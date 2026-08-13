@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
+.PHONY: help test lint test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
 
 help: ## Show this help
 	@echo ""
@@ -16,6 +16,10 @@ help: ## Show this help
 
 test: ## Run the test suite
 	cargo test
+
+lint: ## Run clippy and check formatting
+	cargo clippy --all-targets -- -D warnings
+	cargo fmt -- --check
 
 # === Assurance ===
 
