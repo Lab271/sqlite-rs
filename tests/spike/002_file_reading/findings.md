@@ -47,6 +47,31 @@ confirmed bit-identical via `f64::to_bits()` (see finding 2), not a decode bug.
 3. **Float display formatting differs from `sqlite3`'s `quote()`/CLI output, but the decoded bits are correct.** Rust's default `{}` `Display` for `f64` spells `2.5e300` out as a ~300-digit decimal string rather than switching to scientific notation; `sqlite3` uses something closer to `%g`. Confirmed the underlying value is bit-identical via `f64::to_bits()` (`7e4ddd4baa009303` either way) — this is a presentation concern for a future `dump` CLI (step 9), not a record-decoder bug (step 3). The real decoder shouldn't need to reproduce `sqlite3`'s exact float formatting algorithm unless byte-identical `dump` output (the V1 acceptance gate) is interpreted to include exact string formatting, not just correct values — worth clarifying in step 9's ticket.
 4. **Not exercised (deliberately out of scope for this atomic experiment):** overflow chains (this fixture's rows all fit locally), multi-page / interior table b-trees (both tables here fit on one leaf page), index b-trees, WAL frames, and DDL parsing beyond printing the raw `sql` text column verbatim. The code asserts loudly (panics) rather than silently mishandling these if a future fixture happens to hit them — see the `assert!`/`panic!` calls in `read_table_leaf` and `decode_serial_value`. These map directly to steps 4 (overflow + multi-page), 5 (index b-trees), 6 (WAL), and 7 (DDL reader) and were always meant to be separate, larger tickets, not gaps in this spike.
 
+## Conclusion
+
+The Tier 0 READ CORE architecture in `001-architecture/spec.md` needed
+**zero revision** — every byte-level detail this spike touched (header
+layout, page-relative cell pointers even on page 1, varint/serial-type
+encoding) matched on the first real attempt against a real file. That's a
+stronger result than "the hypothesis survives": it means the spec is
+trustworthy enough to implement straight from, without another round of
+format archaeology, when issue #5's step tickets get written.
+
+Findings 1-3 above aren't new standalone issues to file — they're concrete
+acceptance-criteria and gotchas that belong directly in the step tickets
+they map to (steps 1, 4, 8, 9) when issue #5 specs each one, per its own
+"tickets created and specced one at a time" note. Finding 1 (the
+codec-enabled system `sqlite3`) is the one to resolve *first*, though,
+ahead of any other work: it affects every fixture anyone generates for this
+project going forward, not just this spike's.
+
+Zooming out past this single spike: together with issue #1's parser-toolchain
+spike, this closes out both halves of `plan.md`'s "Parallel Tracks" —
+Frontend (Tokenizer → Parser → AST, now pointed at `pomelo`) and Storage
+(VFS → Pager → B-Tree, now validated against a real file with no
+architectural surprises). Neither track has a foundational unknown left
+blocking it from starting real ticket work.
+
 ## Go/no-go on the issue #5 9-step breakdown
 
 **GO.** Nothing here falsifies the breakdown or the Tier 0 architecture spec.
