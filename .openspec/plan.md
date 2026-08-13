@@ -10,10 +10,14 @@ Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable
 | **V2** | Single-table queries | "Query it with real SQL" |
 | **V3** | Full CRUD | "It's a database now" |
 | **V4** | Multi-table SQL | "Joins, subqueries, aggregates" |
-| **V5** | Transactions & durability | "Trust it with your data" |
-| **V6** | PRAGMAs & introspection | "Operate it like SQLite" |
-| **V7** | SQLite special features | "The quirks people depend on" |
-| **V8** | Extensions | "FTS, JSON, R-Tree" |
+| **V5** | Transactions (rollback journal) | "ACID with a journal" |
+| **V6** | WAL & concurrency | "Readers don't block writers" |
+| **V7** | PRAGMAs & introspection | "Operate it like SQLite" |
+| **V8** | Integrity & triggers | "The schema enforces itself" |
+| **V9** | Modern SQL | "UPSERT, RETURNING, window functions" |
+| **V10** | Storage forms & operations | "STRICT, WITHOUT ROWID, VACUUM, ATTACH" |
+| **V11** | Virtual tables & JSON | "Extension foundation + json1" |
+| **V12** | Search & spatial | "FTS5, R-Tree" |
 
 ---
 
@@ -71,7 +75,7 @@ Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable
 
 | Layer | Subset |
 |-------|--------|
-| Pager | Write path, rollback journal (DELETE mode), locking states |
+| Pager | Write path, basic journaling for statement atomicity, locking states |
 | B-Tree | Insert, delete, page split/merge/balance, freelist management |
 | Parser | INSERT (VALUES + SELECT), UPDATE, DELETE, CREATE/DROP TABLE, CREATE/DROP INDEX |
 | Codegen | Write opcodes, constraint checks (NOT NULL, UNIQUE, PK, CHECK, DEFAULT) |
@@ -108,9 +112,9 @@ Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable
 
 ---
 
-## V5 — Transactions & Durability
+## V5 — Transactions (Rollback Journal)
 
-**Value:** Trust. BEGIN/COMMIT/ROLLBACK, savepoints, crash recovery, WAL mode, concurrent readers. Before this block sqlite-rs is a toy; after it, it's a database.
+**Value:** ACID in the classic journal mode. BEGIN/COMMIT/ROLLBACK, savepoints, hot-journal crash recovery. After this block a power cut cannot corrupt a database.
 
 **Scope:**
 
@@ -118,20 +122,40 @@ Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable
 |-------|--------|
 | Parser | BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE, DEFERRED/IMMEDIATE/EXCLUSIVE |
 | Pager | Journal modes (DELETE/TRUNCATE/PERSIST/MEMORY), hot-journal recovery, all 5 lock states |
-| WAL | WAL file, SHM index, checkpointing (all 4 modes), reader/writer concurrency |
 | VDBE | Transaction opcodes, statement journals (partial rollback of failed statements) |
 
 **Grammar slice:** +~10 productions.
 
-**Corpus:** `trans*.test`, `savepoint*.test`, `journal*.test`, `wal*.test`, crash simulation (kill -9 mid-commit, verify recovery), interop: sqlite3 and sqlite-rs alternating writes to the same WAL-mode database.
+**Corpus:** `trans*.test`, `savepoint*.test`, `journal*.test`; crash simulation (kill -9 mid-commit, verify recovery).
 
-**Demo:** power-cut torture test — loop of writes with random kill; database always recovers consistent.
+**Demo:** power-cut torture test — loop of writes with random kill; database always recovers consistent, verified by stock sqlite3 `integrity_check`.
 
 ---
 
-## V6 — PRAGMAs & Introspection
+## V6 — WAL & Concurrency
 
-**Value:** Operability. Tooling, ORMs, and admin scripts assume PRAGMAs work. Cheap to implement once V1–V5 exist; huge compatibility payoff.
+**Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file.
+
+**Scope:**
+
+| Layer | Subset |
+|-------|--------|
+| WAL | WAL file format, SHM index (wal-index), reader marks |
+| Checkpoint | All 4 modes (PASSIVE/FULL/RESTART/TRUNCATE), auto-checkpoint |
+| Concurrency | Multi-reader single-writer, busy handler, `busy_timeout` |
+| Pager | `journal_mode=WAL` switching in both directions |
+
+**Grammar slice:** none (PRAGMA-driven; PRAGMAs land fully in V7 but `journal_mode`/`wal_checkpoint` ship here).
+
+**Corpus:** `wal*.test`, `walthread*.test`; interop: sqlite3 and sqlite-rs alternating reads/writes on the same WAL-mode database, including cross-process SHM coordination.
+
+**Demo:** sqlite-rs writing while stock `sqlite3` reads the same file live — and the reverse.
+
+---
+
+## V7 — PRAGMAs & Introspection
+
+**Value:** Operability. Tooling, ORMs, and admin scripts assume PRAGMAs work. Cheap to implement once V1–V6 exist; huge compatibility payoff.
 
 **Scope (priority order):**
 
@@ -149,48 +173,111 @@ Plus: `EXPLAIN` / `EXPLAIN QUERY PLAN` (bytecode listing — nearly free since t
 
 ---
 
-## V7 — SQLite Special Features
+## V8 — Integrity & Triggers
 
-**Value:** The quirks real applications depend on. Each is independent — pickable by demand.
+**Value:** The schema enforces itself. Referential integrity, reactive logic, and schema evolution — the features that make SQLite safe under application churn.
+
+**Scope:**
 
 | Feature | Notes |
 |---------|-------|
-| Foreign keys | Enforcement, cascades, deferred checking (`fkey*.test`) |
-| Triggers | BEFORE/AFTER/INSTEAD OF, RAISE (`trigger*.test`) |
-| ALTER TABLE | RENAME, ADD/DROP/RENAME COLUMN (`alter*.test`) |
-| UPSERT | `ON CONFLICT DO UPDATE/NOTHING` (`upsert*.test`) |
-| RETURNING | On INSERT/UPDATE/DELETE (`returning*.test`) |
-| Window functions | OVER, PARTITION BY, frames (`window*.test`) — grammar-heavy |
-| WITHOUT ROWID | Clustered-PK tables (`withoutrowid*.test`) |
-| STRICT tables | Type enforcement (`strict*.test`) |
-| Generated columns | VIRTUAL/STORED (`gencol*.test`) |
-| ATTACH/DETACH | Multi-database connections (`attach*.test`) |
-| VACUUM | Rebuild + incremental (`vacuum*.test`) |
-| Date/time functions | `date`, `time`, `datetime`, `julianday`, `strftime`, `unixepoch` |
-| Collations | Custom collation registration API |
-| Authorizer / hooks | Update/commit hooks, progress handler |
+| Foreign keys | Enforcement, ON DELETE/UPDATE actions, cascades, deferred checking (`fkey*.test`) |
+| Triggers | BEFORE/AFTER/INSTEAD OF, RAISE, recursive triggers (`trigger*.test`) |
+| ALTER TABLE | RENAME, ADD/DROP/RENAME COLUMN incl. schema rewrite (`alter*.test`) |
+| CHECK constraints | Full expression checks (already partial in V3, completed here) |
 
-**Grammar slice:** +~30 productions (windows and triggers dominate).
+**Grammar slice:** +~15 productions (trigger bodies dominate).
 
-**Demo per feature:** its SQLite test file passes.
+**Corpus:** `fkey*.test`, `trigger*.test`, `alter*.test`.
+
+**Demo:** a cascading delete through a 3-table FK chain with audit triggers, matching sqlite3 row-for-row.
 
 ---
 
-## V8 — Extensions
+## V9 — Modern SQL
 
-**Value:** Ecosystem parity. Built on the virtual-table mechanism (per [sqlite.org/docs.html](https://www.sqlite.org/docs.html)).
+**Value:** The SQL that post-2018 applications actually write. ORMs (Django 4+, Prisma, Diesel) emit these constructs by default.
 
-| Extension | Priority | Why |
-|-----------|----------|-----|
-| Virtual table API | First | Foundation for everything below |
-| `json1` / JSONB | High | Ubiquitous in modern apps |
-| FTS5 | High | Full-text search — major adoption driver |
-| R-Tree | Medium | Spatial queries |
-| `generate_series` | Medium | Common utility |
-| Sessions / changesets | Low | Sync use cases |
-| `dbstat`, `csv` | Low | Tooling |
+**Scope:**
 
-**Rust bonus:** the virtual-table trait makes third-party Rust extensions safe — a differentiator over C SQLite, and the natural place for community growth.
+| Feature | Notes |
+|---------|-------|
+| UPSERT | `ON CONFLICT DO UPDATE/NOTHING` (`upsert*.test`) |
+| RETURNING | On INSERT/UPDATE/DELETE (`returning*.test`) |
+| Window functions | OVER, PARTITION BY, frame specs, named windows (`window*.test`) — grammar-heavy |
+| Advanced aggregates | FILTER clause, DISTINCT in aggregates |
+| Date/time functions | `date`, `time`, `datetime`, `julianday`, `strftime`, `unixepoch` |
+| `IIF`, `NULLIF`, math functions | Scalar completeness |
+
+**Grammar slice:** +~20 productions (window grammar dominates).
+
+**Corpus:** `upsert*.test`, `returning*.test`, `window*.test`, `date.test`, `func*.test`.
+
+**Demo:** run an unmodified Django/Prisma-generated query workload against sqlite-rs.
+
+---
+
+## V10 — Storage Forms & Operations
+
+**Value:** Alternate table forms and database-level operations — completeness for schema designers and DBAs.
+
+**Scope:**
+
+| Feature | Notes |
+|---------|-------|
+| WITHOUT ROWID | Clustered-PK tables (`withoutrowid*.test`) |
+| STRICT tables | Type enforcement (`strict*.test`) |
+| Generated columns | VIRTUAL/STORED (`gencol*.test`) |
+| ATTACH/DETACH | Multi-database connections, cross-DB queries (`attach*.test`) |
+| VACUUM | Full rebuild + incremental, `VACUUM INTO` (`vacuum*.test`) |
+| Auto-vacuum | Pointer-map pages |
+| Collations | Custom collation registration API |
+| Authorizer / hooks | Update/commit hooks, progress handler |
+
+**Grammar slice:** +~15 productions → grammar complete (~200/200).
+
+**Corpus:** `withoutrowid*.test`, `strict*.test`, `gencol*.test`, `attach*.test`, `vacuum*.test`.
+
+**Demo:** `VACUUM INTO` produces a file byte-compatible with stock SQLite's output structure.
+
+---
+
+## V11 — Virtual Tables & JSON
+
+**Value:** The extension foundation plus the single most-used extension. The virtual-table mechanism is the plugin architecture (per [sqlite.org/docs.html](https://www.sqlite.org/docs.html)); json1 is ubiquitous in modern apps.
+
+**Scope:**
+
+| Feature | Notes |
+|---------|-------|
+| Virtual table trait | `xCreate/xConnect/xBestIndex/xFilter/...` as a safe Rust trait |
+| Table-valued functions | `generate_series`, `pragma_*` TVFs |
+| json1 / JSONB | `json_extract`, `json_set`, `->`/`->>` operators, `json_each`, `json_tree`, JSONB binary format |
+| `dbstat`, `csv` | Simple vtab exercises |
+
+**Grammar:** `->`/`->>` operators, `CREATE VIRTUAL TABLE`.
+
+**Corpus:** `json1*.test`, `tabfunc*.test`, `bestindex*.test`.
+
+**Demo:** third-party Rust crate implements a custom vtab against the public trait — no unsafe code.
+
+---
+
+## V12 — Search & Spatial
+
+**Value:** Ecosystem parity on the heavyweight extensions — the features that make SQLite a search engine and a GIS store.
+
+**Scope:**
+
+| Feature | Notes |
+|---------|-------|
+| FTS5 | Tokenizers, MATCH queries, ranking (bm25), highlight/snippet, shadow-table format compatibility |
+| R-Tree | Spatial index, shadow-table format compatibility |
+| Sessions / changesets | Sync use cases (stretch) |
+
+**Corpus:** `fts5*.test`, `rtree*.test`.
+
+**Demo:** open an existing FTS5-indexed database created by stock SQLite and run MATCH queries against it unchanged.
 
 ---
 
@@ -200,14 +287,17 @@ Plus: `EXPLAIN` / `EXPLAIN QUERY PLAN` (bytecode listing — nearly free since t
 V1 (read files)
  └─→ V2 (single-table SELECT)
       └─→ V3 (CRUD)
-           ├─→ V4 (multi-table SQL) ─→ V6 (pragmas: ANALYZE/EXPLAIN parts)
-           └─→ V5 (transactions/WAL)
-V6 core pragmas: after V3
-V7 features: each after its prerequisite (triggers→V3, windows→V4, FK→V4+V5)
-V8: after V4 (virtual tables plug into FROM clause)
+           ├─→ V4 (multi-table SQL) ─→ V7 (ANALYZE/EXPLAIN parts)
+           └─→ V5 (journal transactions) ─→ V6 (WAL & concurrency)
+V7 core pragmas: after V3
+V8 (integrity/triggers): after V4 (+V5 for deferred FK)
+V9 (modern SQL): after V4 (windows need the sorter/aggregate machinery)
+V10 (storage forms): after V3; ATTACH after V5
+V11 (vtab + JSON): after V4 (vtabs plug into FROM clause)
+V12 (FTS/R-Tree): after V11 (built on vtab mechanism)
 ```
 
-V4 and V5 are parallelizable — one track on the planner/codegen, one on pager/WAL.
+Parallelizable pairs: V4 ∥ V5 (planner track vs pager track), V8 ∥ V9 ∥ V10 (independent features), V11 → V12 sequential.
 
 ## Grammar Coverage per Block
 
@@ -218,8 +308,12 @@ V4 and V5 are parallelizable — one track on the planner/codegen, one on pager/
 | V3 | ~90 | 45% |
 | V4 | ~160 | 80% |
 | V5 | ~170 | 85% |
-| V6 | ~175 | 88% |
-| V7 | ~200 | 100% |
+| V6–V7 | ~175 | 88% |
+| V8 | ~190 | 95% |
+| V9 | ~210* | — |
+| V10 | complete | 100% |
+
+*Window grammar pushes past the core-200 count; V11 adds `CREATE VIRTUAL TABLE` and JSON operators on top.
 
 ## Corpus Strategy per Block
 
@@ -227,8 +321,9 @@ V4 and V5 are parallelizable — one track on the planner/codegen, one on pager/
 - **V2:** sqllogictest single-table slice + `select1/expr/like` TCL tests
 - **V3:** write-path TCL tests + interop check (`integrity_check` by stock sqlite3)
 - **V4:** **full sqllogictest run** — pass-rate becomes the project's public metric
-- **V5:** crash/torture tests + WAL interop
-- **V6–V8:** per-feature TCL test files as acceptance gates
+- **V5:** crash/torture tests
+- **V6:** WAL interop with live stock-sqlite3 processes
+- **V7–V12:** per-feature TCL test files as acceptance gates
 
 ## Test Strategy
 
@@ -261,5 +356,7 @@ tempfile = "3"          # Test fixtures
 | **File format** | Must be byte-compatible | V1 first — format risk retired earliest |
 | **B-Tree balancing** | Complex, many edge cases | V3 write-path tests + fuzzing against oracle |
 | **Crash recovery** | Subtle, catastrophic if wrong | V5 torture tests, SQLite crash-test patterns |
+| **WAL/SHM interop** | Cross-process shared memory with stock SQLite | V6 live-interop tests, exact wal-index format |
 | **Codegen size** | ~35K lines equivalent | Sliced across V2/V3/V4 — never a big-bang |
 | **Type affinity** | Weird, underdocumented behavior | Oracle-diff in V2, `affinity*.test` early |
+| **Shadow-table formats** | FTS5/R-Tree on-disk compat | V12 opens stock-created FTS databases as acceptance test |
