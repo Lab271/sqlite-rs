@@ -370,13 +370,40 @@ Parallelizable pairs: V4 ∥ V5 (planner track vs pager track), V8 ∥ V9 ∥ V1
 
 ## Test Strategy
 
-SQLite as oracle throughout:
+SQLite as oracle throughout — **at a pinned version and build**:
 
 ```bash
 diff <(sqlite3 test.db "$SQL") <(sqlite-rs query test.db "$SQL")
 ```
 
+**Pinned oracle (spike 002 finding, #6):** macOS's system `sqlite3` (3.51.0) is compiled with `CODEC=see-cccrypt` and reserves 12 bytes/page even unencrypted. Fixture generation and oracle diffs MUST use a pinned, non-codec build (brew or compiled amalgamation, exact version recorded in the corpus harness). Both reserved-byte cases (0 and 12) are kept as explicit fixtures — the codec accident is free edge-case coverage. Oracle drift across versions is real; version bumps are deliberate, reviewed events.
+
 Every block's exit criterion: its corpus slice passes with zero diffs, and files written by sqlite-rs pass `PRAGMA integrity_check` in stock SQLite.
+
+## Concurrency Contract
+
+The compatibility contract has **two halves**: the file format (static — what the bytes mean) and the **locking protocol** (dynamic — how live processes coordinate). SQLite has no server; the OS's advisory file locking IS the concurrency infrastructure. A stock `sqlite3` process and sqlite-rs *will* open the same file simultaneously — that is the real deployment (Rust app + sqlite3 CLI for debugging). Format-right but locking-wrong yields the worst failure mode: silent corruption visible only under concurrent access.
+
+**The protocol to reproduce:**
+
+| Mechanism | Detail |
+|-----------|--------|
+| Journal-mode locks | 5 states (UNLOCKED → SHARED → RESERVED → PENDING → EXCLUSIVE) via POSIX `fcntl` range locks on the reserved lock-byte range (1073741824–1073742335) |
+| WAL-mode locks | Lock slots in the memory-mapped `-shm` wal-index; readers mark positions so checkpointers don't overwrite frames in use |
+| POSIX close() trap | `close()` on ANY fd of a file drops ALL the process's locks — must replicate SQLite's per-inode fd cache workaround |
+| Threading | One connection per thread (serialized mode default within a connection) |
+| Known limits | Advisory only (non-cooperating writers can corrupt); unreliable on network filesystems (NFS = #1 real-world corruption cause); WAL requires same-machine (mmap) |
+
+**Tiered through the blocks:**
+
+| Tier / Block | Concurrency obligation |
+|--------------|------------------------|
+| **Tier 0 / V1** | *Safe reader:* take SHARED correctly so live stock-SQLite writers see us (and we never read torn pages). Hot-journal and busy detection. Validated by spike 004 |
+| **V3 (write core)** | Full journal-mode lock ladder incl. RESERVED/PENDING semantics and the fd-cache workaround |
+| **V5 (transactions)** | Busy handler, `busy_timeout`, deadlock-avoiding lock upgrade rules |
+| **V6 (WAL)** | Exact `-shm` layout and lock-slot protocol; live interop with stock sqlite3 readers/writers/checkpointers as acceptance test |
+
+**De-risking:** spike 004 (locking interop with a live stock sqlite3 process) validates the fcntl ranges, PENDING semantics, WAL read-lock slots, and the close() trap on macOS + Linux — before V1's step tickets are finalized.
 
 ## Dependencies
 
