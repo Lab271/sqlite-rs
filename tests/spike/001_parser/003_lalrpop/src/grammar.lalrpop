@@ -1,0 +1,292 @@
+// LALRPOP grammar for the sqlite-rs parser spike (issue #1).
+//
+// Implements exactly the subset in ../grammar/sqlite-subset.ebnf.
+// LALRPOP has no Lemon-style `%left`/`%right` declarations, so operator
+// precedence is encoded by grammar layering -- one nonterminal per
+// precedence level, left-recursive for left-associative operators. The
+// layers below mirror the EBNF's ladder rung for rung.
+
+use crate::ast::*;
+
+grammar;
+
+// ---------------------------------------------------------------------------
+// Lexer (LALRPOP's built-in generated lexer).
+//
+// Keywords sit in the first `match` level so they win ties against the
+// identifier regex; the identifier regex still wins on longer matches
+// (`selection` lexes as ID, not SELECT + ID). `_` pulls in every remaining
+// terminal used in the grammar (punctuation and operators).
+// ---------------------------------------------------------------------------
+match {
+    r"(?i)create"   => "CREATE",
+    r"(?i)table"    => "TABLE",
+    r"(?i)if"       => "IF",
+    r"(?i)not"      => "NOT",
+    r"(?i)exists"   => "EXISTS",
+    r"(?i)null"     => "NULL",
+    r"(?i)primary"  => "PRIMARY",
+    r"(?i)key"      => "KEY",
+    r"(?i)insert"   => "INSERT",
+    r"(?i)into"     => "INTO",
+    r"(?i)values"   => "VALUES",
+    r"(?i)select"   => "SELECT",
+    r"(?i)distinct" => "DISTINCT",
+    r"(?i)all"      => "ALL",
+    r"(?i)from"     => "FROM",
+    r"(?i)where"    => "WHERE",
+    r"(?i)group"    => "GROUP",
+    r"(?i)by"       => "BY",
+    r"(?i)having"   => "HAVING",
+    r"(?i)order"    => "ORDER",
+    r"(?i)asc"      => "ASC",
+    r"(?i)desc"     => "DESC",
+    r"(?i)limit"    => "LIMIT",
+    r"(?i)offset"   => "OFFSET",
+    r"(?i)as"       => "AS",
+    r"(?i)and"      => "AND",
+    r"(?i)or"       => "OR",
+    r"(?i)update"   => "UPDATE",
+    r"(?i)set"      => "SET",
+    r"(?i)delete"   => "DELETE",
+} else {
+    r"[a-zA-Z_][a-zA-Z0-9_]*"    => "ID",
+    r#""[^"]*""#                 => "QID",
+    r"[0-9]+(\.[0-9]+)?"         => "NUMBER",
+    r"'[^']*'"                   => "STRING",
+    _
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// One or more `T` separated by commas.
+Comma<T>: Vec<T> = <mut v:(<T> ",")*> <e:T> => { v.push(e); v };
+
+// ---------------------------------------------------------------------------
+// Top level  [ebnf: statement]
+// ---------------------------------------------------------------------------
+
+pub Statement: Stmt = <s:StmtBody> ";"? => s;
+
+StmtBody: Stmt = {
+    <CreateTableStmt> => Stmt::CreateTable(<>),
+    <InsertStmt>      => Stmt::Insert(<>),
+    <SelectStmt>      => Stmt::Select(<>),
+    <UpdateStmt>      => Stmt::Update(<>),
+    <DeleteStmt>      => Stmt::Delete(<>),
+};
+
+// ---------------------------------------------------------------------------
+// CREATE TABLE
+// ---------------------------------------------------------------------------
+
+CreateTableStmt: CreateTable =
+    "CREATE" "TABLE" <ine:("IF" "NOT" "EXISTS")?> <name:Name>
+    "(" <columns:Comma<ColumnDef>> ")" => CreateTable {
+        if_not_exists: ine.is_some(),
+        name,
+        columns,
+    };
+
+ColumnDef: ColumnDef =
+    <name:Name> <type_name:Name*> <constraints:ColumnConstraint*> => ColumnDef {
+        name,
+        type_name,
+        constraints,
+    };
+
+ColumnConstraint: ColumnConstraint = {
+    "NOT" "NULL"    => ColumnConstraint::NotNull,
+    "PRIMARY" "KEY" => ColumnConstraint::PrimaryKey,
+};
+
+// ---------------------------------------------------------------------------
+// INSERT
+// ---------------------------------------------------------------------------
+
+InsertStmt: Insert =
+    "INSERT" "INTO" <table:Name> <columns:("(" <Comma<Name>> ")")?>
+    "VALUES" <rows:Comma<ValuesRow>> => Insert {
+        table,
+        columns: columns.unwrap_or_default(),
+        rows,
+    };
+
+ValuesRow: Vec<Expr> = "(" <ExprList> ")";
+
+// ---------------------------------------------------------------------------
+// SELECT
+// ---------------------------------------------------------------------------
+
+SelectStmt: Select =
+    "SELECT" <distinct:DistinctKw?> <columns:Comma<ResultColumn>>
+    <from:("FROM" <Name>)?>
+    <where_:("WHERE" <Expr>)?>
+    <group:GroupBy?>
+    <order_by:("ORDER" "BY" <Comma<OrderingTerm>>)?>
+    <limit:LimitClause?> => {
+        let (group_by, having) = group.unwrap_or((Vec::new(), None));
+        Select {
+            distinct,
+            columns,
+            from,
+            where_,
+            group_by,
+            having,
+            order_by: order_by.unwrap_or_default(),
+            limit,
+        }
+    };
+
+DistinctKw: Distinct = {
+    "DISTINCT" => Distinct::Distinct,
+    "ALL"      => Distinct::All,
+};
+
+ResultColumn: ResultColumn = {
+    "*" => ResultColumn::Star,
+    <expr:Expr> <alias:Alias?> => ResultColumn::Expr { expr, alias },
+};
+
+Alias: String = {
+    "AS" <Name> => <>,
+    <Name>      => <>,
+};
+
+GroupBy: (Vec<Expr>, Option<Expr>) =
+    "GROUP" "BY" <e:ExprList> <h:("HAVING" <Expr>)?> => (e, h);
+
+OrderingTerm: OrderingTerm = <expr:Expr> <desc:AscDesc?> => OrderingTerm { expr, desc };
+
+AscDesc: bool = {
+    "ASC"  => false,
+    "DESC" => true,
+};
+
+LimitClause: Limit = "LIMIT" <limit:Expr> <offset:LimitOffset?> => Limit { limit, offset };
+
+LimitOffset: Expr = {
+    "OFFSET" <Expr> => <>,
+    "," <Expr>      => <>,
+};
+
+// ---------------------------------------------------------------------------
+// UPDATE / DELETE
+// ---------------------------------------------------------------------------
+
+UpdateStmt: Update =
+    "UPDATE" <table:Name> "SET" <assignments:Comma<Assignment>>
+    <where_:("WHERE" <Expr>)?> => Update { table, assignments, where_ };
+
+Assignment: (String, Expr) = <n:Name> "=" <e:Expr> => (n, e);
+
+DeleteStmt: Delete =
+    "DELETE" "FROM" <table:Name> <where_:("WHERE" <Expr>)?> => Delete { table, where_ };
+
+// ---------------------------------------------------------------------------
+// Expressions -- precedence ladder, lowest rung first.
+//   OR < AND < NOT < comparison < +,- < *,/,% < || < unary +,-
+// ---------------------------------------------------------------------------
+
+Expr: Expr = OrExpr;
+
+OrExpr: Expr = {
+    <l:OrExpr> "OR" <r:AndExpr> => bin(l, BinaryOp::Or, r),
+    AndExpr,
+};
+
+AndExpr: Expr = {
+    <l:AndExpr> "AND" <r:NotExpr> => bin(l, BinaryOp::And, r),
+    NotExpr,
+};
+
+NotExpr: Expr = {
+    "NOT" <e:ComparisonExpr> => Expr::Unary(UnaryOp::Not, Box::new(e)),
+    ComparisonExpr,
+};
+
+// Non-associative: `a = b = c` is a parse error, as in the EBNF.
+ComparisonExpr: Expr = {
+    <l:AdditiveExpr> <op:ComparisonOp> <r:AdditiveExpr> => bin(l, op, r),
+    AdditiveExpr,
+};
+
+ComparisonOp: BinaryOp = {
+    "="  => BinaryOp::Eq,
+    "!=" => BinaryOp::Ne,
+    "<>" => BinaryOp::Ne,
+    "<"  => BinaryOp::Lt,
+    "<=" => BinaryOp::Le,
+    ">"  => BinaryOp::Gt,
+    ">=" => BinaryOp::Ge,
+};
+
+AdditiveExpr: Expr = {
+    <l:AdditiveExpr> <op:AdditiveOp> <r:MultiplicativeExpr> => bin(l, op, r),
+    MultiplicativeExpr,
+};
+
+AdditiveOp: BinaryOp = {
+    "+" => BinaryOp::Add,
+    "-" => BinaryOp::Sub,
+};
+
+MultiplicativeExpr: Expr = {
+    <l:MultiplicativeExpr> <op:MultiplicativeOp> <r:ConcatExpr> => bin(l, op, r),
+    ConcatExpr,
+};
+
+MultiplicativeOp: BinaryOp = {
+    "*" => BinaryOp::Mul,
+    "/" => BinaryOp::Div,
+    "%" => BinaryOp::Mod,
+};
+
+ConcatExpr: Expr = {
+    <l:ConcatExpr> "||" <r:UnaryExpr> => bin(l, BinaryOp::Concat, r),
+    UnaryExpr,
+};
+
+UnaryExpr: Expr = {
+    "+" <e:PrimaryExpr> => Expr::Unary(UnaryOp::Plus, Box::new(e)),
+    "-" <e:PrimaryExpr> => Expr::Unary(UnaryOp::Minus, Box::new(e)),
+    PrimaryExpr,
+};
+
+PrimaryExpr: Expr = {
+    LiteralValue,
+    ColumnRef,
+    FunctionCall,
+    "(" <Expr> ")",
+};
+
+LiteralValue: Expr = {
+    <n:"NUMBER"> => Expr::Literal(Literal::Number(n.to_string())),
+    <s:"STRING"> => Expr::Literal(Literal::String(unquote(s, '\''))),
+    "NULL"       => Expr::Literal(Literal::Null),
+};
+
+ColumnRef: Expr = {
+    <name:Name>              => Expr::Column { table: None, name },
+    <t:Name> "." <name:Name> => Expr::Column { table: Some(t), name },
+};
+
+FunctionCall: Expr =
+    <name:Name> "(" <d:"DISTINCT"?> <args:ExprList?> ")" => Expr::Call {
+        name,
+        distinct: d.is_some(),
+        args: args.unwrap_or_default(),
+    };
+
+ExprList: Vec<Expr> = Comma<Expr>;
+
+// ---------------------------------------------------------------------------
+// Lexical
+// ---------------------------------------------------------------------------
+
+Name: String = {
+    <s:"ID">  => s.to_string(),
+    <s:"QID"> => unquote(s, '"'),
+};

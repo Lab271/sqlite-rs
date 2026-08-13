@@ -1,0 +1,167 @@
+//! sqlite-rs parser spike -- pest (PEG) variant of tests/spike/001_parser/grammar/sqlite-subset.ebnf
+//!
+//! Notes on the PEG translation:
+//!  * pest has no separate lexer: the "lexical" rules at the bottom of this file
+//!    are ordinary grammar rules marked atomic (`@`), which disables the implicit
+//!    whitespace skipping that non-atomic rules get for free.
+//!  * Operator precedence is encoded with the same nested-rule ladder as the EBNF
+//!    (or > and > not > comparison > +- > */% > || > unary) rather than with
+//!    pest's PrattParser, so the precedence is verifiable by reading the grammar.
+//!  * Ordered choice matters: `function_call` MUST precede `column_ref` in
+//!    `primary_expr`, otherwise `count(a)` matches `count` as a column reference
+//!    and the trailing `(a)` fails much later, at the top level.
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+// ===================== Top level =====================
+
+statement = { SOI ~ stmt ~ ";"? ~ EOI }
+
+stmt = { create_table_stmt | insert_stmt | select_stmt | update_stmt | delete_stmt }
+
+// ===================== CREATE TABLE =====================
+
+create_table_stmt = {
+    kw_create ~ kw_table ~ if_not_exists? ~ table_name
+    ~ "(" ~ column_def ~ ("," ~ column_def)* ~ ")"
+}
+if_not_exists = { kw_if ~ kw_not ~ kw_exists }
+
+column_def = { column_name ~ type_name? ~ column_constraint* }
+type_name  = { identifier+ }
+
+column_constraint = { not_null | primary_key }
+not_null    = { kw_not ~ kw_null }
+primary_key = { kw_primary ~ kw_key }
+
+// ===================== INSERT =====================
+
+insert_stmt = {
+    kw_insert ~ kw_into ~ table_name ~ column_list?
+    ~ kw_values ~ values_row ~ ("," ~ values_row)*
+}
+column_list = { "(" ~ column_name ~ ("," ~ column_name)* ~ ")" }
+values_row  = { "(" ~ expr_list ~ ")" }
+
+// ===================== SELECT =====================
+
+select_stmt = {
+    kw_select ~ select_mode? ~ result_column ~ ("," ~ result_column)*
+    ~ from_clause?
+    ~ where_clause?
+    ~ group_clause?
+    ~ order_clause?
+    ~ limit_clause?
+}
+select_mode   = { kw_distinct | kw_all }
+result_column = { star | (expr ~ alias?) }
+star          = { "*" }
+alias         = { kw_as? ~ identifier }
+
+from_clause   = { kw_from ~ table_name }
+where_clause  = { kw_where ~ expr }
+group_clause  = { kw_group ~ kw_by ~ expr_list ~ having_clause? }
+having_clause = { kw_having ~ expr }
+order_clause  = { kw_order ~ kw_by ~ ordering_term ~ ("," ~ ordering_term)* }
+ordering_term = { expr ~ (kw_asc | kw_desc)? }
+limit_clause  = { kw_limit ~ expr ~ ((kw_offset | ",") ~ expr)? }
+
+// ===================== UPDATE =====================
+
+update_stmt = { kw_update ~ table_name ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ where_clause? }
+assignment  = { column_name ~ "=" ~ expr }
+
+// ===================== DELETE =====================
+
+delete_stmt = { kw_delete ~ kw_from ~ table_name ~ where_clause? }
+
+// ===================== Expressions =====================
+// Precedence ladder, lowest to highest, mirroring the EBNF exactly.
+
+expr = { or_expr }
+
+or_expr  = { and_expr ~ (kw_or ~ and_expr)* }
+and_expr = { not_expr ~ (kw_and ~ not_expr)* }
+not_expr = { kw_not? ~ comparison_expr }
+
+comparison_expr = { additive_expr ~ (comparison_op ~ additive_expr)? }
+comparison_op   = { "<=" | "<>" | ">=" | "!=" | "=" | "<" | ">" }
+
+additive_expr = { multiplicative_expr ~ (additive_op ~ multiplicative_expr)* }
+additive_op   = { "+" | "-" }
+
+multiplicative_expr = { concat_expr ~ (multiplicative_op ~ concat_expr)* }
+multiplicative_op   = { "*" | "/" | "%" }
+
+concat_expr = { unary_expr ~ ("||" ~ unary_expr)* }
+
+unary_expr = { unary_op? ~ primary_expr }
+unary_op   = { "+" | "-" }
+
+primary_expr  = { literal | function_call | column_ref | paren_expr }
+paren_expr    = { "(" ~ expr ~ ")" }
+literal       = { number | string | kw_null }
+column_ref    = { identifier ~ ("." ~ identifier)? }
+function_call = { identifier ~ "(" ~ kw_distinct? ~ expr_list? ~ ")" }
+
+expr_list = { expr ~ ("," ~ expr)* }
+
+// ===================== Lexical =====================
+
+table_name  = { identifier }
+column_name = { identifier }
+
+// Unlike SQLite (which lets most keywords fall back to ID, parse.y %fallback),
+// this spike treats the subset's keywords as reserved. That is what makes
+// `SELECT FROM t` and `UPDATE t SET WHERE a = 1` fail instead of parsing the
+// keyword as an identifier/alias.
+identifier   = @{ (!reserved ~ ident_start ~ ident_char*) | quoted_ident }
+quoted_ident = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+ident_start  = { ASCII_ALPHA | "_" }
+ident_char   = { ASCII_ALPHANUMERIC | "_" }
+
+number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? }
+string = @{ "'" ~ ("''" | (!"'" ~ ANY))* ~ "'" }
+
+// Keywords are atomic rules so that the `!ident_char` word-boundary check is not
+// separated from the literal by pest's implicit whitespace skipping (which is
+// what would happen in a non-atomic, and therefore silenceable, rule). The cost
+// is that every keyword shows up as a token pair in the parse tree.
+reserved = {
+    kw_create | kw_table | kw_if | kw_not | kw_exists | kw_insert | kw_into
+  | kw_values | kw_select | kw_distinct | kw_all | kw_from | kw_where
+  | kw_group | kw_by | kw_having | kw_order | kw_limit | kw_offset
+  | kw_asc | kw_as | kw_desc | kw_update | kw_set | kw_delete | kw_null
+  | kw_and | kw_or | kw_primary | kw_key
+}
+
+kw_create   = @{ ^"create" ~ !ident_char }
+kw_table    = @{ ^"table" ~ !ident_char }
+kw_if       = @{ ^"if" ~ !ident_char }
+kw_not      = @{ ^"not" ~ !ident_char }
+kw_exists   = @{ ^"exists" ~ !ident_char }
+kw_insert   = @{ ^"insert" ~ !ident_char }
+kw_into     = @{ ^"into" ~ !ident_char }
+kw_values   = @{ ^"values" ~ !ident_char }
+kw_select   = @{ ^"select" ~ !ident_char }
+kw_distinct = @{ ^"distinct" ~ !ident_char }
+kw_all      = @{ ^"all" ~ !ident_char }
+kw_from     = @{ ^"from" ~ !ident_char }
+kw_where    = @{ ^"where" ~ !ident_char }
+kw_group    = @{ ^"group" ~ !ident_char }
+kw_by       = @{ ^"by" ~ !ident_char }
+kw_having   = @{ ^"having" ~ !ident_char }
+kw_order    = @{ ^"order" ~ !ident_char }
+kw_limit    = @{ ^"limit" ~ !ident_char }
+kw_offset   = @{ ^"offset" ~ !ident_char }
+kw_asc      = @{ ^"asc" ~ !ident_char }
+kw_desc     = @{ ^"desc" ~ !ident_char }
+kw_as       = @{ ^"as" ~ !ident_char }
+kw_update   = @{ ^"update" ~ !ident_char }
+kw_set      = @{ ^"set" ~ !ident_char }
+kw_delete   = @{ ^"delete" ~ !ident_char }
+kw_null     = @{ ^"null" ~ !ident_char }
+kw_and      = @{ ^"and" ~ !ident_char }
+kw_or       = @{ ^"or" ~ !ident_char }
+kw_primary  = @{ ^"primary" ~ !ident_char }
+kw_key      = @{ ^"key" ~ !ident_char }
