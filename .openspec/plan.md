@@ -2,6 +2,47 @@
 
 Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable capability — go from working to working. Grammar, architecture layers, and test corpus are sliced per block, not built layer-by-layer.
 
+## Core Definition & Drop Order
+
+The project invariant: **whatever wrote the file, sqlite-rs must be able to read the data out.** Reading is much smaller than supporting — a `WITHOUT ROWID` table, a STRICT table, an FTS5 index are all just b-trees with records on disk. You don't need a feature's semantics to read its data. The storage layer must therefore be **100% format-complete before any SQL feature is scoped**.
+
+### Tier 0 — READ CORE (never droppable)
+
+| Capability | Why it's in the core |
+|------------|---------------------|
+| All serial types + varints | Every value ever stored: NULL, all int widths, both REAL encodings, text, blob |
+| All text encodings | UTF-8, UTF-16LE, UTF-16BE databases exist in the wild |
+| Table b-trees AND index b-trees | `WITHOUT ROWID` tables are stored as index b-trees — dropping index-btree reading silently drops whole tables |
+| Overflow chains, all page sizes (512–65536), reserved bytes | Or arbitrary rows become unreadable |
+| **WAL frame reading** | A db with an uncheckpointed `-wal` file is *incomplete without it* — read-only WAL recovery is a read feature, not a durability feature |
+| Hot journal detection | At minimum: refuse-and-explain, never serve pre-rollback pages as truth |
+| `sqlite_master` schema decode | Names/types/DDL text — even for features we don't execute |
+| Freelist / pointer-map awareness | Skip correctly in auto-vacuum databases |
+| Graceful unknowns | Unknown schema entries (virtual tables, future formats) degrade to raw-row access, never to errors |
+
+**Acceptance gate:** take *any* database — FTS5, R-Tree, generated columns, STRICT, WAL-mode with pending frames — and `sqlite-rs dump` produces every stored row. This is the project's floor.
+
+### Tier 1 — QUERY CORE
+
+Single-table SELECT with WHERE/ORDER BY/LIMIT, core scalar functions, correct type affinity, the three built-in collations. The query *planner* is droppable — full scans are always correct, just slow.
+
+### Tier 2 — WRITE CORE
+
+INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journal transactions, output that passes `PRAGMA integrity_check` in stock SQLite. Permitted simplifications: always-full journal mode, conservative locking, no auto-vacuum on write.
+
+### Tier 3 — Drop order (last dropped first)
+
+1. Multi-table read (joins/aggregates) — high value, read-only, safe
+2. WAL *writing* (WAL reading is Tier 0)
+3. Foreign keys + triggers
+4. Modern SQL (UPSERT / RETURNING / window functions)
+5. PRAGMAs beyond introspection
+6. ALTER TABLE, VACUUM
+7. *Writing to* WITHOUT ROWID / STRICT tables (reading them is Tier 0)
+8. First to drop: extension *semantics* (FTS5/R-Tree queries), sessions, ATTACH, hooks
+
+**The asymmetry, explicit:** WAL, WITHOUT ROWID, STRICT, and STORED generated columns each appear twice — reading their data is Tier 0; executing their semantics is Tier 3. Tier 0 ≈ V1 (extended), Tier 1 ≈ V2, Tier 2 ≈ V3+V5-minimum; everything beyond is negotiable in the order above.
+
 ## Value Blocks
 
 | Block | Value delivered | One-liner |
@@ -23,23 +64,25 @@ Value-driven breakdown for rebuilding SQLite in Rust. Each block delivers usable
 
 ## V1 — Read Existing SQLite Files
 
-**Value:** Open any `.sqlite`/`.db` file created by SQLite and extract data. No SQL yet — a programmatic API. Immediately useful as a forensics/ETL library, and forces file-format correctness first (the highest-risk area).
+**Value:** Open any `.sqlite`/`.db` file created by SQLite and extract data. No SQL yet — a programmatic API. Immediately useful as a forensics/ETL library, and forces file-format correctness first (the highest-risk area). **V1 implements the full Tier 0 READ CORE** — feature-agnostic at the storage layer: WITHOUT ROWID tables, STRICT tables, extension shadow tables are all just b-trees here.
 
 **Scope:**
 
 | Layer | Subset |
 |-------|--------|
 | VFS | Read-only Unix VFS |
-| Pager | Read path, no journal, no cache eviction |
-| B-Tree | Cursor read: first/next/seek, table + index btrees, overflow pages |
-| Record format | Serial types, varint decoding, all value types |
-| Schema | Parse `sqlite_master` (needs minimal DDL *tokenizer* only, not full parser) |
+| Pager | Read path, hot-journal detection (refuse-and-explain), no cache eviction |
+| WAL | **Read-only WAL recovery** — merge uncheckpointed `-wal` frames into the page view |
+| B-Tree | Cursor read: first/next/seek, **table + index btrees** (index btrees carry WITHOUT ROWID tables), overflow pages |
+| Record format | Serial types, varint decoding, all value types, **all three text encodings (UTF-8/16LE/16BE)** |
+| Format edge cases | All page sizes (512–65536), reserved bytes, freelist + pointer-map (auto-vacuum) skipping |
+| Schema | Parse `sqlite_master` (minimal DDL reader, not full parser); unknown entries degrade to raw-row access |
 
 **Grammar:** none (CREATE TABLE text in `sqlite_master` parsed with a minimal DDL reader).
 
-**Corpus:** fixture databases generated by `sqlite3`; hex-level format tests; every serial type; overflow chains; freelist pages present but ignored.
+**Corpus:** fixture databases generated by `sqlite3`; hex-level format tests; every serial type; overflow chains; UTF-16 databases; WAL-mode databases with uncheckpointed frames; auto-vacuum databases; FTS5/R-Tree/STRICT/WITHOUT ROWID fixtures (raw-row readable).
 
-**Demo:** `sqlite-rs dump file.db` — prints schema + all rows, byte-identical values vs `sqlite3 file.db .dump`.
+**Demo:** `sqlite-rs dump file.db` — prints schema + all rows, byte-identical values vs `sqlite3 file.db .dump`, for *any* fixture including WAL-pending and extension-bearing databases.
 
 ---
 
