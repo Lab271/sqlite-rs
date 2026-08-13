@@ -9,11 +9,23 @@ use super::varint::decode_varint;
 pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value>, RecordError> {
     let (header_len, n) = decode_varint_at(payload, 0)?;
     let header_len = header_len as usize;
+    if header_len < n {
+        return Err(RecordError::HeaderTooShort {
+            declared: header_len,
+            varint_len: n,
+        });
+    }
 
     let mut serial_types = Vec::new();
     let mut pos = n;
     while pos < header_len {
         let (serial_type, len) = decode_varint_at(payload, pos)?;
+        if pos + len > header_len {
+            return Err(RecordError::HeaderOverrun {
+                offset: pos,
+                header_len,
+            });
+        }
         serial_types.push(serial_type);
         pos += len;
     }
@@ -24,6 +36,11 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
         let (value, len) = decode_serial_value(serial_type, payload, body_pos, encoding)?;
         values.push(value);
         body_pos += len;
+    }
+    if body_pos != payload.len() {
+        return Err(RecordError::TrailingData {
+            trailing: payload.len() - body_pos,
+        });
     }
     Ok(values)
 }
@@ -44,7 +61,10 @@ fn decode_varint_at(buf: &[u8], pos: usize) -> Result<(u64, usize), RecordError>
 }
 
 fn take(buf: &[u8], pos: usize, len: usize) -> Result<&[u8], RecordError> {
-    buf.get(pos..pos + len)
+    let end = pos
+        .checked_add(len)
+        .ok_or(RecordError::UnexpectedEof { offset: pos })?;
+    buf.get(pos..end)
         .ok_or(RecordError::UnexpectedEof { offset: pos })
 }
 
@@ -98,16 +118,30 @@ pub fn decode_serial_value(
         }
         7 => {
             let b = take(buf, pos, 8)?;
-            Ok((Value::Real(f64::from_be_bytes(b.try_into().unwrap())), 8))
+            let value = f64::from_be_bytes(b.try_into().unwrap());
+            // SQLite decodes a NaN payload as NULL rather than a real NaN
+            // (sqlite3VdbeSerialGet's IsNaN(x) check) — matched here for
+            // binary-compatible read behavior.
+            if value.is_nan() {
+                Ok((Value::Null, 8))
+            } else {
+                Ok((Value::Real(value), 8))
+            }
         }
         8 => Ok((Value::Integer(0), 0)),
         9 => Ok((Value::Integer(1), 0)),
-        10 | 11 => Err(RecordError::ReservedSerialType(serial_type)),
+        // Types 10/11 are reserved/internal (type 10 is SQLite's virtual-table
+        // "no-change" marker) and never appear in a well-formed database, but
+        // upstream decodes both as NULL rather than treating them as
+        // corruption — matched here rather than erroring.
+        10 | 11 => Ok((Value::Null, 0)),
+        // n is guaranteed >= 12 here: match arms above exhaustively cover 0..=11.
         n if n % 2 == 0 => {
             let len = ((n - 12) / 2) as usize;
             let bytes = take(buf, pos, len)?;
             Ok((Value::Blob(bytes.to_vec()), len))
         }
+        // n is guaranteed >= 13 here: odd, and 0..=11 handled above.
         n => {
             let len = ((n - 13) / 2) as usize;
             let bytes = take(buf, pos, len)?;
@@ -273,7 +307,6 @@ mod tests {
             0.0f64,
             -0.0,
             1.5,
-            f64::NAN,
             f64::INFINITY,
             f64::NEG_INFINITY,
             f64::MIN,
@@ -287,6 +320,17 @@ mod tests {
                 other => panic!("expected one Real, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn real_nan_decodes_as_null() {
+        // Matches sqlite3VdbeSerialGet: a NaN float payload decodes as NULL,
+        // not as a Real(NaN), same as upstream SQLite.
+        let payload = record_bytes(&[(7, &f64::NAN.to_be_bytes())]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Ok(vec![Value::Null])
+        );
     }
 
     #[test]
@@ -334,16 +378,59 @@ mod tests {
     }
 
     #[test]
-    fn reserved_serial_types_error_not_panic() {
+    fn reserved_serial_types_decode_as_null() {
+        // Types 10/11 never appear in a well-formed database, but upstream
+        // SQLite decodes both as NULL (type 10 doubles as the virtual-table
+        // "no-change" marker) rather than treating them as corruption.
         let payload = record_bytes(&[(10, &[])]);
         assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
-            Err(RecordError::ReservedSerialType(10))
+            Ok(vec![Value::Null])
         );
         let payload = record_bytes(&[(11, &[])]);
         assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
-            Err(RecordError::ReservedSerialType(11))
+            Ok(vec![Value::Null])
+        );
+    }
+
+    #[test]
+    fn header_shorter_than_its_own_varint_errors() {
+        // A header-length varint encoded with redundant continuation bytes
+        // can claim a `header_len` smaller than the varint's own byte count.
+        let payload = vec![0x80, 0x00]; // encodes header_len = 0 using 2 bytes
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::HeaderTooShort {
+                declared: 0,
+                varint_len: 2
+            })
+        );
+    }
+
+    #[test]
+    fn header_entry_overrunning_declared_length_errors() {
+        // header_len = 2 leaves exactly 1 byte for serial-type entries, but
+        // the entry at offset 1 is encoded as a 2-byte varint (0x81, 0x00)
+        // that would extend into what's declared as the record body — it
+        // must not be silently reinterpreted as body bytes.
+        let payload = vec![0x02, 0x81, 0x00];
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::HeaderOverrun {
+                offset: 1,
+                header_len: 2
+            })
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_last_column_error() {
+        let mut payload = record_bytes(&[(0, &[])]);
+        payload.push(0xff); // unconsumed trailing byte
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::TrailingData { trailing: 1 })
         );
     }
 
