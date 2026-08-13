@@ -1,0 +1,136 @@
+(*
+ * sqlite-rs parser spike -- central grammar reference (issue #1)
+ *
+ * Scope: a small, representative subset of SQLite's SQL grammar --
+ * CREATE TABLE, INSERT, SELECT, UPDATE, DELETE and a shared expression
+ * grammar -- used identically by every spike variant under
+ * tests/spike/001_parser/ so the four parsing approaches are compared
+ * on equal footing.
+ *
+ * Source of truth: SQLite 3.53.4, src/parse.y (Lemon grammar), i.e.
+ *   https://github.com/sqlite/sqlite/blob/version-3.53.4/src/parse.y
+ * Every rule below is annotated with the parse.y line number and rule
+ * name it was distilled from, e.g. [parse.y:520 cmd]. This file is a
+ * structural re-derivation (no SQLite source text copied), written in
+ * standard EBNF instead of Lemon's action-annotated syntax, so it can
+ * be fed into LALR generators (lemon-rs, pomelo, lalrpop) and a PEG
+ * generator (pest) alike.
+ *
+ * Deliberately out of scope (tracked separately, see full parse.y):
+ * compound SELECT (UNION/EXCEPT/INTERSECT), CTEs/WITH, window functions,
+ * triggers, views, indexes, ALTER/DROP/PRAGMA/ATTACH/VACUUM, joins beyond
+ * a single table, subqueries, CASE, CAST, COLLATE, upsert/RETURNING.
+ * These are real parse.y productions omitted only to keep the 4-way
+ * comparison tractable for a spike.
+ *
+ * Notation: ::=  rule definition
+ *           |    alternation
+ *           []   optional (0 or 1)
+ *           {}   repetition (0 or more)
+ *           ""   literal keyword/punctuation (case-insensitive keyword)
+ *           UPPERCASE  lexer token
+ *)
+
+(* ===================== Top level =====================
+ * [parse.y:207 cmd, :520 cmd, :978 cmd, :1014 cmd, :1082 cmd]
+ *)
+statement       ::= create-table-stmt
+                  | insert-stmt
+                  | select-stmt
+                  | update-stmt
+                  | delete-stmt ;
+
+(* ===================== CREATE TABLE =====================
+ * [parse.y:207-247 create_table, create_table_args, createkw, columnlist]
+ *)
+create-table-stmt ::= "CREATE" "TABLE" [ "IF" "NOT" "EXISTS" ] table-name
+                       "(" column-def { "," column-def } ")" ;
+
+(* [parse.y:247 columnname, :330-380 ccons (subset: NOT NULL, PRIMARY KEY only)] *)
+column-def      ::= column-name [ type-name ] { column-constraint } ;
+
+type-name       ::= identifier { identifier } ;   (* [parse.y:363 typename] *)
+
+column-constraint ::= "NOT" "NULL"                (* [parse.y:333 ccons] *)
+                     | "PRIMARY" "KEY" ;           (* [parse.y:335 ccons] *)
+
+(* ===================== INSERT =====================
+ * [parse.y:1082 cmd, :1108 insert_cmd, :1122 idlist_opt]
+ *)
+insert-stmt     ::= "INSERT" "INTO" table-name [ "(" column-name { "," column-name } ")" ]
+                     "VALUES" "(" expr-list ")" { "," "(" expr-list ")" } ;
+
+(* ===================== SELECT =====================
+ * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :749 from,
+ *  :925 orderby_opt, :949 groupby_opt, :954 having_opt, :967 limit_opt,
+ *  :1002 where_opt]
+ *)
+select-stmt     ::= "SELECT" [ "DISTINCT" | "ALL" ] result-column { "," result-column }
+                     [ "FROM" table-name ]
+                     [ "WHERE" expr ]
+                     [ "GROUP" "BY" expr-list [ "HAVING" expr ] ]
+                     [ "ORDER" "BY" ordering-term { "," ordering-term } ]
+                     [ "LIMIT" expr [ ( "OFFSET" | "," ) expr ] ] ;
+
+result-column   ::= "*"                            (* [parse.y:717 selcollist] *)
+                   | expr [ [ "AS" ] identifier ] ; (* [parse.y:712 selcollist, :735 as] *)
+
+ordering-term   ::= expr [ "ASC" | "DESC" ] ;       (* [parse.y:927 sortlist] *)
+
+(* ===================== UPDATE =====================
+ * [parse.y:1014 cmd, :1065 setlist, :1002 where_opt]
+ *)
+update-stmt     ::= "UPDATE" table-name "SET" column-name "=" expr
+                     { "," column-name "=" expr }
+                     [ "WHERE" expr ] ;
+
+(* ===================== DELETE =====================
+ * [parse.y:978 cmd, :1002 where_opt]
+ *)
+delete-stmt     ::= "DELETE" "FROM" table-name [ "WHERE" expr ] ;
+
+(* ===================== Expressions =====================
+ * [parse.y:1175-1476 expr/term]
+ * Operator precedence, LOWEST to HIGHEST, mirrors parse.y's %left/%right
+ * declarations at parse.y:295-309 exactly, so all four spike variants
+ * resolve ambiguity (e.g. `1 + 2 * 3`, `NOT a = b`) the same way SQLite
+ * itself does:
+ *
+ *   OR                                  [parse.y:296 %left OR]
+ *   AND                                 [parse.y:297 %left AND]
+ *   NOT (unary, prefix)                 [parse.y:298 %right NOT]
+ *   = != < <= > >=                      [parse.y:299-300 %left]
+ *   + -  (binary)                       [parse.y:304 %left PLUS MINUS]
+ *   * / %                               [parse.y:305 %left STAR SLASH REM]
+ *   ||  (concat)                        [parse.y:306 %left CONCAT]
+ *   unary + - (BITNOT precedence)       [parse.y:1452 expr ::= PLUS|MINUS(B) expr(X) [BITNOT]]
+ *)
+expr            ::= or-expr ;
+or-expr         ::= and-expr { "OR" and-expr } ;                 (* [parse.y:1349] *)
+and-expr        ::= not-expr { "AND" not-expr } ;                 (* [parse.y:1348] *)
+not-expr        ::= [ "NOT" ] comparison-expr ;                   (* [parse.y:1448] *)
+comparison-expr ::= additive-expr [ comparison-op additive-expr ] ;
+comparison-op   ::= "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=" ; (* [parse.y:1350,1352] *)
+additive-expr   ::= multiplicative-expr { ( "+" | "-" ) multiplicative-expr } ; (* [parse.y:1355] *)
+multiplicative-expr ::= concat-expr { ( "*" | "/" | "%" ) concat-expr } ;       (* [parse.y:1357] *)
+concat-expr     ::= unary-expr { "||" unary-expr } ;               (* [parse.y:1359] *)
+unary-expr      ::= [ "+" | "-" ] primary-expr ;                   (* [parse.y:1452] *)
+
+primary-expr    ::= literal-value                                  (* [parse.y:1193-1204 term] *)
+                   | column-ref                                    (* [parse.y:1177 expr ::= idj] *)
+                   | function-call                                 (* [parse.y:1235 expr ::= idj LP ...] *)
+                   | "(" expr ")" ;                                (* [parse.y:1176 expr ::= LP expr RP] *)
+
+literal-value   ::= NUMBER | STRING | "NULL" ;
+column-ref      ::= identifier [ "." identifier ] ;                (* [parse.y:1178 expr ::= nm DOT nm] *)
+function-call   ::= identifier "(" [ "DISTINCT" ] [ expr-list ] ")" ; (* [parse.y:1235] *)
+
+expr-list       ::= expr { "," expr } ;                             (* [parse.y:1605 nexprlist] *)
+
+(* ===================== Lexical =====================
+ * [parse.y:365-368 %token_class id/ids/idj; keywords fall back to ID
+ *  at parse.y:262-283 %fallback ID]
+ *)
+table-name      ::= identifier ;
+column-name     ::= identifier ;
+identifier      ::= ID ;   (* unquoted identifier or "quoted identifier" *)

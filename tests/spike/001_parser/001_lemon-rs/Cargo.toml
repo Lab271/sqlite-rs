@@ -1,0 +1,26 @@
+[package]
+name = "spike-lemon-rs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Spike 001 variant 1: SQLite SQL subset parser via the Lemon parser generator (lemon-rs Rust template)"
+
+# Standalone crate: the sibling spike variants are independent crates, so this
+# one is deliberately NOT part of any workspace.
+[workspace]
+
+[features]
+# Feature flags consumed by the lemon-rs driver template (lempar.rs):
+#   NDEBUG            - strip all tracing (removes the `log` crate dependency)
+#   YYNOERRORRECOVERY - abandon the parse on the first syntax error
+default = ["NDEBUG", "YYNOERRORRECOVERY"]
+NDEBUG = []
+YYNOERRORRECOVERY = []
+YYTRACKMAXSTACKDEPTH = []
+YYCOVERAGE = []
+
+[dependencies]
+# none: the generated parser only needs std
+
+[build-dependencies]
+# none: build.rs shells out to the system C compiler to build lemon

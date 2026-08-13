@@ -1,0 +1,12 @@
+[package]
+name = "spike-pest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone spike crate: deliberately NOT part of any cargo workspace.
+[workspace]
+
+[dependencies]
+pest = "2"
+pest_derive = "2"

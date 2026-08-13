@@ -1,0 +1,15 @@
+# Standalone spike crate -- deliberately NOT a workspace member.
+[package]
+name = "spike-lalrpop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep this crate out of any parent workspace that might appear later.
+[workspace]
+
+[dependencies]
+lalrpop-util = { version = "0.23", features = ["lexer", "unicode"] }
+
+[build-dependencies]
+lalrpop = "0.23"
