@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test-spikes assurance assurance-gate traceability coverage
+.PHONY: help test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
 
 help: ## Show this help
 	@echo ""
@@ -28,5 +28,10 @@ coverage: ## Cache line coverage for the assurance Evidence level (cargo-llvm-co
 
 # === Spikes ===
 
-test-spikes: ## Run all parser-spike variants (tests/spike/001_parser)
+spike-001: ## Run spike 001 — parser toolchain comparison (tests/spike/001_parser)
 	$(MAKE) -C tests/spike/001_parser test
+
+spike-002: ## Run spike 002 — file reading (tests/spike/002_file_reading)
+	$(MAKE) -C tests/spike/002_file_reading run
+
+test-spikes: spike-001 spike-002 ## Run every spike
