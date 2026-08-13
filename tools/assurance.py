@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """sqlite-rs Assurance Dashboard — the case, assembled from three levels.
 
-Per ADR-0061, "assurance" is the argument that the project is fit for
-purpose; this script assembles it from three independently-measurable
-levels:
+"Assurance" is the argument that the project is fit for purpose; this
+script assembles it from three independently-measurable levels:
 
     Traceability (S->P, E->P): do spec, program and evidence connect?
                                  measured here, scenario-weighted.
     Evidence:                   corpus files present, line coverage if cached.
                                  measured here (reads cached results, doesn't run anything).
     Verification:                does the program satisfy its spec?
-                                 NOT measured here — see `make verify` / `make test`.
+                                 NOT measured here — see `make verification` / `make test`.
 
 Traceability is scored per *scenario*, not per requirement: a single
 **Tests:** link on a requirement with five `#### Scenario:` blocks only
@@ -132,7 +131,7 @@ def scenario_coverage(r):
 
     A requirement with N scenarios and a **Tests:** line listing only M < N
     tests is scored M/N, not 1.0 — one link cannot silently cover five
-    claims (ADR-0061 SS3).
+    claims.
     """
     if r["scenarios"] == 0:
         return 1.0 if r["tests_linked"] else 0.0
@@ -144,7 +143,7 @@ def _get_test_coverage():
 
     Returns a string like '87.3%' or None if no coverage tool is available.
     Doesn't run coverage itself — reads cached results if present (`make coverage`
-    populates the cache; see the Evidence level in ADR-0061).
+    populates the cache).
     """
     # Try llvm-cov cache (macOS + Linux)
     llvm_cov_out = Path(__file__).parent.parent / "target" / "llvm-cov.json"
@@ -180,7 +179,7 @@ def report(requirements, verbose=False, traceability_only=False):
 
     Returns (completeness, coverage) — the two independent traceability
     ratios. There is no longer a combined "assurance" ratio: it was the
-    conjunction of these two and could not fall below either (ADR-0061 SS2).
+    conjunction of these two and could not fall below either.
     """
     planned_count = sum(1 for r in requirements if r["planned"])
     active = [r for r in requirements if not r["planned"]]
@@ -231,7 +230,7 @@ def report(requirements, verbose=False, traceability_only=False):
             print(f"Corpus files present: {corpus_present}/{corpus_total}")
         else:
             print("Corpus files present: n/a (no **Corpus:** links)")
-        print(f"Line coverage:        {test_coverage if test_coverage is not None else 'not cached — run `make evidence`'}")
+        print(f"Line coverage:        {test_coverage if test_coverage is not None else 'not cached — run `make coverage`'}")
 
     print()
     print("-- Verification " + "-" * 44)
