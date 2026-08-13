@@ -131,6 +131,29 @@ ordered-choice hazard and the structural difficulty of ever reproducing
 remains attractive for narrower, definitely-PEG-shaped problems (e.g. a
 future standalone tokenizer or config-file parser elsewhere in the project).
 
+## Conclusion
+
+The spike answers issue #1's question: all 4 toolchains are viable, none
+failed on the shared subset, and the real differences are in maintenance
+cost and error-message quality rather than raw capability. **pomelo is the
+parser generator sqlite-rs will use going forward** — it is adopted here as
+the decision this spike was scoped to produce, not merely floated as a
+suggestion.
+
+Before starting the real M1 tokenizer/parser work (`.openspec/plan.md`),
+three follow-ups from this spike should be closed out first, since each one
+changes the grammar file every future variant (and the real parser) will be
+judged against:
+
+1. Reconcile the chained-comparison ambiguity in
+   `grammar/sqlite-subset.ebnf` (finding 1) — decide non-associative or
+   left-associative and make the rule text and the precedence comment agree.
+2. File a follow-up issue for the `SELECT count(*)` gap (finding 2) — it's a
+   real SQLite construct the current subset can't express yet.
+3. File a follow-up issue to design `%fallback ID` (keyword-as-identifier)
+   support (finding 3) before it's needed, since it's cheaper to plan for in
+   pomelo's grammar now than to retrofit after the real grammar has grown.
+
 ## Spend
 
 Issue #1 estimate: medium. Actual: 4 parallel subagents building/testing
