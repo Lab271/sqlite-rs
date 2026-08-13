@@ -319,6 +319,10 @@ sqlite-rs MUST read and write files byte-compatible with SQLite 3.x.
 
 Each layer MUST communicate only through its defined interface. No layer SHALL reach into another layer's internals.
 
+**Implementation:** `src/lib.rs` (planned)
+
+**Tests:** `tests/architecture_test.rs` (planned)
+
 #### Scenario: B-tree does not know SQL
 
 - GIVEN a B-tree cursor positioned on a row
@@ -334,6 +338,10 @@ Each layer MUST communicate only through its defined interface. No layer SHALL r
 ### Requirement 2: File Format Compatibility [MUST]
 
 sqlite-rs MUST read and write files that SQLite 3.x can read and write.
+
+**Implementation:** `src/lib.rs` (planned)
+
+**Tests:** `tests/corpus/harness.rs` (planned)
 
 #### Scenario: Read SQLite file
 
@@ -351,6 +359,10 @@ sqlite-rs MUST read and write files that SQLite 3.x can read and write.
 
 Development MUST use SQLite's test suite as the compatibility oracle.
 
+**Implementation:** `tests/corpus/oracle.rs` (planned)
+
+**Tests:** `tests/corpus/harness.rs` (planned)
+
 #### Scenario: Query result match
 
 - GIVEN any SQL query Q and database D
@@ -360,6 +372,10 @@ Development MUST use SQLite's test suite as the compatibility oracle.
 ### Requirement 4: Tier 0 Read-Completeness [MUST]
 
 sqlite-rs MUST be able to extract every stored row from any well-formed SQLite database, regardless of which SQLite feature created it. Unsupported feature semantics MUST degrade to raw-row access, never to errors.
+
+**Implementation:** `src/lib.rs` (planned)
+
+**Tests:** `tests/corpus/tier0_test.rs` (planned)
 
 #### Scenario: Read a WITHOUT ROWID table
 

@@ -339,7 +339,7 @@ pub enum Expr {
 
 The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST carry source location for error reporting.
 
-**Implementation:** `src/parser/tokenizer.rs`
+**Implementation:** `src/parser/tokenizer.rs` (planned)
 
 #### Scenario: Tokenize SELECT
 
@@ -369,7 +369,7 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 
 The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLite rejects.
 
-**Implementation:** `src/parser/grammar.rs` or `src/parser/parse.y` (if using lemon-rs)
+**Implementation:** `src/parser/grammar.rs` (planned) or `src/parser/parse.y` (if using lemon-rs)
 
 #### Scenario: Accept valid SELECT
 
@@ -399,7 +399,7 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 The AST MUST represent all SQLite SQL constructs without loss of information.
 
-**Implementation:** `src/parser/ast.rs`
+**Implementation:** `src/parser/ast.rs` (planned)
 
 #### Scenario: Preserve column aliases
 
@@ -417,7 +417,7 @@ The AST MUST represent all SQLite SQL constructs without loss of information.
 
 Parse errors SHOULD include source location and helpful context.
 
-**Implementation:** `src/parser/error.rs`
+**Implementation:** `src/parser/error.rs` (planned)
 
 #### Scenario: Error on unexpected token
 
@@ -429,7 +429,7 @@ Parse errors SHOULD include source location and helpful context.
 
 The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE) MUST NOT depend on the full parser. It extracts table names, column names, declared types, and WITHOUT ROWID / STRICT markers from DDL text — nothing more.
 
-**Implementation:** `src/schema/ddl_reader.rs` (not under `src/parser/`)
+**Implementation:** `src/schema/ddl_reader.rs` (planned) (not under `src/parser/`)
 
 #### Scenario: Read schema without the parser
 
@@ -447,7 +447,7 @@ The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE)
 
 If using lemon-rs, the grammar file SHOULD be derived from SQLite's `parse.y` with minimal modifications.
 
-**Implementation:** `src/parser/parse.y`
+**Implementation:** `src/parser/parse.y` (planned)
 
 #### Scenario: Grammar parity
 

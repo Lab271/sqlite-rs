@@ -37,10 +37,29 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 
 ## Specs
 
-| # | Spec | Focus | Status |
-|---|------|-------|--------|
-| [001](specs/001-architecture/spec.md) | Architecture | System breakdown, layers, modules, line estimates | Draft |
-| [002](specs/002-parser/spec.md) | Parser | SQL grammar, Lemon-equivalent, tokenizer | Draft |
+| # | Spec | Focus | Tier | Status |
+|---|------|-------|------|--------|
+| [001](specs/001-architecture/spec.md) | Architecture | System breakdown, tier model, layers, Tier 0 read-completeness | All | Draft (planned) |
+| [002](specs/002-parser/spec.md) | Parser | SQL grammar, Lemon-equivalent, tokenizer, minimal DDL reader boundary | 1+ | Draft (planned) |
+| [003](specs/003-file-format/spec.md) | File Format | Header, varints, serial types, encodings, read-only VFS | 0 | Draft — active (#9, #11) |
+| [004](specs/004-corpus/spec.md) | Corpus & Oracle | Pinned oracle, fixture families, diff harness | 0 | Draft — active (#10) |
+
+## Progress & Coverage Tracking
+
+Follows the mvl convention: every requirement carries `**Implementation:**` and `**Tests:**` links (plus `**Corpus:**` where fixtures back it), and every requirement has `#### Scenario:` blocks in Given-When-Then form. `tools/assurance.py` parses the specs and assembles the case from three levels:
+
+- **Traceability** — *Completeness (S→P):* does each requirement's implementation file exist? *Coverage (E→P):* scenario-weighted — a requirement with 5 scenarios and 1 test link scores 1/5, not 100%.
+- **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov).
+- **Verification** — `cargo test` / the oracle harness (not measured by the dashboard).
+
+Requirements marked `(planned)` after the Implementation link describe future tiers and are excluded from scoring; specs on the current epic's critical path are active. As V-blocks progress, planned requirements flip to active and the dashboard tracks completion.
+
+```bash
+make assurance              # dashboard
+make assurance VERBOSE=true # per-requirement detail
+make assurance-gate         # CI gate at 75%
+make traceability           # fast path, no I/O
+```
 
 ## ADRs
 
