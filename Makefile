@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
+.PHONY: help test test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
 
 help: ## Show this help
 	@echo ""
@@ -11,6 +11,11 @@ help: ## Show this help
 	  /^[a-zA-Z0-9_-]+:.*?## / { printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2 }' \
 	  $(MAKEFILE_LIST)
 	@echo ""
+
+# === Test ===
+
+test: ## Run the test suite
+	cargo test
 
 # === Assurance ===
 
@@ -23,8 +28,10 @@ assurance-gate: ## CI gate: fail if completeness or scenario-weighted coverage i
 traceability: ## Fast path: traceability only, no corpus/coverage I/O
 	@python3 tools/assurance.py --traceability-only $(if $(VERBOSE),--verbose)
 
-coverage: ## Cache line coverage for the assurance Evidence level (cargo-llvm-cov)
-	cargo llvm-cov --json --output-path target/llvm-cov.json
+coverage: ## Run the test suite under coverage instrumentation and print a line coverage report (cargo-llvm-cov)
+	cargo llvm-cov --no-report
+	cargo llvm-cov report
+	cargo llvm-cov report --json --output-path target/llvm-cov.json
 
 # === Spikes ===
 
