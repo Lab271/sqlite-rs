@@ -1,0 +1,378 @@
+use super::error::RecordError;
+use super::value::{TextEncoding, Value};
+use super::varint::decode_varint;
+
+/// Decodes a record (the payload of a table b-tree cell) into column
+/// values, per the record-format doc: varint header length, then one
+/// varint serial type per column, then the column bodies back-to-back.
+/// Never panics — any truncation or malformed serial type returns `Err`.
+pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value>, RecordError> {
+    let (header_len, n) = decode_varint_at(payload, 0)?;
+    let header_len = header_len as usize;
+
+    let mut serial_types = Vec::new();
+    let mut pos = n;
+    while pos < header_len {
+        let (serial_type, len) = decode_varint_at(payload, pos)?;
+        serial_types.push(serial_type);
+        pos += len;
+    }
+
+    let mut body_pos = header_len;
+    let mut values = Vec::with_capacity(serial_types.len());
+    for serial_type in serial_types {
+        let (value, len) = decode_serial_value(serial_type, payload, body_pos, encoding)?;
+        values.push(value);
+        body_pos += len;
+    }
+    Ok(values)
+}
+
+/// `decode_varint`, but against `buf` starting at absolute offset `pos`,
+/// with errors reporting the absolute offset rather than one relative to
+/// a sub-slice.
+fn decode_varint_at(buf: &[u8], pos: usize) -> Result<(u64, usize), RecordError> {
+    let slice = buf
+        .get(pos..)
+        .ok_or(RecordError::UnexpectedEof { offset: pos })?;
+    decode_varint(slice).map_err(|e| match e {
+        RecordError::UnexpectedEof { offset } => RecordError::UnexpectedEof {
+            offset: pos + offset,
+        },
+        other => other,
+    })
+}
+
+fn take(buf: &[u8], pos: usize, len: usize) -> Result<&[u8], RecordError> {
+    buf.get(pos..pos + len)
+        .ok_or(RecordError::UnexpectedEof { offset: pos })
+}
+
+/// Decodes one column body given its serial type. Returns the value and
+/// the number of body bytes it occupies.
+pub fn decode_serial_value(
+    serial_type: u64,
+    buf: &[u8],
+    pos: usize,
+    encoding: TextEncoding,
+) -> Result<(Value, usize), RecordError> {
+    match serial_type {
+        0 => Ok((Value::Null, 0)),
+        1 => {
+            let b = take(buf, pos, 1)?;
+            Ok((Value::Integer(b[0] as i8 as i64), 1))
+        }
+        2 => {
+            let b = take(buf, pos, 2)?;
+            Ok((Value::Integer(i16::from_be_bytes([b[0], b[1]]) as i64), 2))
+        }
+        3 => {
+            let b = take(buf, pos, 3)?;
+            let mut v = ((b[0] as i64) << 16) | ((b[1] as i64) << 8) | (b[2] as i64);
+            if b[0] & 0x80 != 0 {
+                v -= 1 << 24; // sign-extend 24-bit
+            }
+            Ok((Value::Integer(v), 3))
+        }
+        4 => {
+            let b = take(buf, pos, 4)?;
+            Ok((
+                Value::Integer(i32::from_be_bytes(b.try_into().unwrap()) as i64),
+                4,
+            ))
+        }
+        5 => {
+            let b = take(buf, pos, 6)?;
+            let mut v: i64 = 0;
+            for &byte in b {
+                v = (v << 8) | byte as i64;
+            }
+            if b[0] & 0x80 != 0 {
+                v -= 1 << 48; // sign-extend 48-bit
+            }
+            Ok((Value::Integer(v), 6))
+        }
+        6 => {
+            let b = take(buf, pos, 8)?;
+            Ok((Value::Integer(i64::from_be_bytes(b.try_into().unwrap())), 8))
+        }
+        7 => {
+            let b = take(buf, pos, 8)?;
+            Ok((Value::Real(f64::from_be_bytes(b.try_into().unwrap())), 8))
+        }
+        8 => Ok((Value::Integer(0), 0)),
+        9 => Ok((Value::Integer(1), 0)),
+        10 | 11 => Err(RecordError::ReservedSerialType(serial_type)),
+        n if n % 2 == 0 => {
+            let len = ((n - 12) / 2) as usize;
+            let bytes = take(buf, pos, len)?;
+            Ok((Value::Blob(bytes.to_vec()), len))
+        }
+        n => {
+            let len = ((n - 13) / 2) as usize;
+            let bytes = take(buf, pos, len)?;
+            let text = decode_text(bytes, encoding)?;
+            Ok((Value::Text(text), len))
+        }
+    }
+}
+
+fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<String, RecordError> {
+    match encoding {
+        TextEncoding::Utf8 => std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| RecordError::InvalidUtf8),
+        TextEncoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes),
+        TextEncoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes),
+    }
+}
+
+fn decode_utf16(bytes: &[u8], unit_from_bytes: fn([u8; 2]) -> u16) -> Result<String, RecordError> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(RecordError::InvalidUtf16);
+    }
+    let units = bytes.chunks_exact(2).map(|c| unit_from_bytes([c[0], c[1]]));
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .map_err(|_| RecordError::InvalidUtf16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn varint_bytes(mut value: u64) -> Vec<u8> {
+        // Minimal varint encoder for building test payloads (mirrors the
+        // decoder's bit layout; only used to construct fixtures).
+        let mut bytes = [0u8; 9];
+        for i in (0..8).rev() {
+            bytes[i] = (value & 0x7f) as u8;
+            value >>= 7;
+            if i != 7 {
+                bytes[i] |= 0x80;
+            }
+        }
+        if value == 0 {
+            // Find the shortest valid encoding by trimming leading continuation bytes.
+            let first_nonzero = bytes[..8]
+                .iter()
+                .position(|&b| b & 0x7f != 0 || b == 0x80)
+                .unwrap_or(7);
+            let mut out = bytes[first_nonzero..8].to_vec();
+            *out.last_mut().unwrap() &= 0x7f;
+            out
+        } else {
+            bytes[8] = value as u8;
+            bytes.to_vec()
+        }
+    }
+
+    fn record_bytes(serial_types_and_bodies: &[(u64, &[u8])]) -> Vec<u8> {
+        let mut header = Vec::new();
+        for (st, _) in serial_types_and_bodies {
+            header.extend(varint_bytes(*st));
+        }
+        // header_len includes its own varint's length; try lengths until stable.
+        let mut header_len = header.len() + 1;
+        loop {
+            let hl_bytes = varint_bytes(header_len as u64);
+            if hl_bytes.len() + header.len() == header_len {
+                let mut out = hl_bytes;
+                out.extend(&header);
+                for (_, body) in serial_types_and_bodies {
+                    out.extend(*body);
+                }
+                return out;
+            }
+            header_len += 1;
+        }
+    }
+
+    #[test]
+    fn null_value() {
+        let payload = record_bytes(&[(0, &[])]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Ok(vec![Value::Null])
+        );
+    }
+
+    #[test]
+    fn integer_widths_and_edge_values() {
+        // type 1: i8 range
+        for v in [0i8, 1, -1, i8::MIN, i8::MAX] {
+            let payload = record_bytes(&[(1, &v.to_be_bytes())]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+        // type 2: i16 range
+        for v in [0i16, i16::MIN, i16::MAX] {
+            let payload = record_bytes(&[(2, &v.to_be_bytes())]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+        // type 3: 24-bit signed range (no native type — build bytes by hand)
+        let cases_24: &[(i64, [u8; 3])] = &[
+            (0, [0x00, 0x00, 0x00]),
+            (-1, [0xff, 0xff, 0xff]),
+            (8388607, [0x7f, 0xff, 0xff]),
+            (-8388608, [0x80, 0x00, 0x00]),
+        ];
+        for (expected, bytes) in cases_24 {
+            let payload = record_bytes(&[(3, bytes)]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(*expected)])
+            );
+        }
+        // type 4: i32 range
+        for v in [0i32, i32::MIN, i32::MAX] {
+            let payload = record_bytes(&[(4, &v.to_be_bytes())]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+        // type 5: 48-bit signed range
+        let cases_48: &[(i64, [u8; 6])] = &[
+            (0, [0, 0, 0, 0, 0, 0]),
+            (-1, [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            (140737488355327, [0x7f, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            (-140737488355328, [0x80, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        ];
+        for (expected, bytes) in cases_48 {
+            let payload = record_bytes(&[(5, bytes)]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(*expected)])
+            );
+        }
+        // type 6: full i64 range
+        for v in [0i64, -1, i64::MIN, i64::MAX] {
+            let payload = record_bytes(&[(6, &v.to_be_bytes())]);
+            assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v)])
+            );
+        }
+        // type 8/9: zero-byte integer constants
+        let payload = record_bytes(&[(8, &[]), (9, &[])]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Ok(vec![Value::Integer(0), Value::Integer(1)])
+        );
+    }
+
+    #[test]
+    fn real_edge_values_bit_identical() {
+        let cases = [
+            0.0f64,
+            -0.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN,
+            f64::MAX,
+        ];
+        for v in cases {
+            let payload = record_bytes(&[(7, &v.to_be_bytes())]);
+            let decoded = decode_record(&payload, TextEncoding::Utf8).unwrap();
+            match &decoded[..] {
+                [Value::Real(r)] => assert_eq!(r.to_bits(), v.to_bits(), "value {v} bit mismatch"),
+                other => panic!("expected one Real, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn blob_including_zero_length() {
+        let payload = record_bytes(&[(12, &[]), (20, &[0xde, 0xad, 0xbe, 0xef])]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Ok(vec![
+                Value::Blob(vec![]),
+                Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])
+            ])
+        );
+    }
+
+    #[test]
+    fn text_utf8_including_empty() {
+        let payload = record_bytes(&[(13, &[]), (13 + 2 * 5, b"hello")]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Ok(vec![
+                Value::Text(String::new()),
+                Value::Text("hello".to_string())
+            ])
+        );
+    }
+
+    #[test]
+    fn text_utf16le_and_utf16be() {
+        let s = "hé"; // 2 chars, needs non-ASCII to actually exercise 2-byte units
+        let utf16_units: Vec<u16> = s.encode_utf16().collect();
+        let le_bytes: Vec<u8> = utf16_units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        let be_bytes: Vec<u8> = utf16_units.iter().flat_map(|u| u.to_be_bytes()).collect();
+
+        let payload_le = record_bytes(&[(13 + 2 * le_bytes.len() as u64, &le_bytes)]);
+        assert_eq!(
+            decode_record(&payload_le, TextEncoding::Utf16Le),
+            Ok(vec![Value::Text(s.to_string())])
+        );
+
+        let payload_be = record_bytes(&[(13 + 2 * be_bytes.len() as u64, &be_bytes)]);
+        assert_eq!(
+            decode_record(&payload_be, TextEncoding::Utf16Be),
+            Ok(vec![Value::Text(s.to_string())])
+        );
+    }
+
+    #[test]
+    fn reserved_serial_types_error_not_panic() {
+        let payload = record_bytes(&[(10, &[])]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::ReservedSerialType(10))
+        );
+        let payload = record_bytes(&[(11, &[])]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::ReservedSerialType(11))
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_errors_not_panics() {
+        let invalid = [0xff, 0xfe];
+        let payload = record_bytes(&[(13 + 2 * invalid.len() as u64, &invalid)]);
+        assert_eq!(
+            decode_record(&payload, TextEncoding::Utf8),
+            Err(RecordError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn truncated_record_at_every_offset_errors_not_panics() {
+        let payload = record_bytes(&[
+            (1, &[42]),
+            (13 + 2 * 5, b"hello"),
+            (7, &2.5f64.to_be_bytes()),
+        ]);
+        for cut in 0..payload.len() {
+            let result = decode_record(&payload[..cut], TextEncoding::Utf8);
+            assert!(
+                result.is_err(),
+                "truncating to {cut} bytes should error, got {result:?}"
+            );
+        }
+        // Full payload still decodes fine, confirming the truncation loop
+        // above is actually exercising a valid record and not testing nothing.
+        assert!(decode_record(&payload, TextEncoding::Utf8).is_ok());
+    }
+}
