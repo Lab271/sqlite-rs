@@ -71,7 +71,26 @@ def parse_specs():
             # scenario-level coverage rather than treat the link as binary.
             tests_match = re.search(r"\*\*Tests:\*\*\s*(.+)", block)
             tests_path = tests_match.group(1).strip() if tests_match else None
-            tests_listed = len([t for t in tests_path.split(",") if t.strip()]) if tests_path else 0
+            # A listed test only counts if its file exists on disk — a link
+            # to a not-yet-written test is a plan, not evidence (symmetric
+            # with impl_exists above).
+            tests_listed = 0
+            tests_declared = 0
+            if tests_path:
+                for entry in tests_path.split(","):
+                    entry = entry.strip().strip("`")
+                    if not entry:
+                        continue
+                    tests_declared += 1
+                    test_file = entry.split("::")[0].strip()
+                    # strip inline qualifiers like "inline #[cfg(test)] in src/x.rs"
+                    m2 = re.search(r"[\w/.-]+\.rs", test_file)
+                    if m2:
+                        test_file = m2.group(0)
+                    resolved = (SRC_DIR.parent / test_file).resolve()
+                    repo_root = SRC_DIR.parent.resolve()
+                    if resolved.is_relative_to(repo_root) and resolved.exists():
+                        tests_listed += 1
 
             # Check for Corpus link
             corpus_files = re.findall(r"\*\*Corpus:\*\*\s*`(.+?)`", block)
@@ -92,7 +111,8 @@ def parse_specs():
                     "impl_exists": impl_exists,
                     "planned": planned,
                     "tests_path": tests_path,
-                    "tests_linked": tests_path is not None,
+                    "tests_linked": tests_listed > 0,
+                    "tests_declared": tests_declared,
                     "tests_listed": tests_listed,
                     "corpus_files": corpus_files,
                     "corpus_present": corpus_present,
@@ -193,7 +213,9 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"  - File exists:      {impl_exists}/{total}")
     print()
     print(f"Coverage (E->P):      scenario-weighted  ({coverage:.0%})")
-    print(f"  - Any test linked:  {tests_linked}/{total} requirements")
+    declared = sum(1 for r in active if r.get("tests_declared", 0) > 0)
+    print(f"  - Tests declared:   {declared}/{total} requirements (links in spec)")
+    print(f"  - Tests existing:   {tests_linked}/{total} requirements (files on disk)")
     if total_scenarios:
         weighted = sum(min(r["tests_listed"], r["scenarios"]) for r in active if r["scenarios"])
         print(f"  - Scenarios backed: {weighted}/{total_scenarios} (requirements with #### Scenario: blocks only)")
