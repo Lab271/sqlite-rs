@@ -9,6 +9,21 @@ date: 2026-08-13
 
 The sqlite-rs parser transforms SQL text into an Abstract Syntax Tree (AST). This spec defines the tokenizer, grammar, and parser generator strategy.
 
+## Tier Position
+
+The full parser is **Tier 1** in the tier model ([plan.md](../../plan.md#core-definition--drop-order)). It is deliberately **not** part of the Tier 0 READ CORE: reading existing databases uses a *minimal DDL reader* that extracts table/column names and types from `sqlite_master` DDL text without a full grammar. This keeps the never-droppable core free of the ~200-production grammar.
+
+Grammar productions land tier-by-tier:
+
+| Tier | Grammar scope |
+|------|---------------|
+| Tier 0 | None (minimal DDL reader, separate component) |
+| Tier 1 | Tokenizer complete; SELECT core + expressions (~40 productions) |
+| Tier 2 | DML + core DDL + transactions (~100 cumulative) |
+| Tier 3 | Joins/subqueries/CTEs, triggers, windows, virtual tables (~200+, in drop order) |
+
+Consequence for the tokenizer: it is built **once, completely** (all ~140 keywords) at Tier 1 — keyword recognition is cheap and retrofitting it is not.
+
 ## Philosophy
 
 SQLite uses a Lemon-generated LALR(1) parser. The grammar is defined in `parse.y` (~3,500 lines) and processed by Lemon (~6,000 lines) to produce `parse.c`. We have three options:
@@ -410,7 +425,25 @@ Parse errors SHOULD include source location and helpful context.
 - WHEN parsed
 - THEN error SHOULD say "expected column or expression, found FROM at line 1, column 8"
 
-### Requirement 5: lemon-rs Integration [MAY]
+### Requirement 5: Minimal DDL Reader Independence [MUST]
+
+The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE) MUST NOT depend on the full parser. It extracts table names, column names, declared types, and WITHOUT ROWID / STRICT markers from DDL text — nothing more.
+
+**Implementation:** `src/schema/ddl_reader.rs` (not under `src/parser/`)
+
+#### Scenario: Read schema without the parser
+
+- GIVEN a build with the full parser feature-gated off
+- WHEN sqlite-rs opens a database and dumps its rows
+- THEN schema decoding MUST still work via the minimal DDL reader
+
+#### Scenario: Tolerate unparseable DDL
+
+- GIVEN a `sqlite_master` entry with DDL the minimal reader does not understand (e.g. `CREATE VIRTUAL TABLE ... USING fts5(...)`)
+- WHEN the schema is decoded
+- THEN the entry MUST degrade to raw-row access with untyped columns, not an error
+
+### Requirement 6: lemon-rs Integration [MAY]
 
 If using lemon-rs, the grammar file SHOULD be derived from SQLite's `parse.y` with minimal modifications.
 

@@ -19,6 +19,32 @@ SQLite's architecture is strictly layered. Each layer has one job. The pager doe
 2. **Layer isolation** — modules communicate through defined interfaces
 3. **Test against the oracle** — SQLite's test suite is the spec; divergence is a bug
 4. **Incremental delivery** — each layer can be tested independently
+5. **Read-completeness first** — the storage layer is 100% format-complete before any SQL feature is scoped; whatever wrote the file, sqlite-rs reads the data out
+
+## Tier Model
+
+Capabilities are tiered by droppability (see [plan.md](../../plan.md#core-definition--drop-order) for the full definition and drop order):
+
+| Tier | Scope | Droppable? |
+|------|-------|------------|
+| **Tier 0 — READ CORE** | Feature-agnostic storage reading: all serial types, all text encodings, table + index b-trees, overflow chains, WAL frame reading, hot-journal detection, graceful unknowns | **Never** |
+| **Tier 1 — QUERY CORE** | Single-table SELECT, core scalar functions, affinity, built-in collations | Planner droppable (full scans are correct); SELECT core is not |
+| **Tier 2 — WRITE CORE** | CRUD on rowid tables, basic constraints, rollback-journal transactions, `integrity_check`-clean output | Simplifiable, not droppable |
+| **Tier 3** | Everything else | Yes, in defined drop order |
+
+**Layer-to-tier mapping:**
+
+| Layer | Tier 0 share | Notes |
+|-------|--------------|-------|
+| VFS | Read path | Write path is Tier 2 |
+| Pager | Read path, WAL frame reading, hot-journal detection | Journaling/locking writes are Tier 2; WAL *writing* Tier 3 |
+| B-Tree | Full cursor read incl. index b-trees | Insert/delete/balance are Tier 2 |
+| Record format | Complete (all serial types, all encodings) | Entirely Tier 0 |
+| Tokenizer/Parser | **Not in Tier 0** — `sqlite_master` uses a minimal DDL reader | Full parser starts at Tier 1 |
+| VDBE / Codegen | None | Tier 1 upward |
+| SQL Interface | Raw-dump API only | Full API Tier 1+ |
+
+The asymmetry to preserve: WAL, WITHOUT ROWID, STRICT, and STORED generated columns appear twice — *reading* their data is Tier 0, *executing* their semantics is Tier 3.
 
 ## System Layers
 
@@ -330,3 +356,37 @@ Development MUST use SQLite's test suite as the compatibility oracle.
 - GIVEN any SQL query Q and database D
 - WHEN both SQLite and sqlite-rs execute Q on D
 - THEN the results MUST be identical (byte-for-byte for BLOBs, value-equal otherwise)
+
+### Requirement 4: Tier 0 Read-Completeness [MUST]
+
+sqlite-rs MUST be able to extract every stored row from any well-formed SQLite database, regardless of which SQLite feature created it. Unsupported feature semantics MUST degrade to raw-row access, never to errors.
+
+#### Scenario: Read a WITHOUT ROWID table
+
+- GIVEN a database containing a WITHOUT ROWID table (stored as an index b-tree)
+- WHEN sqlite-rs dumps the database
+- THEN all rows of that table MUST be produced, even if WITHOUT ROWID write semantics are unimplemented
+
+#### Scenario: Read a database with uncheckpointed WAL
+
+- GIVEN a WAL-mode database with a non-empty `-wal` file
+- WHEN sqlite-rs reads the database
+- THEN the page view MUST include committed WAL frames — the data MUST match what `sqlite3` reports
+
+#### Scenario: Read a UTF-16 database
+
+- GIVEN a database created with `PRAGMA encoding='UTF-16le'` (or UTF-16be)
+- WHEN sqlite-rs dumps text values
+- THEN text MUST be decoded correctly
+
+#### Scenario: Unknown schema entry degrades gracefully
+
+- GIVEN a database containing a virtual table (e.g. FTS5) whose module is unimplemented
+- WHEN sqlite-rs dumps the database
+- THEN the shadow tables' raw rows MUST be readable and no error raised for the unknown module
+
+#### Scenario: Hot journal is never ignored
+
+- GIVEN a database with a hot rollback journal (crashed writer)
+- WHEN sqlite-rs opens it read-only
+- THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
