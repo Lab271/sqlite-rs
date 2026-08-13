@@ -380,6 +380,18 @@ diff <(sqlite3 test.db "$SQL") <(sqlite-rs query test.db "$SQL")
 
 Every block's exit criterion: its corpus slice passes with zero diffs, and files written by sqlite-rs pass `PRAGMA integrity_check` in stock SQLite.
 
+## CLI & Tooling
+
+The `sqlite3` CLI shell is a **separate program** from the library (`shell.c`, ~30K lines — vs ~150K for the library). It is where `-csv`/`-json` output modes, `.dump`, `.schema`, `.tables`, `.import`, `.mode`/`.headers`, and the REPL live. It is a third compatibility surface next to the file format and the SQL dialect — and it is also our test oracle's interface (`sqlite3 -csv`, `.dump`). Three levels, scoped explicitly:
+
+| Level | Scope | Status |
+|-------|-------|--------|
+| **1. Dev tooling** | `sqlite-rs dump` / `query` / `export` — our own UX, no shell-compatibility claim. First piece: spike 005 (#12, CSV export) | **In scope** — grows with V1/V2 |
+| **2. Output-format parity** | Match the shell's `-csv`, `-json`, `-list` output modes exactly, including NULL representation, quoting, blob and float rendering | **In scope** — folded into the V1 step 9 output contract; makes oracle diffing trivial forever |
+| **3. Shell parity** | `.dump`, `.schema`, `.tables`, `.import`, REPL, the full dot-command set | **Explicit non-goal for now** — candidate for a later V13 "CLI shell" block; `.dump` (portable backup) and `.schema` are the first candidates when demand appears |
+
+Rationale for level 2 being early: every oracle test diffs our output against the shell's. If our formatting matches the shell's by construction, corpus diffs need zero normalization layers — the formatting *is* part of the evidence chain.
+
 ## Concurrency Contract
 
 The compatibility contract has **two halves**: the file format (static — what the bytes mean) and the **locking protocol** (dynamic — how live processes coordinate). SQLite has no server; the OS's advisory file locking IS the concurrency infrastructure. A stock `sqlite3` process and sqlite-rs *will* open the same file simultaneously — that is the real deployment (Rust app + sqlite3 CLI for debugging). Format-right but locking-wrong yields the worst failure mode: silent corruption visible only under concurrent access.
