@@ -391,6 +391,8 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs reads the database
 - THEN the page view MUST include committed WAL frames — the data MUST match what `sqlite3` reports
 
+**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_fixture_shows_uncheckpointed_rows`
+
 #### Scenario: Read a UTF-16 database
 
 - GIVEN a database created with `PRAGMA encoding='UTF-16le'` (or UTF-16be)
@@ -410,3 +412,5 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - GIVEN a database with a hot rollback journal (crashed writer)
 - WHEN sqlite-rs opens it read-only
 - THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::hot_journal_fixture_is_refused`

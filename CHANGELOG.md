@@ -2,6 +2,27 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
+## [0.3.0] - 2026-08-14
+
+Pager read path and WAL frame reading — V1 phase 3, epic #5 steps 2 and 6 (#35, #36), plus the fixture corpus family (#21) that unblocked both.
+
+### Added
+
+- **`Pager`** (`src/pager/mod.rs`, #35): a `PageSource` implementation sitting between the VFS and the b-tree cursor. Refuses to open a database with a hot rollback journal (valid magic header) rather than risk serving pre-rollback pages as committed data; otherwise wraps `VfsPageSource` unchanged, so `TableCursor<Pager>`/`IndexCursor<Pager>` are byte-identical to the `VfsPageSource`-based cursors on every at-rest fixture, including auto-vacuum databases
+- **WAL frame reading** (`src/pager/wal.rs`, #36): WAL header parsing (both checksum-endianness variants — magic `0x377f0682` is native byte order, the common case), frame walk with checksum/salt validation, and a committed-page index merged transparently into `Pager`. Read-only, quiescent-file recovery only — no `-shm` file
+- **`journalstates` fixture family** (#21): hot-journal and four WAL-pending fixture variants (primary, trailing/spilled, stale/foreign-salt, big-endian checksum), reusing spike #7's fixture-generation tricks
+- **Spec 007-pager**: hot-journal detection, page-view zero-behavior-change, and WAL frame reading, transcribed from SQLite's file format and validated against real fixtures
+- `Vfs::companion_path`, closing spec 003 Req-1's previously-unimplemented "Companion file detection" scenario
+- Second fuzz target (`fuzz/fuzz_targets/wal_frames.rs`, `make fuzz-wal`) for the "malformed WAL never panics" acceptance criterion
+
+### Fixed
+
+- `tests/corpus/regen_test.rs`'s reproducibility check assumed byte-identical regeneration corpus-wide — spec 004 Req-2 already allowed for "byte-identity not required where sqlite3 embeds nondeterminism," but nothing had exercised that carve-out until `journalstates`'s WAL salts/journal nonces became the corpus's first nondeterministic fixture family. Now compared by size for that family only
+
+### Deferred
+
+- Safe-reader `fcntl` locking (SHARED-lock correctness, WAL `-shm` reader-mark protocol): spike 005 (#8, closed) validated the approach against a live stock `sqlite3` process, but implementing it is tracked separately as #45 — `Pager` takes no locks yet
+
 ## [0.2.0] - 2026-08-14
 
 Read-only table and index b-tree cursors, plus the minimal DDL reader — V1 phase 2, epic #5 steps 4-6 (#32, #33, #34).

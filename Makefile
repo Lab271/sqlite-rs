@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree spike-001 spike-002 spike-003 spike-004 spike-005
+.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal spike-001 spike-002 spike-003 spike-004 spike-005
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -82,6 +82,9 @@ FUZZ_SECONDS ?= 60
 
 fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
 	cd fuzz && cargo +nightly fuzz run btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
+
+fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
+	cd fuzz && cargo +nightly fuzz run wal_frames -- -max_total_time=$(FUZZ_SECONDS)
 
 # === Spikes ===
 

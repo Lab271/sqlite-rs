@@ -1,0 +1,19 @@
+hot_journal.db, hot_journal.db-journal — a rollback-journal writer that
+never committed: the journal (valid header) is present, and the main file
+already carries the uncommitted, spilled pages (~1999 rows). The true
+committed state, which a hot-journal-aware reader must report instead of
+those spilled rows, is 1 row.
+wal_pending.db(-wal) — three separate commits to the same page, none
+checkpointed into the main file: 3 rows (1,2,3), invisible reading
+wal_pending.db alone, visible once the WAL is merged in.
+wal_pending_trailing.db(-wal) — a big transaction spills dirty pages into
+the WAL as non-commit frames, then rolls back. Correct row count: 1
+(only the pre-existing committed row).
+wal_pending_stale.db(-wal) — a committed frame from an unrelated WAL
+generation (different salts) appended after this fixture's own last
+commit. Correct rows: 10, 11 — the foreign frame's poisoned row must never
+surface.
+wal_pending_bigendian.db(-wal) — wal_pending.db's content with the WAL
+magic flipped to 0x377f0683 and every checksum independently recomputed in
+big-endian arithmetic, exercising the less common checksum-endianness path.
+Correct rows: 1, 2, 3 (identical to wal_pending.db).

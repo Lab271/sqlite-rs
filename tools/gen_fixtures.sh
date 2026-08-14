@@ -60,8 +60,8 @@ fi
 
 echo "oracle: $ORACLE (sqlite3 $FOUND_VERSION, non-codec)"
 
-rm -rf -- serialtypes encodings pagesizes btrees features invalid
-mkdir -p serialtypes encodings pagesizes btrees features invalid
+rm -rf -- serialtypes encodings pagesizes btrees features invalid journalstates
+mkdir -p serialtypes encodings pagesizes btrees features invalid journalstates
 
 # --- serialtypes/: every serial type at its edge values, NULL, empty/large blobs ---
 "$ORACLE" serialtypes/values.db <<'SQL'
@@ -224,5 +224,201 @@ empty.db — zero-byte file.
 truncated.db — a valid database chopped off mid-header (first 50 bytes).
 magic.db — otherwise-valid database with its 16-byte magic string overwritten.
 EOF
+
+# --- journalstates/: mid-life files a plain CLI invocation can't produce ---
+#
+# Both families below rely on the same trick (spike #7 / issue #21, findings
+# 1 and 4, tests/spike/004_wal_reading/gen_fixture.sh): sqlite3 auto-recovers
+# or auto-checkpoints these transient states the instant a connection opens
+# or closes cleanly, so a plain `sqlite3 db "INSERT ..."` invocation can
+# never leave one on disk. A backgrounded connection blocked on a fifo holds
+# the state open long enough to `cp` both files; forcing a cache spill
+# (`cache_spill=1` + a small negative-KB `cache_size` — a small positive
+# page count does not reliably spill, see spike #7 finding 4) makes the
+# in-flight write visible in the main/WAL file before commit, rather than
+# only in the page cache.
+cd journalstates
+
+# hot_journal.db / hot_journal.db-journal — simulates a writer that died
+# mid-transaction in rollback-journal mode: the journal (with a valid
+# header) is still present, and the main db file already has the
+# uncommitted, spilled pages written into it. A reader that ignores the
+# hot journal and serves the main file's current bytes as committed data
+# would show ~1999 rows; the true committed state (which a real sqlite3
+# reports once it rolls the hot journal back) is 1 row.
+"$ORACLE" work.db "CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'committed-before');"
+{
+  echo "PRAGMA cache_spill=1;"
+  echo "PRAGMA cache_size=-1;"
+  echo "BEGIN;"
+  python3 -c "
+for i in range(2, 2000):
+    print(f\"INSERT INTO t VALUES({i},'row-{i}-padding-xxxxxxxxxxxxxxxxxxxx');\")
+"
+} >sql_hot_journal.txt
+mkfifo writer.fifo
+(cat sql_hot_journal.txt writer.fifo | "$ORACLE" work.db) &
+WRITER_PID=$!
+sleep 1
+cp work.db hot_journal.db
+cp work.db-journal hot_journal.db-journal
+echo "ROLLBACK;" >writer.fifo
+wait "$WRITER_PID" 2>/dev/null || true
+rm -f writer.fifo sql_hot_journal.txt work.db work.db-journal
+
+# wal_pending.db(-wal) — primary case: three separate commits to the same
+# page, none checkpointed into the main file (all invisible reading
+# wal_pending.db alone; all visible once the WAL is merged in).
+"$ORACLE" work.db "PRAGMA journal_mode=WAL; CREATE TABLE t(a INTEGER, b TEXT);"
+mkfifo reader.fifo
+{
+  echo "BEGIN;"
+  echo "SELECT count(*) FROM t;"
+  cat reader.fifo
+} | "$ORACLE" work.db &
+READER_PID=$!
+sleep 0.3
+"$ORACLE" work.db "PRAGMA wal_autocheckpoint=0; INSERT INTO t VALUES(1,'one');"
+"$ORACLE" work.db "PRAGMA wal_autocheckpoint=0; INSERT INTO t VALUES(2,'two');"
+"$ORACLE" work.db "PRAGMA wal_autocheckpoint=0; INSERT INTO t VALUES(3,'three');"
+cp work.db wal_pending.db
+cp work.db-wal wal_pending.db-wal
+echo "ROLLBACK;" >reader.fifo
+wait "$READER_PID" 2>/dev/null || true
+rm -f reader.fifo work.db work.db-wal work.db-shm
+
+# wal_pending_trailing.db(-wal) — a big transaction spills dirty pages into
+# the WAL as non-commit frames, then rolls back: the WAL ends with
+# committed-looking-but-not frames trailing after the last real commit. A
+# reader must show only the previously committed row.
+"$ORACLE" work.db "PRAGMA journal_mode=WAL; CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'committed-before');"
+"$ORACLE" work.db "PRAGMA wal_checkpoint(FULL);" >/dev/null
+{
+  echo "PRAGMA cache_spill=1;"
+  echo "PRAGMA cache_size=-1;"
+  echo "BEGIN;"
+  python3 -c "
+for i in range(2, 2000):
+    print(f\"INSERT INTO t VALUES({i},'row-{i}-padding-to-make-it-bigger-xxxxxxxxxxxxxxxxxxxx');\")
+"
+} >sql_trailing.txt
+mkfifo writer.fifo
+(cat sql_trailing.txt writer.fifo | "$ORACLE" work.db) &
+WRITER_PID=$!
+sleep 1
+cp work.db wal_pending_trailing.db
+cp work.db-wal wal_pending_trailing.db-wal
+echo "ROLLBACK;" >writer.fifo
+wait "$WRITER_PID" 2>/dev/null || true
+rm -f writer.fifo sql_trailing.txt work.db work.db-wal work.db-shm
+
+# wal_pending_stale.db(-wal) — a committed frame lifted from an unrelated
+# WAL generation (different salts) is appended after this fixture's own
+# last commit. A reader must reject it on salt mismatch.
+"$ORACLE" work.db "PRAGMA journal_mode=WAL; CREATE TABLE t(a INTEGER, b TEXT);"
+mkfifo reader.fifo
+{
+  echo "BEGIN;"
+  echo "SELECT count(*) FROM t;"
+  cat reader.fifo
+} | "$ORACLE" work.db &
+READER_PID=$!
+sleep 0.3
+"$ORACLE" work.db "INSERT INTO t VALUES(999,'STALE-FRAME-MUST-NOT-APPEAR');"
+cp work.db-wal poison.wal
+echo "ROLLBACK;" >reader.fifo
+wait "$READER_PID" 2>/dev/null || true
+rm -f reader.fifo work.db work.db-wal work.db-shm
+
+"$ORACLE" work.db "PRAGMA journal_mode=WAL; CREATE TABLE t(a INTEGER, b TEXT);"
+mkfifo reader.fifo
+{
+  echo "BEGIN;"
+  echo "SELECT count(*) FROM t;"
+  cat reader.fifo
+} | "$ORACLE" work.db &
+READER_PID=$!
+sleep 0.3
+"$ORACLE" work.db "INSERT INTO t VALUES(10,'ten');"
+"$ORACLE" work.db "INSERT INTO t VALUES(11,'eleven');"
+cp work.db wal_pending_stale.db
+cp work.db-wal wal_pending_stale.db-wal
+# Skip poison.wal's own 32-byte WAL header, keep only its one 24-byte frame
+# header + page content (both fixtures use the default 4096-byte page size,
+# so frame sizes match).
+tail -c +33 poison.wal >>wal_pending_stale.db-wal
+echo "ROLLBACK;" >reader.fifo
+wait "$READER_PID" 2>/dev/null || true
+rm -f reader.fifo work.db work.db-wal work.db-shm poison.wal
+
+# wal_pending_bigendian.db(-wal) — the other checksum-endianness path (magic
+# 0x377f0683). This host's sqlite3 only ever writes native-endian checksums
+# (0x377f0682, little-endian here — see spike #7 finding 2: native is the
+# *default* encoding, not big-endian, despite what the magic's name
+# suggests). Synthesized from wal_pending's content: magic flipped, every
+# checksum (header + each frame, in order) recomputed independently in
+# Python using explicit big-endian arithmetic.
+cp wal_pending.db wal_pending_bigendian.db
+python3 - <<'PYEOF'
+import struct
+
+with open("wal_pending.db-wal", "rb") as f:
+    wal = bytearray(f.read())
+
+page_size = struct.unpack(">I", wal[8:12])[0]
+frame_size = 24 + page_size
+
+
+def cksum_be(data, s1, s2):
+    for i in range(0, len(data), 8):
+        w0 = struct.unpack_from(">I", data, i)[0]
+        w1 = struct.unpack_from(">I", data, i + 4)[0]
+        s1 = (s1 + w0 + s2) & 0xFFFFFFFF
+        s2 = (s2 + w1 + s1) & 0xFFFFFFFF
+    return s1, s2
+
+
+wal[0:4] = bytes.fromhex("377f0683")
+s1, s2 = cksum_be(wal[0:24], 0, 0)
+wal[24:28] = struct.pack(">I", s1)
+wal[28:32] = struct.pack(">I", s2)
+
+offset = 32
+while offset + frame_size <= len(wal):
+    frame_header = wal[offset : offset + 8]
+    page_content = wal[offset + 24 : offset + 24 + page_size]
+    s1, s2 = cksum_be(frame_header, s1, s2)
+    s1, s2 = cksum_be(page_content, s1, s2)
+    wal[offset + 16 : offset + 20] = struct.pack(">I", s1)
+    wal[offset + 20 : offset + 24] = struct.pack(">I", s2)
+    offset += frame_size
+
+with open("wal_pending_bigendian.db-wal", "wb") as f:
+    f.write(wal)
+PYEOF
+
+cat >manifest.txt <<'EOF'
+hot_journal.db, hot_journal.db-journal — a rollback-journal writer that
+never committed: the journal (valid header) is present, and the main file
+already carries the uncommitted, spilled pages (~1999 rows). The true
+committed state, which a hot-journal-aware reader must report instead of
+those spilled rows, is 1 row.
+wal_pending.db(-wal) — three separate commits to the same page, none
+checkpointed into the main file: 3 rows (1,2,3), invisible reading
+wal_pending.db alone, visible once the WAL is merged in.
+wal_pending_trailing.db(-wal) — a big transaction spills dirty pages into
+the WAL as non-commit frames, then rolls back. Correct row count: 1
+(only the pre-existing committed row).
+wal_pending_stale.db(-wal) — a committed frame from an unrelated WAL
+generation (different salts) appended after this fixture's own last
+commit. Correct rows: 10, 11 — the foreign frame's poisoned row must never
+surface.
+wal_pending_bigendian.db(-wal) — wal_pending.db's content with the WAL
+magic flipped to 0x377f0683 and every checksum independently recomputed in
+big-endian arithmetic, exercising the less common checksum-endianness path.
+Correct rows: 1, 2, 3 (identical to wal_pending.db).
+EOF
+
+cd ..
 
 echo "wrote $(find . -name '*.db' | wc -l | tr -d ' ') fixtures across $(find . -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') families to $(pwd)"
