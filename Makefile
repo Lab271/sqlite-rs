@@ -84,4 +84,7 @@ spike-001: ## Run spike 001 — parser toolchain comparison (tests/spike/001_par
 spike-002: ## Run spike 002 — file reading (tests/spike/002_file_reading)
 	$(MAKE) -C tests/spike/002_file_reading run
 
-test-spikes: spike-001 spike-002 ## Run every spike
+spike-003: ## Run spike 003 — CSV export (tests/spike/003_csv_export)
+	$(MAKE) -C tests/spike/003_csv_export run
+
+test-spikes: spike-001 spike-002 spike-003 ## Run every spike
