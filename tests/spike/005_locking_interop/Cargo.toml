@@ -1,0 +1,10 @@
+[package]
+name = "spike-locking-interop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
