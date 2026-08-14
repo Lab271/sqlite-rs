@@ -380,6 +380,19 @@ diff <(sqlite3 test.db "$SQL") <(sqlite-rs query test.db "$SQL")
 
 Every block's exit criterion: its corpus slice passes with zero diffs, and files written by sqlite-rs pass `PRAGMA integrity_check` in stock SQLite.
 
+## Assurance Stack
+
+Shift-left principle (from MVL): catch each defect class at the earliest phase that can catch it. Full inventory lives in spec 005-assurance (#25) — **the living document every assurance-touching ticket must keep current**. Summary:
+
+| Phase | In place | Phase 1 of V1 adds (#26) | Deferred (deliberate) |
+|-------|----------|--------------------------|------------------------|
+| **Compile time** | rustc, clippy `-D warnings`, rustfmt, mvl-limit (#23) | `#![forbid(unsafe_code)]`, panic-surface lints, `cargo mvl total` experiment on `src/record/` | — |
+| **Test time** | cargo test, llvm-cov, traceability dashboard | proptest roundtrips, cargo-fuzz on `decode_record` (discharges 003 Req 6) | **Mutation testing (cargo-mutants) → V1 exit gate** (epic #5): coverage proves execution, mutation score proves assertion |
+| **Build time** | Cargo.lock, pinned oracle (004 Req 1) | `--locked` CI, cargo-deny (install at zero deps), SHA-pinned actions | **SBOM / cargo-auditable → publish time** |
+| **Run time** | Structured error taxonomy | The Tier 0 totality claim: any input → `Ok` or structured `Err`, never panic (enforced at compile+fuzz time); `debug_assert!` invariants as code grows | **`integrity_check`-style self-diagnosis → V7** |
+
+Deferred ≠ dropped: each deferred item has a named landing point, and moving that point is a plan change, not an omission.
+
 ## CLI & Tooling
 
 The `sqlite3` CLI shell is a **separate program** from the library (`shell.c`, ~30K lines — vs ~150K for the library). It is where `-csv`/`-json` output modes, `.dump`, `.schema`, `.tables`, `.import`, `.mode`/`.headers`, and the REPL live. It is a third compatibility surface next to the file format and the SQL dialect — and it is also our test oracle's interface (`sqlite3 -csv`, `.dump`). Three levels, scoped explicitly:
