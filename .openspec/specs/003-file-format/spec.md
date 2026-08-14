@@ -215,4 +215,4 @@ The system MUST decode complete records: header-size varint, serial-type list, t
 - WHEN decoded
 - THEN the decoder returns errors and never panics (fuzz target)
 
-**Tests:** `src/record/decode.rs::truncated_record_at_every_offset_errors_not_panics`
+**Tests:** `src/record/decode.rs::truncated_record_at_every_offset_errors_not_panics`, `fuzz/fuzz_targets/decode_record.rs`

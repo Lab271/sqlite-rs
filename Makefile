@@ -94,6 +94,10 @@ fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly;
 fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
 	cd fuzz && cargo +nightly fuzz run wal_frames -- -max_total_time=$(FUZZ_SECONDS)
 
+fuzz-decode-record: ## Run the record-decoder fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 003 Req 6)
+	cd fuzz && cargo +nightly fuzz run decode_record -- -max_total_time=$(FUZZ_SECONDS)
+
+
 # === Spikes ===
 
 spike-001: ## Run spike 001 — parser toolchain comparison (tests/spike/001_parser)
