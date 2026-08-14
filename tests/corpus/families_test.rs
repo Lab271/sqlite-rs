@@ -78,3 +78,17 @@ fn feature_bearing_family() {
 fn invalid_family() {
     assert_family_contains("invalid", &["empty.db", "truncated.db", "magic.db"]);
 }
+
+#[test]
+fn journal_states_family() {
+    assert_family_contains(
+        "journalstates",
+        &[
+            "hot_journal.db",
+            "wal_pending.db",
+            "wal_pending_trailing.db",
+            "wal_pending_stale.db",
+            "wal_pending_bigendian.db",
+        ],
+    );
+}

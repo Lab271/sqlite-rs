@@ -12,6 +12,7 @@ pub const FAMILIES: &[&str] = &[
     "btrees",
     "features",
     "invalid",
+    "journalstates",
 ];
 
 pub fn discover_fixtures() -> Vec<PathBuf> {

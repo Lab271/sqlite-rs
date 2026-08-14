@@ -52,6 +52,20 @@ fn regeneration_is_reproducible() {
     let _ = std::fs::remove_dir_all(&run2);
 }
 
+/// Requirement 2 explicitly allows this: "byte-identity not required where
+/// sqlite3 embeds nondeterminism." The `journalstates/` family (#21, #35,
+/// #36) is the corpus's first and only fixture family built from WAL/
+/// rollback-journal files, both of which embed SQLite-generated random
+/// salts/nonces by design (WAL generation salts, the journal header's
+/// random nonce) — every other byte is deterministic given the same
+/// script, but these fields necessarily differ run to run. Checked for
+/// "functionally identical" (same size — content differs only in the
+/// fixed-width random fields and the checksums that cover them) rather
+/// than exact bytes.
+fn is_nondeterministic(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "journalstates")
+}
+
 fn compare_dirs(a: &Path, b: &Path, mismatches: &mut Vec<String>) {
     let mut a_entries: Vec<_> = std::fs::read_dir(a).unwrap().map(|e| e.unwrap()).collect();
     a_entries.sort_by_key(|e| e.file_name());
@@ -65,6 +79,15 @@ fn compare_dirs(a: &Path, b: &Path, mismatches: &mut Vec<String>) {
         }
         if a_path.is_dir() {
             compare_dirs(&a_path, &b_path, mismatches);
+        } else if is_nondeterministic(&a_path) {
+            let a_len = std::fs::metadata(&a_path).unwrap().len();
+            let b_len = std::fs::metadata(&b_path).unwrap().len();
+            if a_len != b_len {
+                mismatches.push(format!(
+                    "{} differs in size between runs ({a_len} vs {b_len})",
+                    a_path.display()
+                ));
+            }
         } else {
             let a_bytes = std::fs::read(&a_path).unwrap();
             let b_bytes = std::fs::read(&b_path).unwrap();

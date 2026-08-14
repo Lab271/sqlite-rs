@@ -47,7 +47,9 @@ The corpus MUST be regenerable deterministically from a script using the pinned 
 
 - GIVEN a clean checkout
 - WHEN `make fixtures` runs twice
-- THEN both runs produce corpora that the harness reports as equivalent
+- THEN both runs produce corpora that the harness reports as equivalent (byte-identical, except `journalstates/`'s WAL-salt/journal-nonce-bearing files, which are compared by size — see #35/#36)
+
+**Tests:** `tests/corpus/regen_test.rs::regeneration_is_reproducible`
 
 ### Requirement 3: Fixture Families [MUST]
 
@@ -79,7 +81,10 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 
 #### Scenario: Journal-state family
 
-- Deferred to #21 — WAL-pending (uncheckpointed frames) and hot-journal (crashed-writer) fixtures both require scripting a partial/interrupted write rather than a single deterministic `sqlite3` invocation, unlike every other family here. Not part of this spec's current scope; #21 will add a `journalstates/` family when it lands.
+- GIVEN the `journalstates/` family
+- THEN it contains a hot-journal (crashed rollback-journal writer) fixture and four WAL-pending fixtures (primary uncheckpointed case, trailing spilled-but-uncommitted frames, a stale foreign-generation frame, and the big-endian checksum path) — each produced by scripting a partial/interrupted write (a blocked reader/writer held open on a fifo) rather than a single deterministic `sqlite3` invocation, per spike #7's findings (#21, #35, #36)
+
+**Tests:** `tests/corpus/families_test.rs::journal_states_family`
 
 #### Scenario: Feature-bearing family
 

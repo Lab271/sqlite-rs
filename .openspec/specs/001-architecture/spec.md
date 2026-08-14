@@ -410,3 +410,5 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - GIVEN a database with a hot rollback journal (crashed writer)
 - WHEN sqlite-rs opens it read-only
 - THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::hot_journal_fixture_is_refused`

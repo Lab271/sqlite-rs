@@ -15,7 +15,7 @@ pub use memory::MemoryVfs;
 pub use page_source::{PageError, PageSource, VfsPageSource};
 pub use unix::UnixVfs;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -42,6 +42,16 @@ pub trait Vfs {
     /// Whether `path` exists — used to detect sibling `-wal` / `-journal`
     /// files.
     fn exists(&self, path: &Path) -> Result<bool>;
+}
+
+/// Builds the path of a companion file (e.g. `-wal`, `-journal`) by
+/// appending `suffix` to `path`'s full name — never `.set_extension`, since
+/// companion suffixes are appended after the existing `.db` extension, not
+/// substituted for it (`test.db` + `-wal` = `test.db-wal`, not `test.wal`).
+pub fn companion_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// A single file opened via [`Vfs::open_read`].
@@ -97,6 +107,24 @@ mod tests {
             Path::new("/absent.db"),
             &contents,
         );
+    }
+
+    #[test]
+    fn companion_file_detection() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", b"main file".to_vec());
+        vfs.insert("/test.db-wal", b"wal file".to_vec());
+        vfs.insert("/test.db-journal", b"journal file".to_vec());
+
+        assert!(vfs
+            .exists(&companion_path(Path::new("/test.db"), "-wal"))
+            .unwrap());
+        assert!(vfs
+            .exists(&companion_path(Path::new("/test.db"), "-journal"))
+            .unwrap());
+        assert!(!vfs
+            .exists(&companion_path(Path::new("/other.db"), "-wal"))
+            .unwrap());
     }
 
     #[test]
