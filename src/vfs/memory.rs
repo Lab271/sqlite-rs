@@ -44,6 +44,10 @@ impl Vfs for MemoryVfs {
 struct MemoryVfsFile(Arc<Vec<u8>>);
 
 impl VfsFile for MemoryVfsFile {
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "offset < self.0.len() is checked above; n = min(buf.len(), available.len()) is always in bounds on both sides"
+    )]
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         let offset = offset as usize;
         if offset >= self.0.len() {

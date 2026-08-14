@@ -18,3 +18,10 @@ path = "tests/unit/record.rs"
 [[test]]
 name = "unit_vfs"
 path = "tests/unit/vfs.rs"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+arithmetic_side_effects = "deny"

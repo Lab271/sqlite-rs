@@ -53,7 +53,13 @@ impl PageSource for VfsPageSource {
             return Err(PageError::InvalidPageNumber);
         }
         let mut buf = vec![0u8; self.page_size as usize];
-        let offset = (page_num as u64 - 1) * self.page_size as u64;
+        // page_num >= 1 here (checked above) and page_size is a validated
+        // power of two in [512, 65536] (header.rs), so this product stays
+        // far below u64::MAX; saturating_* just avoids asserting that by
+        // inspection.
+        let offset = (page_num as u64)
+            .saturating_sub(1)
+            .saturating_mul(self.page_size as u64);
         let n = self.file.read_at(&mut buf, offset)?;
         if n != buf.len() {
             return Err(PageError::ShortRead {

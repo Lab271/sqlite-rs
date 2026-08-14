@@ -20,14 +20,19 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
     let mut pos = n;
     while pos < header_len {
         let (serial_type, len) = decode_varint_at(payload, pos)?;
-        if pos + len > header_len {
+        // pos and len are both bounded by payload's real (finite) length via
+        // decode_varint_at's own bounds check, never by header_len's
+        // (attacker-declared, unbounded) value — saturating_add can't
+        // change the outcome of the overrun check below, only avoid a
+        // theoretical wraparound on it.
+        if pos.saturating_add(len) > header_len {
             return Err(RecordError::HeaderOverrun {
                 offset: pos,
                 header_len,
             });
         }
         serial_types.push(serial_type);
-        pos += len;
+        pos = pos.saturating_add(len);
     }
 
     let mut body_pos = header_len;
@@ -35,11 +40,11 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
     for serial_type in serial_types {
         let (value, len) = decode_serial_value(serial_type, payload, body_pos, encoding)?;
         values.push(value);
-        body_pos += len;
+        body_pos = body_pos.saturating_add(len);
     }
     if body_pos != payload.len() {
         return Err(RecordError::TrailingData {
-            trailing: payload.len() - body_pos,
+            trailing: payload.len().saturating_sub(body_pos),
         });
     }
     Ok(values)
@@ -54,7 +59,7 @@ fn decode_varint_at(buf: &[u8], pos: usize) -> Result<(u64, usize), RecordError>
         .ok_or(RecordError::UnexpectedEof { offset: pos })?;
     decode_varint(slice).map_err(|e| match e {
         RecordError::UnexpectedEof { offset } => RecordError::UnexpectedEof {
-            offset: pos + offset,
+            offset: pos.saturating_add(offset),
         },
         other => other,
     })
@@ -68,6 +73,15 @@ fn take(buf: &[u8], pos: usize, len: usize) -> Result<&[u8], RecordError> {
         .ok_or(RecordError::UnexpectedEof { offset: pos })
 }
 
+/// Like [`take`], but returns an owned fixed-size array instead of a slice
+/// — lets fixed-width serial types (i16/i32/i64/f64) destructure their
+/// bytes directly instead of indexing into a slice.
+fn take_array<const N: usize>(buf: &[u8], pos: usize) -> Result<[u8; N], RecordError> {
+    take(buf, pos, N)?
+        .try_into()
+        .map_err(|_| RecordError::UnexpectedEof { offset: pos })
+}
+
 /// Decodes one column body given its serial type. Returns the value and
 /// the number of body bytes it occupies.
 pub(crate) fn decode_serial_value(
@@ -79,46 +93,44 @@ pub(crate) fn decode_serial_value(
     match serial_type {
         0 => Ok((Value::Null, 0)),
         1 => {
-            let b = take(buf, pos, 1)?;
-            Ok((Value::Integer(b[0] as i8 as i64), 1))
+            let [b0] = take_array(buf, pos)?;
+            Ok((Value::Integer(b0 as i8 as i64), 1))
         }
         2 => {
-            let b = take(buf, pos, 2)?;
-            Ok((Value::Integer(i16::from_be_bytes([b[0], b[1]]) as i64), 2))
+            let b = take_array(buf, pos)?;
+            Ok((Value::Integer(i16::from_be_bytes(b) as i64), 2))
         }
         3 => {
-            let b = take(buf, pos, 3)?;
-            let mut v = ((b[0] as i64) << 16) | ((b[1] as i64) << 8) | (b[2] as i64);
-            if b[0] & 0x80 != 0 {
-                v -= 1 << 24; // sign-extend 24-bit
+            let [b0, b1, b2] = take_array(buf, pos)?;
+            let mut v = ((b0 as i64) << 16) | ((b1 as i64) << 8) | (b2 as i64);
+            if b0 & 0x80 != 0 {
+                v = v.wrapping_sub(1 << 24); // sign-extend 24-bit; magnitude is tiny relative to i64
             }
             Ok((Value::Integer(v), 3))
         }
         4 => {
-            let b = take(buf, pos, 4)?;
-            Ok((
-                Value::Integer(i32::from_be_bytes(b.try_into().unwrap()) as i64),
-                4,
-            ))
+            let b = take_array(buf, pos)?;
+            Ok((Value::Integer(i32::from_be_bytes(b) as i64), 4))
         }
         5 => {
-            let b = take(buf, pos, 6)?;
+            let bytes: [u8; 6] = take_array(buf, pos)?;
+            let [b0, ..] = bytes;
             let mut v: i64 = 0;
-            for &byte in b {
+            for byte in bytes {
                 v = (v << 8) | byte as i64;
             }
-            if b[0] & 0x80 != 0 {
-                v -= 1 << 48; // sign-extend 48-bit
+            if b0 & 0x80 != 0 {
+                v = v.wrapping_sub(1 << 48); // sign-extend 48-bit; magnitude is tiny relative to i64
             }
             Ok((Value::Integer(v), 6))
         }
         6 => {
-            let b = take(buf, pos, 8)?;
-            Ok((Value::Integer(i64::from_be_bytes(b.try_into().unwrap())), 8))
+            let b = take_array(buf, pos)?;
+            Ok((Value::Integer(i64::from_be_bytes(b)), 8))
         }
         7 => {
-            let b = take(buf, pos, 8)?;
-            let value = f64::from_be_bytes(b.try_into().unwrap());
+            let b = take_array(buf, pos)?;
+            let value = f64::from_be_bytes(b);
             // SQLite decodes a NaN payload as NULL rather than a real NaN
             // (sqlite3VdbeSerialGet's IsNaN(x) check) — matched here for
             // binary-compatible read behavior.
@@ -135,15 +147,19 @@ pub(crate) fn decode_serial_value(
         // upstream decodes both as NULL rather than treating them as
         // corruption — matched here rather than erroring.
         10 | 11 => Ok((Value::Null, 0)),
-        // n is guaranteed >= 12 here: match arms above exhaustively cover 0..=11.
+        // n is guaranteed >= 12 here (match arms above exhaustively cover
+        // 0..=11), so n.wrapping_sub(12) never wraps; n itself is an
+        // attacker-controlled varint value, but the resulting length still
+        // flows into take()'s checked_add, so an implausible declared length
+        // errors there rather than overflowing here.
         n if n % 2 == 0 => {
-            let len = ((n - 12) / 2) as usize;
+            let len = (n.wrapping_sub(12) / 2) as usize;
             let bytes = take(buf, pos, len)?;
             Ok((Value::Blob(bytes.to_vec()), len))
         }
         // n is guaranteed >= 13 here: odd, and 0..=11 handled above.
         n => {
-            let len = ((n - 13) / 2) as usize;
+            let len = (n.wrapping_sub(13) / 2) as usize;
             let bytes = take(buf, pos, len)?;
             let text = decode_text(bytes, encoding)?;
             Ok((Value::Text(text), len))
@@ -165,13 +181,22 @@ fn decode_utf16(bytes: &[u8], unit_from_bytes: fn([u8; 2]) -> u16) -> Result<Str
     if !bytes.len().is_multiple_of(2) {
         return Err(RecordError::InvalidUtf16);
     }
-    let units = bytes.chunks_exact(2).map(|c| unit_from_bytes([c[0], c[1]]));
+    let units = bytes
+        .chunks_exact(2)
+        .map(|c| unit_from_bytes(c.try_into().unwrap_or_default()));
     char::decode_utf16(units)
         .collect::<Result<String, _>>()
         .map_err(|_| RecordError::InvalidUtf16)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

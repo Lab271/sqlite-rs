@@ -64,7 +64,7 @@ pub fn read_schema<P: PageSource>(
         if values.len() != 5 {
             return Err(DdlError::MalformedRow(values.len()));
         }
-        if text(&values[0]) == "table" {
+        if text(values.first()) == "table" {
             schemas.push(table_schema(&values));
         }
         row = cursor.next()?;
@@ -73,12 +73,12 @@ pub fn read_schema<P: PageSource>(
 }
 
 fn table_schema(values: &[Value]) -> TableSchema {
-    let name = text(&values[1]).to_string();
-    let root_page = match &values[3] {
-        Value::Integer(i) => *i as u32,
+    let name = text(values.get(1)).to_string();
+    let root_page = match values.get(3) {
+        Some(Value::Integer(i)) => *i as u32,
         _ => 0,
     };
-    let sql = text(&values[4]);
+    let sql = text(values.get(4));
 
     if is_virtual_table(sql) {
         return TableSchema {
@@ -102,9 +102,9 @@ fn table_schema(values: &[Value]) -> TableSchema {
     }
 }
 
-fn text(v: &Value) -> &str {
+fn text(v: Option<&Value>) -> &str {
     match v {
-        Value::Text(s) => s,
+        Some(Value::Text(s)) => s,
         _ => "",
     }
 }
@@ -130,13 +130,13 @@ fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
     let start = sql.find('(')?;
     let mut depth = 0i32;
     let mut end = None;
-    for (i, c) in sql[start..].char_indices() {
+    for (i, c) in sql.get(start..)?.char_indices() {
         match c {
-            '(' => depth += 1,
+            '(' => depth = depth.saturating_add(1),
             ')' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    end = Some(start + i);
+                    end = Some(start.saturating_add(i));
                     break;
                 }
             }
@@ -144,8 +144,8 @@ fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
         }
     }
     let end = end?;
-    let inner = &sql[start + 1..end];
-    let trailer = sql[end + 1..].to_ascii_uppercase();
+    let inner = sql.get(start.saturating_add(1)..end)?;
+    let trailer = sql.get(end.saturating_add(1)..)?.to_ascii_uppercase();
 
     let columns = split_top_level_commas(inner)
         .into_iter()
@@ -181,16 +181,16 @@ fn split_top_level_commas(inner: &str) -> Vec<String> {
     let bytes = inner.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
-                parts.push(inner[part_start..i].trim().to_string());
-                part_start = i + 1;
+                parts.push(inner.get(part_start..i).unwrap_or("").trim().to_string());
+                part_start = i.saturating_add(1);
             }
             _ => {}
         }
     }
-    parts.push(inner[part_start..].trim().to_string());
+    parts.push(inner.get(part_start..).unwrap_or("").trim().to_string());
     parts
 }
 
@@ -204,6 +204,13 @@ fn column_name(def: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::header::DatabaseHeader;

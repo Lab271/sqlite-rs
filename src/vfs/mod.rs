@@ -65,6 +65,13 @@ pub trait VfsFile {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

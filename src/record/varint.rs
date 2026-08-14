@@ -4,6 +4,10 @@ use super::error::RecordError;
 /// continuation flag, up to 9 bytes (the 9th contributes a full 8 bits with
 /// no continuation flag). Returns the decoded value and the number of bytes
 /// consumed. Never panics — a truncated buffer returns `Err`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "i ranges over the compile-time-constant 0..8, so i + 1 never overflows"
+)]
 pub fn decode_varint(buf: &[u8]) -> Result<(u64, usize), RecordError> {
     let mut result: u64 = 0;
     for i in 0..8 {
@@ -19,6 +23,13 @@ pub fn decode_varint(buf: &[u8]) -> Result<(u64, usize), RecordError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
