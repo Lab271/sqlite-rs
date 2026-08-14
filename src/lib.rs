@@ -5,6 +5,8 @@
 #![deny(unsafe_code)]
 
 pub mod btree;
+pub mod dump;
+pub mod format;
 pub mod header;
 pub mod pager;
 pub mod record;

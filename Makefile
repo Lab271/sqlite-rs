@@ -12,7 +12,7 @@
 #     explicit: everything above the VFS is in the qualified subset.
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
-MVL_LIMIT_EXCLUDE := src/vfs/*
+MVL_LIMIT_EXCLUDE := src/vfs/* src/bin/*
 
 COVERAGE_MIN := 75
 
@@ -43,7 +43,7 @@ deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
 
-mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes exempt)
+mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes, src/vfs (dyn boundary), and src/bin (stdout/stderr CLI I/O boundary) exempt)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
 	  echo "error: $(MVL_LIMIT) not found."; \
 	  echo "install: cargo install cargo-mvl  (or build from mvl-lang/mvl-rust:"; \

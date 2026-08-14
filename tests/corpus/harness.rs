@@ -1,8 +1,16 @@
-//! Fixture discovery and the stub reader that V1 steps 1-9 (#5) replace
-//! with real decode-and-diff-against-oracle logic. See
+//! Fixture discovery and the real per-fixture reader: opens each
+//! committed fixture through the library's `dump` path (issue #37, V1
+//! step 9) and reports whether it decoded or failed. See
 //! `.openspec/specs/004-corpus/spec.md` Requirement 4.
+//!
+//! Deliberately does not shell out to `sqlite3` here (per this module's
+//! original design: the harness reads committed fixtures only) — actual
+//! byte-for-byte oracle diffing against a live `sqlite3` binary lives in
+//! `dump_oracle_test.rs`, a separate, explicitly-scoped exception.
 
 use crate::oracle::corpus_dir;
+use sqlite_rs::dump::dump_database;
+use sqlite_rs::vfs::UnixVfs;
 use std::path::PathBuf;
 
 pub const FAMILIES: &[&str] = &[
@@ -32,11 +40,27 @@ pub fn discover_fixtures() -> Vec<PathBuf> {
 }
 
 pub enum FixtureOutcome {
-    Skipped,
+    /// The database opened and every readable table decoded — `tables`
+    /// is the count of non-virtual tables read, `warnings` any
+    /// gracefully-skipped tables (e.g. virtual tables).
+    Dumped {
+        tables: usize,
+        warnings: Vec<String>,
+    },
+    /// The database couldn't be opened at all (malformed header, hot
+    /// rollback journal, ...) — expected for the `invalid` family and
+    /// `journalstates/hot_journal.db`.
+    Failed(String),
 }
 
-/// No reader exists yet — every fixture reports `Skipped`. Real per-fixture
-/// decode-and-diff-against-oracle logic lands as V1 steps 1-9 are built.
-pub fn read_fixture(_path: &std::path::Path) -> FixtureOutcome {
-    FixtureOutcome::Skipped
+/// Reads `path` end to end through `dump_database`. Never panics: any
+/// open/schema/table failure becomes `FixtureOutcome::Failed`.
+pub fn read_fixture(path: &std::path::Path) -> FixtureOutcome {
+    match dump_database(&UnixVfs, path) {
+        Ok(result) => FixtureOutcome::Dumped {
+            tables: result.tables.len(),
+            warnings: result.warnings,
+        },
+        Err(e) => FixtureOutcome::Failed(e.to_string()),
+    }
 }

@@ -47,6 +47,10 @@ pub struct TableSchema {
     /// parse. `columns` is always empty and `root_page` is `0` (virtual
     /// tables have no b-tree storage of their own).
     pub is_virtual: bool,
+    /// The raw `sql` column text from `sqlite_master` — the verbatim
+    /// `CREATE TABLE`/`CREATE VIRTUAL TABLE` statement, needed by callers
+    /// that reproduce schema DDL verbatim (e.g. a `dump` CLI).
+    pub sql: String,
 }
 
 /// Walks `sqlite_master` via `cursor` (which callers MUST construct with
@@ -88,6 +92,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
             without_rowid: false,
             strict: false,
             is_virtual: true,
+            sql: sql.to_string(),
         };
     }
 
@@ -99,6 +104,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
         without_rowid: parsed.without_rowid,
         strict: parsed.strict,
         is_virtual: false,
+        sql: sql.to_string(),
     }
 }
 
