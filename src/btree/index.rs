@@ -22,8 +22,8 @@
 use std::cmp::Ordering;
 
 use super::{
-    page1_header_start, read_cell_pointer, read_num_cells, read_page_type, read_u32,
-    reassemble_payload, require_interior_header, BtreeError, MAX_PAGES_VISITED,
+    cell_ptr_offset, page1_header_start, read_cell_pointer, read_num_cells, read_page_type,
+    read_u32, reassemble_payload, require_interior_header, BtreeError, MAX_PAGES_VISITED,
 };
 use crate::record::{decode_record, decode_varint, TextEncoding, Value};
 use crate::vfs::PageSource;
@@ -113,7 +113,7 @@ impl<P: PageSource> IndexCursor<P> {
     }
 
     fn read_page(&mut self, page_num: u32) -> Result<Vec<u8>, BtreeError> {
-        self.pages_visited += 1;
+        self.pages_visited = self.pages_visited.saturating_add(1);
         if self.pages_visited > MAX_PAGES_VISITED {
             return Err(BtreeError::TraversalTooLong {
                 max: MAX_PAGES_VISITED,
@@ -144,11 +144,11 @@ impl<P: PageSource> IndexCursor<P> {
         let num_cells = read_num_cells(&page, header_start, page_num)?;
         let (cell_ptr_base, rightmost) = if is_interior {
             (
-                header_start + 12,
-                read_u32(&page, header_start + 8, page_num)?,
+                header_start.saturating_add(12),
+                read_u32(&page, header_start.saturating_add(8), page_num)?,
             )
         } else {
-            (header_start + 8, 0)
+            (header_start.saturating_add(8), 0)
         };
         self.stack.push(IndexFrame {
             page_num,
@@ -162,11 +162,15 @@ impl<P: PageSource> IndexCursor<P> {
         Ok(())
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
+    )]
     fn advance(&mut self) -> Result<Option<IndexRow>, BtreeError> {
         loop {
             let top = match self.stack.len() {
                 0 => return Ok(None),
-                n => n - 1,
+                n => n.saturating_sub(1),
             };
             let (is_interior, step, num_cells, rightmost) = {
                 let f = &self.stack[top];
@@ -178,38 +182,50 @@ impl<P: PageSource> IndexCursor<P> {
                     self.stack.pop();
                     continue;
                 }
-                self.stack[top].step += 1;
+                self.stack[top].step = self.stack[top].step.saturating_add(1);
                 return self.decode_leaf_entry(top, step).map(Some);
             }
 
-            let total_steps = 2 * num_cells;
+            let total_steps = num_cells.saturating_mul(2);
             if step > total_steps {
                 self.stack.pop();
                 continue;
             }
-            self.stack[top].step += 1;
+            self.stack[top].step = self.stack[top].step.saturating_add(1);
             if step == total_steps {
                 self.push_page(rightmost)?;
             } else if step % 2 == 0 {
                 let child = self.read_interior_child(top, step / 2)?;
                 self.push_page(child)?;
             } else {
-                return self.decode_interior_entry(top, (step - 1) / 2).map(Some);
+                // step is odd here (the step % 2 == 0 arm above didn't
+                // match), so step >= 1 and this never underflows.
+                return self
+                    .decode_interior_entry(top, step.saturating_sub(1) / 2)
+                    .map(Some);
             }
         }
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "frame_index is always `top` from advance(), always in bounds"
+    )]
     fn read_interior_child(
         &self,
         frame_index: usize,
         cell_index: usize,
     ) -> Result<u32, BtreeError> {
         let frame = &self.stack[frame_index];
-        let ptr_off = frame.cell_ptr_base + 2 * cell_index;
+        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, frame.page_num, cell_index)?;
         read_u32(&frame.page, cell_start, frame.page_num)
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "frame_index is always `top` from advance(), always in bounds"
+    )]
     fn decode_leaf_entry(
         &self,
         frame_index: usize,
@@ -217,7 +233,7 @@ impl<P: PageSource> IndexCursor<P> {
     ) -> Result<IndexRow, BtreeError> {
         let frame = &self.stack[frame_index];
         let page_num = frame.page_num;
-        let ptr_off = frame.cell_ptr_base + 2 * cell_index;
+        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         let (payload_len, tail_start) = decode_payload_len(&frame.page, cell_start, page_num)?;
         let tail = frame
@@ -229,6 +245,10 @@ impl<P: PageSource> IndexCursor<P> {
         Ok(IndexRow { payload })
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "frame_index is always `top` from advance(), always in bounds"
+    )]
     fn decode_interior_entry(
         &self,
         frame_index: usize,
@@ -236,11 +256,12 @@ impl<P: PageSource> IndexCursor<P> {
     ) -> Result<IndexRow, BtreeError> {
         let frame = &self.stack[frame_index];
         let page_num = frame.page_num;
-        let ptr_off = frame.cell_ptr_base + 2 * cell_index;
+        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         // Interior index cell: 4-byte left-child pointer, then the same
         // payload-length-varint + payload shape as a leaf cell.
-        let (payload_len, tail_start) = decode_payload_len(&frame.page, cell_start + 4, page_num)?;
+        let (payload_len, tail_start) =
+            decode_payload_len(&frame.page, cell_start.saturating_add(4), page_num)?;
         let tail = frame
             .page
             .get(tail_start..)
@@ -262,7 +283,7 @@ fn decode_payload_len(
     })?;
     let (payload_len, n1) =
         decode_varint(cell).map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
-    Ok((payload_len, offset + n1))
+    Ok((payload_len, offset.saturating_add(n1)))
 }
 
 /// SQLite's Tier 0 (BINARY collation) type ordering: NULL < numeric <
@@ -309,6 +330,13 @@ fn compare_keys(a: &[Value], b: &[Value]) -> Ordering {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::header::DatabaseHeader;

@@ -158,15 +158,22 @@ points as a timeboxed experiment (half a day), annotating them
 valuable: a clean pass is real-code validation for mvl-rust; a finding is
 filed upstream (in the style of mvl#2284) and noted here.
 
-`#[mvl::total]` annotations land on `decode_record` and `decode_serial_value`
-in #26. This is not a pass/fail CI gate — the tool itself is under
-evaluation — so the outcome (clean pass or upstream-filed findings) is
-recorded as prose in this spec rather than backed by a test link.
+**Finding (#26, mvl-rust v1.8.1 as installed): the experiment as scoped
+doesn't apply to this codebase yet.** `mvl` (v1.8.1) is a compiler/toolchain
+for the standalone MVL language — `mvl build`/`mvl check`/`mvl test` all
+operate on `.mvl` source files and transpile them to Rust. There is no
+`cargo mvl total` subcommand, no `#[mvl::total]` attribute, and no published
+`mvl` crate on crates.io a plain Rust crate could depend on to annotate
+existing `.rs` files in place. This is a different tool from
+`cargo-mvl-limit` (the qualified-subset gate, #23) — that one *does* scan
+real `.rs` files directly, because it's a narrower, standalone static
+checker, not the full MVL transpiler. Confirmed by: `mvl --help`'s full
+subcommand list (no `total`), `cargo add mvl --dry-run` (no such crate on
+crates.io), and the existing `cargo-mvl-limit` binary's own scope (whole-file
+scan, not annotation-based). This is the "doesn't work" branch the ticket
+anticipated — the real-code-validation value returns once mvl-rust ships a
+way to apply `#[mvl::total]`-style contracts to existing Rust source (or a
+`src/record/` port to `.mvl` itself becomes in scope), whichever comes
+first; re-attempt then rather than on a fixed date.
 
-**Implementation:** `src/record/decode.rs` (planned)
-
-#### Scenario: Experiment outcome recorded either way
-
-- GIVEN the half-day timebox on `cargo mvl total` for `src/record/`
-- WHEN the experiment ends
-- THEN this spec records the outcome — either a clean pass (validation for mvl-rust) or specific findings (filed upstream, referenced here by issue link)
+**Implementation:** `src/record/decode.rs` (not applicable — see finding above)

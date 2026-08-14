@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal spike-001 spike-002 spike-003 spike-004 spike-005
+.PHONY: help test lint deny mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -27,12 +27,19 @@ help: ## Show this help
 # === Test ===
 
 test: ## Run the unit test suite + public-API tests (excludes tests/corpus — see test-corpus)
-	cargo test --lib --bins
-	cargo test --test unit_header --test unit_record --test unit_vfs
+	cargo test --locked --lib --bins
+	cargo test --locked --test unit_header --test unit_record --test unit_vfs
 
 lint: ## Run clippy and check formatting
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --locked --all-targets -- -D warnings
 	cargo fmt -- --check
+
+deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
+	@command -v cargo-deny >/dev/null 2>&1 || { \
+	  echo "error: cargo-deny not found."; \
+	  echo "install: cargo install cargo-deny"; \
+	  exit 1; }
+	cargo deny check
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
 
@@ -53,7 +60,7 @@ fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/g
 	./tools/gen_fixtures.sh
 
 test-corpus: ## Run the fixture corpus / oracle harness (see .openspec/specs/004-corpus)
-	cargo test --test corpus
+	cargo test --locked --test corpus
 
 # === Assurance ===
 
@@ -67,7 +74,7 @@ traceability: ## Fast path: traceability only, no corpus/coverage I/O
 	@python3 tools/assurance.py --traceability-only $(if $(VERBOSE),--verbose)
 
 coverage: ## Run the test suite under coverage instrumentation and print a line coverage report (cargo-llvm-cov)
-	cargo llvm-cov --no-report
+	cargo llvm-cov --locked --no-report
 	cargo llvm-cov report
 	cargo llvm-cov report --json --output-path target/llvm-cov.json
 
@@ -86,6 +93,10 @@ fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly;
 
 fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
 	cd fuzz && cargo +nightly fuzz run wal_frames -- -max_total_time=$(FUZZ_SECONDS)
+
+fuzz-decode-record: ## Run the record-decoder fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 003 Req 6)
+	cd fuzz && cargo +nightly fuzz run decode_record -- -max_total_time=$(FUZZ_SECONDS)
+
 
 # === Spikes ===
 

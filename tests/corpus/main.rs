@@ -3,6 +3,14 @@
 //! fast unit-test loop doesn't pay for corpus discovery on every run.
 //! See `.openspec/specs/004-corpus/spec.md`.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 mod harness;
 mod oracle;
 

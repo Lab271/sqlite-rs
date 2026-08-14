@@ -3,6 +3,14 @@
 //! is intentionally not used here — it was demoted to `pub(crate)` as internal
 //! plumbing (its only caller was `decode_record` itself).
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use sqlite_rs::record::{decode_record, decode_varint, RecordError, TextEncoding, Value};
 
 /// Minimal varint encoder for building test payloads (mirrors the decoder's

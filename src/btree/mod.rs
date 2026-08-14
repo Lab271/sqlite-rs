@@ -108,7 +108,7 @@ impl<P: PageSource> TableCursor<P> {
         // calls made earlier or later on this same long-lived cursor.
         let mut visited = 0usize;
         loop {
-            visited += 1;
+            visited = visited.saturating_add(1);
             if visited > MAX_PAGES_VISITED {
                 return Err(BtreeError::TraversalTooLong {
                     max: MAX_PAGES_VISITED,
@@ -124,10 +124,14 @@ impl<P: PageSource> TableCursor<P> {
 
             match page_type {
                 LEAF_TABLE => {
-                    let cell_ptr_base = header_start + 8;
+                    let cell_ptr_base = header_start.saturating_add(8);
                     for i in 0..num_cells {
-                        let cell_start =
-                            read_cell_pointer(&page, cell_ptr_base + 2 * i, page_num, i)?;
+                        let cell_start = read_cell_pointer(
+                            &page,
+                            cell_ptr_offset(cell_ptr_base, i),
+                            page_num,
+                            i,
+                        )?;
                         let (rowid, payload_len, tail_start) =
                             decode_cell_head(&page, cell_start, page_num)?;
                         if rowid == target_rowid {
@@ -148,15 +152,19 @@ impl<P: PageSource> TableCursor<P> {
                 }
                 INTERIOR_TABLE => {
                     require_interior_header(&page, header_start, page_num)?;
-                    let cell_ptr_base = header_start + 12;
-                    let rightmost = read_u32(&page, header_start + 8, page_num)?;
+                    let cell_ptr_base = header_start.saturating_add(12);
+                    let rightmost = read_u32(&page, header_start.saturating_add(8), page_num)?;
                     let mut next_page = rightmost;
                     for i in 0..num_cells {
-                        let cell_start =
-                            read_cell_pointer(&page, cell_ptr_base + 2 * i, page_num, i)?;
+                        let cell_start = read_cell_pointer(
+                            &page,
+                            cell_ptr_offset(cell_ptr_base, i),
+                            page_num,
+                            i,
+                        )?;
                         let child = read_u32(&page, cell_start, page_num)?;
                         let key_bytes = page
-                            .get(cell_start + 4..)
+                            .get(cell_start.saturating_add(4)..)
                             .ok_or(BtreeError::InvalidCellPointer { page_num, index: i })?;
                         let (key, _) = decode_varint(key_bytes)
                             .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
@@ -178,7 +186,7 @@ impl<P: PageSource> TableCursor<P> {
     }
 
     fn read_page(&mut self, page_num: u32) -> Result<Vec<u8>, BtreeError> {
-        self.pages_visited += 1;
+        self.pages_visited = self.pages_visited.saturating_add(1);
         if self.pages_visited > MAX_PAGES_VISITED {
             return Err(BtreeError::TraversalTooLong {
                 max: MAX_PAGES_VISITED,
@@ -209,11 +217,11 @@ impl<P: PageSource> TableCursor<P> {
         let num_cells = read_num_cells(&page, header_start, page_num)?;
         let (cell_ptr_base, rightmost) = if is_interior {
             (
-                header_start + 12,
-                read_u32(&page, header_start + 8, page_num)?,
+                header_start.saturating_add(12),
+                read_u32(&page, header_start.saturating_add(8), page_num)?,
             )
         } else {
-            (header_start + 8, 0)
+            (header_start.saturating_add(8), 0)
         };
         self.stack.push(Frame {
             page_num,
@@ -228,11 +236,15 @@ impl<P: PageSource> TableCursor<P> {
         Ok(())
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
+    )]
     fn advance(&mut self) -> Result<Option<TableRow>, BtreeError> {
         loop {
             let top = match self.stack.len() {
                 0 => return Ok(None),
-                n => n - 1,
+                n => n.saturating_sub(1),
             };
             let (is_interior, next_cell, num_cells, rightmost, rightmost_done) = {
                 let f = &self.stack[top];
@@ -250,12 +262,12 @@ impl<P: PageSource> TableCursor<P> {
                     self.stack.pop();
                     continue;
                 }
-                self.stack[top].next_cell += 1;
+                self.stack[top].next_cell = self.stack[top].next_cell.saturating_add(1);
                 return self.decode_leaf_cell(top, next_cell).map(Some);
             }
 
             if next_cell < num_cells {
-                self.stack[top].next_cell += 1;
+                self.stack[top].next_cell = self.stack[top].next_cell.saturating_add(1);
                 let child = self.read_interior_child(top, next_cell)?;
                 self.push_page(child)?;
             } else if !rightmost_done {
@@ -267,17 +279,25 @@ impl<P: PageSource> TableCursor<P> {
         }
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "frame_index is always `top` from advance(), always in bounds"
+    )]
     fn read_interior_child(
         &self,
         frame_index: usize,
         cell_index: usize,
     ) -> Result<u32, BtreeError> {
         let frame = &self.stack[frame_index];
-        let ptr_off = frame.cell_ptr_base + 2 * cell_index;
+        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, frame.page_num, cell_index)?;
         read_u32(&frame.page, cell_start, frame.page_num)
     }
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "frame_index is always `top` from advance(), always in bounds"
+    )]
     fn decode_leaf_cell(
         &self,
         frame_index: usize,
@@ -285,7 +305,7 @@ impl<P: PageSource> TableCursor<P> {
     ) -> Result<TableRow, BtreeError> {
         let frame = &self.stack[frame_index];
         let page_num = frame.page_num;
-        let ptr_off = frame.cell_ptr_base + 2 * cell_index;
+        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         let (rowid, payload_len, tail_start) = decode_cell_head(&frame.page, cell_start, page_num)?;
         let tail = frame
@@ -310,9 +330,14 @@ fn local_payload_size(usable_size: u32, payload_len: u64) -> u64 {
     if payload_len <= max_local {
         return payload_len;
     }
-    let min_local = ((usable_size.saturating_sub(12) as u64 * 32) / 255).saturating_sub(23);
+    let min_local =
+        ((usable_size.saturating_sub(12) as u64).saturating_mul(32) / 255).saturating_sub(23);
     let denom = usable_size.saturating_sub(4).max(1) as u64;
-    let k = min_local + payload_len.saturating_sub(min_local) % denom;
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "denom is .max(1)'d just above, so % denom never divides by zero"
+    )]
+    let k = min_local.saturating_add(payload_len.saturating_sub(min_local) % denom);
     if k <= max_local {
         k
     } else {
@@ -341,11 +366,17 @@ fn reassemble_payload<P: PageSource>(
         return Ok(local_bytes.to_vec());
     }
 
-    let overflow_ptr = cell_tail
-        .get(local_size..local_size + 4)
-        .ok_or(BtreeError::PayloadTooShort { page_num })?;
-    let mut overflow_page = u32::from_be_bytes(overflow_ptr.try_into().unwrap());
-    let mut remaining = payload_len - local_size as u64;
+    let overflow_end = local_size.saturating_add(4);
+    let overflow_bytes: [u8; 4] = cell_tail
+        .get(local_size..overflow_end)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?
+        .try_into()
+        .map_err(|_| BtreeError::PayloadTooShort { page_num })?;
+    let mut overflow_page = u32::from_be_bytes(overflow_bytes);
+    // local_size < payload_len here (the local_size == payload_len case
+    // returned above), so this never underflows; saturating_sub keeps the
+    // lint satisfied without asserting that invariant unsafely.
+    let mut remaining = payload_len.saturating_sub(local_size as u64);
     let mut result = local_bytes.to_vec();
     let available = usable_size.saturating_sub(4).max(1) as u64;
     let mut hops = 0usize;
@@ -367,7 +398,7 @@ fn reassemble_payload<P: PageSource>(
                 revisited_page: overflow_page,
             });
         }
-        hops += 1;
+        hops = hops.saturating_add(1);
         if hops > MAX_PAGES_VISITED {
             return Err(BtreeError::OverflowChainTooLong {
                 page_num,
@@ -382,12 +413,14 @@ fn reassemble_payload<P: PageSource>(
             })?;
         let next = read_u32(&page, 0, overflow_page)?;
         let take = remaining.min(available) as usize;
-        let chunk = page.get(4..4 + take).ok_or(BtreeError::PageTooShort {
-            page_num: overflow_page,
-            len: page.len(),
-        })?;
+        let chunk = page
+            .get(4..4usize.saturating_add(take))
+            .ok_or(BtreeError::PageTooShort {
+                page_num: overflow_page,
+                len: page.len(),
+            })?;
         result.extend_from_slice(chunk);
-        remaining -= take as u64;
+        remaining = remaining.saturating_sub(take as u64);
         overflow_page = next;
     }
     Ok(result)
@@ -411,13 +444,20 @@ fn read_page_type(page: &[u8], header_start: usize, page_num: u32) -> Result<u8,
 }
 
 fn read_num_cells(page: &[u8], header_start: usize, page_num: u32) -> Result<usize, BtreeError> {
-    let bytes = page
-        .get(header_start + 3..header_start + 5)
+    let start = header_start.saturating_add(3);
+    let end = header_start.saturating_add(5);
+    let bytes: [u8; 2] = page
+        .get(start..end)
         .ok_or(BtreeError::PageTooShort {
             page_num,
             len: page.len(),
+        })?
+        .try_into()
+        .map_err(|_| BtreeError::PageTooShort {
+            page_num,
+            len: page.len(),
         })?;
-    Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as usize)
+    Ok(u16::from_be_bytes(bytes) as usize)
 }
 
 fn require_interior_header(
@@ -425,7 +465,7 @@ fn require_interior_header(
     header_start: usize,
     page_num: u32,
 ) -> Result<(), BtreeError> {
-    if page.len() < header_start + 12 {
+    if page.len() < header_start.saturating_add(12) {
         return Err(BtreeError::PageTooShort {
             page_num,
             len: page.len(),
@@ -435,13 +475,19 @@ fn require_interior_header(
 }
 
 fn read_u32(page: &[u8], offset: usize, page_num: u32) -> Result<u32, BtreeError> {
-    let bytes = page
-        .get(offset..offset + 4)
+    let end = offset.saturating_add(4);
+    let bytes: [u8; 4] = page
+        .get(offset..end)
         .ok_or(BtreeError::PageTooShort {
             page_num,
             len: page.len(),
+        })?
+        .try_into()
+        .map_err(|_| BtreeError::PageTooShort {
+            page_num,
+            len: page.len(),
         })?;
-    Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+    Ok(u32::from_be_bytes(bytes))
 }
 
 fn read_cell_pointer(
@@ -450,13 +496,27 @@ fn read_cell_pointer(
     page_num: u32,
     cell_index: usize,
 ) -> Result<usize, BtreeError> {
-    let bytes = page
-        .get(ptr_off..ptr_off + 2)
+    let end = ptr_off.saturating_add(2);
+    let bytes: [u8; 2] = page
+        .get(ptr_off..end)
         .ok_or(BtreeError::InvalidCellPointer {
             page_num,
             index: cell_index,
+        })?
+        .try_into()
+        .map_err(|_| BtreeError::InvalidCellPointer {
+            page_num,
+            index: cell_index,
         })?;
-    Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as usize)
+    Ok(u16::from_be_bytes(bytes) as usize)
+}
+
+/// Cell-pointer-array byte offset for entry `i` from `base`. `i` is bounded
+/// by `num_cells` (a `u16` field, max 65535); `saturating_mul`/`saturating_add`
+/// keep this lint-clean without pretending the arithmetic could realistically
+/// overflow.
+fn cell_ptr_offset(base: usize, i: usize) -> usize {
+    base.saturating_add(i.saturating_mul(2))
 }
 
 /// Decodes a leaf table-b-tree cell's head (payload-length varint + rowid
@@ -480,10 +540,21 @@ fn decode_cell_head(
         .ok_or(BtreeError::PayloadTooShort { page_num })?;
     let (rowid, n2) =
         decode_varint(rest).map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
-    Ok((rowid as i64, payload_len, cell_start + n1 + n2))
+    Ok((
+        rowid as i64,
+        payload_len,
+        cell_start.saturating_add(n1).saturating_add(n2),
+    ))
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::header::DatabaseHeader;

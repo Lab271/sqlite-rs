@@ -1,6 +1,14 @@
 //! Black-box tests of `sqlite_rs::vfs::*` — only public paths, exactly as an
 //! external consumer of the crate would see them.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+
 use std::path::Path;
 
 use sqlite_rs::vfs::{companion_path, MemoryVfs, Vfs, VfsError};

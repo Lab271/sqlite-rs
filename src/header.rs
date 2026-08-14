@@ -86,6 +86,29 @@ pub struct DatabaseHeader {
     pub application_id: u32,
 }
 
+/// Reads one byte at `offset`. `buf` is assumed already length-checked
+/// against [`HEADER_LEN`] by [`DatabaseHeader::parse`]; this still returns
+/// `Err` rather than indexing directly, so the bound never has to be
+/// re-proven by inspection.
+fn read_u8(buf: &[u8], offset: usize) -> Result<u8, HeaderError> {
+    buf.get(offset)
+        .copied()
+        .ok_or(HeaderError::TooShort { len: buf.len() })
+}
+
+/// Reads a big-endian `u32` at `offset..offset+4`.
+fn read_u32(buf: &[u8], offset: usize) -> Result<u32, HeaderError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(HeaderError::TooShort { len: buf.len() })?;
+    let bytes: [u8; 4] = buf
+        .get(offset..end)
+        .ok_or(HeaderError::TooShort { len: buf.len() })?
+        .try_into()
+        .map_err(|_| HeaderError::TooShort { len: buf.len() })?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
 impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
@@ -95,11 +118,11 @@ impl DatabaseHeader {
             return Err(HeaderError::TooShort { len: buf.len() });
         }
 
-        if buf[0..16] != *MAGIC {
+        if buf.get(0..16) != Some(MAGIC.as_slice()) {
             return Err(HeaderError::InvalidMagic);
         }
 
-        let raw_page_size = u16::from_be_bytes([buf[16], buf[17]]);
+        let raw_page_size = u16::from_be_bytes([read_u8(buf, 16)?, read_u8(buf, 17)?]);
         let page_size: u32 = if raw_page_size == 1 {
             65536
         } else {
@@ -109,14 +132,14 @@ impl DatabaseHeader {
             return Err(HeaderError::InvalidPageSize { raw: raw_page_size });
         }
 
-        let write_version = buf[18];
+        let write_version = read_u8(buf, 18)?;
         if !matches!(write_version, 1 | 2) {
             return Err(HeaderError::InvalidFileFormatVersion {
                 field: VersionField::Write,
                 value: write_version,
             });
         }
-        let read_version = buf[19];
+        let read_version = read_u8(buf, 19)?;
         if !matches!(read_version, 1 | 2) {
             return Err(HeaderError::InvalidFileFormatVersion {
                 field: VersionField::Read,
@@ -124,7 +147,7 @@ impl DatabaseHeader {
             });
         }
 
-        let reserved_space = buf[20];
+        let reserved_space = read_u8(buf, 20)?;
         if reserved_space as u32 >= page_size {
             return Err(HeaderError::InvalidReservedSpace {
                 reserved_space,
@@ -132,14 +155,14 @@ impl DatabaseHeader {
             });
         }
 
-        let page_count = u32::from_be_bytes(buf[28..32].try_into().unwrap());
-        let freelist_trunk_page = u32::from_be_bytes(buf[32..36].try_into().unwrap());
-        let freelist_page_count = u32::from_be_bytes(buf[36..40].try_into().unwrap());
-        let schema_cookie = u32::from_be_bytes(buf[40..44].try_into().unwrap());
-        let schema_format = u32::from_be_bytes(buf[44..48].try_into().unwrap());
-        let largest_root_btree_page = u32::from_be_bytes(buf[52..56].try_into().unwrap());
+        let page_count = read_u32(buf, 28)?;
+        let freelist_trunk_page = read_u32(buf, 32)?;
+        let freelist_page_count = read_u32(buf, 36)?;
+        let schema_cookie = read_u32(buf, 40)?;
+        let schema_format = read_u32(buf, 44)?;
+        let largest_root_btree_page = read_u32(buf, 52)?;
 
-        let text_encoding_raw = u32::from_be_bytes(buf[56..60].try_into().unwrap());
+        let text_encoding_raw = read_u32(buf, 56)?;
         let text_encoding = match text_encoding_raw {
             1 => TextEncoding::Utf8,
             2 => TextEncoding::Utf16Le,
@@ -147,8 +170,8 @@ impl DatabaseHeader {
             other => return Err(HeaderError::InvalidTextEncoding { raw: other }),
         };
 
-        let user_version = u32::from_be_bytes(buf[60..64].try_into().unwrap());
-        let application_id = u32::from_be_bytes(buf[68..72].try_into().unwrap());
+        let user_version = read_u32(buf, 60)?;
+        let application_id = read_u32(buf, 68)?;
 
         Ok(DatabaseHeader {
             page_size,
@@ -177,12 +200,23 @@ impl DatabaseHeader {
     }
 
     /// Usable bytes per page: `page_size - reserved_space`.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "parse() rejects reserved_space >= page_size, so this never underflows"
+    )]
     pub fn usable_page_size(&self) -> u32 {
         self.page_size - self.reserved_space as u32
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::path::Path;
