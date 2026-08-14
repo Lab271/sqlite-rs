@@ -43,6 +43,7 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 | [002](specs/002-parser/spec.md) | Parser | SQL grammar, Lemon-equivalent, tokenizer, minimal DDL reader boundary | 1+ | Draft (planned) |
 | [003](specs/003-file-format/spec.md) | File Format | Header, varints, serial types, encodings, read-only VFS | 0 | Draft — active (#9, #11) |
 | [004](specs/004-corpus/spec.md) | Corpus & Oracle | Pinned oracle, fixture families, diff harness | 0 | Draft — active (#10) |
+| [005](specs/005-assurance/spec.md) | Assurance | Four-pillar assurance stack, harness taxonomy, no-panic totality claim | All | Draft — active (#25, #26) |
 
 ## Progress & Coverage Tracking
 
