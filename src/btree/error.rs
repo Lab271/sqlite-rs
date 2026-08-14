@@ -5,6 +5,9 @@ use crate::vfs::PageError;
 
 #[derive(Debug, Error)]
 pub enum BtreeError {
+    #[error("decoding a key record: {0}")]
+    InvalidKeyRecord(#[from] RecordError),
+
     #[error("reading page {page_num}: {source}")]
     PageSource {
         page_num: u32,

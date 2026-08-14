@@ -17,8 +17,10 @@
 //! once the DDL reader (step 7) knows which column, if any, is the alias.
 
 mod error;
+mod index;
 
 pub use error::BtreeError;
+pub use index::{IndexCursor, IndexRow};
 
 use crate::header::DatabaseHeader;
 use crate::record::decode_varint;
@@ -125,7 +127,13 @@ impl<P: PageSource> TableCursor<P> {
                             let tail = page
                                 .get(tail_start..)
                                 .ok_or(BtreeError::PayloadTooShort { page_num })?;
-                            let payload = self.reassemble_payload(page_num, tail, payload_len)?;
+                            let payload = reassemble_payload(
+                                &self.source,
+                                self.usable_size,
+                                page_num,
+                                tail,
+                                payload_len,
+                            )?;
                             return Ok(Some(TableRow { rowid, payload }));
                         }
                     }
@@ -277,90 +285,92 @@ impl<P: PageSource> TableCursor<P> {
             .page
             .get(tail_start..)
             .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let payload = self.reassemble_payload(page_num, tail, payload_len)?;
+        let payload =
+            reassemble_payload(&self.source, self.usable_size, page_num, tail, payload_len)?;
         Ok(TableRow { rowid, payload })
     }
+}
 
-    /// SQLite's overflow local-size formula (fileformat2.html "Cell
-    /// Payload Overflow"). All arithmetic saturates rather than panics —
-    /// a pathological `usable_size` degrades to a safe (wrong but
-    /// non-panicking) answer, caught by the length checks around the call
-    /// site instead of an arithmetic panic here.
-    fn local_payload_size(&self, payload_len: u64) -> u64 {
-        let max_local = self.usable_size.saturating_sub(35) as u64;
-        if payload_len <= max_local {
-            return payload_len;
-        }
-        let min_local =
-            ((self.usable_size.saturating_sub(12) as u64 * 32) / 255).saturating_sub(23);
-        let denom = self.usable_size.saturating_sub(4).max(1) as u64;
-        let k = min_local + payload_len.saturating_sub(min_local) % denom;
-        if k <= max_local {
-            k
-        } else {
-            min_local
-        }
+/// SQLite's overflow local-size formula (fileformat2.html "Cell Payload
+/// Overflow"), shared by table leaf cells, index leaf cells, and index
+/// interior cells (table interior cells have no payload at all). All
+/// arithmetic saturates rather than panics — a pathological `usable_size`
+/// degrades to a safe (wrong but non-panicking) answer, caught by the
+/// length checks around the call site instead of an arithmetic panic
+/// here.
+fn local_payload_size(usable_size: u32, payload_len: u64) -> u64 {
+    let max_local = usable_size.saturating_sub(35) as u64;
+    if payload_len <= max_local {
+        return payload_len;
+    }
+    let min_local = ((usable_size.saturating_sub(12) as u64 * 32) / 255).saturating_sub(23);
+    let denom = usable_size.saturating_sub(4).max(1) as u64;
+    let k = min_local + payload_len.saturating_sub(min_local) % denom;
+    if k <= max_local {
+        k
+    } else {
+        min_local
+    }
+}
+
+fn reassemble_payload<P: PageSource>(
+    source: &P,
+    usable_size: u32,
+    page_num: u32,
+    cell_tail: &[u8],
+    payload_len: u64,
+) -> Result<Vec<u8>, BtreeError> {
+    if payload_len > MAX_PAYLOAD_LEN {
+        return Err(BtreeError::PayloadTooLarge {
+            page_num,
+            payload_len,
+        });
+    }
+    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let local_bytes = cell_tail
+        .get(..local_size)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?;
+    if local_size as u64 == payload_len {
+        return Ok(local_bytes.to_vec());
     }
 
-    fn reassemble_payload(
-        &self,
-        page_num: u32,
-        cell_tail: &[u8],
-        payload_len: u64,
-    ) -> Result<Vec<u8>, BtreeError> {
-        if payload_len > MAX_PAYLOAD_LEN {
-            return Err(BtreeError::PayloadTooLarge {
+    let overflow_ptr = cell_tail
+        .get(local_size..local_size + 4)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?;
+    let mut overflow_page = u32::from_be_bytes(overflow_ptr.try_into().unwrap());
+    let mut remaining = payload_len - local_size as u64;
+    let mut result = local_bytes.to_vec();
+    let available = usable_size.saturating_sub(4).max(1) as u64;
+    let mut hops = 0usize;
+
+    while remaining > 0 {
+        if overflow_page == 0 {
+            return Err(BtreeError::OverflowChainTruncated { page_num });
+        }
+        hops += 1;
+        if hops > MAX_PAGES_VISITED {
+            return Err(BtreeError::OverflowChainTooLong {
                 page_num,
-                payload_len,
+                max: MAX_PAGES_VISITED,
             });
         }
-        let local_size = self.local_payload_size(payload_len) as usize;
-        let local_bytes = cell_tail
-            .get(..local_size)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        if local_size as u64 == payload_len {
-            return Ok(local_bytes.to_vec());
-        }
-
-        let overflow_ptr = cell_tail
-            .get(local_size..local_size + 4)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let mut overflow_page = u32::from_be_bytes(overflow_ptr.try_into().unwrap());
-        let mut remaining = payload_len - local_size as u64;
-        let mut result = local_bytes.to_vec();
-        let available = self.usable_size.saturating_sub(4).max(1) as u64;
-        let mut hops = 0usize;
-
-        while remaining > 0 {
-            if overflow_page == 0 {
-                return Err(BtreeError::OverflowChainTruncated { page_num });
-            }
-            hops += 1;
-            if hops > MAX_PAGES_VISITED {
-                return Err(BtreeError::OverflowChainTooLong {
-                    page_num,
-                    max: MAX_PAGES_VISITED,
-                });
-            }
-            let page =
-                self.source
-                    .read_page(overflow_page)
-                    .map_err(|source| BtreeError::PageSource {
-                        page_num: overflow_page,
-                        source,
-                    })?;
-            let next = read_u32(&page, 0, overflow_page)?;
-            let take = remaining.min(available) as usize;
-            let chunk = page.get(4..4 + take).ok_or(BtreeError::PageTooShort {
+        let page = source
+            .read_page(overflow_page)
+            .map_err(|source| BtreeError::PageSource {
                 page_num: overflow_page,
-                len: page.len(),
+                source,
             })?;
-            result.extend_from_slice(chunk);
-            remaining -= take as u64;
-            overflow_page = next;
-        }
-        Ok(result)
+        let next = read_u32(&page, 0, overflow_page)?;
+        let take = remaining.min(available) as usize;
+        let chunk = page.get(4..4 + take).ok_or(BtreeError::PageTooShort {
+            page_num: overflow_page,
+            len: page.len(),
+        })?;
+        result.extend_from_slice(chunk);
+        remaining -= take as u64;
+        overflow_page = next;
     }
+    Ok(result)
 }
 
 fn page1_header_start(page_num: u32) -> usize {

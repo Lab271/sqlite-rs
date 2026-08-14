@@ -7,7 +7,7 @@ date: 2026-08-14
 
 # 006 — B-Tree
 
-The read-only table b-tree cursor: page header/cell-pointer-array layout, cell decode, and overflow-chain reassembly. Backs V1 step 4 (#32), part of epic #5 phase 2. Depends on spec 003 (header, VFS, record decode). Validated in part by spike 005 (#12), which exercised interior-node traversal and overflow reassembly against real multi-page/overflow fixtures before this spec was written.
+The read-only table and index b-tree cursors: page header/cell-pointer-array layout, cell decode, key comparison, and overflow-chain reassembly. Backs V1 step 4 (#32) and step 5 (#33), part of epic #5 phase 2. Depends on spec 003 (header, VFS, record decode). Validated in part by spike 005 (#12), which exercised interior-node traversal and overflow reassembly against real multi-page/overflow fixtures before this spec was written.
 
 Everything in this spec is **Tier 0 READ CORE** — never droppable.
 
@@ -91,7 +91,7 @@ Every page-parsing and overflow-reassembly path MUST return `Err`, never panic, 
 - WHEN the cursor attempts to read it
 - THEN the cursor MUST return `Err`, never panic
 
-**Tests:** `src/btree/mod.rs::truncated_page_errors_not_panics`, `src/btree/mod.rs::unexpected_page_type_errors_not_panics`
+**Tests:** `src/btree/mod.rs::truncated_page_errors_not_panics`, `src/btree/mod.rs::unexpected_page_type_errors_not_panics`, `src/btree/index.rs::truncated_page_errors_not_panics`, `src/btree/index.rs::unexpected_page_type_errors_not_panics`
 
 #### Scenario: Broken overflow chain
 
@@ -124,3 +124,67 @@ A column declared exactly `INTEGER PRIMARY KEY` is not stored in the record (SQL
 **Tests:** `src/schema/ddl_reader.rs` (planned)
 
 Covered functionally once #34 (DDL reader) lands and can identify the alias column; flagging here rather than leaving this scenario unlinked.
+
+### Requirement 5: Index B-Tree Page Format [MUST]
+
+The system MUST parse index b-tree pages (page type `0x0a` leaf, `0x02` interior). Unlike table b-tree interior cells (routing-only, no payload), index b-tree interior cells carry a full key payload — a real, sorted entry with a left-child subtree of lesser keys, not merely a separator — so in-order traversal MUST yield each interior cell's own key interleaved with descending into its children. WITHOUT ROWID tables are stored as index b-trees (confirmed on a real fixture in spike 005, #12: FTS5's `t_idx`/`t_config` shadow tables) and MUST be readable through this cursor.
+
+**Implementation:** `src/btree/index.rs`
+
+**Tests:** inline `#[cfg(test)]` in `src/btree/index.rs`
+
+**Corpus:** `tests/corpus/fixtures/btrees/` (`index.db`, `without_rowid.db`)
+
+#### Scenario: Secondary-index walk in BINARY order
+
+- GIVEN a multi-page secondary index over a rowid table
+- WHEN the cursor walks the full index via `first()`/`next()`
+- THEN every entry is visited exactly once, in ascending BINARY-collation key order, matching the pinned oracle key-for-key (including lexicographic, not numeric, text ordering)
+
+**Tests:** `src/btree/index.rs::secondary_index_walk_matches_oracle_binary_order`
+
+#### Scenario: WITHOUT ROWID table read via index b-tree
+
+- GIVEN a `WITHOUT ROWID` table (stored as an index b-tree keyed on its declared primary key)
+- WHEN the cursor walks the full table via `first()`/`next()`
+- THEN every row is visited exactly once, in ascending primary-key order, matching the pinned oracle row-for-row (this is spec 001 Req 4's "WITHOUT ROWID" scenario, made concrete here)
+
+**Tests:** `src/btree/index.rs::without_rowid_table_is_readable_as_index_btree`
+
+#### Scenario: Malformed index page
+
+- GIVEN a page shorter than its declared header, or with an unrecognized page-type byte, where an index b-tree page was expected
+- WHEN the cursor attempts to read it
+- THEN the cursor MUST return `Err`, never panic
+
+**Tests:** `src/btree/index.rs::truncated_page_errors_not_panics`, `src/btree/index.rs::unexpected_page_type_errors_not_panics`
+
+### Requirement 6: Minimal Key Comparison and Seek [SHOULD]
+
+The system SHOULD provide enough key ordering to walk an index b-tree correctly (NULL < numeric < text < blob, BINARY collation only — no other collating sequences at Tier 0) and a minimal `seek` that finds the first entry not less than a target key. `seek` MAY be a linear scan rather than a tree descent — Tier 0 needs enough ordering to walk, not a fully general logarithmic seek — trading efficiency for a simpler, harder-to-get-wrong implementation.
+
+**Implementation:** `src/btree/index.rs`
+
+**Tests:** inline `#[cfg(test)]` in `src/btree/index.rs`
+
+#### Scenario: Point lookup by key
+
+- GIVEN a multi-page secondary index
+- WHEN `seek(target)` is called for an existing key
+- THEN the returned entry's key MUST match the pinned oracle's point-lookup result
+
+**Tests:** `src/btree/index.rs::secondary_index_seek_matches_oracle`
+
+### Requirement 7: No Fixture Yet Covers an Overflowing Index Key [SHOULD]
+
+The originating issue's corpus section expects an index fixture with an overflowing key; `tests/corpus/fixtures/btrees/index.db`'s actual generated content (`b TEXT`, max length 15 bytes) does not exercise this — overflow reassembly on index cells reuses the same `reassemble_payload` function already proven byte-identical against table-cell overflow (Requirement 2), so the residual risk is low, but this is a real coverage gap, not a silent oversight.
+
+**Implementation:** `tools/gen_fixtures.sh` (planned — no fixture with an overflowing index key exists yet)
+
+#### Scenario: Overflowing index key
+
+- GIVEN an index whose key column is large enough to overflow into one or more overflow pages
+- WHEN the cursor reads that entry
+- THEN the reassembled key payload MUST be byte-identical to the pinned oracle's value
+
+**Tests:** `tools/gen_fixtures.sh` (planned)
