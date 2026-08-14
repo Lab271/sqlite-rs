@@ -2,7 +2,17 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint verification test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
+.PHONY: help test lint mvl-limit verification test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
+
+# Qualified-subset gate (issue #23). Boundary policy:
+#   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
+#     stays limit-clean, no exceptions.
+#   - src/vfs/ (and later pager locking) is the designated `unsafe` boundary;
+#     when it lands, exclude exactly that module here so the claim stays
+#     explicit: everything above the VFS is in the qualified subset.
+#   - tests/spike/** is exempt: spikes are throwaway by design.
+MVL_LIMIT ?= cargo-mvl-limit
+MVL_LIMIT_EXCLUDE :=
 
 help: ## Show this help
 	@echo ""
@@ -22,6 +32,19 @@ lint: ## Run clippy and check formatting
 	cargo fmt -- --check
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
+
+mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes exempt)
+	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
+	  echo "error: $(MVL_LIMIT) not found."; \
+	  echo "install: cargo install cargo-mvl  (or build from mvl-lang/mvl-rust:"; \
+	  echo "         cargo build -p rust-limit --bin cargo-mvl-limit)"; \
+	  exit 1; }
+	@fail=0; \
+	for f in $$(find src -name '*.rs' $(foreach e,$(MVL_LIMIT_EXCLUDE),-not -path '$(e)') | sort); do \
+	  if ! $(MVL_LIMIT) "$$f"; then echo "LIMIT VIOLATION: $$f"; fail=1; fi; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
+	exit $$fail
 
 # === Assurance ===
 
