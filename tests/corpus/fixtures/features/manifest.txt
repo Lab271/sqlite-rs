@@ -1,0 +1,7 @@
+autovacuum.db — PRAGMA auto_vacuum=FULL; page 2 is a pointer-map page
+(verified by raw byte inspection — dbstat doesn't surface ptrmap pages
+since they aren't part of any b-tree).
+fts5.db, rtree.db — virtual tables via FTS5 and R-Tree modules.
+strict_generated.db — a STRICT table with a GENERATED ALWAYS ... STORED
+column. All raw-row readable per Tier 0 (spec 001 Requirement 4) without
+needing query-level support for the extension.

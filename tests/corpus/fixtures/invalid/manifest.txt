@@ -1,0 +1,3 @@
+empty.db — zero-byte file.
+truncated.db — a valid database chopped off mid-header (first 50 bytes).
+magic.db — otherwise-valid database with its 16-byte magic string overwritten.

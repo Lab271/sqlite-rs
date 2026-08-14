@@ -1,0 +1,6 @@
+table_single_page.db — one row, a single leaf page.
+table_multipage.db — 3000 rows, forces interior table b-tree nodes.
+index.db — an indexed column over 3000 rows, multi-page index b-tree.
+without_rowid.db — WITHOUT ROWID table, 500 rows.
+overflow_single_page.db — a 6000-byte blob, forces one overflow page.
+overflow_multi_page.db — a 60000-byte blob, forces a 14-page overflow chain.

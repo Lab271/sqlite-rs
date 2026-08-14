@@ -1,0 +1,6 @@
+page_size_512.db, page_size_65536.db — page size boundaries, including the
+`1` = 65536 header encoding (4096 is covered implicitly by every other
+family's fixtures).
+reserved_bytes_0.db, reserved_bytes_12.db — both reserved-bytes-per-page
+cases (usable_size = page_size - reserved). The 12 case uses the
+codec-enabled system sqlite3 deliberately — see the script's oracle notes.
