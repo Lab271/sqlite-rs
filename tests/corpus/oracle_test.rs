@@ -7,11 +7,18 @@
 use crate::oracle::{gen_fixtures_script, support_dir};
 use std::process::Command;
 
+// Both tests point FIXTURES_DIR at a scratch directory rather than the
+// real committed corpus — defense in depth, so a bug in the script's
+// early-exit logic can never destroy committed fixtures instead of just
+// failing a test.
+
 #[test]
 fn rejects_codec_oracle() {
     let fake = support_dir().join("fake_sqlite3_codec.sh");
+    let scratch = std::env::temp_dir().join("sqlite_rs_corpus_oracle_test_codec");
     let output = Command::new(gen_fixtures_script())
         .env("ORACLE_SQLITE3", &fake)
+        .env("FIXTURES_DIR", &scratch)
         .output()
         .expect("running gen_fixtures.sh");
 
@@ -29,8 +36,10 @@ fn rejects_codec_oracle() {
 #[test]
 fn rejects_version_mismatch() {
     let fake = support_dir().join("fake_sqlite3_wrong_version.sh");
+    let scratch = std::env::temp_dir().join("sqlite_rs_corpus_oracle_test_version");
     let output = Command::new(gen_fixtures_script())
         .env("ORACLE_SQLITE3", &fake)
+        .env("FIXTURES_DIR", &scratch)
         .output()
         .expect("running gen_fixtures.sh");
 

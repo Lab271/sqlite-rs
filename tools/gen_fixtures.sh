@@ -38,7 +38,15 @@ ORACLE="$(find_oracle)" || {
 # reported as "codec", even if it also happens to be the wrong version
 # (true of the macOS system binary, which is both codec and a version
 # behind the pin) — see spec 004 Requirement 1's two independent scenarios.
-if "$ORACLE" :memory: "PRAGMA compile_options;" | grep -qi codec; then
+#
+# Captured into a variable rather than piped straight to `grep -q`: with
+# `pipefail` set, grep exiting the instant it finds a match can SIGPIPE a
+# still-writing producer, and pipefail then reports that producer's
+# non-zero (SIGPIPE) exit over grep's successful match — silently
+# swallowing the codec detection. Timing-dependent; only surfaced on CI's
+# GNU grep, never locally on macOS's BSD grep.
+compile_options="$("$ORACLE" :memory: "PRAGMA compile_options;")"
+if grep -qi codec <<<"$compile_options"; then
   echo "error: oracle at $ORACLE is codec-enabled — pin a non-codec build instead" >&2
   exit 1
 fi
