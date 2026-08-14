@@ -61,4 +61,8 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-Specification phase. No code yet.
+**Version 0.1.0** — see [CHANGELOG.md](CHANGELOG.md).
+
+V1 phase 1 landed: record format decoder (all serial types, all encodings), database header parser, read-only VFS (Unix + in-memory), fixture corpus with pinned-oracle harness. `#![forbid(unsafe_code)]`, mvl-limit clean, 22/30 spec scenarios test-backed.
+
+Next: b-tree cursors (epic #5 steps 4/5), WAL-read spike (#7), locking-interop spike (#8).
