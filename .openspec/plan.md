@@ -413,8 +413,8 @@ The compatibility contract has **two halves**: the file format (static — what 
 
 | Mechanism | Detail |
 |-----------|--------|
-| Journal-mode locks | 5 states (UNLOCKED → SHARED → RESERVED → PENDING → EXCLUSIVE) via POSIX `fcntl` range locks on the reserved lock-byte range (1073741824–1073742335) |
-| WAL-mode locks | Lock slots in the memory-mapped `-shm` wal-index; readers mark positions so checkpointers don't overwrite frames in use |
+| Journal-mode locks | 5 states (UNLOCKED → SHARED → RESERVED → PENDING → EXCLUSIVE) via POSIX `fcntl` range locks on the reserved lock-byte range (1073741824–1073742335: `PENDING_BYTE`=1073741824, `RESERVED_BYTE`=+1, `SHARED_FIRST`=+2, `SHARED_SIZE`=510) |
+| WAL-mode locks | 8 lock bytes at `-shm` offset 120–127 (WRITE=120, CKPT=121, RECOVER=122, READ(0..4)=123–127, DMS=128); readers claim a `WAL_READ_LOCK(k)` slot and set `aReadMark[k]` (at `-shm` offset 100+4k) to the frame they need, so checkpointers don't overwrite frames in use |
 | POSIX close() trap | `close()` on ANY fd of a file drops ALL the process's locks — must replicate SQLite's per-inode fd cache workaround |
 | Threading | One connection per thread (serialized mode default within a connection) |
 | Known limits | Advisory only (non-cooperating writers can corrupt); unreliable on network filesystems (NFS = #1 real-world corruption cause); WAL requires same-machine (mmap) |
@@ -423,12 +423,12 @@ The compatibility contract has **two halves**: the file format (static — what 
 
 | Tier / Block | Concurrency obligation |
 |--------------|------------------------|
-| **Tier 0 / V1** | *Safe reader:* take SHARED correctly so live stock-SQLite writers see us (and we never read torn pages). Hot-journal and busy detection. Validated by spike 004 |
-| **V3 (write core)** | Full journal-mode lock ladder incl. RESERVED/PENDING semantics and the fd-cache workaround |
+| **Tier 0 / V1** | *Safe reader:* take SHARED correctly so live stock-SQLite writers see us (and we never read torn pages). Hot-journal and busy detection. **Validated on macOS** by spike 005 (#8) |
+| **V3 (write core)** | Full journal-mode lock ladder incl. RESERVED/PENDING semantics and the fd-cache workaround. Lock ladder + PENDING anti-starvation **validated on macOS** by spike 005 (#8); the fd-cache itself still needs a real per-inode implementation — spike only reproduced the close() trap and confirmed the workaround's *shape* |
 | **V5 (transactions)** | Busy handler, `busy_timeout`, deadlock-avoiding lock upgrade rules |
-| **V6 (WAL)** | Exact `-shm` layout and lock-slot protocol; live interop with stock sqlite3 readers/writers/checkpointers as acceptance test |
+| **V6 (WAL)** | Exact `-shm` layout and lock-slot protocol; live interop with stock sqlite3 readers/writers/checkpointers as acceptance test. Reader-mark protocol (`aReadMark` + `WAL_READ_LOCK(k)`) **validated on macOS** by spike 005 (#8): a live sqlite3 checkpointer correctly backed off while our raw-fcntl claim was held, and proceeded once released |
 
-**De-risking:** spike 004 (locking interop with a live stock sqlite3 process) validates the fcntl ranges, PENDING semantics, WAL read-lock slots, and the close() trap on macOS + Linux — before V1's step tickets are finalized.
+**De-risking:** spike 005 (#8, `tests/spike/005_locking_interop` — numbered 005 on disk since `004` was already taken by a concurrent spike; this section's "spike 004" references predate that renumbering) validated the fcntl lock-byte offsets, PENDING anti-starvation semantics, the WAL read-lock/reader-mark protocol, and the close()-drops-all-locks trap (confirming the fix must be a real per-inode fd-cache — `dup()` does **not** work, since POSIX fcntl record locks are scoped to (process, inode), not the open file description) against a live stock `sqlite3` process. **macOS only** — Linux exercise is tracked separately (#42); see `tests/spike/005_locking_interop/findings.md` for full results and the one methodology finding (one-shot `sqlite3` CLI invocations auto-checkpoint on close, independent of another process's lock — a harness confound to watch for in #21's fixture work too).
 
 ## Dependencies
 
