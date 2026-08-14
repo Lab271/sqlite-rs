@@ -20,6 +20,9 @@ path = "tests/unit/record.rs"
 name = "unit_vfs"
 path = "tests/unit/vfs.rs"
 
+[dev-dependencies]
+proptest = "1"
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

@@ -487,4 +487,109 @@ mod tests {
         // above is actually exercising a valid record and not testing nothing.
         assert!(decode_record(&payload, TextEncoding::Utf8).is_ok());
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Generalizes `integer_widths_and_edge_values`'s hand-picked i8
+        /// cases to the full range.
+        #[test]
+        fn prop_integer_i8_roundtrip(v: i8) {
+            let payload = record_bytes(&[(1, &v.to_be_bytes())]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+
+        #[test]
+        fn prop_integer_i16_roundtrip(v: i16) {
+            let payload = record_bytes(&[(2, &v.to_be_bytes())]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+
+        #[test]
+        fn prop_integer_i24_roundtrip(v in -8_388_608i32..=8_388_607i32) {
+            let four = v.to_be_bytes();
+            let payload = record_bytes(&[(3, &four[1..4])]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+
+        #[test]
+        fn prop_integer_i32_roundtrip(v: i32) {
+            let payload = record_bytes(&[(4, &v.to_be_bytes())]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v as i64)])
+            );
+        }
+
+        #[test]
+        fn prop_integer_i48_roundtrip(v in -140_737_488_355_328i64..=140_737_488_355_327i64) {
+            let eight = v.to_be_bytes();
+            let payload = record_bytes(&[(5, &eight[2..8])]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v)])
+            );
+        }
+
+        #[test]
+        fn prop_integer_i64_roundtrip(v: i64) {
+            let payload = record_bytes(&[(6, &v.to_be_bytes())]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Integer(v)])
+            );
+        }
+
+        /// Generalizes `real_edge_values_bit_identical` and
+        /// `real_nan_decodes_as_null` to every `f64` bit pattern, not just a
+        /// hand-picked list — including the many non-canonical NaN payloads
+        /// `f64::NAN` alone doesn't cover.
+        #[test]
+        fn prop_real_roundtrip_bit_exact_or_nan_to_null(bits: u64) {
+            let v = f64::from_bits(bits);
+            let payload = record_bytes(&[(7, &v.to_be_bytes())]);
+            let decoded = decode_record(&payload, TextEncoding::Utf8).unwrap();
+            if v.is_nan() {
+                prop_assert_eq!(decoded, vec![Value::Null]);
+            } else {
+                match &decoded[..] {
+                    [Value::Real(r)] => prop_assert_eq!(r.to_bits(), v.to_bits()),
+                    other => prop_assert!(false, "expected one Real, got {other:?}"),
+                }
+            }
+        }
+
+        /// Generalizes `blob_including_zero_length` to arbitrary byte
+        /// strings.
+        #[test]
+        fn prop_blob_roundtrip(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
+            let serial_type = 12 + 2 * bytes.len() as u64;
+            let payload = record_bytes(&[(serial_type, &bytes)]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Blob(bytes.clone())])
+            );
+        }
+
+        /// Generalizes `text_utf8_including_empty` to arbitrary strings.
+        #[test]
+        fn prop_text_utf8_roundtrip(s in ".{0,100}") {
+            let bytes = s.as_bytes();
+            let serial_type = 13 + 2 * bytes.len() as u64;
+            let payload = record_bytes(&[(serial_type, bytes)]);
+            prop_assert_eq!(
+                decode_record(&payload, TextEncoding::Utf8),
+                Ok(vec![Value::Text(s.clone())])
+            );
+        }
+    }
 }
