@@ -117,12 +117,16 @@ pub fn format_list_value(v: &Value) -> String {
 }
 
 /// Renders a value for `-csv` mode (what `export` prints): empty string
-/// for NULL, and `sqlite3`'s own quoting rule — not plain RFC4180. A
-/// field is quoted (embedded `"` doubled) if it contains a comma,
-/// double quote, CR, LF, **any embedded space**, or a **leading or
-/// trailing single-quote character** (confirmed empirically against a
-/// real `sqlite3` binary; not documented, and not standard RFC4180 —
-/// see spike 003 finding 3).
+/// for NULL, and `sqlite3`'s own quoting rule — not plain RFC4180. See
+/// [`csv_char_forces_quote`] for the exact rule.
+///
+/// Spike 003 finding 3 described this rule as "any embedded space, or a
+/// leading or trailing single-quote"; that was incomplete and wrong in
+/// both directions (a single-quote *anywhere* quotes, as do tabs, other
+/// control characters, DEL, and all non-ASCII). The rule here is derived
+/// from a systematic byte-by-byte probe of the pinned oracle instead —
+/// see `tests/corpus/cli_e2e_test.rs`'s
+/// `csv_quote_matches_oracle_on_edge_values`, which pins it (#55).
 pub fn format_csv_value(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -133,19 +137,42 @@ pub fn format_csv_value(v: &Value) -> String {
     }
 }
 
+/// Whether `c` on its own forces the whole value to be quoted, per
+/// `sqlite3`'s `needCsvQuote` byte table (`shell.c`) plus its separate
+/// check for the column separator.
+///
+/// Established by probing the pinned oracle across every byte 0x01–0x7F
+/// and representative multi-byte characters: the bytes that come back
+/// *unquoted* are exactly `0x21..=0x7E` minus `"`, `'`, and `,`.
+/// Everything else quotes — control characters (tab included), space,
+/// DEL, and every non-ASCII character, since `needCsvQuote` marks all
+/// bytes `>= 0x80` and a non-ASCII `char`'s UTF-8 encoding is entirely
+/// made of such bytes.
+///
+/// The separator is hardcoded to `,` here because that is the only
+/// separator this crate emits; `sqlite3` compares against its
+/// configurable `colSeparator` instead.
+fn csv_char_forces_quote(c: char) -> bool {
+    !matches!(c, '\u{21}'..='\u{7E}') || c == '"' || c == '\'' || c == ','
+}
+
 /// Applies `sqlite3`'s CSV quoting heuristic to an arbitrary string —
 /// exposed (not just used internally by [`format_csv_value`]) because
 /// CSV column headers need the same quoting: a table's declared column
-/// name can itself contain a comma, quote, or leading/trailing
-/// single-quote.
+/// name can itself contain a comma, quote, space, or single-quote.
+///
+/// The heuristic is not RFC 4180 — see [`csv_char_forces_quote`] for the
+/// exact rule and how it was established. An empty string is also quoted
+/// (`""`), otherwise it would be indistinguishable from NULL, which prints
+/// as a true blank with no quotes at all.
+///
+/// This only ever *adds* quoting and doubles embedded `"`. It never
+/// rewrites the value's own bytes — an embedded CR or LF is quoted and
+/// passed through verbatim, since SQLite stores TEXT byte-for-byte and a
+/// reader must not invent line-ending translation the storage engine
+/// doesn't do.
 pub fn csv_quote(s: &str) -> String {
-    // An empty string must still be quoted (`""`) — otherwise it's
-    // indistinguishable from NULL, which prints as a true blank with no
-    // quotes at all (confirmed against a real `sqlite3 -csv`).
-    let needs_quote = s.is_empty()
-        || s.contains([',', '"', '\n', '\r', ' '])
-        || s.starts_with('\'')
-        || s.ends_with('\'');
+    let needs_quote = s.is_empty() || s.chars().any(csv_char_forces_quote);
     if !needs_quote {
         return s.to_string();
     }
@@ -197,7 +224,45 @@ mod tests {
         assert_eq!(csv_quote("ab "), "\"ab \"");
         assert_eq!(csv_quote("ends_with_quote'"), "\"ends_with_quote'\"");
         assert_eq!(csv_quote("'starts"), "\"'starts\"");
-        assert_eq!(csv_quote("mid'quote"), "mid'quote");
+        // Any single quote anywhere forces quoting, not just a leading or
+        // trailing one. Spike 003's finding 3 concluded the opposite and
+        // this test previously pinned that conclusion; both were wrong.
+        // Verified against the pinned oracle (3.53.3) — and against
+        // Apple's 3.51 build, which agrees, so the earlier error was a
+        // mis-probe rather than a version difference.
+        assert_eq!(csv_quote("mid'quote"), "\"mid'quote\"");
+        assert_eq!(csv_quote("a'b"), "\"a'b\"");
+
+        // Control characters — tab included — force quoting. Previously
+        // unquoted, caught by the CLI oracle diff (#55).
+        //
+        // Quoting is all this function does: it never rewrites the value's
+        // bytes. Note the `sqlite3` *shell* additionally escapes most
+        // control characters into caret notation (`\u{7}` → `^G`) as
+        // terminal safety, which this crate does not reproduce — that is a
+        // separate, open decision, not part of the CSV quoting rule.
+        assert_eq!(csv_quote("tab\tsep"), "\"tab\tsep\"");
+        assert_eq!(csv_quote("bell\u{7}"), "\"bell\u{7}\"");
+        assert_eq!(csv_quote("del\u{7f}"), "\"del\u{7f}\"");
+
+        // Embedded CR/LF are quoted and passed through byte-for-byte —
+        // never translated. SQLite stores TEXT verbatim, so a reader must
+        // not invent line-ending conversion.
+        assert_eq!(csv_quote("a\r\nb"), "\"a\r\nb\"");
+        assert_eq!(csv_quote("a\nb"), "\"a\nb\"");
+
+        // Every non-ASCII character forces quoting: `needCsvQuote` marks
+        // all bytes >= 0x80, and a non-ASCII char is made entirely of
+        // those. Also previously unquoted.
+        assert_eq!(csv_quote("café"), "\"café\"");
+        assert_eq!(csv_quote("日本"), "\"日本\"");
+        assert_eq!(csv_quote("nbsp\u{a0}"), "\"nbsp\u{a0}\"");
+
+        // The boundary of the bare range: 0x21..=0x7E minus " ' ,
+        assert_eq!(
+            csv_quote("!#$%&()*+-./:;<=>?@[\\]^_`{|}~"),
+            "!#$%&()*+-./:;<=>?@[\\]^_`{|}~"
+        );
         assert_eq!(csv_quote(""), "\"\"");
         assert_eq!(format_csv_value(&Value::Null), "");
         assert_eq!(format_csv_value(&Value::Text(String::new())), "\"\"");

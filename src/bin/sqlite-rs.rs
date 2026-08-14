@@ -26,6 +26,18 @@ fn main() -> ExitCode {
     }
 }
 
+/// `sqlite3`'s `-csv` mode terminates every row — header included — with
+/// CRLF, per RFC 4180, and `export` matches it so its output is
+/// byte-identical to the oracle's. This is purely a CLI output-layer
+/// convention: SQLite's storage engine is line-ending agnostic (TEXT and
+/// BLOB bytes are stored and returned verbatim), so this terminator is
+/// only ever *appended between* values and never rewrites a value's own
+/// embedded CR/LF bytes.
+///
+/// Note `-list` mode (what `dump` emits) uses a bare LF instead — the two
+/// modes genuinely differ, verified against the pinned oracle.
+const CSV_ROW_TERMINATOR: &str = "\r\n";
+
 fn usage_error(expected: &str) -> ExitCode {
     eprintln!("usage: sqlite-rs {expected}");
     ExitCode::from(2)
@@ -79,11 +91,11 @@ fn run_export(path: &Path) -> ExitCode {
                 .collect::<Vec<_>>()
                 .join(","),
         );
-        out.push('\n');
+        out.push_str(CSV_ROW_TERMINATOR);
         for row in &table.rows {
             let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
             out.push_str(&rendered.join(","));
-            out.push('\n');
+            out.push_str(CSV_ROW_TERMINATOR);
         }
         if let Err(e) = std::fs::write(&out_path, out) {
             eprintln!("warning: table {:?}: writing {out_path:?}: {e}", table.name);
