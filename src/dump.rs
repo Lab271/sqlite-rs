@@ -286,3 +286,73 @@ enum TableReadError {
     #[error(transparent)]
     Record(#[from] RecordError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema(sql: &str) -> TableSchema {
+        TableSchema {
+            name: "t".to_string(),
+            root_page: 1,
+            columns: vec![],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: sql.to_string(),
+        }
+    }
+
+    #[test]
+    fn rowid_alias_detects_plain_integer_primary_key() {
+        let s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+        assert_eq!(rowid_alias_column(&s), Some(0));
+    }
+
+    #[test]
+    fn rowid_alias_none_for_without_rowid() {
+        let mut s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+        s.without_rowid = true;
+        assert_eq!(rowid_alias_column(&s), None);
+    }
+
+    #[test]
+    fn real_affinity_detects_declared_real_types() {
+        let s = schema("CREATE TABLE t (a REAL, b DOUBLE, c FLOAT, d INTEGER)");
+        assert_eq!(real_affinity_columns(&s), vec![true, true, true, false]);
+    }
+
+    // Known-fragile cases: `column_defs`/`rowid_alias_column`/
+    // `real_affinity_columns` re-derive column info from raw DDL text
+    // with naive splitting rather than the structured parser in
+    // `src/schema/ddl_reader.rs`. These tests document current (not
+    // necessarily correct) behavior so a future fix has a baseline —
+    // see PR #49 review discussion.
+
+    #[test]
+    fn known_fragile_comma_inside_string_literal_default_missplits_columns() {
+        // `DEFAULT 'a,b'` contains a comma that isn't a column separator,
+        // but `column_defs` has no string-literal awareness and splits on
+        // every top-level comma.
+        let s = schema("CREATE TABLE t (a TEXT DEFAULT 'a,b', b INTEGER)");
+        assert_eq!(
+            column_defs(&s).len(),
+            3,
+            "comma inside the string literal was wrongly treated as a column separator"
+        );
+    }
+
+    #[test]
+    fn known_fragile_constraint_text_can_false_positive_on_affinity_keywords() {
+        // A CHECK constraint mentioning "FLOAT" as a string, not a type,
+        // still makes `real_affinity_columns` treat the column as REAL —
+        // because it substring-matches the whole remainder after the
+        // column name, not just the declared-type token.
+        let s = schema("CREATE TABLE t (a TEXT CHECK(a != 'FLOAT'))");
+        assert_eq!(
+            real_affinity_columns(&s),
+            vec![true],
+            "constraint text mentioning FLOAT was wrongly detected as REAL affinity"
+        );
+    }
+}

@@ -26,6 +26,10 @@ pub fn format_real(x: f64) -> String {
             "0.0".to_string()
         };
     }
+    // Not reachable from valid on-disk storage: SQLite's REAL serial
+    // types decode to a finite f64, never NaN. Guarded defensively rather
+    // than left to fall through into the exponent math below, which
+    // assumes a finite, non-zero value.
     if x.is_nan() {
         return "NULL".to_string();
     }
@@ -128,7 +132,12 @@ pub fn format_csv_value(v: &Value) -> String {
     }
 }
 
-fn csv_quote(s: &str) -> String {
+/// Applies `sqlite3`'s CSV quoting heuristic to an arbitrary string —
+/// exposed (not just used internally by [`format_csv_value`]) because
+/// CSV column headers need the same quoting: a table's declared column
+/// name can itself contain a comma, quote, or leading/trailing
+/// single-quote.
+pub fn csv_quote(s: &str) -> String {
     // An empty string must still be quoted (`""`) — otherwise it's
     // indistinguishable from NULL, which prints as a true blank with no
     // quotes at all (confirmed against a real `sqlite3 -csv`).
