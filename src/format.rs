@@ -46,10 +46,11 @@ pub fn format_real(x: f64) -> String {
     }
 
     let sci = format!("{:.14e}", ax);
-    let (mantissa, exp_str) = sci.split_once('e').expect("Rust {:e} always has an 'e'");
-    let exp: i32 = exp_str
-        .parse()
-        .expect("Rust exponent is always a valid i32");
+    // Rust's `{:.14e}` formatter always emits an `e<exponent>` suffix with
+    // a valid integer exponent — these fallbacks are unreachable in
+    // practice, not real error handling.
+    let (mantissa, exp_str) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp_str.parse().unwrap_or(0);
     // Rust's `{:.14e}` always yields exactly 1 + 14 = 15 significant digits.
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
 
@@ -63,7 +64,7 @@ pub fn format_real(x: f64) -> String {
         let exp_sign = if exp >= 0 { "+" } else { "-" };
         format!("{mantissa_part}e{exp_sign}{:02}", exp.abs())
     } else if exp >= 0 {
-        let split = (exp as usize) + 1;
+        let split = (exp as usize).saturating_add(1);
         let int_part = &digits[..split];
         let frac_part = trim_trailing_zeros(&digits[split..]);
         if frac_part.is_empty() {
@@ -72,7 +73,7 @@ pub fn format_real(x: f64) -> String {
             format!("{int_part}.{frac_part}")
         }
     } else {
-        let leading_zeros = "0".repeat((-exp as usize) - 1);
+        let leading_zeros = "0".repeat((exp.unsigned_abs() as usize).saturating_sub(1));
         let frac = trim_trailing_zeros(&digits);
         format!("0.{leading_zeros}{frac}")
     };
@@ -92,7 +93,7 @@ fn trim_trailing_zeros(s: &str) -> &str {
 /// hex + `'`. Neither `-list` nor `-csv` mode has any other way to print
 /// raw, possibly non-UTF8 blob bytes safely.
 pub fn format_blob(b: &[u8]) -> String {
-    let mut s = String::with_capacity(3 + b.len() * 2);
+    let mut s = String::with_capacity(3usize.saturating_add(b.len().saturating_mul(2)));
     s.push_str("X'");
     for byte in b {
         s.push_str(&format!("{byte:02X}"));
@@ -148,7 +149,7 @@ pub fn csv_quote(s: &str) -> String {
     if !needs_quote {
         return s.to_string();
     }
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(s.len().saturating_add(2));
     out.push('"');
     for c in s.chars() {
         if c == '"' {

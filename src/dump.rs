@@ -119,11 +119,11 @@ fn column_defs(schema: &TableSchema) -> Vec<&str> {
     let mut end = None;
     for (i, c) in schema.sql[start..].char_indices() {
         match c {
-            '(' => depth += 1,
+            '(' => depth = depth.saturating_add(1),
             ')' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    end = Some(start + i);
+                    end = Some(start.saturating_add(i));
                     break;
                 }
             }
@@ -133,7 +133,7 @@ fn column_defs(schema: &TableSchema) -> Vec<&str> {
     let Some(end) = end else {
         return Vec::new();
     };
-    let inner = &schema.sql[start + 1..end];
+    let inner = &schema.sql[start.saturating_add(1)..end];
 
     let mut depth = 0i32;
     let mut part_start = 0usize;
@@ -141,11 +141,11 @@ fn column_defs(schema: &TableSchema) -> Vec<&str> {
     let bytes = inner.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
                 defs.push(inner[part_start..i].trim());
-                part_start = i + 1;
+                part_start = i.saturating_add(1);
             }
             _ => {}
         }
