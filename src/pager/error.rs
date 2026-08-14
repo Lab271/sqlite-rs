@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use super::wal::WalError;
 use crate::vfs::{PageError, VfsError};
 
 #[derive(Debug, Error)]
@@ -10,6 +11,13 @@ pub enum PagerError {
          serving pre-rollback pages as committed"
     )]
     HotJournal { path: String },
+
+    #[error("reading WAL at {path}: {source}")]
+    Wal {
+        path: String,
+        #[source]
+        source: WalError,
+    },
 
     #[error(transparent)]
     Page(#[from] PageError),

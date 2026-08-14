@@ -19,9 +19,11 @@
 //! Deferred until #8 lands, per this module's own ticket (#35).
 
 mod error;
+pub mod wal;
 
 pub use error::PagerError;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::vfs::{companion_path, PageError, PageSource, Vfs, VfsPageSource};
@@ -36,15 +38,20 @@ const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 /// A source of whole database pages, refusing to open a database with a
 /// hot rollback journal rather than risk serving pre-rollback pages as
 /// committed data (001-architecture Req-4's "hot journal is never ignored"
-/// scenario).
+/// scenario), and transparently overlaying any committed WAL frames from
+/// an adjacent `-wal` file (Req-4's "Read a database with uncheckpointed
+/// WAL" scenario).
 pub struct Pager {
     source: VfsPageSource,
+    wal_pages: HashMap<u32, Vec<u8>>,
 }
 
 impl Pager {
     /// Opens `path` (page size `page_size`) through `vfs`. Returns
     /// [`PagerError::HotJournal`] if an adjacent `-journal` file has a
-    /// valid rollback-journal header.
+    /// valid rollback-journal header, or [`PagerError::Wal`] if an
+    /// adjacent non-empty `-wal` file's header is malformed or declares a
+    /// page size that doesn't match `page_size`.
     pub fn open<V: Vfs>(vfs: &V, path: &Path, page_size: u32) -> Result<Self, PagerError> {
         let journal_path = companion_path(path, "-journal");
         if vfs.exists(&journal_path)? {
@@ -57,13 +64,63 @@ impl Pager {
                 });
             }
         }
+
+        let wal_pages = read_wal_pages(vfs, path, page_size)?;
+
         let source = VfsPageSource::open(vfs, path, page_size)?;
-        Ok(Pager { source })
+        Ok(Pager { source, wal_pages })
     }
+}
+
+/// Reads and merges committed WAL frames from `path`'s adjacent `-wal`
+/// file, if one exists and is large enough to hold a header. A missing,
+/// empty, or sub-header-length `-wal` file (the common case: a fully
+/// checkpointed WAL truncates to empty) is not an error and yields no
+/// overlay pages.
+fn read_wal_pages<V: Vfs>(
+    vfs: &V,
+    path: &Path,
+    page_size: u32,
+) -> Result<HashMap<u32, Vec<u8>>, PagerError> {
+    let wal_path = companion_path(path, "-wal");
+    if !vfs.exists(&wal_path)? {
+        return Ok(HashMap::new());
+    }
+
+    let wal_file = vfs.open_read(&wal_path)?;
+    let size = wal_file.size()?;
+    if size < wal::HEADER_LEN as u64 {
+        return Ok(HashMap::new());
+    }
+
+    let mut bytes = vec![0u8; size as usize];
+    let n = wal_file.read_at(&mut bytes, 0)?;
+    bytes.truncate(n);
+    if bytes.len() < wal::HEADER_LEN {
+        return Ok(HashMap::new());
+    }
+
+    let to_pager_error = |source| PagerError::Wal {
+        path: wal_path.display().to_string(),
+        source,
+    };
+
+    let header = wal::WalHeader::parse(&bytes).map_err(to_pager_error)?;
+    if header.page_size != page_size {
+        return Err(to_pager_error(wal::WalError::InvalidPageSize {
+            page_size: header.page_size,
+        }));
+    }
+
+    let (pages, _committed_db_size) = wal::committed_pages(&header, &bytes);
+    Ok(pages)
 }
 
 impl PageSource for Pager {
     fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        if let Some(page) = self.wal_pages.get(&page_num) {
+            return Ok(page.clone());
+        }
         self.source.read_page(page_num)
     }
 }
@@ -206,6 +263,96 @@ mod tests {
             let row = cursor.first().unwrap().unwrap();
             let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
             assert_eq!(text(&values[1]), "auto-vacuum full");
+        }
+
+        fn int(v: &Value) -> i64 {
+            match v {
+                Value::Integer(i) => *i,
+                other => panic!("expected integer, got {other:?}"),
+            }
+        }
+
+        /// Opens `name` and returns every row of table `t` as `(a, b)`,
+        /// discovering `t`'s root page via `read_schema` (never
+        /// hardcoded) and merging any pending WAL frames through `Pager`.
+        fn read_table_t(name: &str) -> Vec<(i64, String)> {
+            let vfs = UnixVfs;
+            let path = Path::new("tests/corpus/fixtures/journalstates").join(name);
+            let header = header_of(&vfs, &path);
+
+            let schema_pager = Pager::open(&vfs, &path, header.page_size).unwrap();
+            let mut schema_cursor = TableCursor::new(schema_pager, &header, 1);
+            let schemas = read_schema(&mut schema_cursor, header.text_encoding).unwrap();
+            let t = schemas
+                .iter()
+                .find(|s| s.name == "t")
+                .expect("table t in sqlite_master");
+
+            let pager = Pager::open(&vfs, &path, header.page_size).unwrap();
+            let mut cursor = TableCursor::new(pager, &header, t.root_page);
+            let mut rows = Vec::new();
+            let mut row = cursor.first().unwrap();
+            while let Some(r) = row {
+                let values = decode_record(&r.payload, header.text_encoding).unwrap();
+                rows.push((int(&values[0]), text(&values[1]).to_string()));
+                row = cursor.next().unwrap();
+            }
+            rows
+        }
+
+        /// 001-architecture Req-4's "Read a database with uncheckpointed
+        /// WAL" scenario: three separate commits to the same page, none
+        /// checkpointed into the main file — all three rows must be
+        /// visible, matching `sqlite3` (see tools/gen_fixtures.sh).
+        #[test]
+        fn wal_pending_fixture_shows_uncheckpointed_rows() {
+            assert_eq!(
+                read_table_t("wal_pending.db"),
+                vec![
+                    (1, "one".to_string()),
+                    (2, "two".to_string()),
+                    (3, "three".to_string()),
+                ]
+            );
+        }
+
+        /// Both checksum-endianness paths must decode identically — this
+        /// fixture is `wal_pending.db`'s content with magic flipped to
+        /// 0x377f0683 and every checksum recomputed in big-endian
+        /// arithmetic (spike #7 finding 2).
+        #[test]
+        fn wal_pending_bigendian_fixture_decodes_identically() {
+            assert_eq!(
+                read_table_t("wal_pending_bigendian.db"),
+                read_table_t("wal_pending.db")
+            );
+        }
+
+        /// A committed frame lifted from an unrelated WAL generation
+        /// (different salts) is appended after this fixture's own last
+        /// commit — it must never surface, and the WAL's own two
+        /// legitimate rows must still be visible.
+        #[test]
+        fn wal_pending_stale_fixture_rejects_foreign_frame() {
+            let rows = read_table_t("wal_pending_stale.db");
+            assert_eq!(
+                rows,
+                vec![(10, "ten".to_string()), (11, "eleven".to_string())]
+            );
+            assert!(!rows.iter().any(|(_, b)| b.contains("STALE-FRAME")));
+        }
+
+        /// A big transaction spills dirty pages into the WAL as non-commit
+        /// frames, then rolls back — none of the ~1999 rolled-back rows
+        /// may surface; only the pre-existing committed row (already
+        /// flushed to the main file by an earlier checkpoint, before this
+        /// WAL generation began) is visible.
+        #[test]
+        fn wal_pending_trailing_fixture_shows_only_committed_row() {
+            assert_eq!(
+                read_table_t("wal_pending_trailing.db"),
+                vec![(1, "committed-before".to_string())]
+            );
         }
     }
 }

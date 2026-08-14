@@ -70,3 +70,53 @@ The system MUST refuse to open a database that has an adjacent `-journal` file w
 - THEN the row decodes identically to the non-auto-vacuum case
 
 **Tests:** `src/pager/mod.rs::tests::fixtures::autovacuum_fixture_reads_identically_through_pager`
+
+### Requirement 3: WAL Frame Reading (Read-Only Recovery) [MUST]
+
+For a WAL-mode database with a non-empty, sub-header-length-or-larger `-wal` file, `Pager` MUST parse the WAL header (both checksum-endianness variants — magic `0x377f0682` is native byte order, the common case, `0x377f0683` is always big-endian, per spike #7 finding 2), walk its frames validating checksum and salt, and overlay the latest committed frame per page over the main file's pages. A frame whose salts don't match the header's, or whose checksum doesn't verify, ends the scan (not an error — a torn tail is the normal shape of a WAL file mid-write); everything published by an earlier commit in the same scan survives. No `-shm` file is read — this is quiescent, read-only recovery only (live-writer coexistence is spike 004/#8's territory, still open). A malformed WAL *header* (bad magic, too short, bad checksum, or a page size that doesn't match the main database's) MUST return `PagerError::Wal`, never panic; a missing or empty `-wal` file (the common case: a fully checkpointed WAL) is not an error and yields no overlay.
+
+**Implementation:** `src/pager/wal.rs`, `src/pager/mod.rs::read_wal_pages`
+
+**Tests:** inline `#[cfg(test)]` in `src/pager/wal.rs` and `src/pager/mod.rs`
+
+**Corpus:** `tests/corpus/fixtures/journalstates/`
+
+#### Scenario: Uncheckpointed WAL rows are visible
+
+- GIVEN `journalstates/wal_pending.db` and its adjacent `wal_pending.db-wal` (three separate commits to the same page, none checkpointed into the main file)
+- WHEN read through `TableCursor<Pager>`
+- THEN all three rows are visible, matching `sqlite3`
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_fixture_shows_uncheckpointed_rows`
+
+#### Scenario: Both checksum-endianness paths decode identically
+
+- GIVEN `wal_pending_bigendian.db-wal` — `wal_pending.db-wal`'s content with the magic flipped to `0x377f0683` and every checksum independently recomputed in big-endian arithmetic
+- WHEN read through `TableCursor<Pager>`
+- THEN the decoded rows are identical to `wal_pending.db`'s
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_bigendian_fixture_decodes_identically`, `src/pager/wal.rs::tests::native_checksum_header_parses`, `src/pager/wal.rs::tests::bigendian_checksum_header_parses`
+
+#### Scenario: Stale foreign-generation frame is rejected
+
+- GIVEN `wal_pending_stale.db-wal`, which has a committed frame from an unrelated WAL generation (different salts) appended after its own last commit
+- WHEN read through `TableCursor<Pager>`
+- THEN only the two rows from this generation's own commits are visible — the foreign frame's row never surfaces
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_stale_fixture_rejects_foreign_frame`, `src/pager/wal.rs::tests::stale_foreign_frame_is_rejected_on_salt_mismatch`
+
+#### Scenario: Trailing spilled-but-uncommitted frames are ignored
+
+- GIVEN `wal_pending_trailing.db-wal`, where a big transaction spilled dirty pages into the WAL as non-commit frames before rolling back
+- WHEN read through `TableCursor<Pager>`
+- THEN only the pre-existing committed row is visible — none of the rolled-back insert
+
+**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_trailing_fixture_shows_only_committed_row`, `src/pager/wal.rs::tests::trailing_spilled_frames_are_ignored`
+
+#### Scenario: Malformed WAL never panics
+
+- GIVEN arbitrary malformed byte sequences in place of a `-wal` file's contents
+- WHEN parsed
+- THEN `WalHeader::parse` and `committed_pages` return errors or empty results, never panic (fuzz target)
+
+**Tests:** `src/pager/wal.rs::tests::too_short_is_err_not_panic`, `src/pager/wal.rs::tests::bad_magic_is_err`, `src/pager/wal.rs::tests::corrupted_header_checksum_is_err`, `src/pager/wal.rs::tests::garbage_input_never_panics`, `fuzz/fuzz_targets/wal_frames.rs`
