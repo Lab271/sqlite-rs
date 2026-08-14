@@ -9,7 +9,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use super::{Vfs, VfsError, VfsFile};
+use super::{FileLock, Vfs, VfsError, VfsFile};
 
 #[derive(Debug, Error)]
 pub enum PageError {
@@ -44,6 +44,12 @@ impl VfsPageSource {
     pub fn open(vfs: &dyn Vfs, path: &Path, page_size: u32) -> Result<Self, VfsError> {
         let file = vfs.open_read(path)?;
         Ok(VfsPageSource { file, page_size })
+    }
+
+    /// Acquires a SHARED lock on the underlying file — see
+    /// [`VfsFile::lock_shared`].
+    pub fn lock_shared(&self) -> Result<FileLock, VfsError> {
+        self.file.lock_shared()
     }
 }
 

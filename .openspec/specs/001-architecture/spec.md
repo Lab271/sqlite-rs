@@ -414,3 +414,11 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
 
 **Tests:** `src/pager/mod.rs::tests::fixtures::hot_journal_fixture_is_refused`
+
+#### Scenario: Reader takes a SHARED lock before serving pages
+
+- GIVEN a `Pager` opened over a database file
+- WHEN it is open
+- THEN it MUST hold a journal-mode SHARED byte-range lock (`PENDING_BYTE+2` / `SHARED_SIZE`) on the file, blocking a concurrent writer's EXCLUSIVE lock, and release it when dropped
+
+**Tests:** `src/pager/mod.rs::tests::open_acquires_shared_lock_released_on_drop`, `src/vfs/lock.rs::tests::shared_lock_blocks_concurrent_exclusive_lock_until_dropped`

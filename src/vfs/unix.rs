@@ -2,9 +2,10 @@
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use super::{Result, Vfs, VfsError, VfsFile};
+use super::{lock, FileLock, Result, Vfs, VfsError, VfsFile};
 
 /// Reads database files directly from the local filesystem via `std::fs`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -41,6 +42,12 @@ impl VfsFile for UnixVfsFile {
         self.file
             .metadata()
             .map(|m| m.len())
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
+    fn lock_shared(&self) -> Result<FileLock> {
+        lock::lock_shared(self.file.as_raw_fd())
+            .map(|guard| FileLock(Box::new(guard)))
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 }

@@ -244,6 +244,7 @@ dependencies = [
 name = "sqlite-rs"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "proptest",
  "thiserror",
 ]
