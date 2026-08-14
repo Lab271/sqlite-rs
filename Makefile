@@ -12,7 +12,7 @@
 #     explicit: everything above the VFS is in the qualified subset.
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
-MVL_LIMIT_EXCLUDE :=
+MVL_LIMIT_EXCLUDE := src/vfs/*
 
 COVERAGE_MIN := 75
 
