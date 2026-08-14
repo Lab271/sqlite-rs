@@ -61,8 +61,8 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.6.0** — see [CHANGELOG.md](CHANGELOG.md).
+**Version 0.4.0** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0.
 
-V1 phase 1 landed: record format decoder (all serial types, all encodings), database header parser, read-only VFS (Unix + in-memory), fixture corpus with pinned-oracle harness. `#![forbid(unsafe_code)]`, mvl-limit clean, 22/30 spec scenarios test-backed.
+All four V1 phases landed: format core (header, record decoder, VFS, pinned-oracle corpus), b-tree cursors incl. WITHOUT ROWID + minimal DDL reader, mid-life reading (pager, WAL frame recovery, safe-reader locking validated against live sqlite3), and the `sqlite-rs dump`/`export` CLI with shell-parity output.
 
-Next: b-tree cursors (epic #5 steps 4/5), WAL-read spike (#7), locking-interop spike (#8).
+Remaining for V1 close: mutation-testing run + epic #5 exit gates. Next block: V2 — single-table SELECT.

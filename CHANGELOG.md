@@ -2,26 +2,9 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
-## [0.6.0] - 2026-08-14
+**Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-Safe-reader locking for `Pager`: busy detection and the WAL `-shm` reader-mark protocol (#45).
-
-### Added
-
-- **Busy detection** (`VfsError::Locked`): `fcntl` lock contention (`EAGAIN`/`EACCES`) on the journal-mode SHARED lock acquired in #50 now surfaces as a distinguishable "database is locked" error rather than a generic I/O failure, so callers can tell "another process holds this database" apart from a real I/O problem.
-- **WAL `-shm` reader-mark protocol** (`src/vfs/shm.rs`): `Pager::open` claims a `WAL_READ_LOCK` slot on a WAL-mode database's `-shm` companion file and publishes its `aReadMark` at the WAL's current `mxFrame`, so a live `sqlite3` checkpointer backs off instead of backfilling or truncating WAL frames the open reader still depends on. Released when the `Pager` drops. Byte offsets and the claim sequence are as validated against a live stock `sqlite3` checkpointer by spike 005 (#8), not re-derived. `mxFrame` is read after the exclusive slot claim, never before, so a concurrent writer can't cause a stale mark to be published.
-- Cross-process (`fork`-based) tests for both paths — POSIX record locks never conflict within a single process, so a real second process is required to observe contention at all.
-
-### Deferred
-
-- **Per-inode fd-cache** for the POSIX `close()`-drops-all-locks trap: still tracked in #45, deliberately not built yet. Nothing in the crate currently opens two file descriptors to the *same* path (main db, `-wal`, and `-shm` are three distinct paths, each opened once), so there is no bug for it to fix. Revisit when a write path or live-refresh read path needs a second fd to an already-locked file.
-- **Linux exercise of the locking interop**: owned by #42, not duplicated here. CI already runs the full test suite (including these lock/shm tests) on `ubuntu-latest`; #42 covers the spike's own live-`sqlite3` interop run.
-
-### Known limitations
-
-- Mapping a `-shm` file that another process may truncate can raise `SIGBUS` (an uncatchable process termination, not a Rust panic) if the mapping outlives the file's backing pages. This is inherent to the mmap-based approach without a `SIGBUS` handler; sqlite-rs's threat model here is a cooperating local `sqlite3` writer rather than an adversarial one, so it is documented in `src/vfs/shm.rs` rather than mitigated.
-
-## [0.5.0] - 2026-08-14
+## [0.4.0] - 2026-08-14 — V1 phase 4: the deliverable
 
 `sqlite-rs dump`/`export` CLI — V1 step 9, epic #5's acceptance-gate ticket (#37, #49).
 
@@ -36,52 +19,50 @@ Safe-reader locking for `Pager`: busy detection and the WAL `-shm` reader-mark p
 - `TableSchema` gains a `sql` field (the verbatim `CREATE TABLE` text), needed to reproduce schema DDL and column type/affinity info.
 - `Makefile`'s `mvl-limit` qualified-subset gate excludes `src/bin/*` — a CLI's stdout/stderr is an I/O boundary, the same way `src/vfs` already is the designated `unsafe`/`dyn` boundary.
 
-### Deferred
+### V1 exit gate
 
-- Mutation-testing run, assurance-dashboard check, and closing epic #5 (issue #37 item (e)) are tracked separately, not part of this release.
+- Dump/export oracle parity across all corpus fixture families: done (this release)
+- Mutation-testing run, assurance-dashboard check, epic #5 close: tracked separately (#37 item (e)) — completing them finishes V1 without a further version bump
 
-## [0.4.0] - 2026-08-14
+## [0.3.0] - 2026-08-14 — V1 phase 3: mid-life databases
 
-Journal-mode SHARED lock acquisition for `Pager` — safe-reader locking, item 1 of 6, split out of #45 (#50).
+Pager read path, WAL frame reading, and safe-reader locking — epic #5 steps 2 and 6 (#35, #36), the `journalstates` fixture family (#21), and the safe-reader concurrency scope validated by spike 005 (#8) and implemented via #50/#45. Phase 3 = reading databases *mid-life*, not just at rest.
 
 ### Added
 
-- **`Pager` SHARED locking** (`src/vfs/lock.rs`, #50): `Pager::open` acquires a journal-mode SHARED byte-range `fcntl` lock (`PENDING_BYTE+2` / `SHARED_SIZE`) before serving any page, released when the `Pager` drops. Byte offsets and the `fcntl(F_SETLK)` pattern reuse spike 005's validated findings — not re-derived. The primitive lives in `src/vfs/lock.rs`, inside the qualified-subset gate's `unsafe`/`dyn` boundary; `Pager` consumes it through an opaque `FileLock` type, mirroring the existing `PageSource`/`VfsPageSource` pattern, so no `dyn` leaks outside `src/vfs/`
-- New spec scenario under 001-architecture Req-4: "Reader takes a SHARED lock before serving pages"
+- **`Pager`** (`src/pager/mod.rs`, #35): a `PageSource` implementation sitting between the VFS and the b-tree cursor. Refuses to open a database with a hot rollback journal (valid magic header) rather than risk serving pre-rollback pages as committed data; otherwise wraps `VfsPageSource` unchanged, so `TableCursor<Pager>`/`IndexCursor<Pager>` are byte-identical to the `VfsPageSource`-based cursors on every at-rest fixture, including auto-vacuum databases.
+- **WAL frame reading** (`src/pager/wal.rs`, #36): WAL header parsing (both checksum-endianness variants — magic `0x377f0682` is native byte order, the common case), frame walk with checksum/salt validation, and a committed-page index merged transparently into `Pager`. Read-only, quiescent-file recovery — no `-shm` file required for the recovery path.
+- **Safe-reader locking** (#50, #45; byte offsets and sequences validated against a live stock `sqlite3` by spike 005, not re-derived):
+  - `Pager::open` acquires the journal-mode SHARED byte-range `fcntl` lock (`PENDING_BYTE+2` / `SHARED_SIZE`) before serving any page, released on drop (`src/vfs/lock.rs`, opaque `FileLock` type — no `dyn`/`unsafe` leaks outside `src/vfs/`).
+  - **Busy detection** (`VfsError::Locked`): lock contention (`EAGAIN`/`EACCES`) surfaces as a distinguishable "database is locked" error, not a generic I/O failure.
+  - **WAL `-shm` reader-mark protocol** (`src/vfs/shm.rs`): on WAL-mode databases, `Pager::open` claims a `WAL_READ_LOCK` slot and publishes its `aReadMark` at the WAL's current `mxFrame` (read only *after* the exclusive slot claim), so a live `sqlite3` checkpointer backs off instead of truncating frames the reader depends on. Released on drop.
+  - Cross-process (`fork`-based) tests for the locking paths — POSIX record locks never conflict within one process.
+- **`journalstates` fixture family** (#21): hot-journal and four WAL-pending fixture variants (primary, trailing/spilled, stale/foreign-salt, big-endian checksum), reusing spike #7's fixture-generation tricks.
+- **Spec 007-pager**: hot-journal detection, page-view zero-behavior-change, WAL frame reading; new 001-architecture Req-4 scenario "Reader takes a SHARED lock before serving pages".
+- `Vfs::companion_path`, closing spec 003 Req-1's previously-unimplemented "Companion file detection" scenario.
+- Second fuzz target (`fuzz/fuzz_targets/wal_frames.rs`, `make fuzz-wal`) for the "malformed WAL never panics" acceptance criterion.
 
 ### Changed
 
-- `src/lib.rs`: `#![forbid(unsafe_code)]` → `#![deny(unsafe_code)]`, since `forbid` can't be locally overridden and `src/vfs/lock.rs` needs a scoped `#![allow(unsafe_code)]` for the raw `fcntl` calls
-- `libc` added as a direct dependency (previously only transitive)
-
-### Deferred
-
-- Busy detection / lock-contention error mapping, the WAL `-shm` reader-mark protocol, the per-inode fd-cache workaround for the `close()`-drops-all-locks trap, and Linux verification (#42) remain tracked in #45
-
-## [0.3.0] - 2026-08-14
-
-Pager read path and WAL frame reading — V1 phase 3, epic #5 steps 2 and 6 (#35, #36), plus the fixture corpus family (#21) that unblocked both.
-
-### Added
-
-- **`Pager`** (`src/pager/mod.rs`, #35): a `PageSource` implementation sitting between the VFS and the b-tree cursor. Refuses to open a database with a hot rollback journal (valid magic header) rather than risk serving pre-rollback pages as committed data; otherwise wraps `VfsPageSource` unchanged, so `TableCursor<Pager>`/`IndexCursor<Pager>` are byte-identical to the `VfsPageSource`-based cursors on every at-rest fixture, including auto-vacuum databases
-- **WAL frame reading** (`src/pager/wal.rs`, #36): WAL header parsing (both checksum-endianness variants — magic `0x377f0682` is native byte order, the common case), frame walk with checksum/salt validation, and a committed-page index merged transparently into `Pager`. Read-only, quiescent-file recovery only — no `-shm` file
-- **`journalstates` fixture family** (#21): hot-journal and four WAL-pending fixture variants (primary, trailing/spilled, stale/foreign-salt, big-endian checksum), reusing spike #7's fixture-generation tricks
-- **Spec 007-pager**: hot-journal detection, page-view zero-behavior-change, and WAL frame reading, transcribed from SQLite's file format and validated against real fixtures
-- `Vfs::companion_path`, closing spec 003 Req-1's previously-unimplemented "Companion file detection" scenario
-- Second fuzz target (`fuzz/fuzz_targets/wal_frames.rs`, `make fuzz-wal`) for the "malformed WAL never panics" acceptance criterion
+- `src/lib.rs`: `#![forbid(unsafe_code)]` → `#![deny(unsafe_code)]` — `forbid` cannot be locally overridden and `src/vfs/lock.rs` needs a scoped `#![allow(unsafe_code)]` for raw `fcntl`. The `unsafe` boundary stays exactly where the plan designated it: `src/vfs/`.
+- `libc` added as a direct dependency (previously only transitive).
 
 ### Fixed
 
-- `tests/corpus/regen_test.rs`'s reproducibility check assumed byte-identical regeneration corpus-wide — spec 004 Req-2 already allowed for "byte-identity not required where sqlite3 embeds nondeterminism," but nothing had exercised that carve-out until `journalstates`'s WAL salts/journal nonces became the corpus's first nondeterministic fixture family. Now compared by size for that family only
+- `tests/corpus/regen_test.rs`'s reproducibility check assumed byte-identical regeneration corpus-wide — spec 004 Req-2 already allowed for "byte-identity not required where sqlite3 embeds nondeterminism," but nothing had exercised that carve-out until `journalstates`'s WAL salts/journal nonces became the corpus's first nondeterministic fixture family. Now compared by size for that family only.
 
 ### Deferred
 
-- Safe-reader `fcntl` locking (SHARED-lock correctness, WAL `-shm` reader-mark protocol): spike 005 (#8, closed) validated the approach against a live stock `sqlite3` process, but implementing it is tracked separately as #45 — `Pager` takes no locks yet
+- **Per-inode fd-cache** for the POSIX `close()`-drops-all-locks trap (#45): deliberately not built — nothing in the crate opens two fds to the same path (main db, `-wal`, `-shm` are three distinct paths, each opened once), so there is no bug for it to fix yet. Revisit when a write path or live-refresh read path needs a second fd to an already-locked file.
+- **Linux exercise of the locking interop**: owned by #42; CI already runs the full suite (including lock/shm tests) on `ubuntu-latest`.
 
-## [0.2.0] - 2026-08-14
+### Known limitations
 
-Read-only table and index b-tree cursors, plus the minimal DDL reader — V1 phase 2, epic #5 steps 4-6 (#32, #33, #34).
+- Mapping a `-shm` file that another process may truncate can raise `SIGBUS` (an uncatchable process termination, not a Rust panic) if the mapping outlives the file's backing pages. Inherent to the mmap approach without a `SIGBUS` handler; the threat model here is a cooperating local `sqlite3` writer, not an adversarial one — documented in `src/vfs/shm.rs` rather than mitigated.
+
+## [0.2.0] - 2026-08-14 — V1 phase 2: b-trees and schema
+
+Read-only table and index b-tree cursors, plus the minimal DDL reader — epic #5 steps 4, 5, 7 (#32, #33, #34).
 
 ### Added
 
@@ -96,9 +77,9 @@ Read-only table and index b-tree cursors, plus the minimal DDL reader — V1 pha
 - `TableCursor::seek` no longer accumulates against the `first`/`next` traversal's page-visited budget, so a long-lived cursor doing many point lookups can't spuriously fail
 - Overflow-chain reassembly now detects a chain that revisits a page (cycle) instead of relying solely on a flat hop cap, closing a resource-exhaustion path where a small malicious file could force very large reads/allocations
 
-## [0.1.0] - 2026-08-14
+## [0.1.0] - 2026-08-14 — V1 phase 1: format core
 
-First milestone: the pure-computation core of the Tier 0 READ CORE, plus the assurance machinery. V1 phase 1 — epic #5 steps 1, 3, 8.
+First milestone: the pure-computation core of the Tier 0 READ CORE, plus the assurance machinery. Epic #5 steps 1, 3, 8.
 
 ### Added
 
