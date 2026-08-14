@@ -101,6 +101,12 @@ pub struct FileLock(
     #[allow(dead_code, reason = "held only for its Drop side effect")] Box<dyn SharedLockGuard>,
 );
 
+impl std::fmt::Debug for FileLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FileLock(..)")
+    }
+}
+
 /// Implemented next to each [`VfsFile`] backend (e.g. the Unix backend's
 /// real `fcntl` lock, or a no-op for the in-memory backend).
 trait SharedLockGuard {}
