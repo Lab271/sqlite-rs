@@ -6,3 +6,15 @@ publish = false
 
 [dependencies]
 thiserror = "1"
+
+[[test]]
+name = "unit_header"
+path = "tests/unit/header.rs"
+
+[[test]]
+name = "unit_record"
+path = "tests/unit/record.rs"
+
+[[test]]
+name = "unit_vfs"
+path = "tests/unit/vfs.rs"

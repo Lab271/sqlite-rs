@@ -26,8 +26,9 @@ help: ## Show this help
 
 # === Test ===
 
-test: ## Run the unit test suite (excludes tests/corpus — see test-corpus)
+test: ## Run the unit test suite + public-API tests (excludes tests/corpus — see test-corpus)
 	cargo test --lib --bins
+	cargo test --test unit_header --test unit_record --test unit_vfs
 
 lint: ## Run clippy and check formatting
 	cargo clippy --all-targets -- -D warnings

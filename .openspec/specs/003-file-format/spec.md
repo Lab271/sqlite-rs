@@ -39,6 +39,8 @@ The system MUST provide a read-only virtual filesystem abstraction with a Unix i
 - WHEN the VFS is asked whether the WAL companion exists
 - THEN it MUST report true (and equivalently for `-journal`)
 
+**Tests:** `tests/unit/vfs.rs::companion_file_detection_from_public_api`
+
 #### Scenario: In-memory parity
 
 - GIVEN the same byte content in a Unix-backed file and an in-memory file
@@ -94,6 +96,8 @@ The system MUST parse and validate the 100-byte database header: magic string, p
 - GIVEN page 1 (which contains both the 100-byte header and the schema b-tree root)
 - WHEN its b-tree page header is located
 - THEN it begins at byte 100, BUT cell pointer offsets within it are relative to byte 0 of the page (spike 002 finding 2)
+
+**Tests:** `tests/unit/header.rs::page_1_header_does_not_shift_page_relative_offsets`
 
 ### Requirement 3: Varint Decoding [MUST]
 
@@ -159,6 +163,8 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN they yield integers 0 and 1 with zero payload bytes consumed
 
+**Tests:** `tests/unit/record.rs::constant_serial_types_8_and_9`
+
 #### Scenario: Empty blob and text
 
 - GIVEN serial types 12 (empty BLOB) and 13 (empty TEXT)
@@ -200,6 +206,8 @@ The system MUST decode complete records: header-size varint, serial-type list, t
 - GIVEN the spike 002 fixture row `(42, 'hello', 3.14, X'DEADBEEF', NULL)`
 - WHEN the record is decoded
 - THEN five values of the correct types and contents are produced
+
+**Tests:** `tests/unit/record.rs::mixed_type_row`
 
 #### Scenario: Fuzz safety
 
