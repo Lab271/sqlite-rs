@@ -32,58 +32,6 @@ pub fn decode_varint(buf: &[u8]) -> Result<(u64, usize), RecordError> {
 )]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-
-    /// Minimal-length varint encoder mirroring `decode_varint`'s bit layout
-    /// (7 bits/byte, big-endian, high-bit continuation flag; the 9-byte
-    /// form's last byte carries a full 8 bits, and its first 8 bytes encode
-    /// `value >> 8` as 8 continuation-flagged 7-bit groups — not `value`
-    /// itself shifted 7 bits at a time, which only coincidentally matches
-    /// for all-one-bits values like `u64::MAX`). Test-only — the crate has
-    /// no production encoder since it doesn't write files yet.
-    fn encode_varint(value: u64) -> Vec<u8> {
-        if value < (1u64 << 56) {
-            let mut groups = Vec::new();
-            let mut v = value;
-            loop {
-                groups.push((v & 0x7f) as u8);
-                v >>= 7;
-                if v == 0 {
-                    break;
-                }
-            }
-            groups.reverse(); // most-significant group first
-            let last = groups.len() - 1;
-            groups
-                .iter()
-                .enumerate()
-                .map(|(i, &g)| if i == last { g } else { g | 0x80 })
-                .collect()
-        } else {
-            let low_byte = (value & 0xff) as u8;
-            let upper56 = value >> 8;
-            let mut bytes: Vec<u8> = (0..8)
-                .rev()
-                .map(|shift| (((upper56 >> (shift * 7)) & 0x7f) as u8) | 0x80)
-                .collect();
-            bytes.push(low_byte);
-            bytes
-        }
-    }
-
-    proptest! {
-        /// `decode_varint(encode_varint(v)) == (v, encode_varint(v).len())`
-        /// for arbitrary `u64` — generalizes
-        /// `every_length_from_1_to_9_bytes`'s hand-picked boundary cases to
-        /// the full value space.
-        #[test]
-        fn encode_decode_varint_roundtrip(value: u64) {
-            let bytes = encode_varint(value);
-            let (decoded, len) = decode_varint(&bytes).unwrap();
-            prop_assert_eq!(decoded, value);
-            prop_assert_eq!(len, bytes.len());
-        }
-    }
 
     #[test]
     fn single_byte_values() {

@@ -113,7 +113,7 @@ The system MUST decode SQLite's 1–9 byte big-endian varints. The 9-byte form c
 - WHEN decoded
 - THEN each yields the correct value and consumed-byte count
 
-**Tests:** `src/record/varint.rs::every_length_from_1_to_9_bytes`, `src/record/varint.rs::encode_decode_varint_roundtrip`
+**Tests:** `src/record/varint.rs::every_length_from_1_to_9_bytes`, `tests/record_proptest.rs::encode_decode_varint_roundtrip`
 
 #### Scenario: Nine-byte full width
 
@@ -147,7 +147,7 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN each value is exact
 
-**Tests:** `src/record/decode.rs::integer_widths_and_edge_values`, `src/record/decode.rs::prop_integer_i8_roundtrip`, `src/record/decode.rs::prop_integer_i16_roundtrip`, `src/record/decode.rs::prop_integer_i24_roundtrip`, `src/record/decode.rs::prop_integer_i32_roundtrip`, `src/record/decode.rs::prop_integer_i48_roundtrip`, `src/record/decode.rs::prop_integer_i64_roundtrip`
+**Tests:** `src/record/decode.rs::integer_widths_and_edge_values`, `tests/record_proptest.rs::prop_integer_i8_roundtrip`, `tests/record_proptest.rs::prop_integer_i16_roundtrip`, `tests/record_proptest.rs::prop_integer_i24_roundtrip`, `tests/record_proptest.rs::prop_integer_i32_roundtrip`, `tests/record_proptest.rs::prop_integer_i48_roundtrip`, `tests/record_proptest.rs::prop_integer_i64_roundtrip`
 
 #### Scenario: Float bit-exactness
 
@@ -155,7 +155,7 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN `f64::to_bits()` equals the oracle's stored bits
 
-**Tests:** `src/record/decode.rs::real_edge_values_bit_identical`, `src/record/decode.rs::prop_real_roundtrip_bit_exact_or_nan_to_null`
+**Tests:** `src/record/decode.rs::real_edge_values_bit_identical`, `tests/record_proptest.rs::prop_real_roundtrip_bit_exact_or_nan_to_null`
 
 #### Scenario: Constant serial types
 
@@ -171,7 +171,7 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN empty values are produced, not errors
 
-**Tests:** `src/record/decode.rs::blob_including_zero_length`, `src/record/decode.rs::text_utf8_including_empty`, `src/record/decode.rs::prop_blob_roundtrip`, `src/record/decode.rs::prop_text_utf8_roundtrip`
+**Tests:** `src/record/decode.rs::blob_including_zero_length`, `src/record/decode.rs::text_utf8_including_empty`, `tests/record_proptest.rs::prop_blob_roundtrip`, `tests/record_proptest.rs::prop_text_utf8_roundtrip`
 
 ### Requirement 5: Text Encoding [MUST]
 

@@ -71,6 +71,20 @@ pub struct WalHeader {
     header_checksum: (u32, u32),
 }
 
+/// Reads a big-endian `u32` at `offset..offset+4`. `buf` is assumed
+/// already length-checked by the caller; this still returns `Err` rather
+/// than indexing directly, so the bound never has to be re-proven by
+/// inspection.
+fn read_u32(buf: &[u8], offset: usize) -> Result<u32, WalError> {
+    let end = offset.saturating_add(4);
+    let bytes: [u8; 4] = buf
+        .get(offset..end)
+        .ok_or(WalError::HeaderTooShort { len: buf.len() })?
+        .try_into()
+        .map_err(|_| WalError::HeaderTooShort { len: buf.len() })?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
 impl WalHeader {
     /// Parses the 32-byte WAL header from the start of a `-wal` file's
     /// bytes. `bytes` may be longer (the rest is frame data). Never
@@ -80,25 +94,25 @@ impl WalHeader {
             return Err(WalError::HeaderTooShort { len: bytes.len() });
         }
 
-        let magic = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+        let magic = read_u32(bytes, 0)?;
         let native_checksum = match magic {
             0x377f_0682 => true,
             0x377f_0683 => false,
             _ => return Err(WalError::InvalidMagic { magic }),
         };
 
-        let page_size = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+        let page_size = read_u32(bytes, 8)?;
         if page_size < 512 || !page_size.is_power_of_two() || page_size > 65536 {
             return Err(WalError::InvalidPageSize { page_size });
         }
 
-        let salt1 = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-        let salt2 = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        let stored = (
-            u32::from_be_bytes(bytes[24..28].try_into().unwrap()),
-            u32::from_be_bytes(bytes[28..32].try_into().unwrap()),
-        );
-        let computed = checksum(native_checksum, &bytes[0..24], (0, 0));
+        let salt1 = read_u32(bytes, 16)?;
+        let salt2 = read_u32(bytes, 20)?;
+        let stored = (read_u32(bytes, 24)?, read_u32(bytes, 28)?);
+        let checksummed = bytes
+            .get(0..24)
+            .ok_or(WalError::HeaderTooShort { len: bytes.len() })?;
+        let computed = checksum(native_checksum, checksummed, (0, 0));
         if computed != stored {
             return Err(WalError::HeaderChecksumMismatch { stored, computed });
         }
@@ -122,21 +136,34 @@ impl WalHeader {
 fn checksum(native_checksum: bool, data: &[u8], init: (u32, u32)) -> (u32, u32) {
     let (mut s1, mut s2) = init;
     for chunk in data.chunks_exact(8) {
-        let w0 = read_word(native_checksum, &chunk[0..4]);
-        let w1 = read_word(native_checksum, &chunk[4..8]);
+        let (w0_bytes, w1_bytes) = chunk.split_at(4);
+        let w0 = read_word(native_checksum, w0_bytes);
+        let w1 = read_word(native_checksum, w1_bytes);
         s1 = s1.wrapping_add(w0).wrapping_add(s2);
         s2 = s2.wrapping_add(w1).wrapping_add(s1);
     }
     (s1, s2)
 }
 
+/// `b` is always exactly 4 bytes here (`chunks_exact(8)` + `split_at(4)`
+/// in `checksum`'s only caller), so `unwrap_or_default` never actually
+/// falls back — it just avoids asserting that by an unchecked `unwrap()`.
 fn read_word(native_checksum: bool, b: &[u8]) -> u32 {
-    let arr: [u8; 4] = b.try_into().unwrap();
+    let arr: [u8; 4] = b.try_into().unwrap_or_default();
     if native_checksum {
         u32::from_ne_bytes(arr)
     } else {
         u32::from_be_bytes(arr)
     }
+}
+
+/// `read_u32`, but returning `None` on a short buffer instead of an `Err`
+/// — for callers (like the frame walk below) where a bounds miss is just
+/// "stop, this isn't a full frame" rather than a reportable error.
+fn read_u32_opt(buf: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let bytes: [u8; 4] = buf.get(offset..end)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
 }
 
 /// Walks every frame in `wal_bytes` (past the 32-byte header) and returns
@@ -154,30 +181,46 @@ fn read_word(native_checksum: bool, b: &[u8]) -> u32 {
 /// survives. Never panics on any input, including a `wal_bytes` shorter
 /// than one frame (the loop simply doesn't execute).
 pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Vec<u8>>, u32) {
-    let frame_size = FRAME_HEADER_LEN + header.page_size as usize;
+    let frame_size = FRAME_HEADER_LEN.saturating_add(header.page_size as usize);
     let mut offset = HEADER_LEN;
     let mut running = header.header_checksum;
     let mut candidate: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut committed: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut committed_db_size = 0u32;
 
-    while offset + frame_size <= wal_bytes.len() {
-        let fh = &wal_bytes[offset..offset + FRAME_HEADER_LEN];
-        let page_number = u32::from_be_bytes(fh[0..4].try_into().unwrap());
-        let db_size = u32::from_be_bytes(fh[4..8].try_into().unwrap());
-        let salt1 = u32::from_be_bytes(fh[8..12].try_into().unwrap());
-        let salt2 = u32::from_be_bytes(fh[12..16].try_into().unwrap());
-        let stored_checksum = (
-            u32::from_be_bytes(fh[16..20].try_into().unwrap()),
-            u32::from_be_bytes(fh[20..24].try_into().unwrap()),
-        );
+    while offset.saturating_add(frame_size) <= wal_bytes.len() {
+        // A torn/incomplete tail isn't malformed input in the error sense
+        // (see the module doc) — a bounds miss here just stops the scan
+        // (`break`), the same as the salt/checksum mismatch checks below.
+        let Some(fh) = wal_bytes.get(offset..offset.saturating_add(FRAME_HEADER_LEN)) else {
+            break;
+        };
+        let (Some(page_number), Some(db_size), Some(salt1), Some(salt2)) = (
+            read_u32_opt(fh, 0),
+            read_u32_opt(fh, 4),
+            read_u32_opt(fh, 8),
+            read_u32_opt(fh, 12),
+        ) else {
+            break;
+        };
+        let (Some(c1), Some(c2)) = (read_u32_opt(fh, 16), read_u32_opt(fh, 20)) else {
+            break;
+        };
+        let stored_checksum = (c1, c2);
 
         if salt1 != header.salt1 || salt2 != header.salt2 {
             break;
         }
 
-        let page_content = &wal_bytes[offset + FRAME_HEADER_LEN..offset + frame_size];
-        let after_frame_header = checksum(header.native_checksum, &fh[0..8], running);
+        let Some(page_content) = wal_bytes
+            .get(offset.saturating_add(FRAME_HEADER_LEN)..offset.saturating_add(frame_size))
+        else {
+            break;
+        };
+        let Some(fh_header_bytes) = fh.get(0..8) else {
+            break;
+        };
+        let after_frame_header = checksum(header.native_checksum, fh_header_bytes, running);
         let after_page = checksum(header.native_checksum, page_content, after_frame_header);
 
         if after_page != stored_checksum {
@@ -192,13 +235,20 @@ pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Ve
             committed_db_size = db_size;
         }
 
-        offset += frame_size;
+        offset = offset.saturating_add(frame_size);
     }
 
     (committed, committed_db_size)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::path::Path;
