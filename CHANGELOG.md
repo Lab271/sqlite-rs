@@ -2,6 +2,24 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
+## [0.4.0] - 2026-08-14
+
+Journal-mode SHARED lock acquisition for `Pager` — safe-reader locking, item 1 of 6, split out of #45 (#50).
+
+### Added
+
+- **`Pager` SHARED locking** (`src/vfs/lock.rs`, #50): `Pager::open` acquires a journal-mode SHARED byte-range `fcntl` lock (`PENDING_BYTE+2` / `SHARED_SIZE`) before serving any page, released when the `Pager` drops. Byte offsets and the `fcntl(F_SETLK)` pattern reuse spike 005's validated findings — not re-derived. The primitive lives in `src/vfs/lock.rs`, inside the qualified-subset gate's `unsafe`/`dyn` boundary; `Pager` consumes it through an opaque `FileLock` type, mirroring the existing `PageSource`/`VfsPageSource` pattern, so no `dyn` leaks outside `src/vfs/`
+- New spec scenario under 001-architecture Req-4: "Reader takes a SHARED lock before serving pages"
+
+### Changed
+
+- `src/lib.rs`: `#![forbid(unsafe_code)]` → `#![deny(unsafe_code)]`, since `forbid` can't be locally overridden and `src/vfs/lock.rs` needs a scoped `#![allow(unsafe_code)]` for the raw `fcntl` calls
+- `libc` added as a direct dependency (previously only transitive)
+
+### Deferred
+
+- Busy detection / lock-contention error mapping, the WAL `-shm` reader-mark protocol, the per-inode fd-cache workaround for the `close()`-drops-all-locks trap, and Linux verification (#42) remain tracked in #45
+
 ## [0.3.0] - 2026-08-14
 
 Pager read path and WAL frame reading — V1 phase 3, epic #5 steps 2 and 6 (#35, #36), plus the fixture corpus family (#21) that unblocked both.
