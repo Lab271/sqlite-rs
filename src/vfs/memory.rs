@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::{Result, Vfs, VfsError, VfsFile};
+use super::{FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 
 /// An in-memory [`Vfs`] backed by a path -> bytes map. Lets tests exercise
 /// `Vfs`-consuming code without touching the real filesystem.
@@ -62,4 +62,15 @@ impl VfsFile for MemoryVfsFile {
     fn size(&self) -> Result<u64> {
         Ok(self.0.len() as u64)
     }
+
+    fn lock_shared(&self) -> Result<FileLock> {
+        Ok(FileLock(Box::new(NoopLock)))
+    }
 }
+
+/// The in-memory backend has no real file descriptor to lock — a no-op
+/// satisfies the [`VfsFile`] contract for tests exercising `Vfs`-generic
+/// code that also locks.
+struct NoopLock;
+
+impl SharedLockGuard for NoopLock {}

@@ -1,12 +1,16 @@
 //! Virtual filesystem: the read path sqlite-rs uses to open and read
-//! database files. Read-only for now (see issue #11) — locking and the
-//! write path are deliberately out of scope here, but the trait is shaped
-//! so a lock method can be added later without breaking it.
+//! database files. Read-only for now (see issue #11) — the write path is
+//! deliberately out of scope here. [`VfsFile::lock_shared`] (#50) acquires
+//! the journal-mode SHARED lock a safe reader needs before serving pages;
+//! busy detection, the WAL `-shm` reader-mark protocol, and the per-inode
+//! fd-cache for the `close()`-drops-all-locks trap are further follow-up
+//! tracked in #45.
 //!
 //! This module is the designated `unsafe`/`dyn` boundary (see the
 //! `mvl-limit` Makefile target): everything above the VFS stays in the
 //! qualified subset.
 
+pub(crate) mod lock;
 mod memory;
 mod page_source;
 mod unix;
@@ -62,7 +66,29 @@ pub trait VfsFile {
 
     /// The file's total size in bytes.
     fn size(&self) -> Result<u64>;
+
+    /// Acquires a SHARED byte-range lock on the file's journal-mode lock
+    /// bytes (`PENDING_BYTE+2` / `SHARED_SIZE`, matching SQLite's
+    /// `os_unix.c`) so a concurrent writer can detect this reader per
+    /// SQLite's rollback-journal lock ladder — validated to interop
+    /// correctly with a live stock `sqlite3` process by spike 005
+    /// (`tests/spike/005_locking_interop/findings.md`). Released when the
+    /// returned guard is dropped.
+    fn lock_shared(&self) -> Result<FileLock>;
 }
+
+/// A held file lock, released when dropped. Opaque on purpose: it hides
+/// `dyn SharedLockGuard` behind a concrete type so callers outside
+/// `src/vfs/` (e.g. [`crate::pager::Pager`]) never need to write `dyn`
+/// themselves — this module is the qualified-subset gate's designated
+/// `unsafe`/`dyn` boundary (see the `mvl-limit` Makefile target).
+pub struct FileLock(
+    #[allow(dead_code, reason = "held only for its Drop side effect")] Box<dyn SharedLockGuard>,
+);
+
+/// Implemented next to each [`VfsFile`] backend (e.g. the Unix backend's
+/// real `fcntl` lock, or a no-op for the in-memory backend).
+trait SharedLockGuard {}
 
 #[cfg(test)]
 #[allow(
@@ -101,6 +127,8 @@ mod tests {
             .read_at(&mut past_eof, contents.len() as u64 + 10)
             .unwrap();
         assert_eq!(n, 0);
+
+        drop(file.lock_shared().unwrap());
     }
 
     #[test]

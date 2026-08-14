@@ -14,13 +14,14 @@
 //! part of that structure (they're addressed only by a raw sequential scan,
 //! which this read path never performs) — see `autovacuum_fixture_reads_identically`.
 //!
-//! Locking is out of scope here: spike 005 (#8, closed) validated that a
-//! safe reader's SHARED-lock obligation is real and that byte-identical
+//! `Pager::open` acquires a journal-mode SHARED lock (#50) before serving
+//! any page, released when the `Pager` drops — spike 005 (#8, closed)
+//! validated that this obligation is real and that byte-identical
 //! `fcntl` locks interoperate correctly with a live stock `sqlite3`
-//! process — but it validated the *approach*, not an implementation.
-//! `Pager` takes no locks yet; adding them is tracked as a follow-up
-//! (#45), deferred per #35/#36's own acceptance criteria rather than
-//! blocking this module on it.
+//! process. Busy detection, the WAL `-shm` reader-mark protocol, and the
+//! per-inode fd-cache for the `close()`-drops-all-locks trap remain
+//! tracked in #45, deferred per #35/#36's own acceptance criteria rather
+//! than blocking this module on them.
 
 mod error;
 pub mod wal;
@@ -30,7 +31,7 @@ pub use error::PagerError;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::vfs::{companion_path, PageError, PageSource, Vfs, VfsPageSource};
+use crate::vfs::{companion_path, FileLock, PageError, PageSource, Vfs, VfsPageSource};
 
 /// The 8-byte magic that opens a valid rollback-journal header (SQLite
 /// file-format reference, "The Rollback Journal"). A `-journal` file with
@@ -46,6 +47,14 @@ const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 /// an adjacent `-wal` file (Req-4's "Read a database with uncheckpointed
 /// WAL" scenario).
 pub struct Pager {
+    /// Held only for its `Drop`, which releases the SHARED lock acquired
+    /// in `open`. Declared before `source`: struct fields drop in
+    /// declaration order, and the lock must be released while `source`'s
+    /// file handle is still open — POSIX `close()` silently drops all
+    /// `fcntl` locks on that fd, so unlocking a fd number the kernel may
+    /// already have reused for something else would be a real bug.
+    #[allow(dead_code, reason = "held only for its Drop side effect")]
+    lock: FileLock,
     source: VfsPageSource,
     wal_pages: HashMap<u32, Vec<u8>>,
 }
@@ -72,7 +81,12 @@ impl Pager {
         let wal_pages = read_wal_pages(vfs, path, page_size)?;
 
         let source = VfsPageSource::open(vfs, path, page_size)?;
-        Ok(Pager { source, wal_pages })
+        let lock = source.lock_shared()?;
+        Ok(Pager {
+            lock,
+            source,
+            wal_pages,
+        })
     }
 }
 
@@ -181,6 +195,44 @@ mod tests {
     fn short_journal_file_is_not_hot() {
         let (vfs, path) = db_with_journal(Some(&JOURNAL_MAGIC[..4]));
         assert!(Pager::open(&vfs, &path, 512).is_ok());
+    }
+
+    /// 001-architecture Req-4's "Reader takes a SHARED lock before
+    /// serving pages" scenario: a live `Pager` must hold the journal-mode
+    /// SHARED lock (blocking a concurrent EXCLUSIVE lock attempt from
+    /// another process) and release it once dropped.
+    #[test]
+    fn open_acquires_shared_lock_released_on_drop() {
+        use crate::vfs::lock::exclusive_lock_available;
+        use crate::vfs::UnixVfs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sqlite-rs-pager-lock-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        std::fs::write(&path, vec![0u8; 512]).unwrap();
+
+        let vfs = UnixVfs;
+        let pager = Pager::open(&vfs, &path, 512).unwrap();
+
+        assert!(
+            !exclusive_lock_available(&path),
+            "an open Pager must hold a SHARED lock blocking a concurrent EXCLUSIVE lock"
+        );
+
+        drop(pager);
+
+        assert!(
+            exclusive_lock_available(&path),
+            "dropping the Pager must release the SHARED lock"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
