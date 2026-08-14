@@ -2,6 +2,25 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
+## [0.6.0] - 2026-08-14
+
+Safe-reader locking for `Pager`: busy detection and the WAL `-shm` reader-mark protocol (#45).
+
+### Added
+
+- **Busy detection** (`VfsError::Locked`): `fcntl` lock contention (`EAGAIN`/`EACCES`) on the journal-mode SHARED lock acquired in #50 now surfaces as a distinguishable "database is locked" error rather than a generic I/O failure, so callers can tell "another process holds this database" apart from a real I/O problem.
+- **WAL `-shm` reader-mark protocol** (`src/vfs/shm.rs`): `Pager::open` claims a `WAL_READ_LOCK` slot on a WAL-mode database's `-shm` companion file and publishes its `aReadMark` at the WAL's current `mxFrame`, so a live `sqlite3` checkpointer backs off instead of backfilling or truncating WAL frames the open reader still depends on. Released when the `Pager` drops. Byte offsets and the claim sequence are as validated against a live stock `sqlite3` checkpointer by spike 005 (#8), not re-derived. `mxFrame` is read after the exclusive slot claim, never before, so a concurrent writer can't cause a stale mark to be published.
+- Cross-process (`fork`-based) tests for both paths — POSIX record locks never conflict within a single process, so a real second process is required to observe contention at all.
+
+### Deferred
+
+- **Per-inode fd-cache** for the POSIX `close()`-drops-all-locks trap: still tracked in #45, deliberately not built yet. Nothing in the crate currently opens two file descriptors to the *same* path (main db, `-wal`, and `-shm` are three distinct paths, each opened once), so there is no bug for it to fix. Revisit when a write path or live-refresh read path needs a second fd to an already-locked file.
+- **Linux exercise of the locking interop**: owned by #42, not duplicated here. CI already runs the full test suite (including these lock/shm tests) on `ubuntu-latest`; #42 covers the spike's own live-`sqlite3` interop run.
+
+### Known limitations
+
+- Mapping a `-shm` file that another process may truncate can raise `SIGBUS` (an uncatchable process termination, not a Rust panic) if the mapping outlives the file's backing pages. This is inherent to the mmap-based approach without a `SIGBUS` handler; sqlite-rs's threat model here is a cooperating local `sqlite3` writer rather than an adversarial one, so it is documented in `src/vfs/shm.rs` rather than mitigated.
+
 ## [0.5.0] - 2026-08-14
 
 `sqlite-rs dump`/`export` CLI — V1 step 9, epic #5's acceptance-gate ticket (#37, #49).
