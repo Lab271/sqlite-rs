@@ -376,7 +376,7 @@ SQLite as oracle throughout — **at a pinned version and build**:
 diff <(sqlite3 test.db "$SQL") <(sqlite-rs query test.db "$SQL")
 ```
 
-**Pinned oracle (spike 002 finding, #6):** macOS's system `sqlite3` (3.51.0) is compiled with `CODEC=see-cccrypt` and reserves 12 bytes/page even unencrypted. Fixture generation and oracle diffs MUST use a pinned, non-codec build (brew or compiled amalgamation, exact version recorded in the corpus harness). Both reserved-byte cases (0 and 12) are kept as explicit fixtures — the codec accident is free edge-case coverage. Oracle drift across versions is real; version bumps are deliberate, reviewed events.
+**Pinned oracle (spike 002 finding, #6; isolated by spike #22):** macOS's system `sqlite3` (3.51.0) is compiled with `CODEC=see-cccrypt` and reserves 12 bytes/page even unencrypted. #22 broke the version/codec confound by compiling the same version (3.51.0) without the codec flag — it produced `reserved_space=0`, confirming the codec flag, not the version, is the cause. Fixture generation and oracle diffs MUST use a pinned, non-codec build (brew or compiled amalgamation, exact version recorded in the corpus harness) — sufficient regardless of version. Both reserved-byte cases (0 and 12) are kept as explicit fixtures — the codec accident is free edge-case coverage. Oracle drift across versions is real; version bumps are deliberate, reviewed events.
 
 Every block's exit criterion: its corpus slice passes with zero diffs, and files written by sqlite-rs pass `PRAGMA integrity_check` in stock SQLite.
 
