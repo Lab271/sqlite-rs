@@ -14,9 +14,13 @@
 //! part of that structure (they're addressed only by a raw sequential scan,
 //! which this read path never performs) — see `autovacuum_fixture_reads_identically`.
 //!
-//! Locking is out of scope: spike 004 (#8), which would decide whether a
-//! safe reader needs a SHARED `fcntl` lock before reading, is still open.
-//! Deferred until #8 lands, per this module's own ticket (#35).
+//! Locking is out of scope here: spike 005 (#8, closed) validated that a
+//! safe reader's SHARED-lock obligation is real and that byte-identical
+//! `fcntl` locks interoperate correctly with a live stock `sqlite3`
+//! process — but it validated the *approach*, not an implementation.
+//! `Pager` takes no locks yet; adding them is tracked as a follow-up
+//! (#45), deferred per #35/#36's own acceptance criteria rather than
+//! blocking this module on it.
 
 mod error;
 pub mod wal;

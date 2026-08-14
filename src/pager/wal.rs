@@ -1,7 +1,8 @@
 //! WAL (write-ahead log) frame reading: merges committed frames from an
 //! uncheckpointed `-wal` file over the main database's pages. Read-only,
 //! quiescent-file recovery only — no `-shm` file, no read-locks, no
-//! live-writer coexistence (spike 004/#8's territory, still open). Byte
+//! live-writer coexistence (validated as needed by spike 005/#8, closed;
+//! implementation tracked as #45). Byte
 //! layout and the checksum-endianness gotcha (finding 2) are as
 //! established by spike #7 (`tests/spike/004_wal_reading/src/wal.rs`,
 //! validated against real `sqlite3`-produced files); see
