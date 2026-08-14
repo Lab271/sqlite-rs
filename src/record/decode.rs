@@ -70,7 +70,7 @@ fn take(buf: &[u8], pos: usize, len: usize) -> Result<&[u8], RecordError> {
 
 /// Decodes one column body given its serial type. Returns the value and
 /// the number of body bytes it occupies.
-pub fn decode_serial_value(
+pub(crate) fn decode_serial_value(
     serial_type: u64,
     buf: &[u8],
     pos: usize,
