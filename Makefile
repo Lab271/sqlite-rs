@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002
+.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -26,8 +26,8 @@ help: ## Show this help
 
 # === Test ===
 
-test: ## Run the test suite
-	cargo test
+test: ## Run the unit test suite (excludes tests/corpus — see test-corpus)
+	cargo test --lib --bins
 
 lint: ## Run clippy and check formatting
 	cargo clippy --all-targets -- -D warnings
@@ -47,6 +47,12 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	done; \
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
+
+fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/gen_fixtures.sh
+	./tools/gen_fixtures.sh
+
+test-corpus: ## Run the fixture corpus / oracle harness (see .openspec/specs/004-corpus)
+	cargo test --test corpus
 
 # === Assurance ===
 

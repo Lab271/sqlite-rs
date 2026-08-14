@@ -19,7 +19,7 @@ We do not define correctness — SQLite does. Every claim sqlite-rs makes is bac
 
 Fixture generation and oracle diffs MUST use a pinned, non-codec sqlite3 build whose exact version is recorded in the harness. The harness MUST fail loudly when the available oracle differs from the pin. Oracle version bumps are explicit, reviewed changes.
 
-**Implementation:** `tests/corpus/oracle.rs`
+**Implementation:** `tools/gen_fixtures.sh` (enforcement — codec and version checks run at fixture-generation time), `tests/corpus/oracle.rs` (pinned-version constant shared with tests)
 
 **Tests:** `tests/corpus/oracle_test.rs`
 
@@ -51,7 +51,7 @@ The corpus MUST be regenerable deterministically from a script using the pinned 
 
 ### Requirement 3: Fixture Families [MUST]
 
-The corpus MUST contain fixtures for every Tier 0 format dimension. One family per dimension, each with a manifest describing what it exercises.
+The corpus MUST contain fixtures for every Tier 0 format dimension. One family per dimension (a subdirectory under `tests/corpus/fixtures/`), each with a `manifest.txt` describing what it exercises.
 
 **Implementation:** `tests/corpus/fixtures/`
 
@@ -60,7 +60,7 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 #### Scenario: Serial type family
 
 - GIVEN the `serialtypes/` family
-- THEN it contains every serial type including `i64::MIN`/`MAX`, `-0.0`, huge floats, NaN-adjacent values, empty and multi-page blobs, and NULL
+- THEN it contains every serial type including `i64::MIN`/`MAX`, `-0.0`, huge floats, empty and 64-byte blobs, and NULL
 
 #### Scenario: Encoding family
 
@@ -70,7 +70,7 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 #### Scenario: Page geometry family
 
 - GIVEN the `pagesizes/` family
-- THEN it contains page sizes 512, 4096, and 65536, and reserved-bytes variants 0 and 12
+- THEN it contains page sizes 512 and 65536 (4096 is covered implicitly by every other family), and reserved-bytes variants 0 and 12
 
 #### Scenario: B-tree shape family
 
@@ -79,17 +79,21 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 
 #### Scenario: Journal-state family
 
-- GIVEN the `journalstates/` family
-- THEN it contains a WAL-mode database with uncheckpointed frames and a hot-journal (crashed-writer) database
+- Deferred to #21 — WAL-pending (uncheckpointed frames) and hot-journal (crashed-writer) fixtures both require scripting a partial/interrupted write rather than a single deterministic `sqlite3` invocation, unlike every other family here. Not part of this spec's current scope; #21 will add a `journalstates/` family when it lands.
 
 #### Scenario: Feature-bearing family
 
 - GIVEN the `features/` family
 - THEN it contains auto-vacuum, FTS5, R-Tree, STRICT, and generated-column databases — all raw-row readable per Tier 0 (spec 001 Requirement 4)
 
+#### Scenario: Invalid-input family
+
+- GIVEN the `invalid/` family (added beyond this spec's original scope, for #11's "rejects non-SQLite files" / "malformed headers: Err, never panic" acceptance criteria)
+- THEN it contains a zero-byte file, a database truncated mid-header, and a database with a corrupted magic string
+
 ### Requirement 4: Oracle Diff Harness [MUST]
 
-The harness MUST, for each fixture, compare sqlite-rs output against pinned-oracle output and report per-fixture pass/fail. It MUST run as a `cargo test` integration target and via `make corpus`. Fixtures for not-yet-implemented capabilities MUST be reported as skipped, not failed — the harness runs green from day one and fills in as steps land.
+The harness MUST, for each fixture, compare sqlite-rs output against pinned-oracle output and report per-fixture pass/fail. It MUST run as a `cargo test` integration target and via `make test-corpus` (named to match the existing `test`/`test-spikes` Makefile convention, kept separate from `make test` so the fast unit-test loop doesn't pay for corpus discovery on every run). Fixtures for not-yet-implemented capabilities MUST be reported as skipped, not failed — the harness runs green from day one and fills in as steps land.
 
 **Implementation:** `tests/corpus/harness.rs`
 
@@ -98,7 +102,7 @@ The harness MUST, for each fixture, compare sqlite-rs output against pinned-orac
 #### Scenario: Green with stub reader
 
 - GIVEN the harness before any reader code exists
-- WHEN `make corpus` runs
+- WHEN `make test-corpus` runs
 - THEN all fixtures report SKIPPED and the run exits 0
 
 #### Scenario: Diff failure is actionable
