@@ -2,6 +2,25 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
+## [0.5.0] - 2026-08-14
+
+`sqlite-rs dump`/`export` CLI — V1 step 9, epic #5's acceptance-gate ticket (#37, #49).
+
+### Added
+
+- **`sqlite-rs dump <file>` / `sqlite-rs export <file>`** (`src/bin/sqlite-rs.rs`): schema + all rows of every readable table (rowid and WITHOUT ROWID), with rowid-alias substitution for `INTEGER PRIMARY KEY` columns and REAL-affinity 0/1 constant-optimization handling. Virtual tables and any table that fails to decode are skipped with a warning on stderr rather than aborting the whole dump; `export`'s per-table output filenames are sanitized against the source database's (untrusted) table names to prevent path traversal. Both subcommands return a non-`SUCCESS` exit code when any table was skipped or failed to write, so scripted callers can detect partial output.
+- **`src/format.rs`**: `-list`/`-csv` value rendering verified byte-identical to a real, read-only `sqlite3` process — REAL formatting (`%.15g`-equivalent), blob-as-`X'HEX'`, and `sqlite3`'s actual (non-RFC4180) CSV quoting heuristic.
+- `tests/corpus/dump_oracle_test.rs`: shells out to a real `sqlite3 -readonly` and diffs `dump_database`'s rendering against it across every table of every corpus fixture (list and csv mode); `tests/corpus/harness.rs`'s previously-stubbed fixture reader now does a real open-and-dump.
+
+### Changed
+
+- `TableSchema` gains a `sql` field (the verbatim `CREATE TABLE` text), needed to reproduce schema DDL and column type/affinity info.
+- `Makefile`'s `mvl-limit` qualified-subset gate excludes `src/bin/*` — a CLI's stdout/stderr is an I/O boundary, the same way `src/vfs` already is the designated `unsafe`/`dyn` boundary.
+
+### Deferred
+
+- Mutation-testing run, assurance-dashboard check, and closing epic #5 (issue #37 item (e)) are tracked separately, not part of this release.
+
 ## [0.4.0] - 2026-08-14
 
 Journal-mode SHARED lock acquisition for `Pager` — safe-reader locking, item 1 of 6, split out of #45 (#50).
