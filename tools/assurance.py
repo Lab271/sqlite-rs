@@ -24,7 +24,11 @@ to this header too):
 
 3.  Completeness (S->P): fraction of active requirements whose
     `**Implementation:**` file exists on disk (path resolved inside the
-    repo; `::qualifiers` stripped).
+    repo; `::qualifiers` stripped). STRICT: only two states matter —
+    defined-in-spec (the denominator) and linked-to-real-code (the
+    numerator). A declared link with no file behind it contributes
+    nothing; if it dangles it is reported as a DEAD LINK. There is no
+    intermediate "linked" credit.
 
 4.  Coverage (E->P), scenario-weighted: a requirement with 5 scenarios and
     1 valid test link scores 1/5, not 100%. Per requirement:
@@ -264,15 +268,12 @@ def report(requirements, verbose=False, traceability_only=False):
         print("No requirements found in .openspec/specs/")
         return 0.0, 0.0
 
-    impl_linked = sum(1 for r in active if r["impl_path"])
     impl_exists = sum(1 for r in active if r["impl_exists"])
     total_scenarios = sum(r["scenarios"] for r in active)
 
     completeness = impl_exists / total if total else 0
     coverage = sum(scenario_coverage(r) for r in active) / total if total else 0
 
-    declared = sum(1 for r in active if r["tests_declared"] > 0)
-    existing = sum(1 for r in active if (r["req_level_valid"] + r["scenarios_backed"]) > 0)
     total_dead = sum(len(r["dead_links"]) for r in active)
     backed = sum(covered_scenarios(r) for r in active)
     direct = sum(r["scenarios_backed"] for r in active)
@@ -284,17 +285,10 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"Scenarios:        {total_scenarios}")
     print()
     print("-- Traceability " + "-" * 44)
-    print(f"Completeness (S->P):  {impl_exists}/{total} spec -> implementation  ({completeness:.0%})")
-    print(f"  - Linked:           {impl_linked}/{total}")
-    print(f"  - File exists:      {impl_exists}/{total}")
-    print()
-    print(f"Coverage (E->P):      scenario-weighted  ({coverage:.0%})")
-    print(f"  - Tests declared:   {declared}/{total} requirements (links in spec)")
-    print(f"  - Tests valid:      {existing}/{total} requirements (file + symbol exist)")
-    if total_scenarios:
-        print(f"  - Scenarios backed: {backed}/{total_scenarios} ({direct} by per-scenario links)")
+    print(f"Completeness (S->P):  {impl_exists}/{total} requirements implemented  ({completeness:.0%})")
+    print(f"Coverage (E->P):      {backed}/{total_scenarios} scenarios test-backed  ({coverage:.0%}, {direct} per-scenario)")
     if total_dead:
-        print(f"  - DEAD LINKS:       {total_dead} (declared but file/symbol missing — see --verbose)")
+        print(f"DEAD LINKS:           {total_dead} — spec links to missing file/symbol; fix the spec (see --verbose)")
 
     if not traceability_only:
         corpus_total = sum(1 for r in active if r["corpus_files"])
