@@ -14,14 +14,16 @@
 //! part of that structure (they're addressed only by a raw sequential scan,
 //! which this read path never performs) — see `autovacuum_fixture_reads_identically`.
 //!
-//! `Pager::open` acquires a journal-mode SHARED lock (#50) before serving
-//! any page, released when the `Pager` drops — spike 005 (#8, closed)
-//! validated that this obligation is real and that byte-identical
+//! `Pager::open` acquires a journal-mode SHARED lock (#50) and, if a
+//! `-shm` file is present, a WAL reader-mark lock (#45), before serving
+//! any page — both released when the `Pager` drops. Spike 005 (#8,
+//! closed) validated that this obligation is real and that byte-identical
 //! `fcntl` locks interoperate correctly with a live stock `sqlite3`
-//! process. Busy detection, the WAL `-shm` reader-mark protocol, and the
-//! per-inode fd-cache for the `close()`-drops-all-locks trap remain
-//! tracked in #45, deferred per #35/#36's own acceptance criteria rather
-//! than blocking this module on them.
+//! process, including its checkpointer backing off on a held reader-mark.
+//! Lock contention on either surfaces as [`crate::vfs::VfsError::Locked`].
+//! The per-inode fd-cache for the `close()`-drops-all-locks trap remains
+//! deferred (#45) — nothing here yet opens two fds to the same path, so
+//! there is no bug for it to fix; see #45 for when that changes.
 
 mod error;
 pub mod wal;
@@ -55,6 +57,14 @@ pub struct Pager {
     /// already have reused for something else would be a real bug.
     #[allow(dead_code, reason = "held only for its Drop side effect")]
     lock: FileLock,
+    /// Held only for its `Drop`, which releases the WAL `-shm`
+    /// reader-mark lock claimed in `open` (#45) — `None` when there is no
+    /// `-shm` file to coordinate through (no live WAL writer has ever
+    /// opened this database). Owns its own file handle (`WalReadLock` in
+    /// `src/vfs/shm.rs`), so no interaction with `source`'s fd/drop
+    /// ordering.
+    #[allow(dead_code, reason = "held only for its Drop side effect")]
+    wal_lock: Option<FileLock>,
     source: VfsPageSource,
     wal_pages: HashMap<u32, Vec<u8>>,
 }
@@ -78,12 +88,18 @@ impl Pager {
             }
         }
 
+        // Claimed before reading WAL frames below, so a live checkpointer
+        // that starts backfilling/truncating mid-read still backs off on
+        // this reader's slot (#45) — pinning happens before, not after,
+        // the read it protects.
+        let wal_lock = vfs.claim_wal_read_lock(path)?;
         let wal_pages = read_wal_pages(vfs, path, page_size)?;
 
         let source = VfsPageSource::open(vfs, path, page_size)?;
         let lock = source.lock_shared()?;
         Ok(Pager {
             lock,
+            wal_lock,
             source,
             wal_pages,
         })
@@ -230,6 +246,46 @@ mod tests {
         assert!(
             exclusive_lock_available(&path),
             "dropping the Pager must release the SHARED lock"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 001-architecture Req-4's WAL reader-mark scenario (#45): opening a
+    /// `Pager` against a db with an adjacent `-shm` file must claim a WAL
+    /// reader-mark slot, blocking a concurrent EXCLUSIVE lock attempt on
+    /// that slot from another process, and release it on drop — the same
+    /// shape as the journal-mode SHARED lock test above, one layer up.
+    #[test]
+    fn open_claims_wal_read_lock_when_shm_present_released_on_drop() {
+        use crate::vfs::shm::slot_is_free_test_only;
+        use crate::vfs::UnixVfs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sqlite-rs-pager-wal-lock-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        std::fs::write(&path, vec![0u8; 512]).unwrap();
+        let shm_path = dir.join("test.db-shm");
+        std::fs::write(&shm_path, vec![0u8; 32768]).unwrap();
+
+        let vfs = UnixVfs;
+        let pager = Pager::open(&vfs, &path, 512).unwrap();
+
+        let claimed_slot = (1..=4)
+            .find(|&slot| !slot_is_free_test_only(&shm_path, slot))
+            .expect("Pager::open must claim exactly one reader-mark slot");
+
+        drop(pager);
+
+        assert!(
+            slot_is_free_test_only(&shm_path, claimed_slot),
+            "dropping the Pager must release the WAL reader-mark lock"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

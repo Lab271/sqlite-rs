@@ -422,3 +422,19 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - THEN it MUST hold a journal-mode SHARED byte-range lock (`PENDING_BYTE+2` / `SHARED_SIZE`) on the file, blocking a concurrent writer's EXCLUSIVE lock, and release it when dropped
 
 **Tests:** `src/pager/mod.rs::tests::open_acquires_shared_lock_released_on_drop`, `src/vfs/lock.rs::tests::shared_lock_blocks_concurrent_exclusive_lock_until_dropped`
+
+#### Scenario: Lock contention is reported as busy, not a generic I/O error
+
+- GIVEN a database file whose journal-mode SHARED-lock byte range is held EXCLUSIVE by another process
+- WHEN sqlite-rs attempts to open the database for reading
+- THEN it MUST surface a distinguishable "database is locked" error, not a generic I/O failure
+
+**Tests:** `src/vfs/lock.rs::tests::lock_shared_fails_with_contention_errno_when_exclusively_held_elsewhere`
+
+#### Scenario: WAL reader claims a reader-mark slot so a live checkpointer backs off
+
+- GIVEN a WAL-mode database with an adjacent `-shm` file
+- WHEN a `Pager` opens the database
+- THEN it MUST claim a `WAL_READ_LOCK` slot and publish its `aReadMark` value, blocking a concurrent checkpointer from backfilling/truncating past that point, and release the slot when dropped
+
+**Tests:** `src/pager/mod.rs::tests::open_claims_wal_read_lock_when_shm_present_released_on_drop`, `src/vfs/shm.rs::tests::claims_a_slot_and_publishes_mx_frame`, `src/vfs/shm.rs::tests::contended_slot_is_skipped_for_the_next_free_one`

@@ -6,9 +6,9 @@
 //!
 //! Byte offsets verified against SQLite's own source (`os_unix.c`) by
 //! spike 005 (`tests/spike/005_locking_interop/findings.md`) — not
-//! re-derived here. Busy detection (mapping lock contention to a clear
-//! "database is locked" error) and the WAL `-shm` reader-mark protocol are
-//! out of scope for this module; see #45.
+//! re-derived here. Busy detection is mapped one layer up, in
+//! `src/vfs/unix.rs`'s `to_lock_error`. The WAL `-shm` reader-mark protocol
+//! is out of scope for this module; see #45.
 #![allow(unsafe_code)]
 
 use std::io;
@@ -45,15 +45,19 @@ impl Drop for UnixSharedLock {
 
 /// Acquires a non-blocking SHARED lock on `fd`'s journal-mode lock-byte
 /// range. `Err` on any failure, including lock contention (`EAGAIN`/
-/// `EACCES` surface here as a plain I/O error — mapping contention to a
-/// distinguishable "database is locked" error is #45's busy-detection
-/// item, not this one).
+/// `EACCES` surface here as a plain `io::Error`; `src/vfs/unix.rs`'s
+/// `to_lock_error` is what turns those into a distinguishable "database is
+/// locked" error one layer up).
 pub fn lock_shared(fd: RawFd) -> io::Result<UnixSharedLock> {
     fcntl_lock(fd, libc::F_RDLCK as c_int, SHARED_FIRST, SHARED_SIZE)?;
     Ok(UnixSharedLock { fd })
 }
 
-fn fcntl_lock(fd: RawFd, kind: c_int, start: off_t, len: off_t) -> io::Result<()> {
+/// Generic byte-range `fcntl(F_SETLK)` primitive — used both for the
+/// journal-mode SHARED lock above and (via `pub(crate)`) for the WAL
+/// `-shm` reader-mark lock bytes in `src/vfs/shm.rs`; the underlying
+/// syscall is identical, only the byte offsets differ.
+pub(crate) fn fcntl_lock(fd: RawFd, kind: c_int, start: off_t, len: off_t) -> io::Result<()> {
     let mut fl: flock = unsafe { std::mem::zeroed() };
     fl.l_type = kind as _;
     fl.l_whence = libc::SEEK_SET as _;
@@ -117,8 +121,69 @@ pub(crate) fn exclusive_lock_available(path: &std::path::Path) -> bool {
     }
 }
 
+/// Test-only: forks a child process that takes a blocking EXCLUSIVE lock
+/// on `path`'s SHARED-lock byte range, signals once held, runs `during`
+/// in the parent, then releases the child and waits for it to exit. Lets
+/// a test observe how `lock_shared` behaves against a lock genuinely held
+/// by a separate OS process (in-process re-locking never conflicts, since
+/// POSIX record locks are scoped to (process, inode)).
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only helper: a fork failure has no reasonable fallback"
+)]
+pub(crate) fn with_exclusive_lock_held_by_child<R>(
+    path: &std::path::Path,
+    during: impl FnOnce() -> R,
+) -> R {
+    use std::os::unix::io::AsRawFd;
+
+    let (parent_sock, child_sock) = std::os::unix::net::UnixDatagram::pair().unwrap();
+
+    // Safety: the child only performs async-signal-safe work (raw fcntl /
+    // socket syscalls, no allocation) before `_exit`, avoiding the classic
+    // post-`fork` hazard of a multithreaded parent's runtime state (e.g.
+    // an allocator lock) being left inconsistent in the child.
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => panic!("fork failed: {}", io::Error::last_os_error()),
+        0 => {
+            drop(parent_sock);
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("child opens file for locking");
+            fcntl_lock(
+                file.as_raw_fd(),
+                libc::F_WRLCK as c_int,
+                SHARED_FIRST,
+                SHARED_SIZE,
+            )
+            .expect("child takes exclusive lock");
+            child_sock.send(b"locked").expect("child signals locked");
+            let mut buf = [0u8; 4];
+            let _ = child_sock.recv(&mut buf);
+            unsafe { libc::_exit(0) };
+        }
+        pid => {
+            drop(child_sock);
+            let mut buf = [0u8; 16];
+            parent_sock.recv(&mut buf).expect("wait for child lock");
+
+            let result = during();
+
+            parent_sock.send(b"done").expect("release child");
+            let mut status: c_int = 0;
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            result
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
@@ -163,6 +228,32 @@ mod tests {
             exclusive_lock_available(&path),
             "dropping the guard must release the SHARED lock"
         );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// `lock_shared` contending with a real EXCLUSIVE lock held by another
+    /// OS process (not just this process re-locking, which `fcntl` never
+    /// sees as contention) must surface as lock contention (`EAGAIN`/
+    /// `EACCES`), which `src/vfs/unix.rs`'s `to_lock_error` turns into
+    /// `VfsError::Locked` — 001-architecture Req-4's busy-detection
+    /// scenario.
+    #[test]
+    fn lock_shared_fails_with_contention_errno_when_exclusively_held_elsewhere() {
+        use crate::vfs::{UnixVfs, Vfs, VfsError};
+
+        let (_file, path) = temp_file();
+
+        let result = with_exclusive_lock_held_by_child(&path, || {
+            let file = UnixVfs.open_read(&path).unwrap();
+            file.lock_shared()
+        });
+
+        match result {
+            Err(VfsError::Locked { .. }) => {}
+            Err(other) => panic!("expected VfsError::Locked, got {other:?}"),
+            Ok(_) => panic!("expected VfsError::Locked, got Ok"),
+        }
 
         std::fs::remove_file(&path).unwrap();
     }

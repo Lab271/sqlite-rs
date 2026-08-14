@@ -5,7 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use super::{lock, FileLock, Result, Vfs, VfsError, VfsFile};
+use super::{companion_path, lock, shm, FileLock, Result, Vfs, VfsError, VfsFile};
 
 /// Reads database files directly from the local filesystem via `std::fs`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -23,6 +23,13 @@ impl Vfs for UnixVfs {
     fn exists(&self, path: &Path) -> Result<bool> {
         path.try_exists()
             .map_err(|source| to_vfs_error(path, source))
+    }
+
+    fn claim_wal_read_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let shm_path = companion_path(path, "-shm");
+        shm::claim_wal_read_lock(&shm_path)
+            .map(|opt| opt.map(|guard| FileLock(Box::new(guard))))
+            .map_err(|source| to_lock_error(&shm_path, source))
     }
 }
 
@@ -48,7 +55,7 @@ impl VfsFile for UnixVfsFile {
     fn lock_shared(&self) -> Result<FileLock> {
         lock::lock_shared(self.file.as_raw_fd())
             .map(|guard| FileLock(Box::new(guard)))
-            .map_err(|source| to_vfs_error(&self.path, source))
+            .map_err(|source| to_lock_error(&self.path, source))
     }
 }
 
@@ -61,5 +68,18 @@ fn to_vfs_error(path: &Path, source: std::io::Error) -> VfsError {
             path: path_str,
             source,
         }
+    }
+}
+
+/// Like [`to_vfs_error`], but maps `fcntl(F_SETLK)`'s lock-contention errno
+/// values (`EAGAIN`/`EACCES` — POSIX allows either, `fcntl(2)`) to
+/// [`VfsError::Locked`] so callers can distinguish "another process holds
+/// this lock" from an ordinary I/O failure.
+fn to_lock_error(path: &Path, source: std::io::Error) -> VfsError {
+    match source.raw_os_error() {
+        Some(libc::EAGAIN) | Some(libc::EACCES) => VfsError::Locked {
+            path: path.display().to_string(),
+        },
+        _ => to_vfs_error(path, source),
     }
 }

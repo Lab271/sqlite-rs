@@ -1,10 +1,10 @@
 //! Virtual filesystem: the read path sqlite-rs uses to open and read
 //! database files. Read-only for now (see issue #11) — the write path is
 //! deliberately out of scope here. [`VfsFile::lock_shared`] (#50) acquires
-//! the journal-mode SHARED lock a safe reader needs before serving pages;
-//! busy detection, the WAL `-shm` reader-mark protocol, and the per-inode
-//! fd-cache for the `close()`-drops-all-locks trap are further follow-up
-//! tracked in #45.
+//! the journal-mode SHARED lock a safe reader needs before serving pages,
+//! surfacing lock contention as [`VfsError::Locked`] (#45). The WAL `-shm`
+//! reader-mark protocol and the per-inode fd-cache for the
+//! `close()`-drops-all-locks trap are further follow-up tracked in #45.
 //!
 //! This module is the designated `unsafe`/`dyn` boundary (see the
 //! `mvl-limit` Makefile target): everything above the VFS stays in the
@@ -13,6 +13,7 @@
 pub(crate) mod lock;
 mod memory;
 mod page_source;
+pub(crate) mod shm;
 mod unix;
 
 pub use memory::MemoryVfs;
@@ -27,6 +28,9 @@ use thiserror::Error;
 pub enum VfsError {
     #[error("file not found: {path}")]
     NotFound { path: String },
+
+    #[error("database is locked: {path}")]
+    Locked { path: String },
 
     #[error("I/O error on {path}: {source}")]
     Io {
@@ -46,6 +50,17 @@ pub trait Vfs {
     /// Whether `path` exists — used to detect sibling `-wal` / `-journal`
     /// files.
     fn exists(&self, path: &Path) -> Result<bool>;
+
+    /// Claims a WAL reader-mark slot on `path`'s `-shm` companion file (if
+    /// one exists) so a live checkpointer backs off rather than
+    /// backfilling/truncating WAL frames this reader depends on (#45).
+    /// Released when the returned [`FileLock`] drops. Default: a no-op
+    /// (`Ok(None)`) — correct for backends with no real `-shm` file to
+    /// coordinate through, e.g. [`MemoryVfs`].
+    fn claim_wal_read_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 /// Builds the path of a companion file (e.g. `-wal`, `-journal`) by
