@@ -429,7 +429,9 @@ Parse errors SHOULD include source location and helpful context.
 
 The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE) MUST NOT depend on the full parser. It extracts table names, column names, declared types, and WITHOUT ROWID / STRICT markers from DDL text — nothing more.
 
-**Implementation:** `src/schema/ddl_reader.rs` (planned) (not under `src/parser/`)
+**Implementation:** `src/schema/ddl_reader.rs` (not under `src/parser/`)
+
+**Tests:** inline `#[cfg(test)]` in `src/schema/ddl_reader.rs`
 
 #### Scenario: Read schema without the parser
 
@@ -437,11 +439,15 @@ The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE)
 - WHEN sqlite-rs opens a database and dumps its rows
 - THEN schema decoding MUST still work via the minimal DDL reader
 
+Trivially true today — `src/schema/ddl_reader.rs` has zero `use` of any `src/parser/` item, and no `src/parser/` module or Cargo feature flag exists yet to gate. Re-verify with a real feature-gated build once a parser lands; no automated test backs this yet since there is nothing to gate.
+
 #### Scenario: Tolerate unparseable DDL
 
 - GIVEN a `sqlite_master` entry with DDL the minimal reader does not understand (e.g. `CREATE VIRTUAL TABLE ... USING fts5(...)`)
 - WHEN the schema is decoded
 - THEN the entry MUST degrade to raw-row access with untyped columns, not an error
+
+**Tests:** `src/schema/ddl_reader.rs::fts5_virtual_table_is_graceful_unknown_shadow_tables_are_readable`, `src/schema/ddl_reader.rs::unparseable_non_virtual_ddl_degrades_gracefully_never_errors`
 
 ### Requirement 6: lemon-rs Integration [MAY]
 

@@ -383,6 +383,8 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs dumps the database
 - THEN all rows of that table MUST be produced, even if WITHOUT ROWID write semantics are unimplemented
 
+**Tests:** `src/btree/index.rs::without_rowid_table_is_readable_as_index_btree`
+
 #### Scenario: Read a database with uncheckpointed WAL
 
 - GIVEN a WAL-mode database with a non-empty `-wal` file
@@ -400,6 +402,8 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - GIVEN a database containing a virtual table (e.g. FTS5) whose module is unimplemented
 - WHEN sqlite-rs dumps the database
 - THEN the shadow tables' raw rows MUST be readable and no error raised for the unknown module
+
+**Tests:** `src/schema/ddl_reader.rs::fts5_virtual_table_is_graceful_unknown_shadow_tables_are_readable`
 
 #### Scenario: Hot journal is never ignored
 
