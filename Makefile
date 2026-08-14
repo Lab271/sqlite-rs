@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification test-spikes assurance assurance-gate traceability coverage spike-001 spike-002
+.PHONY: help test lint mvl-limit verification test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -13,6 +13,8 @@
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
 MVL_LIMIT_EXCLUDE :=
+
+COVERAGE_MIN := 75
 
 help: ## Show this help
 	@echo ""
@@ -61,6 +63,12 @@ coverage: ## Run the test suite under coverage instrumentation and print a line 
 	cargo llvm-cov --no-report
 	cargo llvm-cov report
 	cargo llvm-cov report --json --output-path target/llvm-cov.json
+
+coverage-gate: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MIN)%
+	@python3 -c "import json, sys; \
+	  p = json.load(open('target/llvm-cov.json'))['data'][0]['totals']['lines']['percent']; \
+	  print(f'Line coverage: {p:.2f}% (threshold: $(COVERAGE_MIN)%)'); \
+	  sys.exit(0 if p >= $(COVERAGE_MIN) else 1)"
 
 # === Spikes ===
 

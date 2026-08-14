@@ -17,3 +17,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: make test
       - run: make lint
+
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run coverage report
+        id: coverage
+        run: |
+          make coverage
+          cargo llvm-cov report > coverage-table.txt
+          PERCENT=$(python3 -c "import json; print(round(json.load(open('target/llvm-cov.json'))['data'][0]['totals']['lines']['percent'], 2))")
+          echo "percent=$PERCENT" >> "$GITHUB_OUTPUT"
+      - name: Post coverage report to PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          marker="<!-- coverage-report -->"
+          {
+            echo "$marker"
+            echo "## Coverage report"
+            echo ""
+            echo "Line coverage: **${{ steps.coverage.outputs.percent }}%** (gate: 75%)"
+            echo ""
+            echo '```'
+            cat coverage-table.txt
+            echo '```'
+          } > comment-body.md
+          existing=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body=@comment-body.md
+          else
+            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" -f body=@comment-body.md
+          fi
+      - name: Enforce coverage threshold
+        run: |
+          percent="${{ steps.coverage.outputs.percent }}"
+          awk -v p="$percent" 'BEGIN { exit (p + 0 >= 75) ? 0 : 1 }'
