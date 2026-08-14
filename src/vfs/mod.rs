@@ -8,9 +8,11 @@
 //! qualified subset.
 
 mod memory;
+mod page_source;
 mod unix;
 
 pub use memory::MemoryVfs;
+pub use page_source::{PageError, PageSource, VfsPageSource};
 pub use unix::UnixVfs;
 
 use std::path::Path;

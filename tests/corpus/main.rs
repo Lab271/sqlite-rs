@@ -6,7 +6,9 @@
 mod harness;
 mod oracle;
 
+mod btree_test;
 mod families_test;
 mod harness_test;
 mod oracle_test;
 mod regen_test;
+mod schema_test;
