@@ -49,7 +49,7 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 Follows the mvl convention: every requirement carries `**Implementation:**` and `**Tests:**` links (plus `**Corpus:**` where fixtures back it), and every requirement has `#### Scenario:` blocks in Given-When-Then form. `tools/assurance.py` parses the specs and assembles the case from three levels:
 
 - **Traceability** — *Completeness (S→P):* does each requirement's implementation file exist? *Coverage (E→P):* scenario-weighted — a requirement with 5 scenarios and 1 test link scores 1/5, not 100%.
-- **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov).
+- **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov). CI enforces a 75% line-coverage gate on every push/PR (`make coverage-gate`) and posts the per-file report as a sticky PR comment, so this evidence is refreshed and visible on every PR rather than only available locally (#20).
 - **Verification** — `cargo test` / the oracle harness (not measured by the dashboard).
 
 Requirements marked `(planned)` after the Implementation link describe future tiers and are excluded from scoring; specs on the current epic's critical path are active. As V-blocks progress, planned requirements flip to active and the dashboard tracks completion.
@@ -58,6 +58,8 @@ Requirements marked `(planned)` after the Implementation link describe future ti
 make assurance              # dashboard
 make assurance VERBOSE=true # per-requirement detail
 make assurance-gate         # CI gate at 75%
+make coverage               # line coverage report (cargo-llvm-cov)
+make coverage-gate          # CI gate: fail if line coverage < 75%
 make traceability           # fast path, no I/O
 ```
 

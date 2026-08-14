@@ -387,7 +387,7 @@ Shift-left principle (from MVL): catch each defect class at the earliest phase t
 | Phase | In place | Phase 1 of V1 adds (#26) | Deferred (deliberate) |
 |-------|----------|--------------------------|------------------------|
 | **Compile time** | rustc, clippy `-D warnings`, rustfmt, mvl-limit (#23) | `#![forbid(unsafe_code)]`, panic-surface lints, `cargo mvl total` experiment on `src/record/` | — |
-| **Test time** | cargo test, llvm-cov, traceability dashboard | proptest roundtrips, cargo-fuzz on `decode_record` (discharges 003 Req 6) | **Mutation testing (cargo-mutants) → V1 exit gate** (epic #5): coverage proves execution, mutation score proves assertion |
+| **Test time** | cargo test, llvm-cov (CI-gated at 75% line coverage, reported on every PR — #20), traceability dashboard | proptest roundtrips, cargo-fuzz on `decode_record` (discharges 003 Req 6) | **Mutation testing (cargo-mutants) → V1 exit gate** (epic #5): coverage proves execution, mutation score proves assertion |
 | **Build time** | Cargo.lock, pinned oracle (004 Req 1) | `--locked` CI, cargo-deny (install at zero deps), SHA-pinned actions | **SBOM / cargo-auditable → publish time** |
 | **Run time** | Structured error taxonomy | The Tier 0 totality claim: any input → `Ok` or structured `Err`, never panic (enforced at compile+fuzz time); `debug_assert!` invariants as code grows | **`integrity_check`-style self-diagnosis → V7** |
 
