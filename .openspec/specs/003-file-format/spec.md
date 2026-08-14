@@ -23,13 +23,15 @@ The system MUST provide a read-only virtual filesystem abstraction with a Unix i
 
 **Implementation:** `src/vfs/mod.rs`
 
-**Tests:** `tests/vfs_test.rs`
+**Tests:** inline #[cfg(test)] in src/vfs/mod.rs
 
 #### Scenario: Read at offset
 
 - GIVEN an open database file of 3 pages
 - WHEN `read_at(buf, page_size)` is called
 - THEN exactly page 2's bytes are returned
+
+**Tests:** `src/vfs/mod.rs::unix_vfs_contract`
 
 #### Scenario: Companion file detection
 
@@ -43,13 +45,15 @@ The system MUST provide a read-only virtual filesystem abstraction with a Unix i
 - WHEN the full VFS test suite runs against both
 - THEN results MUST be identical
 
+**Tests:** `src/vfs/mod.rs::memory_vfs_contract`
+
 ### Requirement 2: Database Header [MUST]
 
 The system MUST parse and validate the 100-byte database header: magic string, page size (including the `1` = 65536 encoding), read/write versions (journal vs WAL mode detection), reserved bytes per page, text encoding, page count, freelist head and count, schema cookie and format, auto-vacuum largest-root page, user version, and application id. Malformed headers MUST produce errors, never panics.
 
 **Implementation:** `src/header.rs`
 
-**Tests:** `tests/header_test.rs`
+**Tests:** inline #[cfg(test)] in src/header.rs
 
 **Corpus:** `tests/corpus/fixtures/pagesizes/`
 
@@ -59,11 +63,15 @@ The system MUST parse and validate the 100-byte database header: magic string, p
 - WHEN the header is parsed
 - THEN a clear "not a SQLite database" error is returned
 
+**Tests:** `src/header.rs::bad_magic_is_rejected`
+
 #### Scenario: Page size decoding
 
 - GIVEN headers declaring page sizes 512, 4096, 65536 (encoded as 1)
 - WHEN parsed
 - THEN the decoded page sizes are 512, 4096, and 65536 respectively
+
+**Tests:** `src/header.rs::page_size_512, `src/header.rs::page_size_65536_via_one_encoding``
 
 #### Scenario: Reserved bytes reduce usable page size
 
@@ -71,11 +79,15 @@ The system MUST parse and validate the 100-byte database header: magic string, p
 - WHEN the usable page size is computed
 - THEN it is `page_size - 12`, and cell content is read within the usable region only
 
+**Tests:** `src/header.rs::reserved_bytes_12`
+
 #### Scenario: WAL mode detection
 
 - GIVEN a database with read/write version bytes = 2
 - WHEN the header is parsed
 - THEN the database is reported as WAL-mode
+
+**Tests:** `src/header.rs::wal_journal_mode_detected`
 
 #### Scenario: Page-1 offset documentation
 
@@ -89,7 +101,7 @@ The system MUST decode SQLite's 1–9 byte big-endian varints. The 9-byte form c
 
 **Implementation:** `src/record/varint.rs`
 
-**Tests:** `tests/record_test.rs`
+**Tests:** inline #[cfg(test)] in src/record/varint.rs
 
 #### Scenario: All lengths decode
 
@@ -97,11 +109,15 @@ The system MUST decode SQLite's 1–9 byte big-endian varints. The 9-byte form c
 - WHEN decoded
 - THEN each yields the correct value and consumed-byte count
 
+**Tests:** `src/record/varint.rs::every_length_from_1_to_9_bytes`
+
 #### Scenario: Nine-byte full width
 
 - GIVEN the 9-byte varint encoding of `u64::MAX`
 - WHEN decoded
 - THEN the value is exactly `u64::MAX`
+
+**Tests:** `src/record/varint.rs::every_length_from_1_to_9_bytes`
 
 #### Scenario: Truncated input
 
@@ -109,13 +125,15 @@ The system MUST decode SQLite's 1–9 byte big-endian varints. The 9-byte form c
 - WHEN decoded
 - THEN an error is returned, no panic
 
+**Tests:** `src/record/varint.rs::truncated_input_errors_not_panics`
+
 ### Requirement 4: Serial Type Decoding [MUST]
 
 The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte signed big-endian integers (types 1–6), IEEE-754 f64 (7), integer constants 0 and 1 (8/9), BLOB (N≥12, even), TEXT (N≥13, odd). Floats MUST round-trip bit-exact (`f64::to_bits` equality with the oracle) — display formatting is out of scope (spec 001 / step 9).
 
-**Implementation:** `src/record/serial.rs`
+**Implementation:** `src/record/decode.rs::decode_serial_value`
 
-**Tests:** `tests/record_test.rs`
+**Tests:** inline #[cfg(test)] in src/record/decode.rs
 
 **Corpus:** `tests/corpus/fixtures/serialtypes/`
 
@@ -125,11 +143,15 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN each value is exact
 
+**Tests:** `src/record/decode.rs::integer_widths_and_edge_values`
+
 #### Scenario: Float bit-exactness
 
 - GIVEN stored REAL values including `-0.0`, `2.5e300`, and a NaN payload
 - WHEN decoded
 - THEN `f64::to_bits()` equals the oracle's stored bits
+
+**Tests:** `src/record/decode.rs::real_edge_values_bit_identical`
 
 #### Scenario: Constant serial types
 
@@ -143,13 +165,15 @@ The system MUST decode every SQLite serial type: NULL (0), 1/2/3/4/6/8-byte sign
 - WHEN decoded
 - THEN empty values are produced, not errors
 
+**Tests:** `src/record/decode.rs::blob_including_zero_length, `src/record/decode.rs::text_utf8_including_empty``
+
 ### Requirement 5: Text Encoding [MUST]
 
 The system MUST decode TEXT values in all three database encodings: UTF-8 (1), UTF-16LE (2), UTF-16BE (3), selected by header byte 56.
 
-**Implementation:** `src/record/text.rs`
+**Implementation:** `src/record/decode.rs`
 
-**Tests:** `tests/record_test.rs`
+**Tests:** inline #[cfg(test)] in src/record/decode.rs
 
 **Corpus:** `tests/corpus/fixtures/encodings/`
 
@@ -159,13 +183,15 @@ The system MUST decode TEXT values in all three database encodings: UTF-8 (1), U
 - WHEN text values are decoded
 - THEN both produce the identical correct string
 
+**Tests:** `src/record/decode.rs::text_utf16le_and_utf16be`
+
 ### Requirement 6: Record Decoding [MUST]
 
 The system MUST decode complete records: header-size varint, serial-type list, then body values in order. Malformed records (header longer than payload, truncated body) MUST return errors, never panic. The decoder is pure — no I/O.
 
-**Implementation:** `src/record/mod.rs`
+**Implementation:** `src/record/decode.rs::decode_record`
 
-**Tests:** `tests/record_test.rs`
+**Tests:** inline #[cfg(test)] in src/record/decode.rs
 
 **Corpus:** `tests/corpus/fixtures/serialtypes/`
 
@@ -180,3 +206,5 @@ The system MUST decode complete records: header-size varint, serial-type list, t
 - GIVEN arbitrary malformed byte sequences
 - WHEN decoded
 - THEN the decoder returns errors and never panics (fuzz target)
+
+**Tests:** `src/record/decode.rs::truncated_record_at_every_offset_errors_not_panics`
