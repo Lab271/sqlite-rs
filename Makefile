@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002
+.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002 spike-003 spike-004
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -87,4 +87,7 @@ spike-002: ## Run spike 002 — file reading (tests/spike/002_file_reading)
 spike-003: ## Run spike 003 — CSV export (tests/spike/003_csv_export)
 	$(MAKE) -C tests/spike/003_csv_export run
 
-test-spikes: spike-001 spike-002 spike-003 ## Run every spike
+spike-004: ## Run spike 004 — WAL frame reading (tests/spike/004_wal_reading)
+	$(MAKE) -C tests/spike/004_wal_reading run
+
+test-spikes: spike-001 spike-002 spike-003 spike-004 ## Run every spike
