@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate spike-001 spike-002 spike-003 spike-004
+.PHONY: help test lint mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree spike-001 spike-002 spike-003 spike-004
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -75,6 +75,13 @@ coverage-gate: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MI
 	  p = json.load(open('target/llvm-cov.json'))['data'][0]['totals']['lines']['percent']; \
 	  print(f'Line coverage: {p:.2f}% (threshold: $(COVERAGE_MIN)%)'); \
 	  sys.exit(0 if p >= $(COVERAGE_MIN) else 1)"
+
+# === Fuzz ===
+
+FUZZ_SECONDS ?= 60
+
+fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
+	cd fuzz && cargo +nightly fuzz run btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
 
 # === Spikes ===
 
