@@ -11,7 +11,7 @@ The fixture corpus and oracle harness — the evidence layer every other spec's 
 
 ## Philosophy
 
-We do not define correctness — SQLite does. Every claim sqlite-rs makes is backed by a diff against a **pinned** oracle build. Spike 002 (#6) proved why pinning matters: macOS's system `sqlite3` is a codec build (see-cccrypt, 12 reserved bytes/page) that silently produces different files than stock SQLite. Oracle drift is treated like a dependency bump: deliberate, reviewed, recorded.
+We do not define correctness — SQLite does. Every claim sqlite-rs makes is backed by a diff against a **pinned** oracle build. Spike 002 (#6) proved why pinning matters: macOS's system `sqlite3` is a codec build (see-cccrypt, 12 reserved bytes/page) that silently produces different files than stock SQLite. Spike #22 isolated the cause: compiling the same version (3.51.0) without the codec flag produces `reserved_space=0`, confirming the codec flag — not the sqlite3 version — is responsible, so a non-codec build is a sufficient pin regardless of version (see `tests/spike/002_file_reading/findings.md`, finding 1). Oracle drift is treated like a dependency bump: deliberate, reviewed, recorded.
 
 ## Requirements
 
