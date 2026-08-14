@@ -11,15 +11,64 @@ script assembles it from three independently-measurable levels:
     Verification:                does the program satisfy its spec?
                                  NOT measured here — see `make verification` / `make test`.
 
-Traceability is scored per *scenario*, not per requirement: a single
-**Tests:** link on a requirement with five `#### Scenario:` blocks only
-covers 1/5 of that requirement's claims, not all of it.
+Features (keep this list current — spec 005's maintenance rule applies
+to this header too):
+
+1.  Spec parsing: walks `.openspec/specs/*/spec.md`, extracting every
+    `### Requirement N: Title [LEVEL]` block and its `#### Scenario:` blocks.
+
+2.  Planned exclusion: an Implementation link suffixed `(planned)` marks the
+    requirement as future work — excluded from all scores, shown as [P] in
+    verbose mode. Flipping planned -> active is how the dashboard tracks
+    V-block progress.
+
+3.  Completeness (S->P): fraction of active requirements whose
+    `**Implementation:**` file exists on disk (path resolved inside the
+    repo; `::qualifiers` stripped).
+
+4.  Coverage (E->P), scenario-weighted: a requirement with 5 scenarios and
+    1 valid test link scores 1/5, not 100%. Per requirement:
+      covered = scenarios with their own valid link
+              + min(requirement-level valid links, scenarios still uncovered)
+    A requirement with no scenarios falls back to binary (any valid link).
+
+5.  Per-scenario Tests links (preferred convention): a `**Tests:**` line
+    INSIDE a `#### Scenario:` block backs exactly that scenario.
+    Requirement-level `**Tests:**` lines (before the first scenario) remain
+    supported as a pool counted against remaining scenarios.
+
+6.  Existence validation: a listed test link only counts if its file exists
+    on disk. A link to a not-yet-written test is a plan, not evidence
+    (symmetric with Completeness).
+
+7.  Symbol validation: a link of the form `path/file.rs::symbol` (or
+    `::Class::method`) only counts if the trailing symbol name also occurs
+    in the file. File-exists-but-symbol-missing is a dead link.
+
+8.  Dead-link reporting: every declared link that fails validation (missing
+    file or missing symbol) is counted, summarized in the dashboard, and
+    listed per-requirement in --verbose.
+
+9.  Corpus links: `**Corpus:**` fixture paths are checked for existence and
+    reported at the Evidence level.
+
+10. Line coverage: reads cached cargo-llvm-cov (target/llvm-cov.json) or
+    tarpaulin output if present; never runs coverage itself.
+
+11. CI gate: --min X exits 1 if completeness OR coverage is below X.
 
 Usage:
     python3 tools/assurance.py                    # full dashboard (traceability + evidence)
-    python3 tools/assurance.py --verbose           # show each requirement
+    python3 tools/assurance.py --verbose           # per-requirement detail + dead links
     python3 tools/assurance.py --traceability-only # fast path: no corpus/coverage I/O
     python3 tools/assurance.py --min 0.75          # CI gate: exit 1 if below 75%
+
+Link syntax accepted on **Tests:** / **Implementation:** lines:
+    `tests/record_test.rs`                          file only
+    `tests/record_test.rs::test_varint_lengths`     file + symbol
+    `src/x.rs::Struct::method`                      trailing symbol is checked
+    inline #[cfg(test)] in src/record/varint.rs     prose containing a path
+    comma-separated lists of the above
 """
 
 import argparse
@@ -28,12 +77,44 @@ import sys
 from pathlib import Path
 
 SPEC_DIR = Path(__file__).parent.parent / ".openspec" / "specs"
-SRC_DIR = Path(__file__).parent.parent / "src"
-TESTS_DIR = Path(__file__).parent.parent / "tests"
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+
+
+def _validate_link(entry):
+    """Validate one link entry. Returns (entry, error) — error is None if valid.
+
+    Feature 6 (file must exist) and feature 7 (trailing ::symbol must occur
+    in the file). Prose entries ("inline #[cfg(test)] in src/x.rs") are
+    reduced to their path token first.
+    """
+    entry = re.sub(r"\(planned[^)]*\)", "", entry).replace("`", "").strip()
+    if not entry:
+        return None
+    parts = entry.split("::")
+    file_part = parts[0].strip()
+    m = re.search(r"[\w/.-]+\.(?:rs|py|sh|toml)", file_part)
+    if m:
+        file_part = m.group(0)
+    resolved = (REPO_ROOT / file_part).resolve()
+    if not (resolved.is_relative_to(REPO_ROOT) and resolved.exists() and resolved.is_file()):
+        return (entry, "file missing")
+    if len(parts) > 1:
+        symbol = re.sub(r"\(.*\)$", "", parts[-1].strip())
+        if symbol and symbol not in resolved.read_text():
+            return (entry, f"symbol '{symbol}' not in file")
+    return (entry, None)
+
+
+def _parse_tests_line(text):
+    """Extract comma-separated link entries from the first **Tests:** line in text."""
+    m = re.search(r"\*\*Tests:\*\*\s*(.+)", text)
+    if not m:
+        return []
+    return [e for e in (x.strip() for x in m.group(1).split(",")) if e]
 
 
 def parse_specs():
-    """Parse all spec files and extract requirements."""
+    """Parse all spec files and extract requirements (features 1-2, 5-9)."""
     requirements = []
     for spec_dir in sorted(SPEC_DIR.iterdir()):
         spec_file = spec_dir / "spec.md" if spec_dir.is_dir() else None
@@ -43,7 +124,6 @@ def parse_specs():
         text = spec_file.read_text()
         spec_name = spec_dir.name
 
-        # Find all requirements
         req_blocks = re.split(r"(?=^### Requirement \d+)", text, flags=re.MULTILINE)
         for block in req_blocks:
             m = re.match(r"### Requirement (\d+): (.+?) \[(\w+)\]", block)
@@ -52,53 +132,58 @@ def parse_specs():
 
             num, title, level = m.group(1), m.group(2), m.group(3)
 
-            # Check for Implementation link
-            impl_match = re.search(r"\*\*Implementation:\*\*\s*`(.+?)`(\s*\(planned[^)]*\))?", block)
+            # Split into requirement preamble and per-scenario chunks (feature 5)
+            chunks = re.split(r"(?=^#### Scenario:)", block, flags=re.MULTILINE)
+            preamble, scenario_blocks = chunks[0], chunks[1:]
+            scenarios = len(scenario_blocks)
+
+            # Implementation link (feature 3) — from preamble only
+            impl_match = re.search(
+                r"\*\*Implementation:\*\*\s*`(.+?)`(\s*\(planned[^)]*\))?", preamble
+            )
             impl_path = impl_match.group(1) if impl_match else None
             planned = bool(impl_match and impl_match.group(2))
-            impl_file = impl_path.split("::")[0].strip() if impl_path else None
-            if impl_file and not planned:
-                _resolved = (SRC_DIR.parent / impl_file).resolve()
-                _repo_root = SRC_DIR.parent.resolve()
-                impl_exists = _resolved.is_relative_to(_repo_root) and _resolved.exists()
-            else:
-                impl_exists = False
+            impl_exists = False
+            if impl_path and not planned:
+                impl_file = impl_path.split("::")[0].strip()
+                resolved = (REPO_ROOT / impl_file).resolve()
+                impl_exists = resolved.is_relative_to(REPO_ROOT) and resolved.exists()
 
-            # Check for Tests link. A requirement's **Tests:** line may list
-            # several comma-separated test paths — that count is the number
-            # of distinct claims it can plausibly back, used below to weight
-            # scenario-level coverage rather than treat the link as binary.
-            tests_match = re.search(r"\*\*Tests:\*\*\s*(.+)", block)
-            tests_path = tests_match.group(1).strip() if tests_match else None
-            # A listed test only counts if its file exists on disk — a link
-            # to a not-yet-written test is a plan, not evidence (symmetric
-            # with impl_exists above).
-            tests_listed = 0
+            dead_links = []
+
+            # Requirement-level Tests pool (from preamble, feature 4/6/7)
             tests_declared = 0
-            if tests_path:
-                for entry in tests_path.split(","):
-                    entry = entry.strip().strip("`")
-                    if not entry:
+            req_level_valid = 0
+            for entry in _parse_tests_line(preamble):
+                v = _validate_link(entry)
+                if v is None:
+                    continue
+                tests_declared += 1
+                if v[1] is None:
+                    req_level_valid += 1
+                else:
+                    dead_links.append(v)
+
+            # Per-scenario Tests links (feature 5)
+            scenarios_backed = 0
+            for sb in scenario_blocks:
+                entries = _parse_tests_line(sb)
+                backed = False
+                for entry in entries:
+                    v = _validate_link(entry)
+                    if v is None:
                         continue
                     tests_declared += 1
-                    test_file = entry.split("::")[0].strip()
-                    # strip inline qualifiers like "inline #[cfg(test)] in src/x.rs"
-                    m2 = re.search(r"[\w/.-]+\.rs", test_file)
-                    if m2:
-                        test_file = m2.group(0)
-                    resolved = (SRC_DIR.parent / test_file).resolve()
-                    repo_root = SRC_DIR.parent.resolve()
-                    if resolved.is_relative_to(repo_root) and resolved.exists():
-                        tests_listed += 1
+                    if v[1] is None:
+                        backed = True
+                    else:
+                        dead_links.append(v)
+                if backed:
+                    scenarios_backed += 1
 
-            # Check for Corpus link
+            # Corpus links (feature 9) — anywhere in the block
             corpus_files = re.findall(r"\*\*Corpus:\*\*\s*`(.+?)`", block)
-            corpus_present = all(
-                (SRC_DIR.parent / f).exists() for f in corpus_files
-            )
-
-            # Count scenarios
-            scenarios = len(re.findall(r"#### Scenario:", block))
+            corpus_present = all((REPO_ROOT / f).exists() for f in corpus_files)
 
             requirements.append(
                 {
@@ -109,10 +194,10 @@ def parse_specs():
                     "impl_path": impl_path,
                     "impl_exists": impl_exists,
                     "planned": planned,
-                    "tests_path": tests_path,
-                    "tests_linked": tests_listed > 0,
                     "tests_declared": tests_declared,
-                    "tests_listed": tests_listed,
+                    "req_level_valid": req_level_valid,
+                    "scenarios_backed": scenarios_backed,
+                    "dead_links": dead_links,
                     "corpus_files": corpus_files,
                     "corpus_present": corpus_present,
                     "scenarios": scenarios,
@@ -122,31 +207,28 @@ def parse_specs():
     return requirements
 
 
-def scenario_coverage(r):
-    """Fraction of a requirement's falsifiable claims backed by a test link.
+def covered_scenarios(r):
+    """Number of a requirement's scenarios backed by a valid test link (feature 4).
 
-    A requirement with no `#### Scenario:` blocks (older specs predate the
-    scenario format) has nothing to weight against, so it falls back to the
-    previous binary reading: 1.0 if any test is linked, else 0.0.
-
-    A requirement with N scenarios and a **Tests:** line listing only M < N
-    tests is scored M/N, not 1.0 — one link cannot silently cover five
-    claims.
+    Scenario-level links back their own scenario; requirement-level links are
+    a pool counted against scenarios not already backed directly.
     """
     if r["scenarios"] == 0:
-        return 1.0 if r["tests_linked"] else 0.0
-    return min(r["tests_listed"], r["scenarios"]) / r["scenarios"]
+        return 0
+    remaining = r["scenarios"] - r["scenarios_backed"]
+    return r["scenarios_backed"] + min(r["req_level_valid"], remaining)
+
+
+def scenario_coverage(r):
+    """Fraction of a requirement's falsifiable claims backed by a valid test link."""
+    if r["scenarios"] == 0:
+        return 1.0 if (r["req_level_valid"] + r["scenarios_backed"]) > 0 else 0.0
+    return covered_scenarios(r) / r["scenarios"]
 
 
 def _get_test_coverage():
-    """Try to read cached line coverage from cargo-tarpaulin or cargo-llvm-cov.
-
-    Returns a string like '87.3%' or None if no coverage tool is available.
-    Doesn't run coverage itself — reads cached results if present (`make coverage`
-    populates the cache).
-    """
-    # Try llvm-cov cache (macOS + Linux)
-    llvm_cov_out = Path(__file__).parent.parent / "target" / "llvm-cov.json"
+    """Read cached line coverage (feature 10). Never runs coverage itself."""
+    llvm_cov_out = REPO_ROOT / "target" / "llvm-cov.json"
     if llvm_cov_out.exists():
         try:
             import json
@@ -156,8 +238,7 @@ def _get_test_coverage():
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
 
-    # Try tarpaulin cache (Linux only)
-    tarpaulin_out = Path(__file__).parent.parent / "target" / "tarpaulin" / "coverage.json"
+    tarpaulin_out = REPO_ROOT / "target" / "tarpaulin" / "coverage.json"
     if tarpaulin_out.exists():
         try:
             import json
@@ -173,13 +254,8 @@ def _get_test_coverage():
 def report(requirements, verbose=False, traceability_only=False):
     """Print the assurance dashboard: Traceability, then Evidence.
 
-    Planned requirements (marked `(planned)` after the Implementation backtick)
-    are excluded from totals — they describe aspirational architecture, not
-    current behaviour, and double-counting them as missing distorts the metric.
-
-    Returns (completeness, coverage) — the two independent traceability
-    ratios. There is no longer a combined "assurance" ratio: it was the
-    conjunction of these two and could not fall below either.
+    Planned requirements are excluded from totals (feature 2). Returns
+    (completeness, coverage) — two independent traceability ratios.
     """
     planned_count = sum(1 for r in requirements if r["planned"])
     active = [r for r in requirements if not r["planned"]]
@@ -193,12 +269,13 @@ def report(requirements, verbose=False, traceability_only=False):
     total_scenarios = sum(r["scenarios"] for r in active)
 
     completeness = impl_exists / total if total else 0
-
-    # Coverage is scenario-weighted: sum each requirement's scenario_coverage()
-    # and average over the requirement count, so a requirement with partial
-    # scenario coverage contributes partially rather than as a flat 0/1.
     coverage = sum(scenario_coverage(r) for r in active) / total if total else 0
-    tests_linked = sum(1 for r in active if r["tests_linked"])
+
+    declared = sum(1 for r in active if r["tests_declared"] > 0)
+    existing = sum(1 for r in active if (r["req_level_valid"] + r["scenarios_backed"]) > 0)
+    total_dead = sum(len(r["dead_links"]) for r in active)
+    backed = sum(covered_scenarios(r) for r in active)
+    direct = sum(r["scenarios_backed"] for r in active)
 
     print("=" * 60)
     print("sqlite-rs Assurance Case")
@@ -212,12 +289,12 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"  - File exists:      {impl_exists}/{total}")
     print()
     print(f"Coverage (E->P):      scenario-weighted  ({coverage:.0%})")
-    declared = sum(1 for r in active if r.get("tests_declared", 0) > 0)
     print(f"  - Tests declared:   {declared}/{total} requirements (links in spec)")
-    print(f"  - Tests existing:   {tests_linked}/{total} requirements (files on disk)")
+    print(f"  - Tests valid:      {existing}/{total} requirements (file + symbol exist)")
     if total_scenarios:
-        weighted = sum(min(r["tests_listed"], r["scenarios"]) for r in active if r["scenarios"])
-        print(f"  - Scenarios backed: {weighted}/{total_scenarios} (requirements with #### Scenario: blocks only)")
+        print(f"  - Scenarios backed: {backed}/{total_scenarios} ({direct} by per-scenario links)")
+    if total_dead:
+        print(f"  - DEAD LINKS:       {total_dead} (declared but file/symbol missing — see --verbose)")
 
     if not traceability_only:
         corpus_total = sum(1 for r in active if r["corpus_files"])
@@ -241,7 +318,7 @@ def report(requirements, verbose=False, traceability_only=False):
         print()
         print("  Legend: [impl][tests][corpus]")
         print("    impl:   ✓=exists  ○=linked/missing  P=planned  ✗=not linked")
-        print("    tests:  T=fully linked  t=partially linked  -=none")
+        print("    tests:  T=all scenarios backed  t=partially  -=none")
         print("    corpus: C=present c=linked/missing  -=none")
         print()
         for r in requirements:
@@ -252,24 +329,24 @@ def report(requirements, verbose=False, traceability_only=False):
             cov = scenario_coverage(r)
             test_status = "T" if cov >= 1.0 else "t" if cov > 0.0 else "-"
             corpus_status = (
-                "C"
-                if r["corpus_files"] and r["corpus_present"]
-                else "c"
-                if r["corpus_files"]
+                "C" if r["corpus_files"] and r["corpus_present"]
+                else "c" if r["corpus_files"]
                 else "-"
             )
             print(
                 f"  [{status}][{test_status}][{corpus_status}] "
                 f"{r['spec']}/Req {r['num']}: {r['title']} "
-                f"({r['scenarios']} scenarios, {cov:.0%} backed)"
+                f"({covered_scenarios(r)}/{r['scenarios']} scenarios backed)"
             )
+            for entry, err in r["dead_links"]:
+                print(f"        DEAD: {entry} — {err}")
 
     return completeness, coverage
 
 
 def main():
     parser = argparse.ArgumentParser(description="sqlite-rs Assurance Dashboard")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show each requirement")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show each requirement + dead links")
     parser.add_argument(
         "--traceability-only",
         action="store_true",
