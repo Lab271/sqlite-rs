@@ -40,6 +40,9 @@ pub enum BtreeError {
     #[error("overflow chain from page {page_num} exceeded {max} pages (possible cycle)")]
     OverflowChainTooLong { page_num: u32, max: usize },
 
+    #[error("overflow chain from page {page_num} revisited page {revisited_page} (cycle)")]
+    OverflowChainCycle { page_num: u32, revisited_page: u32 },
+
     #[error("overflow chain from page {page_num} ended before all payload bytes were read")]
     OverflowChainTruncated { page_num: u32 },
 

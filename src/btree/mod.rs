@@ -102,6 +102,10 @@ impl<P: PageSource> TableCursor<P> {
     /// exists.
     pub fn seek(&mut self, target_rowid: i64) -> Result<Option<TableRow>, BtreeError> {
         let mut page_num = self.root_page;
+        // A local budget, independent of `self.pages_visited` — `seek` is a
+        // standalone point lookup, not part of the `first`/`next` traversal,
+        // so it must not accumulate against (or be capped by) unrelated
+        // calls made earlier or later on this same long-lived cursor.
         let mut visited = 0usize;
         loop {
             visited += 1;
@@ -110,7 +114,10 @@ impl<P: PageSource> TableCursor<P> {
                     max: MAX_PAGES_VISITED,
                 });
             }
-            let page = self.read_page(page_num)?;
+            let page = self
+                .source
+                .read_page(page_num)
+                .map_err(|source| BtreeError::PageSource { page_num, source })?;
             let header_start = page1_header_start(page_num);
             let page_type = read_page_type(&page, header_start, page_num)?;
             let num_cells = read_num_cells(&page, header_start, page_num)?;
@@ -342,10 +349,23 @@ fn reassemble_payload<P: PageSource>(
     let mut result = local_bytes.to_vec();
     let available = usable_size.saturating_sub(4).max(1) as u64;
     let mut hops = 0usize;
+    // A legitimate SQLite overflow chain never revisits a page — each
+    // overflow page is freshly allocated. Tracking visited page numbers
+    // catches a chain that cycles through a small number of real pages
+    // immediately, rather than relying solely on MAX_PAGES_VISITED (which a
+    // cycling chain could otherwise ride all the way up to, forcing up to
+    // ~64GB of reads/copies out of a file only a couple of pages large).
+    let mut visited_overflow_pages = std::collections::HashSet::new();
 
     while remaining > 0 {
         if overflow_page == 0 {
             return Err(BtreeError::OverflowChainTruncated { page_num });
+        }
+        if !visited_overflow_pages.insert(overflow_page) {
+            return Err(BtreeError::OverflowChainCycle {
+                page_num,
+                revisited_page: overflow_page,
+            });
         }
         hops += 1;
         if hops > MAX_PAGES_VISITED {
@@ -584,6 +604,20 @@ mod tests {
     }
 
     #[test]
+    fn seek_does_not_accumulate_pages_visited_across_calls() {
+        // `pages_visited` backs the `first`/`next` traversal budget; `seek`
+        // must track its own local budget instead of consuming this one, or
+        // a long-lived cursor doing many point lookups would eventually
+        // start failing valid seeks once the cumulative total crossed
+        // MAX_PAGES_VISITED.
+        let mut cursor = open_cursor("table_multipage.db");
+        for _ in 0..50 {
+            cursor.seek(1500).unwrap();
+        }
+        assert_eq!(cursor.pages_visited, 0);
+    }
+
+    #[test]
     fn overflow_single_page_payload_is_byte_identical_to_oracle() {
         let mut cursor = open_cursor("overflow_single_page.db");
         let row = cursor.first().unwrap().unwrap();
@@ -795,6 +829,48 @@ mod tests {
         assert!(matches!(
             err,
             BtreeError::OverflowChainTruncated { page_num: 2 }
+        ));
+    }
+
+    #[test]
+    fn overflow_chain_cycle_errors_quickly_not_after_a_million_hops() {
+        // A cell declaring a payload big enough to need several overflow
+        // hops (usable_size=512: local_size=476, remaining=1524, so 3 hops
+        // would be needed if the chain were legitimate), but whose sole
+        // overflow page points back to itself. Without cycle detection this
+        // would ride MAX_PAGES_VISITED all the way up before erroring
+        // (forcing ~64GB of reads/copies out of a 2-page file at large page
+        // sizes); with it, the repeat is caught on the second visit.
+        let mut page2 = vec![0u8; 512];
+        page2[0] = 0x0d; // leaf table
+        page2[3..5].copy_from_slice(&1u16.to_be_bytes()); // num_cells = 1
+        let cell_ptr_off = 8usize;
+        let cell_start = 16usize;
+        page2[cell_ptr_off..cell_ptr_off + 2].copy_from_slice(&(cell_start as u16).to_be_bytes());
+
+        let mut cell = Vec::new();
+        cell.extend_from_slice(&encode_varint_for_test(2000)); // payload_len
+        cell.extend_from_slice(&encode_varint_for_test(1)); // rowid
+        cell.extend(std::iter::repeat_n(0u8, 476)); // local_size for usable_size=512
+        cell.extend_from_slice(&3u32.to_be_bytes()); // overflow pointer -> page 3
+        page2[cell_start..cell_start + cell.len()].copy_from_slice(&cell);
+
+        let mut page3 = vec![0u8; 512];
+        page3[0..4].copy_from_slice(&3u32.to_be_bytes()); // self-referencing next pointer
+
+        let mut pages = HashMap::new();
+        pages.insert(2u32, page2);
+        pages.insert(3u32, page3);
+        let source = FakePageSource { pages };
+        let mut cursor = TableCursor::new(source, &fake_header(), 2);
+
+        let err = cursor.first().unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::OverflowChainCycle {
+                page_num: 2,
+                revisited_page: 3
+            }
         ));
     }
 
