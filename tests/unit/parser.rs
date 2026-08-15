@@ -338,3 +338,23 @@ fn test_roundtrip_fixpoint() {
         assert_eq!(printed1, printed2, "not a fixpoint for {src:?}");
     }
 }
+
+// ---- pathological input: deep nesting must not overflow the stack -------
+
+#[test]
+fn test_deeply_nested_parens_rejected_not_crashed() {
+    let nested = format!("SELECT {}1{}", "(".repeat(10_000), ")".repeat(10_000));
+    match parse_select(&nested) {
+        ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected Invalid for pathologically nested input, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_deeply_nested_not_rejected_not_crashed() {
+    let nested = format!("SELECT {}1", "NOT ".repeat(10_000));
+    match parse_select(&nested) {
+        ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected Invalid for pathologically nested input, got {other:?}"),
+    }
+}

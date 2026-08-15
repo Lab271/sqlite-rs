@@ -63,7 +63,10 @@ const CASES: &[(&str, Outcome)] = &[
 ];
 
 fn scratch_db() -> PathBuf {
-    let path = std::env::temp_dir().join("sqlite_rs_parser_oracle_test.db");
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_parser_oracle_test_{}.db",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let status = Command::new("sqlite3")
         .arg(&path)

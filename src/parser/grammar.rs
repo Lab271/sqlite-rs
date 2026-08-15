@@ -22,7 +22,13 @@ use super::tokenizer::{Keyword, Param, Span, Token, TokenKind};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
+
+/// Recursion-depth cap for `expr`/`not_expr`/`unary_expr`, so pathological
+/// input (many nested `(`, or repeated `NOT`/unary operators) returns a
+/// clean `ParseFail::Invalid` instead of overflowing the stack.
+const MAX_EXPR_DEPTH: usize = 200;
 
 fn join_span(a: Span, b: Span) -> Span {
     Span {
@@ -35,7 +41,26 @@ fn join_span(a: Span, b: Span) -> Span {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Guards a recursive-descent entry point: increments the depth
+    /// counter, fails with `Invalid` past `MAX_EXPR_DEPTH` instead of
+    /// recursing further, and always decrements again afterward
+    /// (including on error) so sibling subtrees aren't penalized.
+    fn with_depth_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        self.depth = self.depth.saturating_add(1);
+        if self.depth > MAX_EXPR_DEPTH {
+            self.depth = self.depth.saturating_sub(1);
+            return self.invalid("expression nesting too deep");
+        }
+        let result = f(self);
+        self.depth = self.depth.saturating_sub(1);
+        result
     }
 
     // ---- token stream helpers ----------------------------------------
@@ -310,7 +335,8 @@ impl Parser {
             return self.unsupported("JOIN / multi-table FROM not yet supported");
         }
         if matches!(self.peek().kind, TokenKind::LParen) {
-            return self.unsupported("subquery in FROM not yet supported");
+            return self
+                .unsupported("table-valued functions / subqueries in FROM not yet supported");
         }
 
         Ok(TableRef { name, alias, span })
@@ -346,7 +372,7 @@ impl Parser {
     // ---- expressions -----------------------------------------------------
 
     pub(super) fn expr(&mut self) -> PResult<Expr> {
-        self.or_expr()
+        self.with_depth_guard(|this| this.or_expr())
     }
 
     fn or_expr(&mut self) -> PResult<Expr> {
@@ -368,19 +394,21 @@ impl Parser {
     }
 
     fn not_expr(&mut self) -> PResult<Expr> {
-        if self.at_kw(Keyword::NOT) {
-            let start = self.advance().span;
-            let inner = self.not_expr()?;
-            let span = join_span(start, inner.span);
-            return Ok(Expr {
-                kind: ExprKind::Unary {
-                    op: UnaryOp::Not,
-                    expr: Box::new(inner),
-                },
-                span,
-            });
-        }
-        self.equality_expr()
+        self.with_depth_guard(|this| {
+            if this.at_kw(Keyword::NOT) {
+                let start = this.advance().span;
+                let inner = this.not_expr()?;
+                let span = join_span(start, inner.span);
+                return Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(inner),
+                    },
+                    span,
+                });
+            }
+            this.equality_expr()
+        })
     }
 
     fn equality_expr(&mut self) -> PResult<Expr> {
@@ -647,25 +675,27 @@ impl Parser {
     }
 
     fn unary_expr(&mut self) -> PResult<Expr> {
-        let op = match self.peek().kind {
-            TokenKind::Plus => Some(UnaryOp::Plus),
-            TokenKind::Minus => Some(UnaryOp::Minus),
-            TokenKind::BitNot => Some(UnaryOp::BitNot),
-            _ => None,
-        };
-        if let Some(op) = op {
-            let start = self.advance().span;
-            let inner = self.unary_expr()?;
-            let span = join_span(start, inner.span);
-            return Ok(Expr {
-                kind: ExprKind::Unary {
-                    op,
-                    expr: Box::new(inner),
-                },
-                span,
-            });
-        }
-        self.primary_expr()
+        self.with_depth_guard(|this| {
+            let op = match this.peek().kind {
+                TokenKind::Plus => Some(UnaryOp::Plus),
+                TokenKind::Minus => Some(UnaryOp::Minus),
+                TokenKind::BitNot => Some(UnaryOp::BitNot),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let start = this.advance().span;
+                let inner = this.unary_expr()?;
+                let span = join_span(start, inner.span);
+                return Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op,
+                        expr: Box::new(inner),
+                    },
+                    span,
+                });
+            }
+            this.primary_expr()
+        })
     }
 
     fn primary_expr(&mut self) -> PResult<Expr> {
