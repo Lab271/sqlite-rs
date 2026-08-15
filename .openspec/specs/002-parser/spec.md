@@ -406,6 +406,14 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 - WHEN parsed
 - THEN parse fails with error pointing to `FROM`
 
+#### Scenario: SQL text corpus labels match real SQLite
+
+- GIVEN the three-way labeled corpus at `tests/corpus/sql/{valid_in_subset,valid_out_of_subset,invalid}/*.sql` (#2), covering the V2 SELECT-core subset plus representative V3/V4+ statements and malformed SQL
+- WHEN each statement runs against the pinned oracle
+- THEN `valid_in_subset` and `valid_out_of_subset` statements succeed and `invalid` statements are rejected — validating the corpus's labels ahead of the real parser (#61), which will replace the oracle check with sqlite-rs's own parser
+
+**Tests:** `tests/corpus/sql_corpus_test.rs::valid_in_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::valid_out_of_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::invalid_statements_are_rejected_by_real_sqlite`
+
 ### Requirement 3: AST Completeness [MUST]
 
 The AST MUST represent all SQLite SQL constructs without loss of information.
