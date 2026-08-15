@@ -4,6 +4,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.5.0] - 2026-08-15 — V2 phase 1: tokenizer
+
+`src/parser/tokenizer.rs` — a complete SQL tokenizer, spec `002-parser` Requirement 1, #60.
+
+### Added
+
+- **`src/parser/tokenizer.rs`**: `Token`/`Span`/`TokenKind`/`Keyword`/`Param` types and the scanner. Covers all 146 SQLite reserved keywords (case-insensitive), bare/quoted/bracketed/backticked identifiers, integer/hex/float/string/blob/`NULL`/`TRUE`/`FALSE` literals, all operators/punctuation (incl. `||`, `->`, `->>`), five parameter forms (`?`, `?NNN`, `:name`, `@name`, `$name`), and `--`/`/* */` comments. Every token carries a line/column/byte-offset `Span`; malformed input always yields a `TokenKind::Error`, never a panic.
+- `tests/tokenizer_proptest.rs`: tokenize/print roundtrip and never-panics-on-arbitrary-input property tests.
+
+### Changed
+
+- `.openspec/specs/002-parser/spec.md`: Requirement 1 flips `(planned)` → active, all 4 scenarios test-linked.
+
 ## [0.4.0] - 2026-08-14 — V1 phase 4: the deliverable
 
 `sqlite-rs dump`/`export` CLI — V1 step 9, epic #5's acceptance-gate ticket (#37, #49).

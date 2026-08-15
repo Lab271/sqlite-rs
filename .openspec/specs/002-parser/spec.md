@@ -342,7 +342,7 @@ pub enum Expr {
 
 The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST carry source location for error reporting.
 
-**Implementation:** `src/parser/tokenizer.rs` (planned)
+**Implementation:** `src/parser/tokenizer.rs`
 
 #### Scenario: Tokenize SELECT
 
@@ -350,11 +350,15 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 - WHEN tokenized
 - THEN tokens: `[Select, Identifier("a"), Comma, Identifier("b"), From, Identifier("t"), Where, Identifier("x"), Gt, Integer(10)]`
 
+**Tests:** `src/parser/tokenizer.rs::test_tokenize_select`
+
 #### Scenario: Tokenize string literals
 
 - GIVEN `'hello''world'` (SQLite escaping)
 - WHEN tokenized
 - THEN one String token with value `hello'world`
+
+**Tests:** `src/parser/tokenizer.rs::test_tokenize_string_literal_escaping`
 
 #### Scenario: Tokenize blob literal
 
@@ -362,11 +366,15 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 - WHEN tokenized
 - THEN one Blob token with bytes `[72, 69, 76, 76, 79]` ("HELLO")
 
+**Tests:** `src/parser/tokenizer.rs::test_tokenize_blob_literal`
+
 #### Scenario: Tokenize parameters
 
 - GIVEN `?, ?1, :name, @var, $param`
 - WHEN tokenized
 - THEN five Param tokens with appropriate kinds
+
+**Tests:** `src/parser/tokenizer.rs::test_tokenize_parameters`
 
 ### Requirement 2: Grammar Compatibility [MUST]
 
