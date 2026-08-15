@@ -138,6 +138,26 @@ NULL_EXPRS = [
     "coalesce(NULL, NULL, 3)", "1 <> NULL",
 ]
 
+FUNCTION_EXPRS = [
+    "length('héllo')", "length(x'0011')", "length(12345)", "length(NULL)",
+    "upper('café')", "lower('CAFÉ')",
+    "substr('hello',-3)", "substr('hello',0)", "substr('hello',2,-1)",
+    "substr('hello',-100,2)", "substr('hello',2,2)",
+    "abs(-5)", "abs('abc')", "abs(NULL)",
+    "coalesce(NULL,NULL,3)", "ifnull(NULL,5)", "nullif(1,1)", "nullif(1,2)",
+    "typeof(NULL)", "typeof(1)", "typeof(1.5)", "typeof('a')", "typeof(x'00')",
+    "hex('AB')", "hex(5)", "hex(1.5)", "unhex('4142')", "unhex('xyz')",
+    "quote('it''s')", "quote(x'0011')", "quote(NULL)", "quote(1.5)",
+    "min(3,1,2)", "max(3,1,2)", "min(1,NULL)", "max(1,NULL)",
+    "round(2.5)", "round(-2.5)", "round(1.5,0)",
+    "sign(-5)", "sign(0)", "sign(5)", "sign(NULL)",
+    "instr('hello world','wor')", "instr('hello','x')", "instr(NULL,'x')",
+    "trim('  hi  ')", "ltrim('xxhixx','x')", "rtrim('xxhixx','x')",
+    "replace('abcabc','a','Z')",
+    "typeof(zeroblob(3))", "length(zeroblob(3))",
+    "iif(1,'a','b')", "iif(0,'a','b')", "iif(NULL,'a','b')",
+]
+
 COERCION_EXPRS = [
     "'123' + 1", "'123abc' + 1", "'abc' + 1", "'  123  ' + 1",
     "'1e3' + 1", "'0x10' + 1", "'' + 1", "'.5' + 1",
@@ -169,6 +189,7 @@ def main():
     write_jsonl(OUT_DIR / "collation.jsonl", eval_exprs(oracle, COLLATION_EXPRS))
     write_jsonl(OUT_DIR / "null.jsonl", eval_exprs(oracle, NULL_EXPRS))
     write_jsonl(OUT_DIR / "coercion.jsonl", eval_exprs(oracle, COERCION_EXPRS))
+    write_jsonl(OUT_DIR / "functions.jsonl", eval_exprs(oracle, FUNCTION_EXPRS))
 
     print(f"wrote vectors to {OUT_DIR} using oracle {oracle} ({ORACLE_VERSION})")
 

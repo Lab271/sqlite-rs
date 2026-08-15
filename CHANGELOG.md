@@ -4,7 +4,7 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [Unreleased] — V2 phase 2 (in progress)
+## [0.6.0] - 2026-08-15 — V2 phase 2 complete
 
 ### Added
 
@@ -19,6 +19,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   or VDBE-evaluator coupling — runs parallel to the #61 parser work.
   Spend: matched the medium estimate. Fuzz/proptest coverage deferred
   to #85.
+- **`tests/fuzz/fuzz_targets/semantics_compare.rs`**, **`tests/semantics_proptest.rs`**:
+  fuzz + proptest coverage for the value-semantics kernel (#78 follow-up,
+  #85), spec `008-value-semantics` Requirements 1, 2, 5 — `compare`
+  antisymmetry/transitivity/never-panics across arbitrary `Value` pairs
+  and collations, `apply_affinity` idempotence, `coerce_text_to_numeric`
+  idempotence on numeric text. Spend: matched the Small (~100k) estimate.
+- **`src/vdbe/functions.rs`**: the V2 scalar function set — spec
+  `008-value-semantics` Requirement 6, #79. `length`, `upper`/`lower`,
+  `substr` (a faithful port of SQLite's `substrFunc` index arithmetic),
+  `abs`, `coalesce`/`ifnull`/`nullif`, `typeof`, `hex`/`unhex`, `quote`,
+  scalar `min`/`max`, `round`, `sign`, `instr`, `trim`/`ltrim`/`rtrim`,
+  `replace`, `zeroblob`, `iif` — pure `fn(&[Value]) -> Result<Value,
+  FunctionError>`, dispatched through a case-insensitive name+arity
+  registry (`call_function`), ready for phase 3's `Function` opcode.
+  Known gap: `quote()`'s REAL rendering doesn't byte-exact-match
+  SQLite's own (observably build-dependent) higher-precision routine —
+  same divergence already scoped out of `.dump`/`-list` in #37. Spend:
+  matched the large estimate.
+
+This closes out V2 phase 2 (value semantics + scalar functions) — next
+up is V2 phase 3 (single-table SELECT execution, the `Function` opcode).
 
 ## [0.5.4] - 2026-08-15 — value-semantics kernel fuzz/proptest coverage
 

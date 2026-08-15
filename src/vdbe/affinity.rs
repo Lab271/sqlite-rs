@@ -72,8 +72,12 @@ mod tests {
     use std::path::Path;
 
     fn vectors() -> String {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/expr_vectors/affinity.jsonl");
+        // `cargo test` runs with the working directory set to the crate
+        // root, so a path relative to it needs no
+        // `env!("CARGO_MANIFEST_DIR")` — the mvl-limit gate (Makefile)
+        // doesn't allow that macro here (see src/header.rs's `fixture`
+        // helper for the same convention).
+        let path = Path::new("tests/corpus/expr_vectors/affinity.jsonl");
         fs::read_to_string(path).unwrap()
     }
 

@@ -155,3 +155,64 @@ fn coercion_vectors_cover_text_parsing_and_overflow_promotion() {
         "integer overflow must promote to REAL, not wrap: {overflow}"
     );
 }
+
+#[test]
+fn function_vectors_cover_null_propagation_and_the_coalesce_exception() {
+    let vectors = read_lines("functions");
+    let length_null = vectors
+        .iter()
+        .find(|v| v.contains(r#""expr": "length(NULL)""#))
+        .expect("missing length(NULL) vector");
+    assert!(
+        length_null.contains(r#""type": "null""#),
+        "length(NULL) must propagate NULL: {length_null}"
+    );
+    let coalesce = vectors
+        .iter()
+        .find(|v| v.contains(r#""expr": "coalesce(NULL,NULL,3)""#))
+        .expect("missing coalesce NULL-skipping vector");
+    assert!(
+        coalesce.contains(r#""value_quoted": "3""#),
+        "coalesce must skip NULLs to find the first non-NULL: {coalesce}"
+    );
+}
+
+#[test]
+fn function_vectors_cover_ascii_only_case_folding() {
+    let vectors = read_lines("functions");
+    assert!(
+        vectors
+            .iter()
+            .any(|v| v.contains(r#""expr": "upper('café')""#) && v.contains("CAFé")),
+        "upper() must be ASCII-only — 'é' must not fold to 'É'"
+    );
+}
+
+#[test]
+fn function_vectors_cover_substr_negative_and_zero_index_rules() {
+    let vectors = read_lines("functions");
+    for expected in [
+        r#""expr": "substr('hello',-3)""#,
+        r#""expr": "substr('hello',0)""#,
+        r#""expr": "substr('hello',2,-1)""#,
+        r#""expr": "substr('hello',-100,2)""#,
+    ] {
+        assert!(
+            vectors.iter().any(|v| v.contains(expected)),
+            "functions.jsonl missing substr vector {expected}"
+        );
+    }
+}
+
+#[test]
+fn function_vectors_quote_output_is_byte_exact_with_escaped_quotes() {
+    let vectors = read_lines("functions");
+    let quoted = vectors
+        .iter()
+        .find(|v| v.contains(r#""expr": "quote('it''s')""#))
+        .expect("missing quote() single-quote-escaping vector");
+    assert!(
+        quoted.contains(r"'''it''''s'''"),
+        "quote() must double embedded single quotes byte-exact: {quoted}"
+    );
+}

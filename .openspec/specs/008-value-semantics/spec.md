@@ -250,3 +250,70 @@ INTEGER)` on a REAL truncates toward zero.
   or floor
 
 **Tests:** `tests/corpus/expr_vectors_test.rs::coercion_vectors_cover_text_parsing_and_overflow_promotion`
+
+### Requirement 6: Scalar Function Core [MUST]
+
+The V2 scalar set (`length`, `upper`, `lower`, `substr`, `abs`, `coalesce`,
+`ifnull`, `nullif`, `typeof`, `hex`, `unhex`, `quote`, scalar `min`/`max`,
+`round`, `sign`, `instr`, `trim`/`ltrim`/`rtrim`, `replace`, `zeroblob`,
+`iif`) MUST be implemented as pure `fn(&[Value]) -> Result<Value,
+FunctionError>` and dispatched through a case-insensitive name+arity
+registry. Most functions MUST propagate NULL on any NULL argument;
+`coalesce`/`ifnull` are the documented exception (first non-NULL
+argument, or NULL if all are NULL). `upper`/`lower` MUST fold ASCII case
+only, matching NOCASE (Requirement 3) — never Unicode case folding.
+`length()` MUST count UTF-8 characters for TEXT, bytes for BLOB, and the
+character length of the CAST-to-TEXT representation for numeric
+arguments. `substr()`'s index arithmetic (negative/zero `Y`, negative
+`Z`) MUST match SQLite's `substrFunc` exactly, not a simplified
+one-sided-negative-index approximation.
+
+**Implementation:** `src/vdbe/functions.rs`
+
+**Corpus:** `tests/corpus/expr_vectors/functions.jsonl`
+
+**Known gap:** `quote()`'s REAL rendering reuses [`format_real`]'s
+15-significant-digit rule rather than SQLite's own higher-precision
+`quote()` routine (observed up to ~19 significant digits on irrational
+sums, and itself build-dependent across sqlite3 binaries — see the
+`src/format.rs` REAL-rendering note for the identical divergence already
+scoped out of `.dump`/`-list`, issue #37). Exact-precision `quote()` on
+REAL is tracked as a follow-up, not solved by this requirement.
+
+#### Scenario: Most functions propagate NULL; coalesce/ifnull are the exception
+
+- GIVEN `length(NULL)` and `coalesce(NULL, NULL, 3)`
+- THEN `length(NULL)` evaluates to NULL, but `coalesce(NULL, NULL, 3)`
+  evaluates to `3` — coalesce/ifnull skip NULL arguments rather than
+  propagating
+
+**Tests:** `tests/corpus/expr_vectors_test.rs::function_vectors_cover_null_propagation_and_the_coalesce_exception`
+
+#### Scenario: upper/lower fold ASCII case only
+
+- GIVEN `upper('café')`
+- THEN it evaluates to `'CAFé'`, not `'CAFÉ'` — the `é` is left
+  unmodified because ASCII-only folding has no notion of non-ASCII case
+
+**Tests:** `tests/corpus/expr_vectors_test.rs::function_vectors_cover_ascii_only_case_folding`
+
+#### Scenario: substr handles negative and zero indices per substrFunc
+
+- GIVEN `substr('hello', -3)`, `substr('hello', 0)`,
+  `substr('hello', 2, -1)`, and `substr('hello', -100, 2)`
+- THEN they evaluate to `'llo'`, `'hello'`, `'h'`, and `''` respectively —
+  negative `Y` counts from the end, `Y = 0` behaves like `Y = 1` for the
+  no-length form, negative `Z` takes the `abs(Z)` characters preceding
+  position `Y`, and an out-of-range negative `Y` clamps rather than
+  panicking or wrapping
+
+**Tests:** `tests/corpus/expr_vectors_test.rs::function_vectors_cover_substr_negative_and_zero_index_rules`
+
+#### Scenario: quote() escapes embedded single quotes byte-exact
+
+- GIVEN `quote('it''s')`
+- THEN it evaluates to `'''it''''s'''` — every single quote in the input,
+  including ones already escaped in the SQL literal, is doubled in the
+  output
+
+**Tests:** `tests/corpus/expr_vectors_test.rs::function_vectors_quote_output_is_byte_exact_with_escaped_quotes`
