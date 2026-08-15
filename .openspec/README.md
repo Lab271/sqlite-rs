@@ -53,7 +53,7 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 
 Follows the mvl convention: every requirement carries `**Implementation:**` and `**Tests:**` links (plus `**Corpus:**` where fixtures back it), and every requirement has `#### Scenario:` blocks in Given-When-Then form. `tools/assurance.py` parses the specs and assembles the case from three levels:
 
-- **Model** — plan position (crate version → V-block/phase/epic via the one-minor-per-phase policy) and grammar-model rule counts per V-block from `grammar/sqlite.ebnf`.
+- **Model** — three cross-checked sources: crate version (Cargo.toml) → V-block/phase/epic via the one-minor-per-phase policy; block names and count from [plan.md](plan.md)'s value-blocks table; grammar-model rule counts per V-block from `grammar/sqlite.ebnf` (a grammar tag missing from plan.md is drift).
 - **Traceability** — *Completeness (S→P):* does each requirement's implementation file exist? *Coverage (E→P):* scenario-weighted — a requirement with 5 scenarios and 1 test link scores 1/5, not 100%.
 - **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov). CI enforces a 75% line-coverage gate on every push/PR (`make coverage-gate`) and posts the per-file report as a sticky PR comment, so this evidence is refreshed and visible on every PR rather than only available locally (#20).
 - **Verification** — `cargo test` / the oracle harness (not measured by the dashboard).

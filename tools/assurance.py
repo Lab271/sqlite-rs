@@ -66,12 +66,14 @@ to this header too):
 
 11. CI gate: --min X exits 1 if completeness OR coverage is below X.
 
-12. Model level: reads the crate version from Cargo.toml, maps it to
-    V-block / phase / epic via VERSION_MAP (the versioning policy:
-    one minor per completed plan phase), and reports grammar-model
-    rule counts per V-block from .openspec/grammar/sqlite.ebnf.
-    The released version marks the last completed phase; work in
-    flight targets the next minor.
+12. Model level — three sources, cross-checked:
+    - Cargo.toml: crate version, mapped to V-block/phase/epic via
+      VERSION_MAP (one minor per completed plan phase; released =
+      last completed phase, in-flight = next minor)
+    - .openspec/plan.md: the value-blocks table is the source of
+      block names/descriptions and the block-count denominator
+    - .openspec/grammar/sqlite.ebnf: grammar-model rule counts per
+      V-block tag; a tag not present in plan.md's blocks is DRIFT
 
 Usage:
     python3 tools/assurance.py                    # full dashboard (traceability + evidence)
@@ -96,6 +98,7 @@ SPEC_DIR = Path(__file__).parent.parent / ".openspec" / "specs"
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 EBNF_PATH = REPO_ROOT / ".openspec" / "grammar" / "sqlite.ebnf"
 CARGO_TOML = REPO_ROOT / "Cargo.toml"
+PLAN_PATH = REPO_ROOT / ".openspec" / "plan.md"
 
 # Versioning policy (CHANGELOG): one minor per completed plan phase.
 # minor -> (value block, phase, epic). Extend as blocks are planned.
@@ -112,6 +115,16 @@ def crate_version():
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
+def plan_blocks():
+    """Value blocks from plan.md's '## Value Blocks' table: {V-block: description}."""
+    if not PLAN_PATH.exists():
+        return {}
+    blocks = {}
+    for m in re.finditer(r"^\|\s*\*\*(V\d+)\*\*\s*\|\s*([^|]+?)\s*\|", PLAN_PATH.read_text(), re.MULTILINE):
+        blocks.setdefault(m.group(1), m.group(2))
+    return blocks
+
+
 def grammar_model():
     """V-block rule counts from the grammar EBNF (feature 12)."""
     if not EBNF_PATH.exists():
@@ -123,8 +136,9 @@ def grammar_model():
 
 
 def report_model():
-    """Print the Model level: plan position + grammar-model coverage."""
+    """Print the Model level: plan position (plan.md + Cargo.toml) + grammar model (sqlite.ebnf)."""
     print("-- Model " + "-" * 51)
+    blocks = plan_blocks()
     ver = crate_version()
     if ver:
         _, minor, _ = ver
@@ -134,18 +148,26 @@ def report_model():
         if released:
             block, phase, epic = released
             line = f"Version {vstr} = {block} phase {phase} released (epic {epic})"
+            print(line)
             if working:
                 wb, wp, we = working
-                line += f"; in flight: 0.{minor + 1}.0 = {wb} phase {wp} (epic {we})"
-            print(line)
+                title = blocks.get(wb, "")
+                suffix = f" — {title}" if title else ""
+                print(f"In flight:            0.{minor + 1}.0 = {wb} phase {wp} (epic {we}){suffix}")
         else:
             print(f"Version {vstr} (no VERSION_MAP entry — extend the map)")
+    if blocks:
+        print(f"Plan:                 {len(blocks)} value blocks (.openspec/plan.md)")
     model = grammar_model()
     if model:
         total = sum(model.values())
         parts = ", ".join(f"{k}: {v}" for k, v in sorted(model.items()))
+        tagged = ", ".join(sorted(model))
         print(f"Grammar model:        {total} rules defined ({parts}) — .openspec/grammar/sqlite.ebnf")
-        print("                      drift-checked by `make grammar-drift`")
+        print(f"                      covers {len(model)}/{len(blocks) or '?'} plan blocks; drift-checked by `make grammar-drift`")
+        unknown_tags = sorted(set(model) - set(blocks)) if blocks else []
+        if unknown_tags:
+            print(f"  DRIFT: grammar tags not in plan.md value blocks: {', '.join(unknown_tags)}")
     else:
         print("Grammar model:        .openspec/grammar/sqlite.ebnf missing")
     print()
