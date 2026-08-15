@@ -42,12 +42,7 @@ impl Drop for UnixSharedLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        let _ = fcntl_lock(
-            &self.file,
-            i32::from(libc::F_UNLCK),
-            SHARED_FIRST,
-            SHARED_SIZE,
-        );
+        let _ = fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE);
     }
 }
 
@@ -57,7 +52,7 @@ impl Drop for UnixSharedLock {
 /// `to_lock_error` is what turns those into a distinguishable "database is
 /// locked" error one layer up).
 pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
-    fcntl_lock(file, i32::from(libc::F_RDLCK), SHARED_FIRST, SHARED_SIZE)?;
+    fcntl_lock(file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
     Ok(UnixSharedLock {
         file: file.try_clone()?,
     })
@@ -67,7 +62,18 @@ pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
 /// journal-mode SHARED lock above and (via `pub(crate)`) for the WAL
 /// `-shm` reader-mark lock bytes in `src/vfs/shm.rs`; the underlying
 /// syscall is identical, only the byte offsets differ.
-pub(crate) fn fcntl_lock(file: &File, kind: i32, start: off_t, len: off_t) -> io::Result<()> {
+pub(crate) fn fcntl_lock(
+    file: &File,
+    kind: impl Into<i32>,
+    start: off_t,
+    len: off_t,
+) -> io::Result<()> {
+    // `libc::F_RDLCK`/`F_WRLCK`/`F_UNLCK` are `i16` on macOS but already
+    // `i32` on Linux glibc — `Into<i32>` normalizes both without an `as`
+    // cast or `i32::from` call visible at any call site, which clippy
+    // would otherwise flag as redundant on whichever platform the
+    // constant is already `i32`.
+    let kind: i32 = kind.into();
     let fl = libc::flock {
         l_type: kind as _,
         l_whence: libc::SEEK_SET as _,
