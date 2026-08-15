@@ -4,6 +4,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased] — V2 phase 2 (in progress)
+
+### Added
+
+- **`src/vdbe/`**: the value-semantics kernel — spec `008-value-semantics`
+  Requirements 1-5, #78. `affinity.rs` (5-way type affinity derivation +
+  application), `compare.rs` (cross-type comparison order, NULL <
+  numeric < text < blob, with SQLite's exact `i64`/`f64` boundary
+  comparison), `collation.rs` (BINARY/NOCASE/RTRIM), `coerce.rs`
+  (longest-valid-numeric-prefix text coercion, checked arithmetic with
+  REAL-overflow promotion), `value.rs` (NULL propagation, three-valued
+  `AND`/`OR`/`NOT`, `IS`/`IS NOT`). Pure functions on `Value`, no parser
+  or VDBE-evaluator coupling — runs parallel to the #61 parser work.
+  Spend: matched the medium estimate. Fuzz/proptest coverage deferred
+  to #85.
+
 ## [0.5.2] - 2026-08-15 — V2 phase 1: SELECT-core parser
 
 Hand-written recursive-descent parser + typed AST for the SELECT-core V2
