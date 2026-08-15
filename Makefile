@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test lint deny mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
+.PHONY: help test test-lib test-doc test-proptest lint deny mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -26,9 +26,33 @@ help: ## Show this help
 
 # === Test ===
 
-test: ## Run the unit test suite + public-API tests (excludes tests/corpus — see test-corpus)
-	cargo test --locked --lib --bins
-	cargo test --locked --test unit_header --test unit_record --test unit_vfs
+test: ## Run every test except the corpus oracle diffs (unit, public-API, proptest, doctests — see test-corpus)
+	cargo test --locked
+
+# Shortcuts for tight inner loops. Deliberately NOT dependencies of `test`:
+# it stays a plain `cargo test` so that adding a test file can never drop it
+# from the suite. `--lib --bins --doc` together cover only three of cargo's
+# target kinds and would miss every `tests/*.rs` integration target — which
+# is exactly how `record_proptest` went unrun for as long as it did.
+test-lib: ## Just the library unit tests (fastest inner loop)
+	cargo test --locked --lib
+
+test-doc: ## Just the doctests
+	cargo test --locked --doc
+
+test-proptest: ## Just the property tests
+	cargo test --locked --test record_proptest
+
+test-corpus: ## Run the fixture corpus / oracle harness against a pinned real sqlite3 (see .openspec/specs/004-corpus)
+	cargo test --locked --test corpus
+
+verification: test ## Verification level of the assurance case (alias for `make test`)
+
+# === Gates ===
+#
+# Everything here is a pass/fail check intended to block a merge. Keep them
+# fast and hermetic: the PR gate is only useful if it is cheap enough that
+# nobody is tempted to skip it.
 
 lint: ## Run clippy and check formatting
 	cargo clippy --locked --all-targets -- -D warnings
@@ -40,8 +64,6 @@ deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
 	  echo "install: cargo install cargo-deny"; \
 	  exit 1; }
 	cargo deny check
-
-verification: test ## Verification level of the assurance case (alias for `make test`)
 
 mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes, src/vfs (dyn boundary), and src/bin (stdout/stderr CLI I/O boundary) exempt)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
@@ -56,11 +78,10 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
 
+# === Fixtures ===
+
 fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/gen_fixtures.sh
 	./tools/gen_fixtures.sh
-
-test-corpus: ## Run the fixture corpus / oracle harness (see .openspec/specs/004-corpus)
-	cargo test --locked --test corpus
 
 # === Assurance ===
 
@@ -74,7 +95,15 @@ traceability: ## Fast path: traceability only, no corpus/coverage I/O
 	@python3 tools/assurance.py --traceability-only $(if $(VERBOSE),--verbose)
 
 coverage: ## Run the test suite under coverage instrumentation and print a line coverage report (cargo-llvm-cov)
+	# Two instrumented runs merged into one report. The corpus harness is
+	# `test = false` in Cargo.toml, so `cargo test` skips it by default and
+	# it must be named explicitly — otherwise every line only the oracle
+	# diffs reach would silently read as uncovered. `clean` first, then
+	# accumulate with `--no-report`, per cargo-llvm-cov's documented
+	# merge-multiple-runs workflow.
+	cargo llvm-cov clean --workspace
 	cargo llvm-cov --locked --no-report
+	cargo llvm-cov --locked --no-report --test corpus
 	cargo llvm-cov report
 	cargo llvm-cov report --json --output-path target/llvm-cov.json
 

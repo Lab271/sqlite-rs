@@ -3,90 +3,32 @@
 //! `-csv`/`-list` modes exactly" acceptance bar, exercised across every
 //! table of every non-`invalid`, non-hot-journal corpus fixture.
 //!
-//! Deliberately NOT in `harness.rs`/`oracle.rs`: those modules'
-//! documented design is "never shell out to `sqlite3`, read only
-//! committed fixtures." This file is a scoped, explicit exception —
-//! read-only (`-readonly`, never opens for write, so it cannot mutate a
-//! committed fixture the way an accidental read-write open could) and
-//! skipped entirely (not failed) if no `sqlite3` binary is on `PATH`, so
-//! a machine without one still passes `make test-corpus`.
+//! Deliberately NOT in `harness.rs`: that module's documented design is
+//! "never shell out to `sqlite3`, read only committed fixtures." Live
+//! oracle invocation is a scoped, explicit exception, and the helpers for
+//! it live in `oracle.rs` (shared with `cli_e2e_test.rs`) — always
+//! `-readonly`, so the oracle cannot mutate a committed fixture the way
+//! an accidental read-write open could, and skipped entirely (not failed)
+//! when no `sqlite3` binary is on `PATH`, so a machine without one still
+//! passes `make test-corpus`.
+//!
+//! This file compares at the *library* level (`dump_database` plus the
+//! `format_*` functions). `cli_e2e_test.rs` covers the same ground
+//! through the actual CLI binary, where the header row, file naming, and
+//! exit codes also come into play (#55).
 
 use crate::harness::{discover_fixtures, FAMILIES};
+use crate::oracle::{oracle_csv_output, oracle_list_output, pinned_oracle, skip_no_oracle};
 use sqlite_rs::dump::dump_database;
 use sqlite_rs::format::{format_csv_value, format_list_value};
 use sqlite_rs::vfs::UnixVfs;
-use std::path::Path;
-use std::process::Command;
-
-fn sqlite3_available() -> bool {
-    Command::new("sqlite3")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-/// The oracle's own value for one column: `quote(col)` for a BLOB-typed
-/// column (list/csv mode can't print raw bytes at all), the column
-/// itself otherwise. Determined per-row via `typeof()`, since a column's
-/// *declared* type doesn't guarantee every row's dynamic storage class
-/// (e.g. the serial-type-8/9 REAL-as-integer-constant case this crate's
-/// own `dump` module already accounts for).
-fn oracle_list_output(db: &Path, table: &str, columns: &[String]) -> String {
-    let select_list = columns
-        .iter()
-        .map(|c| format!("(case when typeof(\"{c}\")='blob' then quote(\"{c}\") else \"{c}\" end)"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("select {select_list} from \"{table}\"");
-    let output = Command::new("sqlite3")
-        .arg("-readonly")
-        .arg("-list")
-        .arg("-separator")
-        .arg("|")
-        .arg("-nullvalue")
-        .arg("NULL")
-        .arg(db)
-        .arg(&sql)
-        .output()
-        .unwrap_or_else(|e| panic!("running sqlite3 oracle on {}: {e}", db.display()));
-    assert!(
-        output.status.success(),
-        "sqlite3 oracle failed on {} table {table}: {}",
-        db.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn oracle_csv_output(db: &Path, table: &str, columns: &[String]) -> String {
-    let select_list = columns
-        .iter()
-        .map(|c| format!("(case when typeof(\"{c}\")='blob' then quote(\"{c}\") else \"{c}\" end)"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("select {select_list} from \"{table}\"");
-    let output = Command::new("sqlite3")
-        .arg("-readonly")
-        .arg("-csv")
-        .arg(db)
-        .arg(&sql)
-        .output()
-        .unwrap_or_else(|e| panic!("running sqlite3 oracle on {}: {e}", db.display()));
-    assert!(
-        output.status.success(),
-        "sqlite3 oracle failed on {} table {table}: {}",
-        db.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
 
 #[test]
 fn dump_matches_sqlite3_list_mode_across_corpus() {
-    if !sqlite3_available() {
-        eprintln!("skipping: no sqlite3 on PATH");
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("dump_matches_sqlite3_list_mode_across_corpus");
         return;
-    }
+    };
 
     let invalid_or_hot_journal = |p: &std::path::Path| {
         let in_invalid = p
@@ -134,7 +76,7 @@ fn dump_matches_sqlite3_list_mode_across_corpus() {
                     })
                     .collect();
                 let mine_list = mine_list.join("\n") + if mine_list.is_empty() { "" } else { "\n" };
-                let oracle_list = oracle_list_output(&path, &table.name, &table.columns);
+                let oracle_list = oracle_list_output(&oracle, &path, &table.name, &table.columns);
                 assert_eq!(
                     mine_list,
                     oracle_list,
@@ -153,8 +95,13 @@ fn dump_matches_sqlite3_list_mode_across_corpus() {
                             .join(",")
                     })
                     .collect();
-                let mine_csv = mine_csv.join("\n") + if mine_csv.is_empty() { "" } else { "\n" };
-                let oracle_csv = oracle_csv_output(&path, &table.name, &table.columns);
+                // `-csv` mode terminates rows with CRLF (unlike `-list`'s bare LF)
+                // — see `CSV_ROW_TERMINATOR` in `src/bin/sqlite-rs.rs`.
+                let mine_csv = mine_csv
+                    .iter()
+                    .map(|line| format!("{line}\r\n"))
+                    .collect::<String>();
+                let oracle_csv = oracle_csv_output(&oracle, &path, &table.name, &table.columns);
                 assert_eq!(
                     mine_csv,
                     oracle_csv,
