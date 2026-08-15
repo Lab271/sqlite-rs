@@ -47,3 +47,10 @@ path = "fuzz_targets/semantics_compare.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scalar_functions"
+path = "fuzz_targets/scalar_functions.rs"
+test = false
+doc = false
+bench = false

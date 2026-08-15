@@ -31,6 +31,24 @@ fn t1_expression_kernel_affinity_and_collation_vectors() {
     unimplemented!()
 }
 
+/// V2 phase 2 — scalar function core (#79): dispatch through the
+/// registry never panics, NULL propagates for the general case, and
+/// coalesce is the documented NULL-propagation exception. Full
+/// oracle-vector coverage lives in
+/// `tests/corpus/expr_vectors_test.rs::function_vectors_*`.
+#[test]
+fn t1_scalar_functions_match_oracle() {
+    use sqlite_rs::record::Value;
+    use sqlite_rs::vdbe::call_function;
+
+    assert_eq!(call_function("length", &[Value::Null]), Ok(Value::Null));
+    assert_eq!(
+        call_function("coalesce", &[Value::Null, Value::Null, Value::Integer(3)]),
+        Ok(Value::Integer(3))
+    );
+    assert!(call_function("nope", &[]).is_err());
+}
+
 #[test]
 #[ignore = "V2 phase 3 — single-table SELECT execution"]
 fn t1_single_table_where_matches_oracle() {

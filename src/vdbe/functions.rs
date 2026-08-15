@@ -1,0 +1,654 @@
+//! The V2 scalar function set (spec 008, Requirement 6): pure
+//! `fn(&[Value]) -> Result<Value, FunctionError>` implementations plus a
+//! name+arity registry, ready for phase 3's `Function` opcode. Mirrors
+//! SQLite's `func.c` behavior for the built-ins listed in issue #79 —
+//! `length`, `upper`/`lower`, `substr`, `abs`, `coalesce`/`ifnull`/
+//! `nullif`, `typeof`, `hex`/`unhex`, `quote`, scalar `min`/`max`,
+//! `round`, `sign`, `instr`, `trim`/`ltrim`/`rtrim`, `replace`,
+//! `zeroblob`, `iif`.
+//!
+//! Known gap: `quote()`'s REAL rendering reuses [`format_real`]'s
+//! 15-significant-digit rule rather than SQLite's own higher-precision
+//! `quote()` routine (observed up to ~19 significant digits on
+//! irrational sums) — the same divergence `src/format.rs` already scopes
+//! out of `.dump`/`-list` rendering (issue #37). Tracked as a follow-up
+//! rather than solved here.
+
+// Every `args[n]` index below is provably in-bounds: `call()`'s registry
+// match arms gate on exact arity before dispatching, so each function
+// body only indexes positions its own arm guarantees are present.
+#![allow(clippy::indexing_slicing)]
+
+use std::cmp::Ordering;
+
+use thiserror::Error;
+
+use crate::format::{format_blob, format_real};
+use crate::record::Value;
+use crate::vdbe::collation::Collation;
+use crate::vdbe::compare::compare;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FunctionError {
+    #[error("unknown function {name} with {arity} argument(s)")]
+    Unknown { name: String, arity: usize },
+
+    #[error("wrong number of arguments to function {name}()")]
+    WrongArity { name: String },
+
+    #[error("integer overflow")]
+    IntegerOverflow,
+}
+
+/// Renders `v` the way `CAST(v AS TEXT)` would, for `length()`/`hex()` on
+/// non-blob arguments — an integer/real's *text* representation, not its
+/// storage bytes.
+fn as_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(r) => format_real(*r),
+        Value::Text(s) => s.clone(),
+        Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),
+    }
+}
+
+fn length(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(match &args[0] {
+        Value::Null => Value::Null,
+        Value::Blob(b) => Value::Integer(b.len() as i64),
+        Value::Text(s) => Value::Integer(s.chars().count() as i64),
+        other => Value::Integer(as_text(other).chars().count() as i64),
+    })
+}
+
+fn upper(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(match &args[0] {
+        Value::Null => Value::Null,
+        Value::Text(s) => Value::Text(s.to_ascii_uppercase()),
+        other => other.clone(),
+    })
+}
+
+fn lower(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(match &args[0] {
+        Value::Null => Value::Null,
+        Value::Text(s) => Value::Text(s.to_ascii_lowercase()),
+        other => other.clone(),
+    })
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn value_int(v: &Value) -> i64 {
+    match v {
+        Value::Integer(i) => *i,
+        Value::Real(r) => *r as i64,
+        Value::Text(s) => crate::vdbe::coerce::cast_to_integer(&Value::Text(s.clone())),
+        Value::Null | Value::Blob(_) => 0,
+    }
+}
+
+/// Faithful port of SQLite's `substrFunc` (`func.c`): 1-based indexing,
+/// negative `Y` counts from the end, negative `Z` takes the `abs(Z)`
+/// characters *preceding* position `Y`, `Y == 0` shifts `Z` down by one.
+/// Character-indexed for text, byte-indexed for blobs.
+fn substr(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[1], Value::Null) || args.get(2).is_some_and(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let mut p1 = value_int(&args[1]);
+    let (mut p2, neg_p2) = match args.get(2) {
+        Some(z) => {
+            let raw = value_int(z);
+            if raw < 0 {
+                (raw.saturating_neg(), true)
+            } else {
+                (raw, false)
+            }
+        }
+        None => (i64::MAX / 2, false),
+    };
+
+    let blob = match &args[0] {
+        Value::Blob(b) => Some(b),
+        _ => None,
+    };
+    let len: i64 = if let Some(b) = blob {
+        b.len() as i64
+    } else if p1 < 0 {
+        as_text(&args[0]).chars().count() as i64
+    } else {
+        0
+    };
+
+    if p1 < 0 {
+        p1 = p1.saturating_add(len);
+        if p1 < 0 {
+            p2 = p2.saturating_add(p1);
+            if p2 < 0 {
+                p2 = 0;
+            }
+            p1 = 0;
+        }
+    } else if p1 > 0 {
+        p1 = p1.saturating_sub(1);
+    } else if p2 > 0 {
+        p2 = p2.saturating_sub(1);
+    }
+
+    if neg_p2 {
+        p1 = p1.saturating_sub(p2);
+        if p1 < 0 {
+            p2 = p2.saturating_add(p1);
+            p1 = 0;
+        }
+    }
+    let p1 = p1.max(0) as usize;
+    let p2 = p2.max(0) as usize;
+
+    if let Some(b) = blob {
+        let start = p1.min(b.len());
+        let end = start.saturating_add(p2).min(b.len());
+        Ok(Value::Blob(b[start..end].to_vec()))
+    } else {
+        let text = as_text(&args[0]);
+        let out: String = text.chars().skip(p1).take(p2).collect();
+        Ok(Value::Text(out))
+    }
+}
+
+fn abs(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(match &args[0] {
+        Value::Null => Value::Null,
+        Value::Integer(i) => Value::Integer(i.checked_abs().ok_or(FunctionError::IntegerOverflow)?),
+        Value::Real(r) => Value::Real(r.abs()),
+        // Text/blob arguments always coerce through the REAL path — even
+        // a clean integer-looking string like '5' yields REAL 5.0, per
+        // the oracle (abs() does not attempt the INTEGER-preserving path
+        // for non-numeric-typed inputs).
+        other => Value::Real(value_f64(other).abs()),
+    })
+}
+
+fn coalesce(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(args
+        .iter()
+        .find(|v| !matches!(v, Value::Null))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn nullif(args: &[Value]) -> Result<Value, FunctionError> {
+    let (a, b) = (&args[0], &args[1]);
+    if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        return Ok(a.clone());
+    }
+    if compare(a, b, Collation::Binary) == Ordering::Equal {
+        Ok(Value::Null)
+    } else {
+        Ok(a.clone())
+    }
+}
+
+fn typeof_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    let s = match &args[0] {
+        Value::Null => "null",
+        Value::Integer(_) => "integer",
+        Value::Real(_) => "real",
+        Value::Text(_) => "text",
+        Value::Blob(_) => "blob",
+    };
+    Ok(Value::Text(s.to_string()))
+}
+
+fn hex(args: &[Value]) -> Result<Value, FunctionError> {
+    let bytes: Vec<u8> = match &args[0] {
+        Value::Blob(b) => b.clone(),
+        other => as_text(other).into_bytes(),
+    };
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for b in bytes {
+        out.push_str(&format!("{b:02X}"));
+    }
+    Ok(Value::Text(out))
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c.saturating_sub(b'0')),
+        b'a'..=b'f' => Some(c.saturating_sub(b'a').saturating_add(10)),
+        b'A'..=b'F' => Some(c.saturating_sub(b'A').saturating_add(10)),
+        _ => None,
+    }
+}
+
+fn unhex(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = as_text(&args[0]);
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return Ok(Value::Null);
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks(2) {
+        let (Some(hi), Some(lo)) = (hex_digit(pair[0]), hex_digit(pair[1])) else {
+            return Ok(Value::Null);
+        };
+        out.push((hi << 4) | lo);
+    }
+    Ok(Value::Blob(out))
+}
+
+fn sql_quote_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_add(2));
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push('\'');
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+fn quote(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(Value::Text(match &args[0] {
+        Value::Null => "NULL".to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(r) => format_real(*r),
+        Value::Text(s) => sql_quote_text(s),
+        Value::Blob(b) => format_blob(b),
+    }))
+}
+
+fn scalar_min(args: &[Value]) -> Result<Value, FunctionError> {
+    if args.iter().any(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    Ok(args
+        .iter()
+        .min_by(|a, b| compare(a, b, Collation::Binary))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn scalar_max(args: &[Value]) -> Result<Value, FunctionError> {
+    if args.iter().any(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    Ok(args
+        .iter()
+        .max_by(|a, b| compare(a, b, Collation::Binary))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn value_f64(v: &Value) -> f64 {
+    match v {
+        Value::Integer(i) => *i as f64,
+        Value::Real(r) => *r,
+        Value::Text(s) => match crate::vdbe::coerce::coerce_text_to_numeric(s) {
+            Value::Integer(i) => i as f64,
+            Value::Real(r) => r,
+            _ => 0.0,
+        },
+        Value::Null | Value::Blob(_) => 0.0,
+    }
+}
+
+/// Half-away-from-zero rounding to `digits` decimal places, always
+/// returning REAL (matches SQLite's `round()`, which never returns
+/// INTEGER even for a whole-number result).
+fn round_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let x = value_f64(&args[0]);
+    let digits = args.get(1).map_or(0, value_int).max(0);
+    #[allow(clippy::cast_precision_loss)]
+    let scale = 10f64.powi(digits as i32);
+    let scaled = x * scale;
+    let rounded = if scaled >= 0.0 {
+        (scaled + 0.5).floor()
+    } else {
+        (scaled - 0.5).ceil()
+    };
+    Ok(Value::Real(rounded / scale))
+}
+
+fn sign(args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(match &args[0] {
+        Value::Null => Value::Null,
+        other => {
+            let n = value_f64(other);
+            Value::Integer(if n > 0.0 {
+                1
+            } else if n < 0.0 {
+                -1
+            } else {
+                0
+            })
+        }
+    })
+}
+
+fn instr(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let pos = if let Value::Blob(hay) = &args[0] {
+        let needle = match &args[1] {
+            Value::Blob(b) => b.clone(),
+            other => as_text(other).into_bytes(),
+        };
+        find_bytes(hay, &needle)
+    } else {
+        let haystack = as_text(&args[0]);
+        let needle = as_text(&args[1]);
+        haystack
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(haystack.len()))
+            .position(|i| haystack[i..].starts_with(&needle))
+    };
+    Ok(Value::Integer(
+        pos.map_or(0, |p| (p as i64).saturating_add(1)),
+    ))
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn trim_charset(args: &[Value]) -> String {
+    args.get(1).map_or(" ".to_string(), as_text)
+}
+
+fn trim_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let charset: Vec<char> = trim_charset(args).chars().collect();
+    let s = as_text(&args[0]);
+    Ok(Value::Text(
+        s.trim_matches(|c| charset.contains(&c)).to_string(),
+    ))
+}
+
+fn ltrim_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let charset: Vec<char> = trim_charset(args).chars().collect();
+    let s = as_text(&args[0]);
+    Ok(Value::Text(
+        s.trim_start_matches(|c| charset.contains(&c)).to_string(),
+    ))
+}
+
+fn rtrim_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+    let charset: Vec<char> = trim_charset(args).chars().collect();
+    let s = as_text(&args[0]);
+    Ok(Value::Text(
+        s.trim_end_matches(|c| charset.contains(&c)).to_string(),
+    ))
+}
+
+fn replace_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if args.iter().any(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let s = as_text(&args[0]);
+    let from = as_text(&args[1]);
+    let to = as_text(&args[2]);
+    if from.is_empty() {
+        return Ok(Value::Text(s));
+    }
+    Ok(Value::Text(s.replace(&from, &to)))
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn zeroblob(args: &[Value]) -> Result<Value, FunctionError> {
+    let n = value_int(&args[0]).max(0);
+    Ok(Value::Blob(vec![0u8; n as usize]))
+}
+
+fn iif(args: &[Value]) -> Result<Value, FunctionError> {
+    let cond = match &args[0] {
+        Value::Null => false,
+        Value::Integer(i) => *i != 0,
+        Value::Real(r) => *r != 0.0,
+        Value::Text(s) => !matches!(
+            crate::vdbe::coerce::coerce_text_to_numeric(s),
+            Value::Integer(0)
+        ),
+        Value::Blob(_) => false,
+    };
+    Ok(if cond {
+        args[1].clone()
+    } else {
+        args[2].clone()
+    })
+}
+
+type ScalarFn = fn(&[Value]) -> Result<Value, FunctionError>;
+
+/// Looks up a scalar function by case-insensitive name and arity,
+/// invokes it, and reports an unknown name/arity combination.
+pub fn call(name: &str, args: &[Value]) -> Result<Value, FunctionError> {
+    let arity = args.len();
+    let f: Option<ScalarFn> = match (name.to_ascii_lowercase().as_str(), arity) {
+        ("length", 1) => Some(length),
+        ("upper", 1) => Some(upper),
+        ("lower", 1) => Some(lower),
+        ("substr", 2 | 3) => Some(substr),
+        ("abs", 1) => Some(abs),
+        ("coalesce", n) if n >= 2 => Some(coalesce),
+        ("ifnull", 2) => Some(coalesce),
+        ("nullif", 2) => Some(nullif),
+        ("typeof", 1) => Some(typeof_fn),
+        ("hex", 1) => Some(hex),
+        ("unhex", 1) => Some(unhex),
+        ("quote", 1) => Some(quote),
+        ("min", n) if n >= 1 => Some(scalar_min),
+        ("max", n) if n >= 1 => Some(scalar_max),
+        ("round", 1 | 2) => Some(round_fn),
+        ("sign", 1) => Some(sign),
+        ("instr", 2) => Some(instr),
+        ("trim", 1 | 2) => Some(trim_fn),
+        ("ltrim", 1 | 2) => Some(ltrim_fn),
+        ("rtrim", 1 | 2) => Some(rtrim_fn),
+        ("replace", 3) => Some(replace_fn),
+        ("zeroblob", 1) => Some(zeroblob),
+        ("iif", 3) => Some(iif),
+        _ => None,
+    };
+    match f {
+        Some(f) => f(args),
+        None => Err(FunctionError::Unknown {
+            name: name.to_string(),
+            arity,
+        }),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn v(name: &str, args: &[Value]) -> Value {
+        call(name, args).unwrap()
+    }
+
+    #[test]
+    fn length_counts_chars_for_text_bytes_for_blob() {
+        assert_eq!(
+            v("length", &[Value::Text("héllo".to_string())]),
+            Value::Integer(5)
+        );
+        assert_eq!(
+            v("length", &[Value::Blob(vec![0, 1, 2])]),
+            Value::Integer(3)
+        );
+        assert_eq!(v("length", &[Value::Integer(12345)]), Value::Integer(5));
+        assert_eq!(v("length", &[Value::Null]), Value::Null);
+    }
+
+    #[test]
+    fn upper_lower_are_ascii_only() {
+        assert_eq!(
+            v("upper", &[Value::Text("café".to_string())]),
+            Value::Text("CAFé".to_string())
+        );
+        assert_eq!(
+            v("lower", &[Value::Text("CAFÉ".to_string())]),
+            Value::Text("cafÉ".to_string())
+        );
+    }
+
+    #[test]
+    fn substr_negative_and_zero_index_rules() {
+        assert_eq!(
+            v(
+                "substr",
+                &[Value::Text("hello".to_string()), Value::Integer(-3)]
+            ),
+            Value::Text("llo".to_string())
+        );
+        assert_eq!(
+            v(
+                "substr",
+                &[Value::Text("hello".to_string()), Value::Integer(0)]
+            ),
+            Value::Text("hello".to_string())
+        );
+        assert_eq!(
+            v(
+                "substr",
+                &[
+                    Value::Text("hello".to_string()),
+                    Value::Integer(2),
+                    Value::Integer(-1)
+                ]
+            ),
+            Value::Text("h".to_string())
+        );
+        assert_eq!(
+            v(
+                "substr",
+                &[
+                    Value::Text("hello".to_string()),
+                    Value::Integer(-100),
+                    Value::Integer(2)
+                ]
+            ),
+            Value::Text(String::new())
+        );
+    }
+
+    #[test]
+    fn round_half_away_from_zero() {
+        assert_eq!(v("round", &[Value::Real(2.5)]), Value::Real(3.0));
+        assert_eq!(v("round", &[Value::Real(-2.5)]), Value::Real(-3.0));
+    }
+
+    #[test]
+    fn coalesce_and_ifnull_are_the_null_propagation_exception() {
+        assert_eq!(
+            v("coalesce", &[Value::Null, Value::Null, Value::Integer(3)]),
+            Value::Integer(3)
+        );
+        assert_eq!(
+            v("ifnull", &[Value::Null, Value::Integer(5)]),
+            Value::Integer(5)
+        );
+    }
+
+    #[test]
+    fn min_max_scalar_null_propagates() {
+        assert_eq!(
+            v(
+                "min",
+                &[Value::Integer(3), Value::Integer(1), Value::Integer(2)]
+            ),
+            Value::Integer(1)
+        );
+        assert_eq!(v("min", &[Value::Integer(1), Value::Null]), Value::Null);
+        assert_eq!(v("max", &[Value::Integer(1), Value::Null]), Value::Null);
+    }
+
+    #[test]
+    fn quote_escapes_single_quotes_and_renders_blob_hex() {
+        assert_eq!(
+            v("quote", &[Value::Text("it's".to_string())]),
+            Value::Text("'it''s'".to_string())
+        );
+        assert_eq!(
+            v("quote", &[Value::Blob(vec![0x00, 0x11])]),
+            Value::Text("X'0011'".to_string())
+        );
+        assert_eq!(v("quote", &[Value::Null]), Value::Text("NULL".to_string()));
+    }
+
+    #[test]
+    fn hex_and_unhex_roundtrip() {
+        assert_eq!(
+            v("hex", &[Value::Text("AB".to_string())]),
+            Value::Text("4142".to_string())
+        );
+        assert_eq!(
+            v("hex", &[Value::Integer(5)]),
+            Value::Text("35".to_string())
+        );
+        assert_eq!(
+            v("unhex", &[Value::Text("4142".to_string())]),
+            Value::Blob(vec![0x41, 0x42])
+        );
+        assert_eq!(v("unhex", &[Value::Text("xyz".to_string())]), Value::Null);
+    }
+
+    #[test]
+    fn abs_overflow_errors_instead_of_wrapping() {
+        assert_eq!(
+            call("abs", &[Value::Integer(i64::MIN)]),
+            Err(FunctionError::IntegerOverflow)
+        );
+    }
+
+    #[test]
+    fn iif_and_typeof() {
+        assert_eq!(
+            v(
+                "iif",
+                &[
+                    Value::Integer(1),
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string())
+                ]
+            ),
+            Value::Text("a".to_string())
+        );
+        assert_eq!(v("typeof", &[Value::Null]), Value::Text("null".to_string()));
+    }
+
+    #[test]
+    fn registry_dispatch_never_panics_on_unknown_name_or_arity() {
+        assert!(matches!(
+            call("nope", &[]),
+            Err(FunctionError::Unknown { .. })
+        ));
+    }
+}
