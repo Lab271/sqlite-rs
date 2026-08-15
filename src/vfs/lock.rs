@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io;
 
 use nix::fcntl::{fcntl, FcntlArg};
-use nix::libc::{self, c_short, off_t};
+use nix::libc::{self, off_t};
 
 use super::SharedLockGuard;
 
@@ -42,7 +42,7 @@ impl Drop for UnixSharedLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        let _ = fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE);
+        let _ = fcntl_lock(&self.file, libc::F_UNLCK as i32, SHARED_FIRST, SHARED_SIZE);
     }
 }
 
@@ -52,7 +52,7 @@ impl Drop for UnixSharedLock {
 /// `to_lock_error` is what turns those into a distinguishable "database is
 /// locked" error one layer up).
 pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
-    fcntl_lock(file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
+    fcntl_lock(file, libc::F_RDLCK as i32, SHARED_FIRST, SHARED_SIZE)?;
     Ok(UnixSharedLock {
         file: file.try_clone()?,
     })
@@ -62,7 +62,7 @@ pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
 /// journal-mode SHARED lock above and (via `pub(crate)`) for the WAL
 /// `-shm` reader-mark lock bytes in `src/vfs/shm.rs`; the underlying
 /// syscall is identical, only the byte offsets differ.
-pub(crate) fn fcntl_lock(file: &File, kind: c_short, start: off_t, len: off_t) -> io::Result<()> {
+pub(crate) fn fcntl_lock(file: &File, kind: i32, start: off_t, len: off_t) -> io::Result<()> {
     let fl = libc::flock {
         l_type: kind as _,
         l_whence: libc::SEEK_SET as _,
