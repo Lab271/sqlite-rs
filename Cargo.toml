@@ -28,6 +28,14 @@ path = "tests/tokenizer_proptest.rs"
 [dev-dependencies]
 proptest = "1"
 
+# Single source of truth for the pinned oracle sqlite3 version. Currently
+# read only by tools/harvest_opcodes.py; tools/gen_fixtures.sh and
+# tests/corpus/oracle.rs still carry their own "3.53.3" literal (kept in
+# sync by hand) — unifying those onto this value is a follow-up, out of
+# scope for the opcode-harvest spike (#58) this was added for.
+[package.metadata.oracle]
+version = "3.53.3"
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

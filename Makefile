@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -86,6 +86,9 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/gen_fixtures.sh
 	./tools/gen_fixtures.sh
 
+opcodes: ## Harvest V2 (single-table SELECT) opcodes via pinned oracle EXPLAIN, write tools/opcodes-v2.json (spike 007, #58; needs a pinned, non-codec sqlite3 matching Cargo.toml's [package.metadata.oracle] version — override with --oracle)
+	python3 tools/harvest_opcodes.py
+
 # === Assurance ===
 
 assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence (VERBOSE=true for per-requirement detail)
@@ -150,4 +153,6 @@ spike-005: ## Run spike 005 — locking protocol interop (tests/spike/005_lockin
 spike-006: ## Run spike 006 — grammar-slice viability for SELECT core (tests/spike/006_grammar_slice, issue #57)
 	cd tests/spike/006_grammar_slice && cargo test
 
-test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 ## Run every spike
+spike-007: opcodes ## Run spike 007 — opcode harvest via oracle EXPLAIN (tests/spike/007_opcode_harvest, #58; alias for `make opcodes`)
+
+test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 ## Run every spike
