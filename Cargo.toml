@@ -30,3 +30,18 @@ expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
 arithmetic_side_effects = "deny"
+
+# Excluded from the default `cargo test` run: the corpus harness shells out
+# to a pinned real `sqlite3` and takes ~8s, so it stays behind
+# `make test-corpus` (`cargo test --test corpus`, which still works — this
+# only changes what runs *by default*).
+#
+# Declaring it here rather than filtering by name in the Makefile is what
+# keeps `make test` a plain `cargo test`: every other test target is picked
+# up automatically, so a newly added test file can never be silently
+# dropped. It previously was — `tests/record_proptest.rs`'s 10 tests were
+# built but never run, because the Makefile enumerated targets by name.
+[[test]]
+name = "corpus"
+path = "tests/corpus/main.rs"
+test = false

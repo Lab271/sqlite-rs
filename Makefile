@@ -26,9 +26,8 @@ help: ## Show this help
 
 # === Test ===
 
-test: ## Run the unit test suite + public-API tests (excludes tests/corpus — see test-corpus)
-	cargo test --locked --lib --bins
-	cargo test --locked --test unit_header --test unit_record --test unit_vfs
+test: ## Run every test except the corpus oracle diffs (unit, public-API, proptest, doctests — see test-corpus)
+	cargo test --locked
 
 lint: ## Run clippy and check formatting
 	cargo clippy --locked --all-targets -- -D warnings
@@ -74,7 +73,15 @@ traceability: ## Fast path: traceability only, no corpus/coverage I/O
 	@python3 tools/assurance.py --traceability-only $(if $(VERBOSE),--verbose)
 
 coverage: ## Run the test suite under coverage instrumentation and print a line coverage report (cargo-llvm-cov)
+	# Two instrumented runs merged into one report. The corpus harness is
+	# `test = false` in Cargo.toml, so `cargo test` skips it by default and
+	# it must be named explicitly — otherwise every line only the oracle
+	# diffs reach would silently read as uncovered. `clean` first, then
+	# accumulate with `--no-report`, per cargo-llvm-cov's documented
+	# merge-multiple-runs workflow.
+	cargo llvm-cov clean --workspace
 	cargo llvm-cov --locked --no-report
+	cargo llvm-cov --locked --no-report --test corpus
 	cargo llvm-cov report
 	cargo llvm-cov report --json --output-path target/llvm-cov.json
 
