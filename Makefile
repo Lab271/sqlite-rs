@@ -7,9 +7,12 @@
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
 #     stays limit-clean, no exceptions.
-#   - src/vfs/ (and later pager locking) is the designated `unsafe` boundary;
-#     when it lands, exclude exactly that module here so the claim stays
-#     explicit: everything above the VFS is in the qualified subset.
+#   - src/vfs/ is the designated `dyn` boundary (its `Vfs`/`VfsFile`/
+#     `SharedLockGuard` trait objects): exclude exactly that module here so
+#     the claim stays explicit — everything above the VFS is in the
+#     qualified subset. It no longer needs `unsafe` (#66): `fcntl`/`-shm`
+#     access goes through safe `nix`/`std` APIs, and the crate is
+#     `#![forbid(unsafe_code)]` with no local override anywhere.
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
 MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/* src/bin/*
