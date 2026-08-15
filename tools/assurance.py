@@ -171,6 +171,27 @@ def parity_model():
     return blocks
 
 
+TIERS_DIR = REPO_ROOT / "tests" / "tiers"
+
+
+def tier_model():
+    """Active/total #[test] counts per tests/tiers/tierN.rs (feature 001/Req-4).
+
+    "Active" is a #[test] fn not immediately preceded by #[ignore = "..."]
+    — i.e. a tier contract already discharged rather than stubbed.
+    """
+    counts = {}
+    for n in range(4):
+        path = TIERS_DIR / f"tier{n}.rs"
+        if not path.exists():
+            continue
+        text = path.read_text()
+        total = len(re.findall(r"#\[test\]", text))
+        ignored = len(re.findall(r'#\[test\]\s*\n\s*#\[ignore(?:\s*=\s*"[^"]*")?\]', text))
+        counts[f"T{n}"] = (total - ignored, total)
+    return counts
+
+
 def report_model():
     """Print the Model level: plan position (plan.md + Cargo.toml) + grammar model (sqlite.ebnf)."""
     print("-- Model " + "-" * 51)
@@ -221,6 +242,10 @@ def report_model():
         if pending:
             summary += (" · " if summary else "") + f"{pending[0]}+ pending"
         print(f"Parity:               {summary} — tests/parity/ (#72)")
+    tiers = tier_model()
+    if tiers:
+        parts = " · ".join(f"{k} {active}/{total}" for k, (active, total) in sorted(tiers.items()))
+        print(f"Tier contracts:       {parts}")
     print()
 
 

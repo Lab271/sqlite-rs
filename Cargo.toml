@@ -77,3 +77,19 @@ test = false
 name = "parity"
 path = "tests/parity/main.rs"
 test = false
+
+[[test]]
+name = "tier0"
+path = "tests/tiers/tier0.rs"
+
+[[test]]
+name = "tier1"
+path = "tests/tiers/tier1.rs"
+
+[[test]]
+name = "tier2"
+path = "tests/tiers/tier2.rs"
+
+[[test]]
+name = "tier3"
+path = "tests/tiers/tier3.rs"

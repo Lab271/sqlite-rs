@@ -42,6 +42,14 @@ a trivial budget.
 - **PR review checks the dashboard.** `make assurance` before and after: a
   feature PR should move Completeness and/or Scenarios-backed, and must not
   introduce dead links. Spec 005's maintenance rule applies (#25).
+- **Tier stubs flip on close.** `tests/tiers/tier{0..3}.rs` (spec 001 Tier
+  Model, #69) are executable, claim-oriented contracts alongside the
+  evidence-oriented corpus harness. Every feature ticket's acceptance
+  criteria include un-`#[ignore]`ing the tier stub(s) it discharges — a
+  stub's `#[ignore = "..."]` reason names the V-block/phase/ticket that
+  flips it. `tools/assurance.py`'s `Tier contracts:` line (active/total per
+  tier) should move when a ticket lands; `tier0.rs` itself must never gain
+  an `#[ignore]` — it's the never-droppable gate.
 
 ## Grammar conventions
 
