@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit mod-files verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -12,7 +12,7 @@
 #     explicit: everything above the VFS is in the qualified subset.
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
-MVL_LIMIT_EXCLUDE := src/vfs/* src/bin/*
+MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/* src/bin/*
 
 COVERAGE_MIN := 75
 
@@ -80,6 +80,15 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	done; \
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
+
+mod-files: ## Module-layout gate: no legacy foo/mod.rs files under src/ (#73; use foo.rs instead)
+	@hits=$$(find src -name 'mod.rs'); \
+	if [ -n "$$hits" ]; then \
+	  echo "MOD-FILE VIOLATION: legacy mod.rs found (use foo.rs instead):"; \
+	  echo "$$hits"; \
+	  exit 1; \
+	fi; \
+	echo "mod-files: no legacy mod.rs under src/"
 
 # === Fixtures ===
 

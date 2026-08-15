@@ -21,9 +21,9 @@ The file format is SQLite's real product — frozen until 2050. We implement it 
 
 The system MUST provide a read-only virtual filesystem abstraction with a Unix implementation and an in-memory implementation. Both MUST pass an identical test suite. The trait MUST be extensible with locking methods later (spike 004, #8) without breaking consumers.
 
-**Implementation:** `src/vfs/mod.rs`
+**Implementation:** `src/vfs.rs`
 
-**Tests:** inline #[cfg(test)] in src/vfs/mod.rs
+**Tests:** inline #[cfg(test)] in src/vfs.rs
 
 #### Scenario: Read at offset
 
@@ -31,7 +31,7 @@ The system MUST provide a read-only virtual filesystem abstraction with a Unix i
 - WHEN `read_at(buf, page_size)` is called
 - THEN exactly page 2's bytes are returned
 
-**Tests:** `src/vfs/mod.rs::unix_vfs_contract`
+**Tests:** `src/vfs.rs::unix_vfs_contract`
 
 #### Scenario: Companion file detection
 
@@ -47,7 +47,7 @@ The system MUST provide a read-only virtual filesystem abstraction with a Unix i
 - WHEN the full VFS test suite runs against both
 - THEN results MUST be identical
 
-**Tests:** `src/vfs/mod.rs::memory_vfs_contract`
+**Tests:** `src/vfs.rs::memory_vfs_contract`
 
 ### Requirement 2: Database Header [MUST]
 
