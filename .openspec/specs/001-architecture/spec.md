@@ -359,15 +359,17 @@ sqlite-rs MUST read and write files that SQLite 3.x can read and write.
 
 Development MUST use SQLite's test suite as the compatibility oracle.
 
-**Implementation:** `tests/corpus/oracle.rs` (planned)
+**Implementation:** `tests/corpus/oracle.rs`
 
-**Tests:** `tests/corpus/harness.rs` (planned)
+**Tests:** `tests/corpus/harness.rs`
 
 #### Scenario: Query result match
 
 - GIVEN any SQL query Q and database D
 - WHEN both SQLite and sqlite-rs execute Q on D
 - THEN the results MUST be identical (byte-for-byte for BLOBs, value-equal otherwise)
+
+**Tests:** `tests/parity/v01.rs::acceptance_and_output_match_across_readable_corpus`
 
 ### Requirement 4: Tier 0 Read-Completeness [MUST]
 

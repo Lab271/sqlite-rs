@@ -97,6 +97,11 @@ from pathlib import Path
 SPEC_DIR = Path(__file__).parent.parent / ".openspec" / "specs"
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 EBNF_PATH = REPO_ROOT / ".openspec" / "grammar" / "sqlite.ebnf"
+PARITY_DIR = REPO_ROOT / "tests" / "parity"
+
+# The 4 gated comparison dimensions from issue #72 (VM instructions is
+# informational-only and deliberately excluded from this count).
+PARITY_DIMENSIONS = ("acceptance", "output", "schema", "plan")
 CARGO_TOML = REPO_ROOT / "Cargo.toml"
 PLAN_PATH = REPO_ROOT / ".openspec" / "plan.md"
 
@@ -135,6 +140,37 @@ def grammar_model():
     return counts
 
 
+def parity_model():
+    """Per-V-block dimension coverage from tests/parity/vNN.rs (issue #72).
+
+    Heuristic, same style as grammar_model()'s regex counting: for each
+    vNN.rs file, a #[test] fn counts toward a dimension if it is not
+    #[ignore]d and its name mentions that dimension. Approximate (name-based,
+    not AST-based) by design — good enough for a progress indicator, not a
+    correctness check.
+    """
+    if not PARITY_DIR.exists():
+        return {}
+    blocks = {}
+    for path in sorted(PARITY_DIR.glob("v[0-9][0-9].rs")):
+        block = path.stem.upper()
+        text = path.read_text()
+        fns = re.split(r"(?=#\[test\])", text)
+        dims_hit = set()
+        for fn in fns:
+            if not fn.startswith("#[test]"):
+                continue
+            if re.search(r"#\[test\]\s*\n\s*#\[ignore", fn):
+                continue
+            name_m = re.search(r"fn\s+(\w+)", fn)
+            name = name_m.group(1) if name_m else ""
+            for dim in PARITY_DIMENSIONS:
+                if dim in name:
+                    dims_hit.add(dim)
+        blocks[block] = len(dims_hit)
+    return blocks
+
+
 def report_model():
     """Print the Model level: plan position (plan.md + Cargo.toml) + grammar model (sqlite.ebnf)."""
     print("-- Model " + "-" * 51)
@@ -170,6 +206,21 @@ def report_model():
             print(f"  DRIFT: grammar tags not in plan.md value blocks: {', '.join(unknown_tags)}")
     else:
         print("Grammar model:        .openspec/grammar/sqlite.ebnf missing")
+    parity = parity_model()
+    if parity:
+        n_gated = len(PARITY_DIMENSIONS)
+        parts = []
+        pending = []
+        for block in sorted(parity):
+            n = parity[block]
+            if n == 0:
+                pending.append(block)
+            else:
+                parts.append(f"{block} {n}/{n_gated}")
+        summary = " · ".join(parts)
+        if pending:
+            summary += (" · " if summary else "") + f"{pending[0]}+ pending"
+        print(f"Parity:               {summary} — tests/parity/ (#72)")
     print()
 
 

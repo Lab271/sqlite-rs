@@ -50,13 +50,34 @@ pub fn pinned_oracle() -> Option<PathBuf> {
     candidates.push(PathBuf::from("sqlite3"));
 
     candidates.into_iter().find(|candidate| {
-        Command::new(candidate)
+        let version_matches = Command::new(candidate)
             .arg("-version")
             .output()
             .is_ok_and(|o| {
                 o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with(ORACLE_VERSION)
-            })
+            });
+        version_matches && !is_codec_build(candidate)
     })
+}
+
+/// Rejects codec-enabled builds (e.g. macOS's system `/usr/bin/sqlite3`)
+/// even when their reported version happens to match [`ORACLE_VERSION`].
+/// A version match alone isn't sufficient: codec builds are a distinct
+/// binary lineage that can diverge in output formatting (see the
+/// `\n`-vs-`\r\n` CSV bug documented on [`pinned_oracle`]), so `PRAGMA
+/// compile_options` is checked the same way `tools/harvest_opcodes.py`'s
+/// `find_oracle()` does.
+fn is_codec_build(candidate: &Path) -> bool {
+    Command::new(candidate)
+        .arg("-readonly")
+        .arg(":memory:")
+        .arg("PRAGMA compile_options;")
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_lowercase()
+                .contains("codec")
+        })
 }
 
 /// Prints a uniform skip notice for tests gated on [`pinned_oracle`].

@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit mod-files verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit mod-files verification fixtures test-corpus test-parity test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -48,6 +48,9 @@ test-proptest: ## Just the property tests
 
 test-corpus: ## Run the fixture corpus / oracle harness against a pinned real sqlite3 (see .openspec/specs/004-corpus)
 	cargo test --locked --test corpus
+
+test-parity: ## Run the per-V-block parity mirror against a pinned real sqlite3 (see #72)
+	cargo test --locked --test parity
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
 
