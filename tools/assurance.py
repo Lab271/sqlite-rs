@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""sqlite-rs Assurance Dashboard — the case, assembled from three levels.
+"""sqlite-rs Assurance Dashboard — the case, assembled from four levels.
 
 "Assurance" is the argument that the project is fit for purpose; this
-script assembles it from three independently-measurable levels:
+script assembles it from four independently-measurable levels:
 
+    Model:                      where are we in the plan (version -> V-block/
+                                 phase/epic per the one-minor-per-phase policy)
+                                 and how much of the grammar model each block
+                                 defines (.openspec/grammar/sqlite.ebnf V-block
+                                 rule counts).
     Traceability (S->P, E->P): do spec, program and evidence connect?
                                  measured here, scenario-weighted.
     Evidence:                   corpus files present, line coverage if cached.
@@ -61,6 +66,13 @@ to this header too):
 
 11. CI gate: --min X exits 1 if completeness OR coverage is below X.
 
+12. Model level: reads the crate version from Cargo.toml, maps it to
+    V-block / phase / epic via VERSION_MAP (the versioning policy:
+    one minor per completed plan phase), and reports grammar-model
+    rule counts per V-block from .openspec/grammar/sqlite.ebnf.
+    The released version marks the last completed phase; work in
+    flight targets the next minor.
+
 Usage:
     python3 tools/assurance.py                    # full dashboard (traceability + evidence)
     python3 tools/assurance.py --verbose           # per-requirement detail + dead links
@@ -82,6 +94,61 @@ from pathlib import Path
 
 SPEC_DIR = Path(__file__).parent.parent / ".openspec" / "specs"
 REPO_ROOT = Path(__file__).parent.parent.resolve()
+EBNF_PATH = REPO_ROOT / ".openspec" / "grammar" / "sqlite.ebnf"
+CARGO_TOML = REPO_ROOT / "Cargo.toml"
+
+# Versioning policy (CHANGELOG): one minor per completed plan phase.
+# minor -> (value block, phase, epic). Extend as blocks are planned.
+VERSION_MAP = {
+    1: ("V1", 1, "#5"),  2: ("V1", 2, "#5"),
+    3: ("V1", 3, "#5"),  4: ("V1", 4, "#5"),
+    5: ("V2", 1, "#56"), 6: ("V2", 2, "#56"),
+    7: ("V2", 3, "#56"), 8: ("V2", 4, "#56"),
+}
+
+
+def crate_version():
+    m = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', CARGO_TOML.read_text(), re.MULTILINE)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def grammar_model():
+    """V-block rule counts from the grammar EBNF (feature 12)."""
+    if not EBNF_PATH.exists():
+        return {}
+    counts = {}
+    for m in re.finditer(r"\(\*\s*(V\d+)[^)]*\*\)", EBNF_PATH.read_text()):
+        counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return counts
+
+
+def report_model():
+    """Print the Model level: plan position + grammar-model coverage."""
+    print("-- Model " + "-" * 51)
+    ver = crate_version()
+    if ver:
+        _, minor, _ = ver
+        released = VERSION_MAP.get(minor)
+        working = VERSION_MAP.get(minor + 1)
+        vstr = ".".join(str(x) for x in ver)
+        if released:
+            block, phase, epic = released
+            line = f"Version {vstr} = {block} phase {phase} released (epic {epic})"
+            if working:
+                wb, wp, we = working
+                line += f"; in flight: 0.{minor + 1}.0 = {wb} phase {wp} (epic {we})"
+            print(line)
+        else:
+            print(f"Version {vstr} (no VERSION_MAP entry — extend the map)")
+    model = grammar_model()
+    if model:
+        total = sum(model.values())
+        parts = ", ".join(f"{k}: {v}" for k, v in sorted(model.items()))
+        print(f"Grammar model:        {total} rules defined ({parts}) — .openspec/grammar/sqlite.ebnf")
+        print("                      drift-checked by `make grammar-drift`")
+    else:
+        print("Grammar model:        .openspec/grammar/sqlite.ebnf missing")
+    print()
 
 
 def _validate_link(entry):
@@ -284,6 +351,7 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"Requirements:     {total}" + (f" ({planned_count} planned excluded)" if planned_count else ""))
     print(f"Scenarios:        {total_scenarios}")
     print()
+    report_model()
     print("-- Traceability " + "-" * 44)
     print(f"Completeness (S->P):  {impl_exists}/{total} requirements implemented  ({completeness:.0%})")
     print(f"Coverage (E->P):      {backed}/{total_scenarios} scenarios test-backed  ({coverage:.0%}, {direct} per-scenario)")
