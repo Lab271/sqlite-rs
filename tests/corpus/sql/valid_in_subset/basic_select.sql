@@ -1,0 +1,9 @@
+SELECT * FROM t;
+SELECT a FROM t;
+SELECT a, b FROM t;
+SELECT a AS x FROM t;
+SELECT a x FROM t;
+SELECT t.a FROM t;
+SELECT t.a, t.b FROM t;
+SELECT * FROM t AS u2;
+SELECT * FROM t u2;

@@ -22,3 +22,4 @@ mod harness_test;
 mod oracle_test;
 mod regen_test;
 mod schema_test;
+mod sql_corpus_test;

@@ -1,0 +1,14 @@
+SELECT count(a) FROM t;
+SELECT count(*) FROM t;
+SELECT count(DISTINCT a) FROM t;
+SELECT abs(a) FROM t;
+SELECT max(a, b) FROM t;
+SELECT upper(name) FROM t;
+SELECT coalesce(a, b, 0) FROM t;
+SELECT CASE WHEN a = 1 THEN 'one' WHEN a = 2 THEN 'two' ELSE 'other' END FROM t;
+SELECT CASE a WHEN 1 THEN 'one' WHEN 2 THEN 'two' END FROM t;
+SELECT CASE WHEN a = 1 THEN 'one' END FROM t;
+SELECT CAST(a AS INTEGER) FROM t;
+SELECT CAST(a AS TEXT) FROM t;
+SELECT CAST(name AS REAL) FROM t;
+SELECT CAST(a + b AS INTEGER) FROM t;
