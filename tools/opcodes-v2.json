@@ -1,7 +1,7 @@
 {
   "oracle_version": "3.53.3",
-  "query_count": 25,
-  "opcode_count": 57,
+  "query_count": 26,
+  "opcode_count": 52,
   "opcodes": {
     "Add": {
       "count": 1,
@@ -9,50 +9,20 @@
       "example_query": "SELECT price + 1, price - 1, price / 2, qty % 2 FROM products",
       "category": "arithmetic"
     },
-    "AggFinal": {
-      "count": 1,
-      "p4_variants": [
-        "max(1)"
-      ],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "function"
-    },
-    "AggStep": {
-      "count": 1,
-      "p4_variants": [
-        "max(1)"
-      ],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "function"
-    },
     "BeginSubrtn": {
-      "count": 2,
+      "count": 1,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE id IN (1, 2, 3)",
       "category": "control"
     },
-    "CollSeq": {
-      "count": 1,
-      "p4_variants": [
-        "BINARY-8"
-      ],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "compare"
-    },
     "Column": {
-      "count": 101,
+      "count": 105,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
     },
-    "Copy": {
-      "count": 1,
-      "p4_variants": [],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "result"
-    },
     "DecrJumpZero": {
-      "count": 3,
+      "count": 2,
       "p4_variants": [],
       "example_query": "SELECT * FROM products LIMIT 2",
       "category": "control"
@@ -68,6 +38,12 @@
       "p4_variants": [],
       "example_query": "SELECT price + 1, price - 1, price / 2, qty % 2 FROM products",
       "category": "arithmetic"
+    },
+    "Eq": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT * FROM products WHERE id <> 2",
+      "category": "compare"
     },
     "Found": {
       "count": 1,
@@ -113,7 +89,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 25,
+      "count": 26,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -154,13 +130,13 @@
       "category": "control"
     },
     "Init": {
-      "count": 25,
+      "count": 26,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
     },
     "Integer": {
-      "count": 19,
+      "count": 20,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE price > 10",
       "category": "result"
@@ -172,7 +148,7 @@
       "category": "control"
     },
     "Last": {
-      "count": 2,
+      "count": 1,
       "p4_variants": [],
       "example_query": "SELECT * FROM products ORDER BY price LIMIT 1",
       "category": "cursor"
@@ -214,7 +190,7 @@
       "category": "control"
     },
     "Next": {
-      "count": 24,
+      "count": 25,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -224,12 +200,6 @@
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE note IS NULL",
       "category": "control"
-    },
-    "Null": {
-      "count": 2,
-      "p4_variants": [],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "result"
     },
     "NullRow": {
       "count": 1,
@@ -244,7 +214,7 @@
       "category": "control"
     },
     "Once": {
-      "count": 2,
+      "count": 1,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE id IN (1, 2, 3)",
       "category": "control"
@@ -267,7 +237,6 @@
     "OpenRead": {
       "count": 26,
       "p4_variants": [
-        "0",
         "2",
         "3",
         "4",
@@ -276,14 +245,8 @@
       "example_query": "SELECT * FROM products",
       "category": "cursor"
     },
-    "Prev": {
-      "count": 1,
-      "p4_variants": [],
-      "example_query": "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
-      "category": "cursor"
-    },
     "RealAffinity": {
-      "count": 27,
+      "count": 28,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "compare"
@@ -295,25 +258,25 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 25,
+      "count": 26,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
     },
     "Return": {
-      "count": 2,
+      "count": 1,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE id IN (1, 2, 3)",
       "category": "control"
     },
     "Rewind": {
-      "count": 23,
+      "count": 24,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
     },
     "Rowid": {
-      "count": 17,
+      "count": 18,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -321,7 +284,7 @@
     "SeekRowid": {
       "count": 3,
       "p4_variants": [],
-      "example_query": "SELECT * FROM products WHERE id IN (1, 2, 3)",
+      "example_query": "SELECT * FROM products WHERE id = 2",
       "category": "cursor"
     },
     "Sequence": {
@@ -389,7 +352,7 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 25,
+      "count": 26,
       "p4_variants": [
         "0"
       ],

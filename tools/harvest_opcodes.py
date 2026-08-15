@@ -52,6 +52,8 @@ QUERIES = [
     "SELECT DISTINCT note FROM products",
     "SELECT * FROM products WHERE price > 10",
     "SELECT * FROM products WHERE price >= 10 AND qty < 50",
+    "SELECT * FROM products WHERE id = 2",
+    "SELECT * FROM products WHERE id <> 2",
     "SELECT * FROM products WHERE note IS NULL",
     "SELECT * FROM products WHERE note IS NOT NULL",
     "SELECT * FROM products WHERE name LIKE 'g%'",
@@ -70,7 +72,6 @@ QUERIES = [
     "SELECT coalesce(note, 'none') FROM products",
     "SELECT ifnull(note, 'none') FROM products",
     "SELECT CASE WHEN price > 10 THEN 'expensive' ELSE 'cheap' END FROM products",
-    "SELECT * FROM products WHERE id = (SELECT max(id) FROM products)",
     "SELECT rowid, * FROM products WHERE rowid = 2",
 ]
 

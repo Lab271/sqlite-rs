@@ -98,7 +98,7 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 | Parser | `SELECT` core: result columns, single FROM table, WHERE, ORDER BY, LIMIT/OFFSET |
 | Expressions | Literals, column refs, unary/binary ops, `IS NULL`, `BETWEEN`, `IN (list)`, `LIKE`, `CASE`, `CAST` |
 | Codegen | Full-table scan; index lookup for simple equality (stretch) |
-| VDBE | ~40 core opcodes: control, cursor read, Column, comparisons, arithmetic, ResultRow, Sort |
+| VDBE | 52 core opcodes (harvested, `tools/opcodes-v2.json`, #87): control, cursor read, Column, comparisons, arithmetic, ResultRow, sorter. DISTINCT's dedup path costs a second in-memory-ephemeral-table opcode family (`OpenEphemeral`/`Sequence`/`IdxInsert`/`Found`/`Delete`), not just a flag |
 | Functions | Scalar core: `length`, `upper`, `lower`, `substr`, `abs`, `coalesce`, `typeof` |
 | Type system | Affinity rules, comparison/collation semantics (BINARY, NOCASE, RTRIM) |
 
