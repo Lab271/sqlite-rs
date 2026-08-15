@@ -21,6 +21,10 @@ path = "tests/unit/record.rs"
 name = "unit_vfs"
 path = "tests/unit/vfs.rs"
 
+[[test]]
+name = "tokenizer_proptest"
+path = "tests/tokenizer_proptest.rs"
+
 [dev-dependencies]
 proptest = "1"
 

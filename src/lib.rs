@@ -9,6 +9,7 @@ pub mod dump;
 pub mod format;
 pub mod header;
 pub mod pager;
+pub mod parser;
 pub mod record;
 pub mod schema;
 pub mod vfs;
