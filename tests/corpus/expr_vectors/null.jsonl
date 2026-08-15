@@ -1,0 +1,16 @@
+{"expr": "NULL + 1", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL || 'x'", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL = NULL", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL IS NULL", "type": "integer", "value_quoted": "1"}
+{"expr": "NULL IS NOT NULL", "type": "integer", "value_quoted": "0"}
+{"expr": "NULL AND 0", "type": "integer", "value_quoted": "0"}
+{"expr": "NULL AND 1", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL OR 1", "type": "integer", "value_quoted": "1"}
+{"expr": "NULL OR 0", "type": "null", "value_quoted": "NULL"}
+{"expr": "NOT NULL", "type": "null", "value_quoted": "NULL"}
+{"expr": "1 = NULL", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL IS 1", "type": "integer", "value_quoted": "0"}
+{"expr": "NULL IN (1,2,3)", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL NOT IN (1,2,3)", "type": "null", "value_quoted": "NULL"}
+{"expr": "coalesce(NULL, NULL, 3)", "type": "integer", "value_quoted": "3"}
+{"expr": "1 <> NULL", "type": "null", "value_quoted": "NULL"}

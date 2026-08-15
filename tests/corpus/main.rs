@@ -17,6 +17,7 @@ mod oracle;
 mod btree_test;
 mod cli_e2e_test;
 mod dump_oracle_test;
+mod expr_vectors_test;
 mod families_test;
 mod harness_test;
 mod oracle_test;

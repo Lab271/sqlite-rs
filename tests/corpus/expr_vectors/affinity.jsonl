@@ -1,0 +1,30 @@
+{"affinity_probe_stored_type": "real", "declared_type": "INTEGER"}
+{"affinity_probe_stored_type": "real", "declared_type": "INT"}
+{"affinity_probe_stored_type": "real", "declared_type": "TINYINT"}
+{"affinity_probe_stored_type": "real", "declared_type": "SMALLINT"}
+{"affinity_probe_stored_type": "real", "declared_type": "MEDIUMINT"}
+{"affinity_probe_stored_type": "real", "declared_type": "BIGINT"}
+{"affinity_probe_stored_type": "real", "declared_type": "UNSIGNED BIG INT"}
+{"affinity_probe_stored_type": "real", "declared_type": "INT2"}
+{"affinity_probe_stored_type": "real", "declared_type": "INT8"}
+{"affinity_probe_stored_type": "text", "declared_type": "TEXT"}
+{"affinity_probe_stored_type": "text", "declared_type": "CHARACTER(20)"}
+{"affinity_probe_stored_type": "text", "declared_type": "VARCHAR(255)"}
+{"affinity_probe_stored_type": "text", "declared_type": "VARYING CHARACTER(255)"}
+{"affinity_probe_stored_type": "text", "declared_type": "NCHAR(55)"}
+{"affinity_probe_stored_type": "text", "declared_type": "NATIVE CHARACTER(70)"}
+{"affinity_probe_stored_type": "text", "declared_type": "NVARCHAR(100)"}
+{"affinity_probe_stored_type": "text", "declared_type": "CLOB"}
+{"affinity_probe_stored_type": "text", "declared_type": "BLOB"}
+{"affinity_probe_stored_type": "text", "declared_type": ""}
+{"affinity_probe_stored_type": "real", "declared_type": "REAL"}
+{"affinity_probe_stored_type": "real", "declared_type": "DOUBLE"}
+{"affinity_probe_stored_type": "real", "declared_type": "DOUBLE PRECISION"}
+{"affinity_probe_stored_type": "real", "declared_type": "FLOAT"}
+{"affinity_probe_stored_type": "real", "declared_type": "NUMERIC"}
+{"affinity_probe_stored_type": "real", "declared_type": "DECIMAL(10,5)"}
+{"affinity_probe_stored_type": "real", "declared_type": "BOOLEAN"}
+{"affinity_probe_stored_type": "real", "declared_type": "DATE"}
+{"affinity_probe_stored_type": "real", "declared_type": "DATETIME"}
+{"affinity_probe_stored_type": "real", "declared_type": "POINT"}
+{"affinity_probe_stored_type": "real", "declared_type": "STRING"}

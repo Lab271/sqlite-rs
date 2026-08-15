@@ -1,0 +1,17 @@
+{"expr": "'123' + 1", "type": "integer", "value_quoted": "124"}
+{"expr": "'123abc' + 1", "type": "integer", "value_quoted": "124"}
+{"expr": "'abc' + 1", "type": "integer", "value_quoted": "1"}
+{"expr": "'  123  ' + 1", "type": "integer", "value_quoted": "124"}
+{"expr": "'1e3' + 1", "type": "real", "value_quoted": "1001.0"}
+{"expr": "'0x10' + 1", "type": "integer", "value_quoted": "1"}
+{"expr": "'' + 1", "type": "integer", "value_quoted": "1"}
+{"expr": "'.5' + 1", "type": "real", "value_quoted": "1.5"}
+{"expr": "9223372036854775807 + 1", "type": "real", "value_quoted": "9.2233720368547758e+18"}
+{"expr": "9223372036854775807 + 1.0", "type": "real", "value_quoted": "9.2233720368547758e+18"}
+{"expr": "-9223372036854775808 - 1", "type": "real", "value_quoted": "-9.2233720368547758e+18"}
+{"expr": "9223372036854775807 * 2", "type": "real", "value_quoted": "1.8446744073709552e+19"}
+{"expr": "cast('123' AS INTEGER)", "type": "integer", "value_quoted": "123"}
+{"expr": "cast('123abc' AS INTEGER)", "type": "integer", "value_quoted": "123"}
+{"expr": "cast('abc' AS REAL)", "type": "real", "value_quoted": "0.0"}
+{"expr": "cast(3.9 AS INTEGER)", "type": "integer", "value_quoted": "3"}
+{"expr": "cast(-3.9 AS INTEGER)", "type": "integer", "value_quoted": "-3"}
