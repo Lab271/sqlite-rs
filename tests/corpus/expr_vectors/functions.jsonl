@@ -53,3 +53,7 @@
 {"expr": "iif(1,'a','b')", "type": "text", "value_quoted": "'a'"}
 {"expr": "iif(0,'a','b')", "type": "text", "value_quoted": "'b'"}
 {"expr": "iif(NULL,'a','b')", "type": "text", "value_quoted": "'b'"}
+{"expr": "iif('0.0','a','b')", "type": "text", "value_quoted": "'b'"}
+{"expr": "round(1.5,NULL)", "type": "null", "value_quoted": "NULL"}
+{"expr": "round(1.5,40)", "type": "real", "value_quoted": "1.5"}
+{"expr": "length(zeroblob(-1))", "type": "integer", "value_quoted": "0"}

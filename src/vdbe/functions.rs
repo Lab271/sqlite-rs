@@ -306,11 +306,11 @@ fn value_f64(v: &Value) -> f64 {
 /// returning REAL (matches SQLite's `round()`, which never returns
 /// INTEGER even for a whole-number result).
 fn round_fn(args: &[Value]) -> Result<Value, FunctionError> {
-    if matches!(args[0], Value::Null) {
+    if matches!(args[0], Value::Null) || matches!(args.get(1), Some(Value::Null)) {
         return Ok(Value::Null);
     }
     let x = value_f64(&args[0]);
-    let digits = args.get(1).map_or(0, value_int).max(0);
+    let digits = args.get(1).map_or(0, value_int).clamp(0, 30);
     #[allow(clippy::cast_precision_loss)]
     let scale = 10f64.powi(digits as i32);
     let scaled = x * scale;
@@ -419,9 +419,14 @@ fn replace_fn(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(Value::Text(s.replace(&from, &to)))
 }
 
+/// SQLite's default `SQLITE_MAX_LENGTH` — the largest blob/string this
+/// build will materialize. Bounds `zeroblob()` so a huge requested size
+/// returns an error instead of an unbounded allocation.
+const MAX_BLOB_LEN: i64 = 1_000_000_000;
+
 #[allow(clippy::cast_sign_loss)]
 fn zeroblob(args: &[Value]) -> Result<Value, FunctionError> {
-    let n = value_int(&args[0]).max(0);
+    let n = value_int(&args[0]).clamp(0, MAX_BLOB_LEN);
     Ok(Value::Blob(vec![0u8; n as usize]))
 }
 
@@ -430,10 +435,11 @@ fn iif(args: &[Value]) -> Result<Value, FunctionError> {
         Value::Null => false,
         Value::Integer(i) => *i != 0,
         Value::Real(r) => *r != 0.0,
-        Value::Text(s) => !matches!(
-            crate::vdbe::coerce::coerce_text_to_numeric(s),
-            Value::Integer(0)
-        ),
+        Value::Text(s) => match crate::vdbe::coerce::coerce_text_to_numeric(s) {
+            Value::Integer(i) => i != 0,
+            Value::Real(r) => r != 0.0,
+            _ => false,
+        },
         Value::Blob(_) => false,
     };
     Ok(if cond {
@@ -642,6 +648,39 @@ mod tests {
             Value::Text("a".to_string())
         );
         assert_eq!(v("typeof", &[Value::Null]), Value::Text("null".to_string()));
+    }
+
+    #[test]
+    fn iif_treats_real_zero_coerced_text_as_falsy() {
+        assert_eq!(
+            v(
+                "iif",
+                &[
+                    Value::Text("0.0".to_string()),
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string())
+                ]
+            ),
+            Value::Text("b".to_string())
+        );
+    }
+
+    #[test]
+    fn round_clamps_digits_and_propagates_null_digits() {
+        assert_eq!(v("round", &[Value::Real(1.5), Value::Null]), Value::Null);
+        let Value::Real(r) = v("round", &[Value::Real(1.5), Value::Integer(40)]) else {
+            panic!("expected real");
+        };
+        assert!((r - 1.5).abs() < 1e-9, "digits clamped to 30, got {r}");
+    }
+
+    #[test]
+    fn zeroblob_clamps_oversized_length() {
+        let Value::Blob(b) = v("zeroblob", &[Value::Integer(i64::MAX)]) else {
+            panic!("expected blob");
+        };
+        assert_eq!(b.len() as i64, MAX_BLOB_LEN);
+        assert_eq!(v("zeroblob", &[Value::Integer(-1)]), Value::Blob(vec![]));
     }
 
     #[test]
