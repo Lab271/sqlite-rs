@@ -20,6 +20,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   Spend: matched the medium estimate. Fuzz/proptest coverage deferred
   to #85.
 
+## [0.5.4] - 2026-08-15 — value-semantics kernel fuzz/proptest coverage
+
+### Added
+
+- **`tests/fuzz/fuzz_targets/semantics_compare.rs`**, **`tests/semantics_proptest.rs`**:
+  fuzz + proptest coverage for the value-semantics kernel (#78 follow-up,
+  #85), spec `008-value-semantics` Requirements 1, 2, 5 — `compare`
+  antisymmetry/transitivity/never-panics across arbitrary `Value` pairs
+  and collations, `apply_affinity` idempotence, `coerce_text_to_numeric`
+  idempotence on numeric text. Spend: matched the Small (~100k) estimate.
+
 ## [0.5.3] - 2026-08-15 — `-shm` length hardening
 
 ### Fixed
