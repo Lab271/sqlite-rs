@@ -70,5 +70,9 @@ a trivial budget.
   `[lints.clippy]` (Cargo.toml) catches it under `make lint`, and a
   `mod-files` Makefile gate is a dependency-free backstop for anyone
   running gates without clippy.
-- Vendored/spike code (e.g. `tests/spike/.../lemon-rs`) is exempt — it's
-  third-party source, not ours to restructure.
+- Genuinely vendored third-party source under `tests/spike/` (e.g.
+  `tests/spike/.../lemon-rs/third_party/lemon`, the C lemon tool itself)
+  is exempt — not ours to restructure. Our own hand-authored spike code
+  (even inside a `.../lemon-rs/` directory) follows the same no-`mod.rs`
+  convention as `src/`. The gate itself only scans `src/`, so this is a
+  style rule for spike code, not a `make lint` failure.
