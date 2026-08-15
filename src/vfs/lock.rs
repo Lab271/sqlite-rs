@@ -42,7 +42,12 @@ impl Drop for UnixSharedLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        let _ = fcntl_lock(&self.file, libc::F_UNLCK as i32, SHARED_FIRST, SHARED_SIZE);
+        let _ = fcntl_lock(
+            &self.file,
+            i32::from(libc::F_UNLCK),
+            SHARED_FIRST,
+            SHARED_SIZE,
+        );
     }
 }
 
@@ -52,7 +57,7 @@ impl Drop for UnixSharedLock {
 /// `to_lock_error` is what turns those into a distinguishable "database is
 /// locked" error one layer up).
 pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
-    fcntl_lock(file, libc::F_RDLCK as i32, SHARED_FIRST, SHARED_SIZE)?;
+    fcntl_lock(file, i32::from(libc::F_RDLCK), SHARED_FIRST, SHARED_SIZE)?;
     Ok(UnixSharedLock {
         file: file.try_clone()?,
     })

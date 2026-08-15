@@ -125,7 +125,7 @@ impl Drop for WalReadLock {
         // nothing more this crate can do about one anyway.
         let _ = fcntl_lock(
             &self.file,
-            libc::F_UNLCK as i32,
+            i32::from(libc::F_UNLCK),
             wal_read_lock_byte(self.slot),
             1,
         );
@@ -166,10 +166,10 @@ pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadL
         // Briefly exclusive, only long enough to publish this slot's mark
         // before downgrading to the SHARED lock held for the guard's
         // lifetime — matches SQLite's own claim sequence (spike 005 exp 4).
-        match fcntl_lock(&file, libc::F_WRLCK as i32, byte, 1) {
+        match fcntl_lock(&file, i32::from(libc::F_WRLCK), byte, 1) {
             Ok(()) => {
                 set_read_mark(&file, slot, mx_frame(&file)?)?;
-                fcntl_lock(&file, libc::F_RDLCK as i32, byte, 1)?;
+                fcntl_lock(&file, i32::from(libc::F_RDLCK), byte, 1)?;
                 return Ok(Some(WalReadLock { file, slot }));
             }
             Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)) => {
