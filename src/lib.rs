@@ -12,4 +12,5 @@ pub mod pager;
 pub mod parser;
 pub mod record;
 pub mod schema;
+pub mod vdbe;
 pub mod vfs;
