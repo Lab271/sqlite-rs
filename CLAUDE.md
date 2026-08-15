@@ -42,3 +42,22 @@ a trivial budget.
 - **PR review checks the dashboard.** `make assurance` before and after: a
   feature PR should move Completeness and/or Scenarios-backed, and must not
   introduce dead links. Spec 005's maintenance rule applies (#25).
+
+## Grammar conventions
+
+- **Grammar source of truth:** `.openspec/grammar/sqlite.ebnf` — an EBNF
+  re-derivation of SQLite's `parse.y` (pinned at 3.53.4; SQLite publishes
+  no EBNF). Parser work starts from this file, never from memory or
+  third-party grammars.
+- **Grow the grammar in the same PR.** Any ticket that extends the parser
+  extends `sqlite.ebnf` in the same PR: new rules carry a V-block tag
+  (`(* V2 *)`, `(* V3 *)`, …) and a `[parse.y:LINE rulename]` origin
+  annotation. Future-block rules stay listed as stubs so the coverage
+  denominator remains visible.
+- **Run `make grammar-drift` before committing grammar changes.**
+  `tools/grammar_drift.py` validates every annotation against the pinned
+  parse.y (rule exists, cited line within ±5) and reports per-V-block
+  coverage. Drift (unknown rule, stale line citation) is a spec bug — fix
+  the annotation, don't loosen the tolerance. Bumping the parse.y pin
+  (`SQLITE_VERSION` in the tool) is a deliberate, reviewed change, like an
+  oracle bump.
