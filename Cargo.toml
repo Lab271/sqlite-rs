@@ -42,6 +42,7 @@ expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
 arithmetic_side_effects = "deny"
+mod_module_files = "deny"
 
 # Excluded from the default `cargo test` run: the corpus harness shells out
 # to a pinned real `sqlite3` and takes ~8s, so it stays behind
