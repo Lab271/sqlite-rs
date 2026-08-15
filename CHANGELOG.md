@@ -4,6 +4,49 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.5.2] - 2026-08-15 — V2 phase 1: SELECT-core parser
+
+Hand-written recursive-descent parser + typed AST for the SELECT-core V2
+slice, spec `002-parser` Requirements 2-4, #61. Spend: matched the 1.2M
+"Large" estimate.
+
+### Added
+
+- **`src/parser/ast.rs`**: typed AST for `SELECT [DISTINCT] ... FROM
+  table [WHERE] [ORDER BY] [LIMIT [OFFSET]]` and its full V2 expression
+  grammar (literals, params, column refs, function calls, unary/binary
+  ops at SQLite precedence, `IS [NOT] NULL`, `[NOT] BETWEEN`, `[NOT] IN`,
+  `[NOT] LIKE/GLOB [ESCAPE]`, `CASE`, `CAST`, `COLLATE`, parens). Every
+  node carries a `Span`; parenthesization is preserved explicitly via
+  `ExprKind::Paren`.
+- **`src/parser/grammar.rs`**: the recursive-descent parser itself, one
+  method per precedence level mirroring `parse.y`'s `%left`/`%right`
+  table exactly. Recursive-descent entry points (`expr`/`not_expr`/
+  `unary_expr`) are depth-guarded (`MAX_EXPR_DEPTH`) so pathological
+  nesting fails cleanly instead of overflowing the stack.
+- **`src/parser/error.rs`**: `parse_select` / `ParseOutcome` — the
+  three-way accept / reject-unsupported / reject-invalid outcome from
+  spike 006 (#57). Unsupported-but-valid constructs (JOIN, GROUP BY,
+  compound SELECT, subqueries, CTEs, window functions) are distinguished
+  from genuine syntax errors, each pointing at the triggering token.
+- **`src/parser/printer.rs`**: `Display` roundtrip printer, verified as a
+  parse -> print -> parse fixpoint.
+- `tests/unit/parser.rs`: 32 unit tests covering the full V2 grammar,
+  both diagnostic outcomes, the roundtrip fixpoint, and deeply-nested
+  pathological input.
+- `tests/corpus/parser_oracle_test.rs`: accept/reject-unsupported/
+  reject-invalid parity against a live `sqlite3` oracle across the V2
+  corpus slice — the ticket's "oracle parity" acceptance bar.
+- `tests/fuzz/fuzz_targets/parse_select.rs` (`make fuzz-parse-select`):
+  fuzz target asserting `parse_select` never panics.
+
+### Changed
+
+- `.openspec/specs/002-parser/spec.md`: Requirements 2-4 flip
+  `(planned)` → active, all in-scope V2 scenarios test-linked (CTE and
+  window-function scenarios stay `(planned)` — V4/V9 per the grammar's
+  future-blocks stubs).
+
 ## [0.5.1] - 2026-08-15 — VFS unsafe elimination
 
 ### Changed
