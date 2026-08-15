@@ -6,14 +6,18 @@
 //! reader-mark protocol and the per-inode fd-cache for the
 //! `close()`-drops-all-locks trap are further follow-up tracked in #45.
 //!
-//! This module is the designated `unsafe`/`dyn` boundary (see the
-//! `mvl-limit` Makefile target): everything above the VFS stays in the
-//! qualified subset.
+//! This module is the designated `dyn` boundary (see the `mvl-limit`
+//! Makefile target): everything above the VFS stays in the qualified
+//! subset. It is no longer an `unsafe` boundary (#66) — `fcntl`/`-shm`
+//! access here goes through safe `nix`/`std` APIs, and the crate is
+//! `#![forbid(unsafe_code)]` with no local override anywhere.
 
 pub(crate) mod lock;
 mod memory;
 mod page_source;
 pub(crate) mod shm;
+#[cfg(test)]
+pub(crate) mod test_lock_probe;
 mod unix;
 
 pub use memory::MemoryVfs;
@@ -96,7 +100,7 @@ pub trait VfsFile {
 /// `dyn SharedLockGuard` behind a concrete type so callers outside
 /// `src/vfs/` (e.g. [`crate::pager::Pager`]) never need to write `dyn`
 /// themselves — this module is the qualified-subset gate's designated
-/// `unsafe`/`dyn` boundary (see the `mvl-limit` Makefile target).
+/// `dyn` boundary (see the `mvl-limit` Makefile target).
 pub struct FileLock(
     #[allow(dead_code, reason = "held only for its Drop side effect")] Box<dyn SharedLockGuard>,
 );

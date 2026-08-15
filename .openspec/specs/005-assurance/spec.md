@@ -50,7 +50,7 @@ argument (the same logic as diverse-lens verification in MVL).
 | dbsqlfuzz / AFL / OSS-Fuzz | Malformed-input crashes | cargo-fuzz on `decode_record` (#26), later on b-tree/WAL parsers |
 | Anomaly testing (OOM injection, I/O fault, crash tests) | Failure-path bugs | V5 power-cut torture harness; fault-injecting VFS impl (the `Vfs` trait is our injection point) |
 | Boundary/property testing | Edge values | proptest roundtrips (#26) |
-| Valgrind/sanitizers | Memory errors | Largely subsumed by Pillar 1 (safe Rust) — miri only if unsafe ever enters via the VFS carve-out |
+| Valgrind/sanitizers | Memory errors | Largely subsumed by Pillar 1 (safe Rust) — crate-wide `#![forbid(unsafe_code)]` (#66) means there is no `unsafe` for miri to ever need to check |
 | Disabled-optimization diff | Optimizer bugs | Future: planner-on vs planner-off result diffing (V4) — full scans as the reference implementation |
 
 ## Requirements

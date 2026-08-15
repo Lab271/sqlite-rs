@@ -1,8 +1,8 @@
-// `deny`, not `forbid`: `src/vfs/lock.rs` needs a scoped
-// `#![allow(unsafe_code)]` for the raw `fcntl` calls behind journal-mode
-// SHARED locking (#50) — `forbid` can never be locally overridden, `deny`
-// can.
-#![deny(unsafe_code)]
+// Crate-wide, with no local override possible: `src/vfs/lock.rs` and
+// `src/vfs/shm.rs` used to need a scoped `#![allow(unsafe_code)]` for raw
+// `fcntl`/`mmap`/`fork` calls (#50); both are now safe `nix`/`std` APIs
+// (#66), so nothing in this crate needs `unsafe` anymore.
+#![forbid(unsafe_code)]
 
 pub mod btree;
 pub mod dump;

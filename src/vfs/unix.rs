@@ -2,8 +2,9 @@
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+
+use nix::libc;
 
 use super::{companion_path, lock, shm, FileLock, Result, Vfs, VfsError, VfsFile};
 
@@ -53,7 +54,7 @@ impl VfsFile for UnixVfsFile {
     }
 
     fn lock_shared(&self) -> Result<FileLock> {
-        lock::lock_shared(self.file.as_raw_fd())
+        lock::lock_shared(&self.file)
             .map(|guard| FileLock(Box::new(guard)))
             .map_err(|source| to_lock_error(&self.path, source))
     }

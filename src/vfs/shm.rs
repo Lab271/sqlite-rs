@@ -18,23 +18,35 @@
 //! 120     WalCkptInfo.aLock[8]        <- UNIX_SHM_BASE
 //! 128     WalCkptInfo.nBackfillAttempted (u32)
 //! ```
-#![allow(unsafe_code)]
+//!
+//! No longer `mmap`s the `-shm` file (#66): every field access here is a
+//! `pread`/`pwrite` (`std::os::unix::fs::FileExt`) at these same fixed
+//! offsets. Coherence with a concurrent `sqlite3` process's own `MAP_SHARED`
+//! mapping of this file relies on the OS's unified page cache keeping
+//! buffered file I/O and `mmap`'d access to the same file coherent — true
+//! on Linux and macOS, sqlite-rs's supported platforms. A bonus of this
+//! approach over `mmap`: a `-shm` file truncated out from under a reader
+//! now yields a structured `Err` from the read, not an uncatchable
+//! `SIGBUS`.
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::ptr;
 
-use libc::{c_void, off_t, MAP_SHARED, PROT_READ, PROT_WRITE};
+use nix::libc::{self, off_t};
 
 use super::lock::fcntl_lock;
 use super::SharedLockGuard;
 
-const MX_FRAME_OFFSET: isize = 16;
-const READ_MARK_BASE_OFFSET: isize = 100;
+const MX_FRAME_OFFSET: u64 = 16;
+const READ_MARK_BASE_OFFSET: u64 = 100;
 #[cfg(test)]
 const READ_MARK_UNUSED: u32 = 0xFFFF_FFFF;
+
+/// Minimum `-shm` file length for a valid wal-index header: through the
+/// end of `aReadMark[5]` at offset 100..120.
+const MIN_SHM_LEN: u64 = READ_MARK_BASE_OFFSET + 20;
 
 /// SQLite's `UNIX_SHM_BASE` (`os_unix.c`): base of the `-shm` lock-byte
 /// range.
@@ -49,91 +61,50 @@ fn wal_read_lock_byte(slot: usize) -> off_t {
         .saturating_add(slot as off_t)
 }
 
-struct ShmMap {
-    ptr: *mut u8,
-    len: usize,
+fn read_mark_offset(slot: usize) -> u64 {
+    READ_MARK_BASE_OFFSET.saturating_add((slot as u64).saturating_mul(4))
 }
 
-impl ShmMap {
-    fn open(file: &File) -> io::Result<Self> {
-        let len = file.metadata()?.len() as usize;
-        let min_len = (READ_MARK_BASE_OFFSET as usize).saturating_add(20);
-        if len < min_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "-shm file too short for a wal-index header",
-            ));
-        }
-        // Safety: `file` is a valid, open fd for the lifetime of this
-        // call; `MAP_SHARED` + a length validated above against the
-        // file's own size keeps every offset this module reads/writes
-        // in-bounds.
-        let ptr = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                len,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                file.as_raw_fd(),
-                0 as off_t,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(ShmMap {
-            ptr: ptr as *mut u8,
-            len,
-        })
-    }
-
-    /// Safety: `offset..offset+4` must be within `self.len`, checked by
-    /// every call site below against the header's fixed, known-in-bounds
-    /// offsets.
-    unsafe fn read_u32(&self, offset: isize) -> u32 {
-        ptr::read_unaligned(self.ptr.offset(offset) as *const u32)
-    }
-
-    unsafe fn write_u32(&self, offset: isize, value: u32) {
-        ptr::write_unaligned(self.ptr.offset(offset) as *mut u32, value)
-    }
-
-    fn mx_frame(&self) -> u32 {
-        // Safety: offset 16 + 4 bytes is within the 48-byte header copy,
-        // itself within any `len` this type was constructed with.
-        unsafe { self.read_u32(MX_FRAME_OFFSET) }
-    }
-
-    fn read_mark_offset(slot: usize) -> isize {
-        READ_MARK_BASE_OFFSET.saturating_add((slot as isize).saturating_mul(4))
-    }
-
-    /// Test-only: reads back a published mark to verify `set_read_mark`.
-    /// Production code never needs to read a mark it didn't just write —
-    /// slot occupancy is determined by the lock, not the mark value (see
-    /// `claim_wal_read_lock`'s doc comment).
-    #[cfg(test)]
-    fn read_mark(&self, slot: usize) -> u32 {
-        // Safety: `slot` is always 1..=4 (test callers only), so this
-        // offset stays within `aReadMark[5]` at 100..120.
-        unsafe { self.read_u32(Self::read_mark_offset(slot)) }
-    }
-
-    fn set_read_mark(&self, slot: usize, value: u32) {
-        // Safety: see `read_mark`.
-        unsafe { self.write_u32(Self::read_mark_offset(slot), value) }
-    }
+fn read_u32_at(file: &File, offset: u64) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    file.read_exact_at(&mut buf, offset)?;
+    Ok(u32::from_ne_bytes(buf))
 }
 
-impl Drop for ShmMap {
-    fn drop(&mut self) {
-        // Safety: `self.ptr`/`self.len` are exactly the values returned by
-        // the `mmap` call that constructed this `ShmMap`, unmapped at most
-        // once (`Drop` runs once).
-        unsafe {
-            libc::munmap(self.ptr as *mut c_void, self.len);
-        }
+fn write_u32_at(file: &File, offset: u64, value: u32) -> io::Result<()> {
+    file.write_all_at(&value.to_ne_bytes(), offset)
+}
+
+fn mx_frame(file: &File) -> io::Result<u32> {
+    read_u32_at(file, MX_FRAME_OFFSET)
+}
+
+fn set_read_mark(file: &File, slot: usize, value: u32) -> io::Result<()> {
+    write_u32_at(file, read_mark_offset(slot), value)
+}
+
+/// Test-only: reads back a published mark to verify `set_read_mark`.
+/// Production code never needs to read a mark it didn't just write — slot
+/// occupancy is determined by the lock, not the mark value (see
+/// `claim_wal_read_lock`'s doc comment).
+#[cfg(test)]
+fn read_mark(file: &File, slot: usize) -> io::Result<u32> {
+    read_u32_at(file, read_mark_offset(slot))
+}
+
+/// Validates that `file` is at least long enough to hold a full wal-index
+/// header — the `-shm` equivalent of `ShmMap::open`'s old length check,
+/// still needed because a crash-truncated or half-written `-shm` file must
+/// be rejected with a structured `Err`, not read out of bounds.
+fn validate_shm_len(file: &File) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    if len < MIN_SHM_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "-shm file too short for a wal-index header",
+        ));
     }
+    Ok(())
 }
 
 /// A claimed WAL reader-mark slot, released (lock dropped, mark left in
@@ -152,12 +123,7 @@ impl Drop for WalReadLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        let _ = fcntl_lock(
-            self.file.as_raw_fd(),
-            libc::F_UNLCK as libc::c_int,
-            wal_read_lock_byte(self.slot),
-            1,
-        );
+        let _ = fcntl_lock(&self.file, libc::F_UNLCK, wal_read_lock_byte(self.slot), 1);
     }
 }
 
@@ -181,22 +147,13 @@ impl Drop for WalReadLock {
 /// gap between reading it and acquiring the lock, publishing a stale
 /// mark. `Err` on the first non-contention `fcntl` failure, or if every
 /// slot is genuinely contended (`EAGAIN`/`EACCES`).
-///
-/// Known residual risk (accepted, not fixed here): if the `-shm` file
-/// shrinks after `ShmMap::open`'s length check (e.g. a concurrent
-/// checkpoint truncates it), the mapping can extend past the file's
-/// current backing store, and an access there raises `SIGBUS` — an
-/// uncatchable process kill, not a Rust panic. This is inherent to any
-/// mmap-based approach without a `SIGBUS` handler; sqlite-rs's threat
-/// model here is a cooperating local `sqlite3` writer, not a sandboxed
-/// adversary, so this is documented rather than mitigated.
 pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadLock>> {
     let file = match OpenOptions::new().read(true).write(true).open(shm_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let shm = ShmMap::open(&file)?;
+    validate_shm_len(&file)?;
 
     let mut last_err = None;
     for slot in 1..=4usize {
@@ -204,10 +161,10 @@ pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadL
         // Briefly exclusive, only long enough to publish this slot's mark
         // before downgrading to the SHARED lock held for the guard's
         // lifetime — matches SQLite's own claim sequence (spike 005 exp 4).
-        match fcntl_lock(file.as_raw_fd(), libc::F_WRLCK as libc::c_int, byte, 1) {
+        match fcntl_lock(&file, libc::F_WRLCK, byte, 1) {
             Ok(()) => {
-                shm.set_read_mark(slot, shm.mx_frame());
-                fcntl_lock(file.as_raw_fd(), libc::F_RDLCK as libc::c_int, byte, 1)?;
+                set_read_mark(&file, slot, mx_frame(&file)?)?;
+                fcntl_lock(&file, libc::F_RDLCK, byte, 1)?;
                 return Ok(Some(WalReadLock { file, slot }));
             }
             Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)) => {
@@ -220,52 +177,13 @@ pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadL
     Err(last_err.unwrap_or_else(|| io::Error::other("no WAL read-lock slot available")))
 }
 
-/// Test-only: whether `slot` on `shm_path` is currently free, probed from
-/// a forked child process via a non-blocking EXCLUSIVE lock attempt — for
-/// tests outside this module (e.g. `src/pager/mod.rs`) that need to
-/// observe reader-mark lock state without duplicating `fcntl` calls under
-/// `unsafe_code`'s deny gate (`src/vfs/` is that gate's sole
-/// qualified-subset exemption). A real second process is required: POSIX
-/// record locks never conflict with a further request from the same
-/// process (scoped to (process, inode)), so an in-process probe would
-/// report "free" unconditionally.
+/// Test-only: whether `slot` on `shm_path` is currently free, probed via a
+/// real second OS process (`src/vfs/test_lock_probe.rs`) — for tests
+/// outside this module (e.g. `src/pager/mod.rs`) that need to observe
+/// reader-mark lock state.
 #[cfg(test)]
-#[allow(
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test-only helper: a fork failure has no reasonable fallback"
-)]
 pub(crate) fn slot_is_free_test_only(shm_path: &Path, slot: usize) -> bool {
-    // Safety: the child only performs async-signal-safe work (a raw
-    // fcntl syscall, no allocation) before `_exit`.
-    let pid = unsafe { libc::fork() };
-    match pid {
-        -1 => panic!("fork failed: {}", io::Error::last_os_error()),
-        0 => {
-            let ok = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(shm_path)
-                .ok()
-                .map(|f| {
-                    fcntl_lock(
-                        f.as_raw_fd(),
-                        libc::F_WRLCK as libc::c_int,
-                        wal_read_lock_byte(slot),
-                        1,
-                    )
-                    .is_ok()
-                })
-                .unwrap_or(false);
-            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
-        }
-        pid => {
-            let mut status: libc::c_int = 0;
-            unsafe { libc::waitpid(pid, &mut status, 0) };
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
-        }
-    }
+    super::test_lock_probe::lock_available(shm_path, "wrlock", wal_read_lock_byte(slot), 1)
 }
 
 #[cfg(test)]
@@ -280,6 +198,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::vfs::test_lock_probe::{hold_multiple, release_all};
 
     /// Builds a minimal, valid-enough `-shm` file: a zeroed wal-index
     /// header with `mxFrame` set and every `aReadMark` slot unused.
@@ -317,8 +237,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        let shm = ShmMap::open(&file).unwrap();
-        assert_eq!(shm.read_mark(guard.slot), 42);
+        assert_eq!(read_mark(&file, guard.slot).unwrap(), 42);
 
         drop(guard);
         std::fs::remove_file(&path).unwrap();
@@ -346,117 +265,18 @@ mod tests {
     /// favor of the next free one — POSIX record locks never conflict
     /// with a further request from the *same* process (they're scoped to
     /// (process, inode)), so a real second process is required to prove
-    /// this, matching `src/vfs/lock.rs`'s `exclusive_lock_available`
-    /// fork-based pattern.
+    /// this.
     #[test]
-    #[allow(
-        clippy::panic,
-        reason = "test-only helper: a fork failure has no reasonable fallback"
-    )]
     fn contended_slot_is_skipped_for_the_next_free_one() {
         let path = temp_shm(5);
-        let (parent_sock, child_sock) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let held = hold_multiple(&path, &[("rdlock", wal_read_lock_byte(1), 1)]);
 
-        // Safety: the child only performs async-signal-safe work (raw
-        // fcntl/socket syscalls, no allocation) before `_exit`.
-        let pid = unsafe { libc::fork() };
-        match pid {
-            -1 => panic!("fork failed: {}", io::Error::last_os_error()),
-            0 => {
-                drop(parent_sock);
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&path)
-                    .unwrap();
-                fcntl_lock(
-                    file.as_raw_fd(),
-                    libc::F_RDLCK as libc::c_int,
-                    wal_read_lock_byte(1),
-                    1,
-                )
-                .expect("child claims slot 1");
-                child_sock.send(b"locked").unwrap();
-                let mut buf = [0u8; 4];
-                let _ = child_sock.recv(&mut buf);
-                unsafe { libc::_exit(0) };
-            }
-            pid => {
-                drop(child_sock);
-                let mut buf = [0u8; 16];
-                parent_sock.recv(&mut buf).unwrap();
+        let guard = claim_wal_read_lock(&path).unwrap().unwrap();
+        assert_eq!(guard.slot, 2, "slot 1 is held, so slot 2 must be claimed");
 
-                let guard = claim_wal_read_lock(&path).unwrap().unwrap();
-                assert_eq!(guard.slot, 2, "slot 1 is held, so slot 2 must be claimed");
-
-                parent_sock.send(b"done").unwrap();
-                let mut status: libc::c_int = 0;
-                unsafe { libc::waitpid(pid, &mut status, 0) };
-                drop(guard);
-            }
-        }
-
+        release_all(held);
+        drop(guard);
         std::fs::remove_file(&path).unwrap();
-    }
-
-    /// Forks one child per `slots`, each holding an `F_RDLCK` on its slot
-    /// until signaled, and returns their pids plus the parent-side sockets
-    /// to release them. Generalizes the single-slot fork in
-    /// `contended_slot_is_skipped_for_the_next_free_one` to cover "every
-    /// slot contended at once".
-    #[allow(
-        clippy::panic,
-        reason = "test-only helper: a fork failure has no reasonable fallback"
-    )]
-    fn hold_slots_in_children(
-        path: &std::path::Path,
-        slots: &[usize],
-    ) -> Vec<(libc::pid_t, std::os::unix::net::UnixDatagram)> {
-        slots
-            .iter()
-            .map(|&slot| {
-                let (parent_sock, child_sock) = std::os::unix::net::UnixDatagram::pair().unwrap();
-                // Safety: the child only performs async-signal-safe work
-                // (raw fcntl/socket syscalls, no allocation) before `_exit`.
-                let pid = unsafe { libc::fork() };
-                match pid {
-                    -1 => panic!("fork failed: {}", io::Error::last_os_error()),
-                    0 => {
-                        drop(parent_sock);
-                        let file = OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .open(path)
-                            .unwrap();
-                        fcntl_lock(
-                            file.as_raw_fd(),
-                            libc::F_RDLCK as libc::c_int,
-                            wal_read_lock_byte(slot),
-                            1,
-                        )
-                        .expect("child claims its slot");
-                        child_sock.send(b"locked").unwrap();
-                        let mut buf = [0u8; 4];
-                        let _ = child_sock.recv(&mut buf);
-                        unsafe { libc::_exit(0) };
-                    }
-                    pid => {
-                        drop(child_sock);
-                        let mut buf = [0u8; 16];
-                        parent_sock.recv(&mut buf).unwrap();
-                        (pid, parent_sock)
-                    }
-                }
-            })
-            .collect()
-    }
-
-    fn release_children(children: Vec<(libc::pid_t, std::os::unix::net::UnixDatagram)>) {
-        for (pid, sock) in children {
-            sock.send(b"done").unwrap();
-            let mut status: libc::c_int = 0;
-            unsafe { libc::waitpid(pid, &mut status, 0) };
-        }
     }
 
     /// When every reader slot is genuinely contended, `claim_wal_read_lock`
@@ -465,18 +285,24 @@ mod tests {
     #[test]
     fn all_slots_contended_returns_err() {
         let path = temp_shm(9);
-        let children = hold_slots_in_children(&path, &[1, 2, 3, 4]);
+        let held = hold_multiple(
+            &path,
+            &[1, 2, 3, 4].map(|slot| ("rdlock", wal_read_lock_byte(slot), 1)),
+        );
 
         let result = claim_wal_read_lock(&path);
         assert!(result.is_err(), "expected Err, got {result:?}");
 
-        release_children(children);
+        release_all(held);
         std::fs::remove_file(&path).unwrap();
     }
 
     /// A `-shm` file shorter than the wal-index header must be rejected,
     /// not read out-of-bounds or panic — a realistic input for a
-    /// crash-truncated or half-written `-shm` file.
+    /// crash-truncated or half-written `-shm` file. Since `-shm` access is
+    /// now `pread`/`pwrite` rather than `mmap` (#66), this is also the
+    /// scenario that used to risk `SIGBUS`: a truncated file now yields
+    /// this structured `Err` instead.
     #[test]
     fn truncated_shm_file_is_rejected() {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -517,7 +343,10 @@ mod tests {
         let shm_path = companion_path(&db_path, "-shm");
         std::fs::rename(temp_shm(3), &shm_path).unwrap();
 
-        let children = hold_slots_in_children(&shm_path, &[1, 2, 3, 4]);
+        let held = hold_multiple(
+            &shm_path,
+            &[1, 2, 3, 4].map(|slot| ("rdlock", wal_read_lock_byte(slot), 1)),
+        );
 
         let result = UnixVfs.claim_wal_read_lock(&db_path);
         match result {
@@ -525,7 +354,7 @@ mod tests {
             other => panic!("expected VfsError::Locked, got {other:?}"),
         }
 
-        release_children(children);
+        release_all(held);
         std::fs::remove_file(&shm_path).unwrap();
     }
 }

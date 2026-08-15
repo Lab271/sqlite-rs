@@ -4,6 +4,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.5.1] - 2026-08-15 — VFS unsafe elimination
+
+### Changed
+
+- **`src/vfs/` no longer needs `unsafe`** (#66): `src/vfs/lock.rs`'s raw `libc::fcntl(F_SETLK)` is now `nix::fcntl::fcntl` (a safe wrapper); `src/vfs/shm.rs` no longer `mmap`s the `-shm` file — `aReadMark`/`mxFrame` access is `std::os::unix::fs::FileExt::{read_at, write_at}` (`pread`/`pwrite`) at the same fixed offsets, and SHM lock slots use the same safe `fcntl` wrapper. `src/lib.rs` is `#![forbid(unsafe_code)]` crate-wide again, with no local override anywhere in the crate. `libc` is no longer a direct dependency; `nix` (features: `fs`) replaces it.
+- Cross-process lock/shm tests now spawn a genuine subprocess (`tests/helpers/lock_probe.rs`, a `[[bin]]` target) via `std::process::Command`, instead of `fork`/`waitpid`/`_exit` — a fresh address space, closer to a real second `sqlite3` process, and needs no `unsafe`.
+- `Makefile`'s `mvl-limit` `src/vfs/*` exclusion rationale is now `dyn` only (the `Vfs`/`VfsFile`/`SharedLockGuard` trait objects) — the `unsafe` rationale no longer applies.
+
+### Fixed
+
+- The `-shm` `SIGBUS` known limitation (below, from 0.3.0) is gone: without an `mmap`, a `-shm` file truncated out from under a reader now yields a structured `Err` from the failing `read_at`/`write_at`, not an uncatchable process kill. Coherence between this crate's buffered `pread`/`pwrite` access and a concurrent `sqlite3` process's own `MAP_SHARED` mapping of the same file relies on the OS's unified page cache — true on Linux and macOS, sqlite-rs's supported platforms.
+
 ## [0.5.0] - 2026-08-15 — V2 phase 1: tokenizer
 
 `src/parser/tokenizer.rs` — a complete SQL tokenizer, spec `002-parser` Requirement 1, #60.
