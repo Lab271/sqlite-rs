@@ -28,13 +28,14 @@ Consequence for the tokenizer: it is built **once, completely** (all ~140 keywor
 
 ## Philosophy
 
-SQLite uses a Lemon-generated LALR(1) parser. The grammar is defined in `parse.y` (~3,500 lines) and processed by Lemon (~6,000 lines) to produce `parse.c`. We have three options:
+SQLite uses a Lemon-generated LALR(1) parser. The grammar is defined in `parse.y` (~3,500 lines) and processed by Lemon (~6,000 lines) to produce `parse.c`. Spike 001 (issue #1, `tests/spike/001_parser/comparison.md`) built and benchmarked four real variants against a shared subset grammar:
 
-1. **Use lemon-rs** — Rust port of Lemon with SQLite grammar already ported
-2. **Use lalrpop** — Rust-native LALR(1) generator, rewrite grammar
-3. **Hand-write** — Recursive descent like rustc
+1. **lemon-rs** — Rust port of Lemon with SQLite grammar already ported
+2. **pomelo** — Lemon-as-a-proc-macro, LALR(1), zero runtime deps
+3. **lalrpop** — Rust-native LALR(1) generator, rewrite grammar
+4. **pest** — PEG, not LALR
 
-**Decision:** Start with **lemon-rs** for maximum compatibility, evaluate migration to lalrpop if maintenance burden is high.
+**Decision:** **pomelo** — near-1:1 transliteration of `parse.y`'s precedence/rules, ordinary Rust compile errors instead of lemon-rs's runtime `unreachable!()` panics, no runtime dependency. lalrpop is the fallback if compile-time diagnostics matter more than parse.y fidelity; pest is not recommended for the main grammar (ordered-choice hazard, can't cleanly reproduce `%fallback ID`). Spike 006 (issue #57, `tests/spike/006_grammar_slice/FINDINGS.md`) confirmed the V2 SELECT-core subset slices out of pomelo's grammar cleanly and grows to V3 by addition only.
 
 ## SQLite Grammar Statistics
 
