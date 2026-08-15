@@ -401,6 +401,10 @@ fn lookup_word(word: &str) -> TokenKind {
         _ => {}
     }
     match KEYWORDS.binary_search_by(|(text, _)| (*text).cmp(upper.as_str())) {
+        // `Ok(idx)` proves `idx` is in bounds, so `.get` never hits the
+        // `unwrap_or_else` fallback; it's written this way (rather than
+        // indexing) because the qualified subset denies
+        // `clippy::indexing_slicing`/`unwrap_used`/`expect_used`.
         Ok(idx) => KEYWORDS
             .get(idx)
             .map(|(_, kw)| TokenKind::Keyword(*kw))
@@ -546,11 +550,13 @@ impl Tokenizer {
     }
 
     pub fn next_token(&mut self) -> Token {
+        // Captured before `skip_trivia` so an unterminated-comment error
+        // span points at the comment's start, not the EOF it scanned to.
+        let trivia_start = self.current_pos();
         if let Some(reason) = self.skip_trivia() {
-            let start = self.current_pos();
             return Token {
                 kind: TokenKind::Error(reason),
-                span: self.span_from(start),
+                span: self.span_from(trivia_start),
             };
         }
         let start = self.current_pos();
@@ -760,6 +766,10 @@ impl Tokenizer {
             if hex.is_empty() {
                 return TokenKind::Error("hex literal has no digits".to_string());
             }
+            // SQLite parses hex integer literals as unsigned 64-bit and
+            // bit-reinterprets them as signed i64 (values above i64::MAX
+            // wrap to negative, e.g. 0xFFFFFFFFFFFFFFFF -> -1) — matched
+            // here intentionally, not an unreviewed truncation.
             return match i64::from_str_radix(&hex, 16) {
                 Ok(n) => TokenKind::Integer(n),
                 Err(_) => match u64::from_str_radix(&hex, 16) {
@@ -1052,6 +1062,25 @@ mod tests {
     #[test]
     fn test_hex_integer() {
         assert_eq!(kinds("0x1F"), vec![TokenKind::Integer(31), TokenKind::Eof]);
+    }
+
+    /// Hex literals above `i64::MAX` bit-wrap to negative rather than
+    /// erroring, matching SQLite's unsigned-parse-then-reinterpret
+    /// semantics — see the comment at the hex branch of `scan_number`.
+    #[test]
+    fn test_hex_integer_wraps_above_i64_max() {
+        assert_eq!(
+            kinds("0xFFFFFFFFFFFFFFFF"),
+            vec![TokenKind::Integer(-1), TokenKind::Eof]
+        );
+    }
+
+    /// `lookup_word`'s `KEYWORDS.binary_search_by` requires this table
+    /// sorted by text; an out-of-order insertion would silently
+    /// misclassify keywords instead of failing loudly.
+    #[test]
+    fn test_keywords_table_is_sorted() {
+        assert!(KEYWORDS.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]
