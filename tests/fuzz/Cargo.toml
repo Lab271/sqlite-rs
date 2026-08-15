@@ -40,3 +40,10 @@ path = "fuzz_targets/parse_select.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "semantics_compare"
+path = "fuzz_targets/semantics_compare.rs"
+test = false
+doc = false
+bench = false
