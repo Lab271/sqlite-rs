@@ -87,3 +87,27 @@ query set (post-#2/#57) is known.
 - [x] Surprises vs. the ~40 estimate documented (above)
 - [ ] Phase-3 VDBE ticket scoped from the JSON — deferred to when phase 3
       starts, per epic #56's "tickets created as their phase starts" policy
+
+## Addendum: scope decisions (#87, V2 phase 3 opener)
+
+Two of this spike's open surprises are now resolved decisions, executed by
+#87:
+
+1. **Scalar subqueries: OUT of V2.** The bare-aggregate-scalar-subquery
+   surprise above is resolved by scoping subqueries out of V2 entirely —
+   the grammar EBNF already tags `IN (select-stmt)` and friends V4
+   (`.openspec/grammar/sqlite.ebnf`). The harvest's scalar-subquery query
+   (`WHERE id = (SELECT max(id) FROM products)`) is dropped; `AggStep`/
+   `AggFinal` no longer appear in the V2 set. Widened the query set with
+   explicit `=`/`<>` comparisons to close the confessed Eq/Ne gap.
+2. **DISTINCT: IN, with in-memory ephemeral storage.** DISTINCT stays in
+   V2 (grammar EBNF tags it V2). Its ephemeral-table opcode family
+   (`OpenEphemeral`/`Sequence`/`IdxInsert`/`Found`/`Delete`) keeps SQLite's
+   compatibility semantics but backs onto an in-memory `BTreeMap`, never
+   the on-disk file format — reused as-is by V4 (compound selects,
+   IN-subquery) later.
+
+Re-running `make opcodes` against the widened query set: **52 opcodes**
+(down from 57 — `AggStep`/`AggFinal` dropped, `Eq` gained), no `Agg*`
+opcodes present. `.openspec/plan.md:101` updated from "~40 core opcodes"
+to the harvested 52. See `tools/opcodes-v2.json` for full detail.
