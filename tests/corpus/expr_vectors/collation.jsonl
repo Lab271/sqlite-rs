@@ -1,0 +1,7 @@
+{"expr": "'abc' = 'ABC' COLLATE BINARY", "type": "integer", "value_quoted": "0"}
+{"expr": "'abc' = 'ABC' COLLATE NOCASE", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc ' = 'abc' COLLATE RTRIM", "type": "integer", "value_quoted": "1"}
+{"expr": "'straße' = 'STRASSE' COLLATE NOCASE", "type": "integer", "value_quoted": "0"}
+{"expr": "'é' = 'É' COLLATE NOCASE", "type": "integer", "value_quoted": "0"}
+{"expr": "'abc' = 'abc  ' COLLATE RTRIM", "type": "integer", "value_quoted": "1"}
+{"expr": "'I' = 'i' COLLATE NOCASE", "type": "integer", "value_quoted": "1"}

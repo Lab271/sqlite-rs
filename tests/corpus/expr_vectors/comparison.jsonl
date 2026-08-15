@@ -1,0 +1,15 @@
+{"expr": "NULL < 1", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL < 'a'", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL < x'00'", "type": "null", "value_quoted": "NULL"}
+{"expr": "NULL = NULL", "type": "null", "value_quoted": "NULL"}
+{"expr": "1 < 'a'", "type": "integer", "value_quoted": "1"}
+{"expr": "1 < x'00'", "type": "integer", "value_quoted": "1"}
+{"expr": "'a' < x'00'", "type": "integer", "value_quoted": "1"}
+{"expr": "1 < 2.5", "type": "integer", "value_quoted": "1"}
+{"expr": "2 = 2.0", "type": "integer", "value_quoted": "1"}
+{"expr": "1 < 1.0000001", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc' < 'abd'", "type": "integer", "value_quoted": "1"}
+{"expr": "'ABC' < 'abc'", "type": "integer", "value_quoted": "1"}
+{"expr": "x'01' < x'0100'", "type": "integer", "value_quoted": "1"}
+{"expr": "x'0100' < x'02'", "type": "integer", "value_quoted": "1"}
+{"expr": "9223372036854775807 < 9223372036854775807.0", "type": "integer", "value_quoted": "1"}
