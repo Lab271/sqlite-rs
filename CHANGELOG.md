@@ -4,6 +4,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.1] - 2026-08-15
+
+### Fixed
+
+- **`src/vdbe/functions.rs`**: robustness gaps found in #92's review, #99.
+  `zeroblob()` now clamps its requested length to `MAX_BLOB_LEN` (1e9)
+  instead of allocating an unbounded amount — a huge `N` previously hit
+  Rust's allocator abort path. `iif()`'s TEXT-condition truthiness now
+  checks both `Integer(0)` and `Real(0.0)` coercion outcomes (`'0.0'`
+  was incorrectly truthy). `round()` clamps `digits` to SQLite's `[0,
+  30]` range and propagates NULL when the digits argument is NULL
+  instead of silently treating it as 0. Spend: small, matched the
+  review-fix estimate.
+
 ## [0.6.0] - 2026-08-15 — V2 phase 2 complete
 
 ### Added
