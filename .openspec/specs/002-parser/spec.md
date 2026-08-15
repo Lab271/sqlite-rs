@@ -380,13 +380,15 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 
 The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLite rejects.
 
-**Implementation:** `src/parser/grammar.rs` (planned) or `src/parser/parse.y` (if using lemon-rs)
+**Implementation:** `src/parser/grammar.rs` (V2 SELECT-core slice, hand-written recursive descent; pomelo/lemon-generated grammar per spike 006 is future work for V3+)
 
 #### Scenario: Accept valid SELECT
 
 - GIVEN `SELECT * FROM t`
 - WHEN parsed
 - THEN parse succeeds with SelectStmt AST
+
+**Tests:** `tests/unit/parser.rs::test_accept_select_star`
 
 #### Scenario: Accept CTE
 
@@ -406,6 +408,8 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 - WHEN parsed
 - THEN parse fails with error pointing to `FROM`
 
+**Tests:** `tests/unit/parser.rs::test_error_on_missing_columns`, `tests/corpus/parser_oracle_test.rs::parser_matches_oracle_three_way_outcome`
+
 #### Scenario: SQL text corpus labels match real SQLite
 
 - GIVEN the three-way labeled corpus at `tests/corpus/sql/{valid_in_subset,valid_out_of_subset,invalid}/*.sql` (#2), covering the V2 SELECT-core subset plus representative V3/V4+ statements and malformed SQL
@@ -418,7 +422,7 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 The AST MUST represent all SQLite SQL constructs without loss of information.
 
-**Implementation:** `src/parser/ast.rs` (planned)
+**Implementation:** `src/parser/ast.rs`, `src/parser/printer.rs` (roundtrip)
 
 #### Scenario: Preserve column aliases
 
@@ -426,23 +430,29 @@ The AST MUST represent all SQLite SQL constructs without loss of information.
 - WHEN parsed and unparsed
 - THEN output MUST include `AS alias`
 
+**Tests:** `tests/unit/parser.rs::test_preserve_column_alias`
+
 #### Scenario: Preserve parentheses for precedence
 
 - GIVEN `SELECT (a + b) * c`
 - WHEN parsed
 - THEN AST MUST represent grouping (not just operator precedence)
 
+**Tests:** `tests/unit/parser.rs::test_preserve_parens_for_precedence`, `tests/unit/parser.rs::test_roundtrip_fixpoint`
+
 ### Requirement 4: Error Messages [SHOULD]
 
 Parse errors SHOULD include source location and helpful context.
 
-**Implementation:** `src/parser/error.rs` (planned)
+**Implementation:** `src/parser/error.rs`
 
 #### Scenario: Error on unexpected token
 
 - GIVEN `SELECT FROM t` (missing columns)
 - WHEN parsed
 - THEN error SHOULD say "expected column or expression, found FROM at line 1, column 8"
+
+**Tests:** `tests/unit/parser.rs::test_error_on_missing_columns`
 
 ### Requirement 5: Minimal DDL Reader Independence [MUST]
 

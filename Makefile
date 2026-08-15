@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit mod-files verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit mod-files verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -15,7 +15,7 @@
 #     `#![forbid(unsafe_code)]` with no local override anywhere.
 #   - tests/spike/** is exempt: spikes are throwaway by design.
 MVL_LIMIT ?= cargo-mvl-limit
-MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/* src/bin/*
+MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/memory.rs src/vfs/unix.rs src/vfs/page_source.rs src/bin/*
 
 COVERAGE_MIN := 75
 
@@ -71,7 +71,7 @@ deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
 grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict
 
-mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes, src/vfs (dyn boundary), and src/bin (stdout/stderr CLI I/O boundary) exempt)
+mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; the 4 files with genuine dyn Vfs/VfsFile/SharedLockGuard trait objects, and src/bin (stdout/stderr CLI I/O boundary), exempt — #66 removed the unsafe rationale from src/vfs/lock.rs, shm.rs, test_lock_probe.rs, so those are back in the qualified subset)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
 	  echo "error: $(MVL_LIMIT) not found."; \
 	  echo "install: cargo install cargo-mvl  (or build from mvl-lang/mvl-rust:"; \
@@ -143,6 +143,9 @@ fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightl
 
 fuzz-decode-record: ## Run the record-decoder fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 003 Req 6)
 	cargo +nightly fuzz run --fuzz-dir tests/fuzz decode_record -- -max_total_time=$(FUZZ_SECONDS)
+
+fuzz-parse-select: ## Run the SELECT-core parser fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 002 Req 2-4)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz parse_select -- -max_total_time=$(FUZZ_SECONDS)
 
 
 # === Spikes ===

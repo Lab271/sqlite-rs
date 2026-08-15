@@ -3,4 +3,10 @@
 //! must keep building and passing with this module absent, so nothing
 //! under `src/schema` may depend on anything here.
 
+pub mod ast;
+pub mod error;
+pub mod grammar;
+pub mod printer;
 pub mod tokenizer;
+
+pub use error::{parse_select, ParseOutcome};

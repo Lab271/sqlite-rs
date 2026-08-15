@@ -1,6 +1,6 @@
 [package]
 name = "sqlite-rs"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
@@ -27,6 +27,10 @@ path = "tests/unit/record.rs"
 [[test]]
 name = "unit_vfs"
 path = "tests/unit/vfs.rs"
+
+[[test]]
+name = "unit_parser"
+path = "tests/unit/parser.rs"
 
 [[test]]
 name = "tokenizer_proptest"
