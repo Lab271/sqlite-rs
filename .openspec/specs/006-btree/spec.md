@@ -83,7 +83,7 @@ Every page-parsing and overflow-reassembly path MUST return `Err`, never panic, 
 
 **Implementation:** `src/btree/mod.rs`
 
-**Tests:** inline `#[cfg(test)]` in `src/btree/mod.rs`; `fuzz/fuzz_targets/btree_cursor.rs`
+**Tests:** inline `#[cfg(test)]` in `src/btree/mod.rs`; `tests/fuzz/fuzz_targets/btree_cursor.rs`
 
 #### Scenario: Truncated or malformed page
 
@@ -107,7 +107,7 @@ Every page-parsing and overflow-reassembly path MUST return `Err`, never panic, 
 - WHEN the fuzz target runs
 - THEN the cursor MUST never panic, regardless of input
 
-**Tests:** `fuzz/fuzz_targets/btree_cursor.rs`
+**Tests:** `tests/fuzz/fuzz_targets/btree_cursor.rs`
 
 ### Requirement 4: Rowid-Alias Columns Are Not This Layer's Job [SHOULD]
 

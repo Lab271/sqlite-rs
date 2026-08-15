@@ -86,7 +86,7 @@ proptest! {
     // it at a fixed path keeps regression seeds working here too.
     #![proptest_config(ProptestConfig {
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            "proptest-regressions/record_proptest.txt"
+            "tests/proptest-regressions/record_proptest.txt"
         ))),
         ..ProptestConfig::default()
     })]

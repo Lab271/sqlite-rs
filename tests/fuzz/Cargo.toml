@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.sqlite-rs]
-path = ".."
+path = "../.."
 
 [[bin]]
 name = "btree_cursor"

@@ -94,7 +94,7 @@ Structured errors discharge this claim today; the panic-surface compile-time
 gate and the decoder fuzz target land in #26 (existing non-test violations
 in `src/header.rs`, `src/record/decode.rs`, `src/btree/mod.rs`, and
 `src/schema/ddl_reader.rs` must be refactored to a non-panicking form
-first; `fuzz/fuzz_targets/btree_cursor.rs` is the existing pattern the new
+first; `tests/fuzz/fuzz_targets/btree_cursor.rs` is the existing pattern the new
 target follows).
 
 **Implementation:** `src/record/error.rs`
@@ -121,7 +121,7 @@ target follows).
 - WHEN run under `cargo fuzz run decode_record`
 - THEN no panic is ever found — this discharges spec 003 Requirement 6's "Fuzz safety" scenario directly
 
-**Tests:** `fuzz/fuzz_targets/decode_record.rs` (planned)
+**Tests:** `tests/fuzz/fuzz_targets/decode_record.rs` (planned)
 
 ### Requirement 3: Supply-Chain Gates [MUST]
 

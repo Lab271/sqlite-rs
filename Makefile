@@ -121,13 +121,13 @@ coverage-gate: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MI
 FUZZ_SECONDS ?= 60
 
 fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
-	cd fuzz && cargo +nightly fuzz run btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
 
 fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
-	cd fuzz && cargo +nightly fuzz run wal_frames -- -max_total_time=$(FUZZ_SECONDS)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz wal_frames -- -max_total_time=$(FUZZ_SECONDS)
 
 fuzz-decode-record: ## Run the record-decoder fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 003 Req 6)
-	cd fuzz && cargo +nightly fuzz run decode_record -- -max_total_time=$(FUZZ_SECONDS)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz decode_record -- -max_total_time=$(FUZZ_SECONDS)
 
 
 # === Spikes ===

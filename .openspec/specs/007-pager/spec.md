@@ -119,4 +119,4 @@ For a WAL-mode database with a non-empty, sub-header-length-or-larger `-wal` fil
 - WHEN parsed
 - THEN `WalHeader::parse` and `committed_pages` return errors or empty results, never panic (fuzz target)
 
-**Tests:** `src/pager/wal.rs::tests::too_short_is_err_not_panic`, `src/pager/wal.rs::tests::bad_magic_is_err`, `src/pager/wal.rs::tests::corrupted_header_checksum_is_err`, `src/pager/wal.rs::tests::garbage_input_never_panics`, `fuzz/fuzz_targets/wal_frames.rs`
+**Tests:** `src/pager/wal.rs::tests::too_short_is_err_not_panic`, `src/pager/wal.rs::tests::bad_magic_is_err`, `src/pager/wal.rs::tests::corrupted_header_checksum_is_err`, `src/pager/wal.rs::tests::garbage_input_never_panics`, `tests/fuzz/fuzz_targets/wal_frames.rs`
