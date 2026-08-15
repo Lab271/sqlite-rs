@@ -27,7 +27,11 @@
 //! on Linux and macOS, sqlite-rs's supported platforms. A bonus of this
 //! approach over `mmap`: a `-shm` file truncated out from under a reader
 //! now yields a structured `Err` from the read, not an uncatchable
-//! `SIGBUS`.
+//! `SIGBUS`. This was #54's Option C (see `.openspec/adr/0001-shm-access-pread-not-mmap.md`)
+//! — the `SIGBUS` exposure this module used to carry as known residual risk
+//! is eliminated, not merely narrowed. `validate_shm_len` also bounds the
+//! file above `MAX_SHM_LEN`, so an oversized `-shm` (sparse or otherwise) is
+//! rejected before any offset into it is trusted.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -47,6 +51,16 @@ const READ_MARK_UNUSED: u32 = 0xFFFF_FFFF;
 /// Minimum `-shm` file length for a valid wal-index header: through the
 /// end of `aReadMark[5]` at offset 100..120.
 const MIN_SHM_LEN: u64 = READ_MARK_BASE_OFFSET + 20;
+
+/// SQLite grows `-shm` in fixed 32KB regions (`os_unix.c`'s
+/// `SHM_REGION_SIZE`, guarded by a cap of 8 regions in the same file) and
+/// never needs more than a handful of them for the wal-index header plus
+/// lock bytes. A `-shm` file far above that is not something a cooperating
+/// writer produces — it is either corrupt or hostile, and #54 requires
+/// rejecting it outright rather than trusting the filesystem-reported
+/// length unconditionally.
+const SHM_REGION_SIZE: u64 = 32 * 1024;
+const MAX_SHM_LEN: u64 = SHM_REGION_SIZE * 8;
 
 /// SQLite's `UNIX_SHM_BASE` (`os_unix.c`): base of the `-shm` lock-byte
 /// range.
@@ -102,6 +116,12 @@ fn validate_shm_len(file: &File) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "-shm file too short for a wal-index header",
+        ));
+    }
+    if len > MAX_SHM_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "-shm file larger than any size a cooperating writer produces",
         ));
     }
     Ok(())
@@ -312,6 +332,34 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&path, vec![0u8; 32]).unwrap();
+
+        let result = claim_wal_read_lock(&path);
+        assert!(
+            matches!(&result, Err(e) if e.kind() == io::ErrorKind::InvalidData),
+            "expected InvalidData, got {result:?}"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A `-shm` file far larger than any size a cooperating writer produces
+    /// (SQLite grows it in fixed 32KB regions, capped at 8) must be
+    /// rejected rather than trusted wholesale — the upper-bound half of
+    /// #54's hardening, mirroring `truncated_shm_file_is_rejected`'s
+    /// lower-bound check.
+    ///
+    /// **Tests:** `src/vfs/shm.rs::tests::oversized_shm_file_is_rejected`
+    #[test]
+    fn oversized_shm_file_is_rejected() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sqlite-rs-shm-test-{}-{n}-oversized-shm",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_SHM_LEN + 1).unwrap();
+        drop(file);
 
         let result = claim_wal_read_lock(&path);
         assert!(

@@ -20,6 +20,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   Spend: matched the medium estimate. Fuzz/proptest coverage deferred
   to #85.
 
+## [0.5.3] - 2026-08-15 — `-shm` length hardening
+
+### Fixed
+
+- **`src/vfs/shm.rs`**: bounded `-shm` file length against oversized
+  files (#54). #66 had already eliminated the `SIGBUS` risk #54 was
+  filed for by switching `-shm` access from `mmap` to `pread`/`pwrite`;
+  this closes the remaining gaps — an upper bound in `validate_shm_len`
+  and a regression test — and records the pread/pwrite decision in
+  `.openspec/adr/0001-shm-access-pread-not-mmap.md`.
+
 ## [0.5.2] - 2026-08-15 — V2 phase 1: SELECT-core parser
 
 Hand-written recursive-descent parser + typed AST for the SELECT-core V2
