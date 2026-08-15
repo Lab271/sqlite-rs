@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005 spike-006
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -147,4 +147,7 @@ spike-004: ## Run spike 004 — WAL frame reading (tests/spike/004_wal_reading)
 spike-005: ## Run spike 005 — locking protocol interop (tests/spike/005_locking_interop, issue #8)
 	$(MAKE) -C tests/spike/005_locking_interop run
 
-test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 ## Run every spike
+spike-006: ## Run spike 006 — grammar-slice viability for SELECT core (tests/spike/006_grammar_slice, issue #57)
+	cd tests/spike/006_grammar_slice && cargo test
+
+test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 ## Run every spike
