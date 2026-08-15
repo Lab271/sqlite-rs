@@ -36,6 +36,10 @@ path = "tests/unit/parser.rs"
 name = "tokenizer_proptest"
 path = "tests/tokenizer_proptest.rs"
 
+[[test]]
+name = "semantics_proptest"
+path = "tests/semantics_proptest.rs"
+
 [dev-dependencies]
 proptest = "1"
 
