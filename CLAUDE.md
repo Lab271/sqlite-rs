@@ -61,3 +61,14 @@ a trivial budget.
   the annotation, don't loosen the tolerance. Bumping the parse.y pin
   (`SQLITE_VERSION` in the tool) is a deliberate, reviewed change, like an
   oracle bump.
+
+## Module layout conventions
+
+- **No `mod.rs` files.** Use the modern per-file module style — `foo.rs`
+  next to `foo/` — instead of `foo/mod.rs`. Tracked by #73.
+- Enforced two ways: `self_named_module_files = "deny"` in
+  `[lints.clippy]` (Cargo.toml) catches it under `make lint`, and a
+  `mod-files` Makefile gate is a dependency-free backstop for anyone
+  running gates without clippy.
+- Vendored/spike code (e.g. `tests/spike/.../lemon-rs`) is exempt — it's
+  third-party source, not ours to restructure.
