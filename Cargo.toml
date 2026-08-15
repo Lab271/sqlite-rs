@@ -69,3 +69,11 @@ mod_module_files = "deny"
 name = "corpus"
 path = "tests/corpus/main.rs"
 test = false
+
+# Same rationale as "corpus" above: shells out to the pinned oracle, so it
+# stays behind `make test-parity` (`cargo test --test parity`) rather than
+# the default `cargo test` run.
+[[test]]
+name = "parity"
+path = "tests/parity/main.rs"
+test = false
