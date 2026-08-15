@@ -45,6 +45,10 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 | [004](specs/004-corpus/spec.md) | Corpus & Oracle | Pinned oracle, fixture families, diff harness | 0 | Draft — active (#10) |
 | [005](specs/005-assurance/spec.md) | Assurance | Four-pillar assurance stack, harness taxonomy, no-panic totality claim | All | Draft — active (#25, #26) |
 
+## Grammar
+
+[`grammar/sqlite.ebnf`](grammar/sqlite.ebnf) — the SQL grammar source of truth: EBNF re-derivation of SQLite's `parse.y` (pinned 3.53.4), every rule annotated with its V-block and parse.y origin. `make grammar-drift` validates all annotations against the pinned parse.y (downloads/caches it in `target/`). Grew out of spike 001's subset grammar (#63).
+
 ## Progress & Coverage Tracking
 
 Follows the mvl convention: every requirement carries `**Implementation:**` and `**Tests:**` links (plus `**Corpus:**` where fixtures back it), and every requirement has `#### Scenario:` blocks in Given-When-Then form. `tools/assurance.py` parses the specs and assembles the case from three levels:

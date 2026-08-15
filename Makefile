@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit verification fixtures test-corpus test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record spike-001 spike-002 spike-003 spike-004 spike-005
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -64,6 +64,9 @@ deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
 	  echo "install: cargo install cargo-deny"; \
 	  exit 1; }
 	cargo deny check
+
+grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
+	@python3 tools/grammar_drift.py --strict
 
 mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; spikes, src/vfs (dyn boundary), and src/bin (stdout/stderr CLI I/O boundary) exempt)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \

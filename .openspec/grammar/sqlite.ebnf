@@ -1,0 +1,209 @@
+(*
+ * sqlite-rs -- SQL grammar source of truth (issue #63, epic #56)
+ *
+ * SQLite publishes NO EBNF. The upstream authorities are:
+ *   - src/parse.y (Lemon LALR grammar, action-annotated) -- pinned at 3.53.4:
+ *     https://github.com/sqlite/sqlite/blob/version-3.53.4/src/parse.y
+ *   - Railroad diagrams (human-readable, generated):
+ *     https://www.sqlite.org/syntaxdiagrams.html
+ *   - Prose reference:
+ *     https://www.sqlite.org/lang.html
+ * This file is a structural re-derivation of parse.y (no SQLite source text
+ * copied) in standard EBNF. Where a rule was distilled from a verified
+ * parse.y location it carries `[parse.y:LINE rulename]`; rules added beyond
+ * the original spike distillation carry the parse.y rule NAME only.
+ *
+ * V-BLOCK ANNOTATIONS: every rule is tagged with the value block
+ * (plan.md) in which sqlite-rs implements it -- `(* V2 *)`, `(* V3 *)`, ...
+ * The grammar file thereby tracks the plan's production coverage
+ * (V2 ~20%, V3 ~45%, V4 ~80%, V7+ 100%). Rules for future blocks are
+ * listed as stubs under "Future blocks" so the denominator is visible.
+ *
+ * Maintenance rule (mirrors spec 005): any ticket that grows the parser
+ * MUST grow this file in the same PR, with V-block tags and parse.y refs.
+ * Promoted from tests/spike/001_parser/grammar/sqlite-subset.ebnf (frozen
+ * spike record, kept untouched).
+ *
+ * Notation: ::=  rule definition          |    alternation
+ *           []   optional (0 or 1)        {}   repetition (0 or more)
+ *           ""   literal keyword/punct (keywords case-insensitive)
+ *           UPPERCASE  lexer token
+ *)
+
+(* ===================== Top level ===================== *)
+
+sql-stmt        ::= select-stmt        (* V2 *)
+                  | insert-stmt        (* V3 *)
+                  | update-stmt        (* V3 *)
+                  | delete-stmt        (* V3 *)
+                  | create-table-stmt  (* V3 *)
+                  | create-index-stmt  (* V3 *)
+                  | drop-stmt ;        (* V3 *)
+                  (* V4+: compound selects, CTEs, views, joins -- see Future blocks *)
+
+(* ===================== SELECT (V2 slice) =====================
+ * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :749 from,
+ *  :925 orderby_opt, :967 limit_opt, :1002 where_opt]
+ * V2 restrictions vs full parse.y: single FROM table (no joins, no
+ * subqueries), no GROUP BY/HAVING (V4), no compound ops (V4), no
+ * window clause (V9).
+ *)
+
+select-stmt     ::= "SELECT" [ "DISTINCT" | "ALL" ] result-column { "," result-column }
+                     [ "FROM" table-ref ]
+                     [ "WHERE" expr ]
+                     [ "ORDER" "BY" ordering-term { "," ordering-term } ]
+                     [ "LIMIT" expr [ ( "OFFSET" | "," ) expr ] ] ;   (* V2 *)
+
+result-column   ::= "*"                                   (* V2 [parse.y:717 selcollist] *)
+                  | table-name "." "*"                    (* V2 [parse.y selcollist nm DOT STAR] *)
+                  | expr [ [ "AS" ] identifier ] ;        (* V2 [parse.y:712 selcollist, :735 as] *)
+
+table-ref       ::= table-name [ [ "AS" ] identifier ] ;  (* V2 [parse.y seltablist, single table only] *)
+
+ordering-term   ::= expr [ "COLLATE" collation-name ]
+                     [ "ASC" | "DESC" ]
+                     [ "NULLS" ( "FIRST" | "LAST" ) ] ;   (* V2 [parse.y:927 sortlist] *)
+
+collation-name  ::= identifier ;                          (* V2: BINARY | NOCASE | RTRIM *)
+
+(* ===================== Expressions (V2 slice) =====================
+ * [parse.y:1176 expr, :1193 term]
+ * Precedence, LOWEST to HIGHEST, mirrors parse.y's %left/%right
+ * declarations [parse.y:295-309] exactly:
+ *
+ *   OR                                        [%left OR]
+ *   AND                                       [%left AND]
+ *   NOT (unary, prefix)                       [%right NOT]
+ *   = == != <> IS ISNULL NOTNULL IN LIKE GLOB MATCH REGEXP BETWEEN
+ *                                             [%left IS MATCH LIKE_KW BETWEEN IN ISNULL NOTNULL NE EQ]
+ *   < <= > >=                                 [%left GT LE LT GE]
+ *   ESCAPE                                    [%right ESCAPE]
+ *   & | << >>                                 [%left BITAND BITOR LSHIFT RSHIFT]
+ *   + -  (binary)                             [%left PLUS MINUS]
+ *   * / %                                     [%left STAR SLASH REM]
+ *   ||                                        [%left CONCAT]
+ *   COLLATE (postfix)                         [%left COLLATE]
+ *   ~ unary + unary -                         [%right BITNOT]
+ *)
+
+expr            ::= or-expr ;                                             (* V2 *)
+or-expr         ::= and-expr { "OR" and-expr } ;                          (* V2 [parse.y:1349] *)
+and-expr        ::= not-expr { "AND" not-expr } ;                         (* V2 [parse.y:1348] *)
+not-expr        ::= { "NOT" } equality-expr ;                             (* V2 [parse.y:1448] *)
+
+equality-expr   ::= relational-expr { equality-tail } ;                   (* V2 *)
+equality-tail   ::= ( "=" | "==" | "!=" | "<>" ) relational-expr          (* V2 [parse.y:1350,1352] *)
+                  | "IS" [ "NOT" ] relational-expr                        (* V2 [parse.y expr ::= expr IS expr] *)
+                  | "ISNULL"                                              (* V2 [parse.y expr ::= expr ISNULL] *)
+                  | "NOTNULL" | "NOT" "NULL"                              (* V2 [parse.y expr ::= expr NOTNULL] *)
+                  | [ "NOT" ] "BETWEEN" relational-expr "AND" relational-expr
+                                                                          (* V2 [parse.y expr ::= expr between_op] *)
+                  | [ "NOT" ] "IN" "(" [ expr-list ] ")"                  (* V2 [parse.y expr ::= expr in_op LP exprlist RP]
+                                                                             V4: IN (select-stmt), IN table-name *)
+                  | [ "NOT" ] like-op relational-expr [ "ESCAPE" relational-expr ] ;
+                                                                          (* V2 [parse.y expr ::= expr likeop expr] *)
+like-op         ::= "LIKE" | "GLOB" ;                                     (* V2; "REGEXP"|"MATCH" V7+ (need functions) *)
+
+relational-expr ::= bitwise-expr { ( "<" | "<=" | ">" | ">=" ) bitwise-expr } ;  (* V2 [parse.y:1354] *)
+bitwise-expr    ::= additive-expr { ( "&" | "|" | "<<" | ">>" ) additive-expr } ; (* V2 [parse.y:1353] *)
+additive-expr   ::= multiplicative-expr { ( "+" | "-" ) multiplicative-expr } ;   (* V2 [parse.y:1355] *)
+multiplicative-expr ::= concat-expr { ( "*" | "/" | "%" ) concat-expr } ;         (* V2 [parse.y:1357] *)
+concat-expr     ::= collate-expr { "||" collate-expr } ;                          (* V2 [parse.y:1359]; "->"/"->>" V11 *)
+collate-expr    ::= unary-expr { "COLLATE" collation-name } ;             (* V2 [parse.y expr ::= expr COLLATE ids] *)
+unary-expr      ::= { "+" | "-" | "~" } primary-expr ;                    (* V2 [parse.y:1452, BITNOT] *)
+
+primary-expr    ::= literal-value                                         (* V2 [parse.y:1193-1204 term] *)
+                  | parameter                                             (* V2 [parse.y expr ::= VARIABLE] *)
+                  | column-ref                                            (* V2 [parse.y:1177 expr ::= idj] *)
+                  | function-call                                         (* V2 [parse.y:1235] *)
+                  | case-expr                                             (* V2 [parse.y expr ::= CASE case_operand case_exprlist case_else END] *)
+                  | cast-expr                                             (* V2 [parse.y expr ::= CAST LP expr AS typetoken RP] *)
+                  | "(" expr ")" ;                                        (* V2 [parse.y:1176] *)
+                  (* V4: ( select-stmt ), EXISTS ( select-stmt ); V9: RAISE *)
+
+case-expr       ::= "CASE" [ expr ] ( "WHEN" expr "THEN" expr ) { "WHEN" expr "THEN" expr }
+                     [ "ELSE" expr ] "END" ;                              (* V2 *)
+
+cast-expr       ::= "CAST" "(" expr "AS" type-name ")" ;                  (* V2 *)
+
+function-call   ::= identifier "(" [ [ "DISTINCT" ] expr-list | "*" ] ")" ;
+                     (* V2 scalar only (count(*) V4 with aggregates)
+                        [parse.y:1235 expr ::= idj LP distinct exprlist RP]
+                        V9: FILTER clause, OVER window *)
+
+literal-value   ::= NUMBER                                                (* V2: int, hex 0x, float incl. 1e5/.5/1. *)
+                  | STRING                                                (* V2: '...' with '' escaping *)
+                  | BLOB                                                  (* V2: X'hex' *)
+                  | "NULL" | "TRUE" | "FALSE"                             (* V2 *)
+                  | "CURRENT_TIME" | "CURRENT_DATE" | "CURRENT_TIMESTAMP" ; (* V9: needs date/time fns *)
+
+parameter       ::= "?" | "?" NUMBER | ":" identifier | "@" identifier | "$" identifier ;  (* V2 *)
+
+column-ref      ::= identifier [ "." identifier [ "." identifier ] ] ;    (* V2 [parse.y:1178]; 3-part = db.tbl.col, ATTACH semantics V10 *)
+
+expr-list       ::= expr { "," expr } ;                                   (* V2 [parse.y:1605 nexprlist] *)
+
+(* ===================== DML (V3 block) =====================
+ * Carried from the spike distillation; V3 tickets grow these
+ * (upsert/RETURNING are V9).
+ *)
+
+insert-stmt     ::= "INSERT" "INTO" table-name [ "(" column-name { "," column-name } ")" ]
+                     ( "VALUES" "(" expr-list ")" { "," "(" expr-list ")" }
+                     | "DEFAULT" "VALUES" ) ;                             (* V3 [parse.y:1082 cmd, :1114 insert_cmd, :1122 idlist_opt] *)
+
+update-stmt     ::= "UPDATE" table-name "SET" column-name "=" expr
+                     { "," column-name "=" expr }
+                     [ "WHERE" expr ] ;                                   (* V3 [parse.y:1014 cmd, :1065 setlist] *)
+
+delete-stmt     ::= "DELETE" "FROM" table-name [ "WHERE" expr ] ;         (* V3 [parse.y:978 cmd, :1002 where_opt] *)
+
+(* ===================== DDL (V3 block) ===================== *)
+
+create-table-stmt ::= "CREATE" "TABLE" [ "IF" "NOT" "EXISTS" ] table-name
+                       "(" column-def { "," column-def } [ "," table-constraint { "," table-constraint } ] ")"
+                       [ "WITHOUT" "ROWID" | "STRICT" ] ;                 (* V3 [parse.y:207-247]; WITHOUT ROWID/STRICT *write* V10 *)
+
+column-def      ::= column-name [ type-name ] { column-constraint } ;     (* V3 [parse.y:253 columnname, :389-424 ccons] *)
+
+type-name       ::= identifier { identifier } [ "(" NUMBER [ "," NUMBER ] ")" ] ;  (* V3 [parse.y:356 typename] *)
+
+column-constraint ::= "NOT" "NULL"                                        (* V3 [parse.y:389 ccons] *)
+                    | "PRIMARY" "KEY" [ "ASC" | "DESC" ] [ "AUTOINCREMENT" ]  (* V3 [parse.y:392 ccons] *)
+                    | "UNIQUE"                                            (* V3 *)
+                    | "DEFAULT" ( literal-value | "(" expr ")" )          (* V3 *)
+                    | "CHECK" "(" expr ")" ;                              (* V3; FK REFERENCES V8; GENERATED V10 *)
+
+table-constraint ::= "PRIMARY" "KEY" "(" column-name { "," column-name } ")"
+                   | "UNIQUE" "(" column-name { "," column-name } ")"
+                   | "CHECK" "(" expr ")" ;                               (* V3; FOREIGN KEY V8 *)
+
+create-index-stmt ::= "CREATE" [ "UNIQUE" ] "INDEX" [ "IF" "NOT" "EXISTS" ] identifier
+                       "ON" table-name "(" ordering-term { "," ordering-term } ")"
+                       [ "WHERE" expr ] ;                                 (* V3 [parse.y cmd ::= CREATE uniqueflag INDEX]; partial-index WHERE V4 planner *)
+
+drop-stmt       ::= "DROP" ( "TABLE" | "INDEX" ) [ "IF" "EXISTS" ] identifier ;  (* V3 [parse.y cmd ::= DROP TABLE ifexists fullname] *)
+
+(* ===================== Lexical (shared) =====================
+ * [parse.y:365-368 %token_class id/ids/idj; keyword fallback to ID
+ *  at parse.y:262-283 %fallback ID]
+ *)
+
+table-name      ::= identifier ;                                          (* V2 *)
+column-name     ::= identifier ;                                          (* V2 *)
+identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -- V2 tokenizer (#60) *)
+
+(* ===================== Future blocks (stubs -- the denominator) =====================
+ * V4:  join-clause, subqueries (expr + FROM), compound-select (UNION/INTERSECT/EXCEPT),
+ *      GROUP BY / HAVING, WITH/CTEs (incl. RECURSIVE), CREATE VIEW, aggregate fns
+ * V5:  BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE
+ * V7:  PRAGMA, EXPLAIN [QUERY PLAN], ANALYZE
+ * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),
+ *      ALTER TABLE (RENAME / ADD|DROP|RENAME COLUMN)
+ * V9:  UPSERT (ON CONFLICT DO ...), RETURNING, window functions (OVER/PARTITION/frames),
+ *      FILTER, CURRENT_* semantics
+ * V10: WITHOUT ROWID/STRICT write semantics, GENERATED columns, ATTACH/DETACH,
+ *      VACUUM [INTO], REINDEX
+ * V11: CREATE VIRTUAL TABLE ... USING, "->" / "->>" JSON operators
+ *)
