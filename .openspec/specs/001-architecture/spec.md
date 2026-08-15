@@ -391,7 +391,7 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs reads the database
 - THEN the page view MUST include committed WAL frames — the data MUST match what `sqlite3` reports
 
-**Tests:** `src/pager/mod.rs::tests::fixtures::wal_pending_fixture_shows_uncheckpointed_rows`
+**Tests:** `src/pager.rs::tests::fixtures::wal_pending_fixture_shows_uncheckpointed_rows`
 
 #### Scenario: Read a UTF-16 database
 
@@ -413,7 +413,7 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs opens it read-only
 - THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
 
-**Tests:** `src/pager/mod.rs::tests::fixtures::hot_journal_fixture_is_refused`
+**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_is_refused`
 
 #### Scenario: Reader takes a SHARED lock before serving pages
 
@@ -421,7 +421,7 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN it is open
 - THEN it MUST hold a journal-mode SHARED byte-range lock (`PENDING_BYTE+2` / `SHARED_SIZE`) on the file, blocking a concurrent writer's EXCLUSIVE lock, and release it when dropped
 
-**Tests:** `src/pager/mod.rs::tests::open_acquires_shared_lock_released_on_drop`, `src/vfs/lock.rs::tests::shared_lock_blocks_concurrent_exclusive_lock_until_dropped`
+**Tests:** `src/pager.rs::tests::open_acquires_shared_lock_released_on_drop`, `src/vfs/lock.rs::tests::shared_lock_blocks_concurrent_exclusive_lock_until_dropped`
 
 #### Scenario: Lock contention is reported as busy, not a generic I/O error
 
@@ -437,4 +437,4 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN a `Pager` opens the database
 - THEN it MUST claim a `WAL_READ_LOCK` slot and publish its `aReadMark` value, blocking a concurrent checkpointer from backfilling/truncating past that point, and release the slot when dropped
 
-**Tests:** `src/pager/mod.rs::tests::open_claims_wal_read_lock_when_shm_present_released_on_drop`, `src/vfs/shm.rs::tests::claims_a_slot_and_publishes_mx_frame`, `src/vfs/shm.rs::tests::contended_slot_is_skipped_for_the_next_free_one`
+**Tests:** `src/pager.rs::tests::open_claims_wal_read_lock_when_shm_present_released_on_drop`, `src/vfs/shm.rs::tests::claims_a_slot_and_publishes_mx_frame`, `src/vfs/shm.rs::tests::contended_slot_is_skipped_for_the_next_free_one`

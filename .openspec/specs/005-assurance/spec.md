@@ -92,7 +92,7 @@ documentation.
 
 Structured errors discharge this claim today; the panic-surface compile-time
 gate and the decoder fuzz target land in #26 (existing non-test violations
-in `src/header.rs`, `src/record/decode.rs`, `src/btree/mod.rs`, and
+in `src/header.rs`, `src/record/decode.rs`, `src/btree.rs`, and
 `src/schema/ddl_reader.rs` must be refactored to a non-panicking form
 first; `tests/fuzz/fuzz_targets/btree_cursor.rs` is the existing pattern the new
 target follows).
