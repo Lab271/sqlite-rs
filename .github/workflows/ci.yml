@@ -29,6 +29,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Need main's history to compare against; the default shallow
+          # checkout has only this branch's tip.
+          fetch-depth: 0
+
+      # Stands in for branch protection's "Require branches to be up to date
+      # before merging", which is Pro-only on private repos. Without it, two
+      # PRs can each pass CI against an older main and break it together once
+      # both land: on 2026-08-16, #113 and #115 merged 13 seconds apart and
+      # main aborted with a stack overflow (#118) that neither CI run could
+      # have seen. Re-running against the real merge base is the whole fix.
+      #
+      # NOTE: this reports, it cannot block — enforcing "don't merge a red
+      # PR" still needs branch protection (make the repo public, or Pro).
+      - name: Branch must be up to date with main
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          # NOT HEAD: for pull_request events actions/checkout checks out
+          # refs/pull/N/merge, which already contains main — comparing against
+          # that would make this check pass unconditionally. Compare the real
+          # branch tip instead.
+          head="${{ github.event.pull_request.head.sha }}"
+          git fetch --quiet origin "$head"
+          if git merge-base --is-ancestor origin/main "$head"; then
+            echo "up to date with origin/main ($(git rev-parse --short origin/main))"
+            exit 0
+          fi
+          behind=$(git rev-list --count "$head"..origin/main)
+          echo "::error::Branch is $behind commit(s) behind origin/main. CI would"
+          echo "::error::validate a state that never gets merged. Rebase and push:"
+          echo "::error::  git fetch origin && git rebase origin/main"
+          echo ""
+          echo "Commits on main not in this branch:"
+          git log --oneline "$head"..origin/main
+          exit 1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: clippy, rustfmt
