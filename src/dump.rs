@@ -107,12 +107,13 @@ pub fn dump_database<V: Vfs>(vfs: &V, path: &Path) -> Result<DumpResult, DumpErr
 
 /// Column indices with REAL type affinity (declared type containing
 /// `REAL`, `FLOA`, or `DOUB`, per SQLite's type-affinity rules). Needed
-/// because SQLite's serial-type-8/9 space optimization ("the constant
-/// integer 0 or 1") applies to a REAL column storing exactly `0.0`/`1.0`
-/// too — the raw record alone can't tell those apart from a genuine
-/// INTEGER 0/1 without the column's declared type. Confirmed empirically
-/// against `sqlite3 -list` (a REAL column holding `0.0` renders `0.0`,
-/// not `0`).
+/// because SQLite stores any REAL value with no fractional component
+/// (not just `0.0`/`1.0`, which additionally get the dedicated
+/// serial-type-8/9 encoding) using an integer serial type in a
+/// REAL-affinity column, to save space — the raw record alone can't
+/// tell that apart from a genuine INTEGER without the column's declared
+/// type. Confirmed empirically against `sqlite3 -list` (a REAL column
+/// holding `42.0` renders `42.0`, not `42`).
 fn real_affinity_columns(schema: &TableSchema) -> Vec<bool> {
     column_defs(schema)
         .iter()
@@ -135,10 +136,8 @@ fn apply_real_affinity(values: &mut [Value], real_affinity: &[bool]) {
             continue;
         }
         if let Some(v) = values.get_mut(i) {
-            match v {
-                Value::Integer(0) => *v = Value::Real(0.0),
-                Value::Integer(1) => *v = Value::Real(1.0),
-                _ => {}
+            if let Value::Integer(n) = v {
+                *v = Value::Real(*n as f64);
             }
         }
     }
