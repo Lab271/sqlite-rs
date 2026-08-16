@@ -418,6 +418,56 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 **Tests:** `tests/corpus/sql_corpus_test.rs::valid_in_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::valid_out_of_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::invalid_statements_are_rejected_by_real_sqlite`
 
+#### Extraction process (#70)
+
+The hand-curated corpus above is complemented by SQL extracted from the two
+external suites SQLite itself is validated against. `tools/extract_sql_corpus.py`
+performs the extraction; `make sql-corpus` regenerates it offline.
+
+- **Sources.** sqllogictest (`gregrahn/sqllogictest` mirror, pinned by commit
+  SHA — sqlite.org's Fossil tarball endpoint serves an HTML anti-robot page
+  with a `200` status and is not fetchable by tooling) and SQLite's own TCL
+  suite (`test/*.test` at the tag matching `[package.metadata.oracle]`).
+- **Vendoring.** Upstream is 110 MB and 13 MB respectively and is not
+  committed. A curated subset of source `.test` files is vendored verbatim
+  under `tests/corpus/sql/vendor/` with provenance recorded in its README, and
+  the committed extraction is generated from that subset — so a clean checkout
+  reproduces it byte-identically with no network access.
+- **Parsing.** sqllogictest's `statement ok|error` and `query <types> <sort>`
+  blocks; TCL's `do_execsql_test` / `do_catchsql_test` / bare `execsql` brace
+  blocks. Statements whose SQL is built by TCL interpolation (`$var`, `[cmd]`,
+  `%s`) are skipped and counted — resolving them needs a TCL interpreter.
+- **Labels are honoured.** `statement error`, `do_catchsql_test` and
+  `catch`-wrapped `execsql` blocks hold deliberately-invalid SQL and are
+  excluded from the valid corpus rather than mislabeled into it.
+- **Representativeness over volume.** The generated sqllogictest files differ
+  only in literal values, so each statement is reduced to a shape key
+  (literals normalized away) and capped per distinct shape. A cap of N
+  therefore buys N structurally different statements. Every dropped statement
+  is counted and reported by category; nothing is silently truncated.
+- **Category yield is uneven by design.** sqllogictest is a query suite whose
+  DML is incidental setup, so INSERT/UPDATE/DELETE/DDL diversity comes
+  predominantly from the TCL suite. `update` and `delete` fall short of the
+  ~1000-per-category target because the corpora do not contain that many
+  structurally distinct statements at a vendorable size.
+
+#### Scenario: Extracted corpus tokenizes without error
+
+- GIVEN the extracted corpus at `tests/corpus/sql/{select,insert,update,delete,ddl}/*.sql`, every statement of which real SQLite accepted in the suite it came from
+- WHEN each statement is tokenized by sqlite-rs
+- THEN no statement produces `TokenKind::Error` — the tokenizer is total over SQL real SQLite lexes
+
+**Tests:** `tests/corpus/extracted_sql_test.rs::every_extracted_statement_tokenizes_without_error`, `tests/corpus/extracted_sql_test.rs::extracted_corpus_is_present`
+
+#### Scenario: Extracted SELECT is never misreported as invalid
+
+- GIVEN the extracted SELECT corpus, which is valid SQL by construction
+- WHEN each statement is parsed by `parse_select`
+- THEN `Accepted` and `Unsupported` are both acceptable (the V2 grammar is a deliberate slice) but `Invalid` is not, since it asserts valid SQL is malformed
+- AND the count of such misclassifications is held to a documented baseline that may only decrease — currently non-zero for subquery-in-FROM, `IN <table-name>`, schema-qualified names, `HAVING` without `GROUP BY`, `->`/`->>`, `NOT INDEXED` and bare `VALUES`
+
+**Tests:** `tests/corpus/extracted_sql_test.rs::no_extracted_select_is_reported_invalid`
+
 ### Requirement 3: AST Completeness [MUST]
 
 The AST MUST represent all SQLite SQL constructs without loss of information.
