@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures sql-corpus test-corpus test-parity sqllogictest test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -85,7 +85,13 @@ verification: test ## Verification level of the assurance case (alias for `make 
 # nobody is tempted to skip it.
 
 lint: ## Run clippy and check formatting
-	cargo clippy --locked --all-targets -- -D warnings
+	# Deliberately `--lib --bins --tests --examples`, not `--all-targets`:
+	# benches (tests/performance/engine.rs, #111/#112) need rusqlite linked
+	# against the pinned oracle via `tools/bench_env.sh`, not whatever
+	# sqlite3-dev a CI runner happens to ship — performance testing is a
+	# manual `make bench`/`make bench-cli` workflow, not part of the
+	# regular CI gate, so it deliberately isn't wired up here.
+	cargo clippy --locked --lib --bins --tests --examples -- -D warnings
 	cargo fmt -- --check
 
 deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
@@ -133,6 +139,20 @@ opcodes: ## Harvest V2 (single-table SELECT) opcodes via pinned oracle EXPLAIN, 
 
 sql-corpus: ## Regenerate tests/corpus/sql/{select,insert,update,delete,ddl}/ from the vendored sqllogictest + TCL subsets (#70; offline. Add FETCH=1 to refresh the vendored subsets from upstream)
 	python3 tools/extract_sql_corpus.py $(if $(FETCH),--fetch,)
+
+# === Bench (#111/#112 — three-tier perf regime) ===
+
+fixtures-bench: ## Regenerate the ~1MB/~50MB bench fixtures (target/bench-fixtures/, not committed) from tools/gen_fixtures.sh --bench
+	./tools/gen_fixtures.sh --bench
+
+bench: fixtures-bench ## Tier 1 (engine-to-engine): criterion bench, sqlite-rs vs rusqlite linked to the pinned oracle (tests/performance/engine.rs)
+	@bash -c '. ./tools/bench_env.sh && cargo bench --bench engine'
+
+bench-cli: fixtures-bench ## Tier 2 (CLI-to-CLI): hyperfine, sqlite-rs dump/query vs sqlite3 (tools/bench_cli.sh)
+	./tools/bench_cli.sh
+
+bench-status: ## Assemble tools/bench-status.json from the latest `make bench`/`make bench-cli` raw output
+	python3 tools/bench_status.py
 
 # === Assurance ===
 

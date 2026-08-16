@@ -49,6 +49,11 @@ PINNED_LITERALS = [
         re.compile(r'echo "(\d+\.\d+\.\d+) '),
         "fake codec oracle version string",
     ),
+    (
+        "tests/performance/engine.rs",
+        re.compile(r'pub const ORACLE_VERSION: &str = "([^"]+)"'),
+        "tier-1 bench ORACLE_VERSION const",
+    ),
 ]
 
 # CI names the source tarball by SQLite's zero-padded encoding of the version
@@ -70,6 +75,7 @@ RUNTIME_READERS = [
     "tools/grammar_drift.py",
     "tools/extract_sql_corpus.py",
     "tools/gen_fixtures.sh",
+    "tools/bench_env.sh",
 ]
 VERSION_LITERAL_RE = re.compile(r'"3\.\d+\.\d+"')
 
