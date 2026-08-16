@@ -67,6 +67,7 @@ pub struct TableCursor<P: PageSource> {
     root_page: u32,
     stack: Vec<Frame>,
     pages_visited: usize,
+    positioned_reverse: bool,
 }
 
 impl<P: PageSource> TableCursor<P> {
@@ -77,6 +78,7 @@ impl<P: PageSource> TableCursor<P> {
             root_page,
             stack: Vec::new(),
             pages_visited: 0,
+            positioned_reverse: false,
         }
     }
 
@@ -85,6 +87,7 @@ impl<P: PageSource> TableCursor<P> {
     pub fn first(&mut self) -> Result<Option<TableRow>, BtreeError> {
         self.stack.clear();
         self.pages_visited = 0;
+        self.positioned_reverse = false;
         self.push_page(self.root_page, false)?;
         self.advance()
     }
@@ -104,6 +107,7 @@ impl<P: PageSource> TableCursor<P> {
     pub fn last(&mut self) -> Result<Option<TableRow>, BtreeError> {
         self.stack.clear();
         self.pages_visited = 0;
+        self.positioned_reverse = true;
         self.push_page(self.root_page, true)?;
         self.advance_rev()
     }
@@ -112,7 +116,15 @@ impl<P: PageSource> TableCursor<P> {
     /// or `None` once exhausted. Call [`Self::last`] first; a cursor
     /// positioned via `first`/`next` cannot be walked backward with
     /// `prev` — the two directions maintain independent stack state.
+    ///
+    /// Debug builds assert that `last()` ran first: calling `prev()`
+    /// before any `last()` would otherwise silently return `None`
+    /// (empty stack), indistinguishable from "table exhausted."
     pub fn prev(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        debug_assert!(
+            self.positioned_reverse,
+            "TableCursor::prev() called without a prior last()"
+        );
         self.advance_rev()
     }
 

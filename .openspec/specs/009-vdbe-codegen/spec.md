@@ -502,5 +502,5 @@ coverage scoring until then.
 harvested opcode set — the full 52-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
 line tracks how many of those 52 are actually dispatched in
-`src/vdbe/exec.rs` (51/52 with #90's cursor/sorter/ephemeral families
+`src/vdbe/exec.rs` (49/52 with #90's cursor/sorter/ephemeral families
 landed).
