@@ -1,5 +1,6 @@
-//! SQLite shell-parity value rendering, shared by `dump` (`-list` mode)
-//! and `export` (`-csv` mode). See `.openspec/specs/003-file-format`'s
+//! SQLite shell-parity value rendering: `dump`'s `.dump`-quote()-style
+//! output, `export`'s `-csv` mode, and `query`'s `-list`-mode parity
+//! (`format_query_value`). See `.openspec/specs/003-file-format`'s
 //! REAL round-trip note and spike 002/003's findings on float display
 //! and CSV quoting — this module is where those open questions get
 //! resolved into concrete formatting rules.
@@ -102,10 +103,11 @@ pub fn format_blob(b: &[u8]) -> String {
     s
 }
 
-/// Renders a value for `-list` mode (what `dump` prints): `NULL`
-/// literal for nulls, raw unescaped text (list mode does no escaping at
-/// all — the separator's own ambiguity if it appears inside a value is
-/// inherited from `sqlite3`, not introduced here), and `X'HEX'` blobs.
+/// Renders a value the way `sqlite3 .dump` prints it (its
+/// `quote()`-based SQL-literal style): `NULL` literal for nulls, raw
+/// unescaped text, and `X'HEX'` blobs. This is *not* what `sqlite3
+/// -list` mode does for a live query — see [`format_query_value`] for
+/// that renderer.
 pub fn format_list_value(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),
@@ -113,6 +115,36 @@ pub fn format_list_value(v: &Value) -> String {
         Value::Real(r) => format_real(*r),
         Value::Text(s) => s.clone(),
         Value::Blob(b) => format_blob(b),
+    }
+}
+
+/// Renders a value the way `sqlite3 -list` mode prints it for a live
+/// query (what `sqlite-rs query`'s default, non-`-csv` output matches):
+/// an empty string for `NULL` (the shell's default `.nullvalue`), and
+/// raw unescaped blob bytes — not the `X'HEX'` quoting `format_list_value`
+/// uses for `.dump`. Returns bytes rather than `String` since a raw blob
+/// is not guaranteed to be valid UTF-8.
+///
+/// Text and blob output is truncated at the first embedded `0x00` byte:
+/// the shell prints column values through a null-terminated C string
+/// (verified against the pinned oracle on a BLOB column containing
+/// embedded NUL bytes), so anything after the first NUL is silently
+/// dropped rather than a bug worth fighting — this reproduces that
+/// exactly, not a design choice made independently here.
+pub fn format_query_value(v: &Value) -> Vec<u8> {
+    match v {
+        Value::Null => Vec::new(),
+        Value::Integer(i) => i.to_string().into_bytes(),
+        Value::Real(r) => format_real(*r).into_bytes(),
+        Value::Text(s) => truncate_at_nul(s.as_bytes()),
+        Value::Blob(b) => truncate_at_nul(b),
+    }
+}
+
+fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
+    match bytes.iter().position(|&b| b == 0) {
+        Some(i) => bytes.get(..i).unwrap_or(bytes).to_vec(),
+        None => bytes.to_vec(),
     }
 }
 
@@ -208,6 +240,32 @@ mod tests {
         assert_eq!(format_real(123.456), "123.456");
         assert_eq!(format_real(0.0), "0.0");
         assert_eq!(format_real(-0.0), "-0.0");
+    }
+
+    #[test]
+    fn query_value_matches_shell_list_mode() {
+        assert_eq!(format_query_value(&Value::Null), Vec::<u8>::new());
+        assert_eq!(format_query_value(&Value::Integer(0)), b"0".to_vec());
+        assert_eq!(format_query_value(&Value::Real(0.0)), b"0.0".to_vec());
+        assert_eq!(
+            format_query_value(&Value::Text("hi".to_string())),
+            b"hi".to_vec()
+        );
+        assert_eq!(
+            format_query_value(&Value::Blob(vec![0x41, 0xDE, 0xAD])),
+            vec![0x41, 0xDE, 0xAD]
+        );
+        // Verified against the pinned oracle: `-list` mode prints column
+        // values through a null-terminated C string, so anything from the
+        // first embedded NUL onward is silently dropped.
+        assert_eq!(
+            format_query_value(&Value::Blob(vec![0x41, 0x00, 0xAD])),
+            vec![0x41]
+        );
+        assert_eq!(
+            format_query_value(&Value::Text("ab\0cd".to_string())),
+            b"ab".to_vec()
+        );
     }
 
     #[test]

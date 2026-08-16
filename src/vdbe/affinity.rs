@@ -90,6 +90,15 @@ pub fn comparison_affinity(lhs: Option<Affinity>, rhs: Option<Affinity>) -> Affi
 /// Converts a well-formed numeric-text literal to its lossless numeric
 /// representation for NUMERIC/INTEGER/REAL affinities. TEXT and BLOB
 /// affinities never convert (spec 008, Requirement 1).
+///
+/// REAL affinity additionally forces an `Integer` value into floating
+/// point (datatype3.html §2.1: "a column with REAL affinity works like a
+/// column with NUMERIC affinity except that it forces integer values
+/// into floating point representation"). This matters because a REAL
+/// column's value may be stored on disk using the integer-0/1 serial
+/// type optimization (record-format doc) independent of its declared
+/// affinity — reading it back must undo that, or `SELECT r FROM t`
+/// answers `0` instead of `0.0` for a REAL column holding `0.0` (#143).
 pub fn apply_affinity(value: &mut Value, affinity: Affinity) {
     if matches!(affinity, Affinity::Text | Affinity::Blob) {
         return;
@@ -97,6 +106,13 @@ pub fn apply_affinity(value: &mut Value, affinity: Affinity) {
     if let Value::Text(s) = value {
         if let Some(numeric) = parse_well_formed_number(s) {
             *value = numeric;
+        }
+    }
+    if affinity == Affinity::Real {
+        if let Value::Integer(i) = *value {
+            #[allow(clippy::cast_precision_loss)]
+            let real = i as f64;
+            *value = Value::Real(real);
         }
     }
 }
