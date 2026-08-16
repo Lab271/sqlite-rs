@@ -70,6 +70,24 @@ a trivial budget.
   (`SQLITE_VERSION` in the tool) is a deliberate, reviewed change, like an
   oracle bump.
 
+## Test layout conventions
+
+- **`tests/{corpus,parity,tiers,unit}/` are the only test subdirectories**
+  with a defined meaning (oracle-diff corpus, per-V-block oracle parity,
+  tier-model contracts, public-API unit tests, respectively — see the
+  tier-stub-flip and spec-traceability conventions above).
+- **Property tests are top-level files, not a subdirectory.** `tests/*_proptest.rs`
+  (e.g. `tests/record_proptest.rs`, `tests/semantics_proptest.rs`,
+  `tests/tokenizer_proptest.rs`) live directly under `tests/`, each its own
+  Cargo integration-test binary — there is no `tests/proptest/` directory.
+  Don't move them into one: spec `Tests:` links
+  (`tests/record_proptest.rs::prop_integer_i8_roundtrip`) and the
+  `test-proptest` Makefile target (`cargo test --test record_proptest`)
+  hard-code these paths, and `tools/assurance.py` would report DEAD LINKs
+  on a rename. `tests/proptest-regressions/` is unrelated — it's
+  proptest's own auto-generated regression-seed storage, not a home for
+  the test files themselves.
+
 ## Epic & phase breakdown conventions
 
 Each value block (`V1`…`V12` in `.openspec/plan.md`) gets one GitHub `epic`-labeled
