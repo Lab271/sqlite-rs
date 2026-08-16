@@ -543,7 +543,8 @@ def report(requirements, verbose=False, traceability_only=False):
     exclusions = mvl_limit_model()
     if exclusions:
         print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (VFS dyn boundary, not unsafe — #80; src/bin is I/O)")
-        model_detail.append(f"Qualified-subset:     {', '.join(exclusions)}")
+        model_detail.append("Qualified-subset:")
+        model_detail.extend(f"  {f}" for f in exclusions)
     print("Not measured here — run `make verification` (alias for `make test`) or `make mvl-limit`")
     print("=" * 60)
 
