@@ -37,7 +37,7 @@ impl RawMemoryFile {
 // ---- closed-enum VfsFile (was `trait VfsFile` + `Box<dyn VfsFile>`) ----
 // Churn point #1: every VfsFile method needs a match arm here.
 
-pub enum AnyVfsFile {
+enum AnyVfsFile {
     Unix(RawUnixFile),
     Memory(RawMemoryFile),
 }
