@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures sql-corpus test-corpus test-parity test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures sql-corpus test-corpus test-parity test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -200,4 +200,10 @@ spike-006: ## Run spike 006 — grammar-slice viability for SELECT core (tests/s
 
 spike-007: opcodes ## Run spike 007 — opcode harvest via oracle EXPLAIN (tests/spike/007_opcode_harvest, #58; alias for `make opcodes`)
 
-test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 ## Run every spike
+spike-008: ## Spike 008 — tree-walking evaluator (closed, #59): prototype deleted at close, see tests/spike/008_tree_walker/findings.md
+	@echo "spike-008 closed at #59 — prototype deleted; see tests/spike/008_tree_walker/findings.md"
+
+spike-009: ## Spike 009 — VFS dyn-elimination (closed, #80): prototype deleted at close, see tests/spike/009_vfs_dyn_elimination/findings.md
+	@echo "spike-009 closed at #80 — prototype deleted; see tests/spike/009_vfs_dyn_elimination/findings.md"
+
+test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 ## Run every spike
