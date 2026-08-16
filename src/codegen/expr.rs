@@ -563,8 +563,6 @@ fn emit_compare_false_jump(
     Ok(())
 }
 
-/// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
-/// unrecognized collation names fall back to `None` (BINARY default).
 /// Reads column `idx` of the row at `cursor` into `dest`, emitting
 /// `Rowid` rather than `Column` for a rowid-alias column. A table's
 /// `INTEGER PRIMARY KEY` column is stored as a NULL placeholder in
@@ -572,7 +570,12 @@ fn emit_compare_false_jump(
 /// NULL, so `SELECT x FROM t WHERE x=2` silently matched nothing until
 /// this substitution existed. `src/dump.rs` has always done the same
 /// thing; this is the compiled read path catching up.
-fn emit_column_read(
+///
+/// Every column read in the compiled path must come through here.
+/// `select.rs`'s result-column expansion emitted a bare `Column`
+/// instead, which is why `SELECT *` still answered NULL for an
+/// `INTEGER PRIMARY KEY` long after `SELECT id` was fixed.
+pub(crate) fn emit_column_read(
     em: &mut Emitter,
     schema: &TableSchema,
     cursor: i32,
@@ -610,6 +613,8 @@ fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> boo
     }
 }
 
+/// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
+/// unrecognized collation names fall back to `None` (BINARY default).
 fn collation_of(expr: &Expr) -> Option<Collation> {
     match &expr.kind {
         ExprKind::Collate { collation, .. } => match collation.to_ascii_uppercase().as_str() {

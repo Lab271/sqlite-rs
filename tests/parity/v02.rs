@@ -118,6 +118,42 @@ const NULL_CASES: &[ParityCase] = &[
     },
 ];
 
+/// `SELECT *` over a table with an `INTEGER PRIMARY KEY`. That column
+/// is a NULL placeholder in every record and has to be read with
+/// `Rowid`, not `Column` — the star-expansion path did the latter, so
+/// `SELECT * FROM t` answered NULL for it while `SELECT id FROM t`
+/// answered correctly.
+///
+/// The fixture is an FTS5 shadow table because no corpus fixture is a
+/// plain table with an `INTEGER PRIMARY KEY` — which is exactly why the
+/// oracle suites never caught this. `t_content` is an ordinary rowid
+/// table despite its provenance, and it is the only one available;
+/// giving the corpus a first-class fixture for this shape is tracked
+/// separately.
+const ROWID_ALIAS_CASES: &[ParityCase] = &[
+    ParityCase {
+        name: "star_expands_rowid_alias",
+        sql: "SELECT * FROM t_content",
+    },
+    ParityCase {
+        name: "qualified_star_expands_rowid_alias",
+        sql: "SELECT t_content.* FROM t_content",
+    },
+    ParityCase {
+        name: "named_rowid_alias_agrees_with_star",
+        sql: "SELECT id, c0 FROM t_content",
+    },
+];
+
+#[test]
+fn star_expansion_acceptance_and_output_match_for_a_rowid_alias_table() {
+    if pinned_oracle().is_none() {
+        skip_no_oracle("star_expansion_acceptance_and_output_match_for_a_rowid_alias_table");
+        return;
+    }
+    assert_cases_match(&corpus_dir().join("features/fts5.db"), ROWID_ALIAS_CASES);
+}
+
 fn assert_cases_match(db: &Path, cases: &[ParityCase]) {
     let mine: &dyn Fn(&Path, &str) -> Result<Vec<String>, String> = &run_query_cli;
     let mut checked = 0usize;

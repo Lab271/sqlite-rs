@@ -193,6 +193,21 @@ the just-produced duplicate row if present.
 **Tests:** `src/vdbe/cursor.rs::tests::full_scan_opens_rewinds_iterates_reads`,
 `tests/vdbe/cursor_sorter_test.rs::full_scan_program_matches_oracle_row_for_row`
 
+#### Scenario: A rowid-alias column is read with Rowid on every path, including `*`
+
+- GIVEN a table whose `INTEGER PRIMARY KEY` column is stored as a NULL
+  placeholder in every record (spec 006 Requirement 4, which defers the
+  substitution to "a higher row-assembly layer" — this is that layer)
+- WHEN any of `SELECT id`, `SELECT *`, `SELECT tbl.*`, or a `WHERE`
+  comparison reads that column
+- THEN codegen emits `Rowid`, never `Column` — the substitution is a
+  property of the column, not of the syntax that names it. Emitting
+  `Column` on any one path answers NULL there while the others answer
+  correctly, which is how `SELECT * FROM t` stayed wrong after
+  `SELECT id FROM t` was fixed (#131, #134)
+
+**Tests:** `tests/unit/codegen.rs::star_expansion_reads_the_rowid_alias_via_rowid`, `tests/unit/codegen.rs::rowid_alias_result_column_reads_via_rowid_not_column`, `tests/parity/v02.rs::star_expansion_acceptance_and_output_match_for_a_rowid_alias_table`
+
 #### Scenario: DISTINCT probes an ephemeral index before emitting each row
 
 - GIVEN `SELECT DISTINCT note FROM products` (harvested: `OpenEphemeral`,

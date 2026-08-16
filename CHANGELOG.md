@@ -99,6 +99,22 @@ Codegen defects the runner and its review surfaced, all affecting
   `CASE ... ELSE NULL` leaked the previous row's result, since its NULL
   branch emitted no instruction at all to overwrite the shared
   destination register.
+- `SELECT *` (and `SELECT tbl.*`) answered NULL for an
+  `INTEGER PRIMARY KEY` column. #131 routed the WHERE and named-result-
+  column paths through `emit_column_read`, which substitutes `Rowid`
+  for the record's NULL placeholder, but the star-expansion path in
+  `compile_row_values` emitted its own bare `Column` and was missed —
+  so `SELECT id FROM t` was right while `SELECT * FROM t` was wrong.
+  No corpus fixture is a plain table with an `INTEGER PRIMARY KEY`,
+  which is why the oracle suites could not see it; the new parity case
+  borrows an FTS5 shadow table until the corpus gains one.
+- `tests/codegen/expr_test.rs`'s walker-vector reader extracted JSON
+  string fields by splitting on the next `"`, without unescaping. That
+  silently changed the SQL under test: `'a%b' LIKE 'a\\%b' ESCAPE '\\'`
+  reached the compiler with a two-character escape, which SQLite itself
+  rejects. The resulting failure had been filed against `Like`'s
+  codegen — the engine agreed with the oracle all along. Both `ESCAPE`
+  vectors leave `KNOWN_GAPS`, and the pass ratchet moves 44 -> 46.
 - Aggregate calls (`count`, `sum`, `avg`, ...) compiled as ordinary per-row
   scalar functions, so `SELECT count(*) FROM t` emitted one row per input row
   instead of one count. Codegen now rejects them as unsupported — V2 has no

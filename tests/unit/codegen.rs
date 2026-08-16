@@ -108,6 +108,31 @@ fn non_alias_column_still_reads_via_column() {
 }
 
 #[test]
+fn star_expansion_reads_the_rowid_alias_via_rowid() {
+    // `SELECT id` was fixed with the other two call sites; `SELECT *`
+    // was not, because the star-expansion path in `compile_row_values`
+    // emits its own `Column` rather than going through
+    // `emit_column_read`. `SELECT * FROM t` therefore answered NULL for
+    // the rowid-alias column — the most common query in SQL, on the
+    // most common table shape. No corpus fixture has an
+    // `INTEGER PRIMARY KEY`, which is why the oracle suites never saw
+    // it.
+    let s = schema(IPK_DDL, &["id", "name"]);
+    for sql in ["SELECT * FROM t", "SELECT t.* FROM t"] {
+        let program = compile(sql, &s);
+        assert!(
+            uses(&program, Opcode::Rowid),
+            "{sql:?} must read the rowid-alias column through Rowid"
+        );
+        assert_eq!(
+            count(&program, Opcode::Column),
+            1,
+            "{sql:?} should read only the non-alias column through Column"
+        );
+    }
+}
+
+#[test]
 fn rowid_alias_in_where_clause_reads_via_rowid() {
     // The bug's headline symptom: this returned no rows at all, because
     // the WHERE comparison read the placeholder NULL. Covers the
