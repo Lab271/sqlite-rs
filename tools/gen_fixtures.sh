@@ -73,6 +73,60 @@ fi
 
 echo "oracle: $ORACLE (sqlite3 $FOUND_VERSION, non-codec)"
 
+# --- bench fixtures: opt-in, not part of the default corpus regen ---
+#
+# Generated into target/bench-fixtures/ (under the gitignored target/ tree),
+# not tests/corpus/fixtures/: these are sized for wall-clock benching
+# (~1MB, ~50MB per #111/#112), not committed as oracle-diff corpus. A
+# recursive CTE with an arithmetic PRNG (no random()/randomblob()) keeps
+# row content bit-for-bit reproducible without a seeded RNG.
+if [ "${1:-}" = "--bench" ]; then
+  BENCH_DIR="${BENCH_FIXTURES_DIR:-$REPO_ROOT/target/bench-fixtures}"
+  mkdir -p "$BENCH_DIR"
+
+  gen_bench_fixture() {
+    fixture_out="$1"
+    fixture_rows="$2"
+    rm -f "$fixture_out"
+    "$ORACLE" "$fixture_out" <<SQL
+CREATE TABLE bench_data(
+  id INTEGER PRIMARY KEY,
+  n INTEGER,
+  x INTEGER,
+  f REAL,
+  s TEXT
+);
+WITH RECURSIVE seq(i) AS (
+  SELECT 1
+  UNION ALL
+  SELECT i + 1 FROM seq WHERE i < $fixture_rows
+)
+INSERT INTO bench_data(id, n, x, f, s)
+SELECT
+  i,
+  (i * 2654435761) % 1000000,
+  (i * 40503) % 100000,
+  CAST((i * 40503) % 100000 AS REAL) / 1000.0,
+  CASE WHEN i % 10 < 3 THEN NULL
+       ELSE substr(
+         'the quick brown fox jumps over the lazy dog while sqlite reads pages from disk',
+         1 + (i % 40),
+         10 + (i % 40)
+       ) || '-' || i
+  END
+FROM seq;
+CREATE INDEX bench_data_x ON bench_data(x);
+SQL
+    echo "wrote $fixture_out ($fixture_rows rows, $(du -h "$fixture_out" | cut -f1))"
+  }
+
+  # Row counts tuned empirically against this schema's average row width to
+  # land near the target file sizes; re-tune if the schema changes.
+  gen_bench_fixture "$BENCH_DIR/bench_1mb.db" 16700
+  gen_bench_fixture "$BENCH_DIR/bench_50mb.db" 830000
+  exit 0
+fi
+
 rm -rf -- serialtypes encodings pagesizes btrees features invalid journalstates
 mkdir -p serialtypes encodings pagesizes btrees features invalid journalstates
 

@@ -78,12 +78,26 @@ path = "tests/proptest/record_proptest.rs"
 
 [dev-dependencies]
 proptest = "1"
+criterion = "0.5"
+
+# Deliberately no `bundled` feature: the point of tier-1 benching is
+# comparing against the *pinned* oracle (same one gen_fixtures.sh and the
+# corpus harness use), not whatever SQLite version rusqlite happens to
+# vendor. `tools/bench_env.sh` points the build at the pinned Homebrew keg
+# via SQLITE3_LIB_DIR/SQLITE3_INCLUDE_DIR; `benches/engine.rs` asserts the
+# linked version matches at run time so a drift can't pass silently.
+rusqlite = "0.32"
 
 # MD5 is part of the sqllogictest format itself (`"N values hashing to
 # <md5>"` result blocks, #96) — not a project cryptographic dependency, so
 # pulling in a maintained implementation beats hand-rolling a bit-exact
 # digest for a test-only concern.
 md-5 = "0.10"
+
+[[bench]]
+name = "engine"
+path = "tests/performance/engine.rs"
+harness = false
 
 # Single source of truth for the pinned sqlite3 version — the oracle binary,
 # the parse.y the grammar is re-derived from, and the TCL suite the SQL corpus

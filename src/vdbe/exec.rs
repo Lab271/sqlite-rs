@@ -416,8 +416,11 @@ fn parse_function_descriptor(descriptor: &str) -> Option<(&str, usize)> {
 /// Caps total instructions executed per run — a backstop against a
 /// malformed or adversarial program looping forever (e.g. a bare `Goto`
 /// cycle), not a performance tuning knob. Well past any real program's
-/// legitimate instruction count.
-const MAX_STEPS: u32 = 1_000_000;
+/// legitimate instruction count: a full-table scan over a several-hundred-
+/// thousand-row table (#112's ~50MB bench fixture) legitimately spends a
+/// handful of steps per row, so the cap needs enough headroom for that —
+/// previously 1_000_000, which a real ~830k-row scan already exceeded.
+const MAX_STEPS: u32 = 50_000_000;
 
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
     run(Vm::new(), program)

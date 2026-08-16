@@ -8,6 +8,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Performance regime, first results (#112, epic #111): tier-1
+  (engine-to-engine, criterion) and tier-2 (CLI-to-CLI, hyperfine) bench
+  harnesses against the pinned 3.53.4 oracle. `tools/gen_fixtures.sh --bench`
+  generates ~1MB/~50MB fixtures (pure-SQL, deterministic, not committed);
+  `tests/performance/engine.rs` runs 6 scenarios per fixture with rusqlite
+  linked to the pinned oracle (not its `bundled` feature, so it can't drift);
+  `tools/bench_cli.sh` compares `sqlite-rs dump`/`query` against `sqlite3`;
+  `tools/bench-status.json` is the committed first-results table. `make
+  bench`/`make bench-cli`/`make bench-status`/`make fixtures-bench`.
+  Deliberately not wired into CI — `make lint` scopes clippy to `--lib --bins
+  --tests --examples` rather than `--all-targets` so benching stays a manual
+  workflow. Findings: full scan/filter/expr/prepare land in the expected
+  1.5–6× band; point lookup and `ORDER BY ... LIMIT` are 500×–41,000× outliers
+  (full scan instead of a rowid seek / no top-K bound — V4 planner-tuning
+  material, filed as #128/#129, not fixed here).
 - Phase 4B (#96, epic #56): sqllogictest slice runner — `tests/sqllogictest/`
   parses the sqllogictest record format (`statement ok/error`,
   `query <types> <sort>`, `----` expected blocks with literal values or the
@@ -69,6 +84,13 @@ Codegen defects the runner and its review surfaced, all affecting
   detection now also excludes `INTEGER PRIMARY KEY DESC`, which SQLite
   deliberately does not treat as a rowid alias; two remaining textual
   misreads are pinned by `known_fragile_*` tests.
+
+VDBE execution limit, unrelated to codegen, surfaced by #112's bench:
+
+- `src/vdbe/exec.rs`'s `MAX_STEPS` infinite-loop backstop was `1_000_000`,
+  which a real ~830k-row full-table scan already exceeds (a handful of
+  VDBE steps per row). Raised to `50_000_000` — still a bounded safety net,
+  now sized for real workloads instead of only small test fixtures.
 
 ## [0.7.0] - 2026-08-16
 

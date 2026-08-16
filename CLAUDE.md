@@ -92,6 +92,14 @@ a trivial budget.
   (`tests/proptest/record_proptest.rs::prop_integer_i8_roundtrip`); update
   them in the same PR as any future move so `tools/assurance.py` doesn't
   report DEAD LINKs.
+- **Performance benches live under `tests/performance/`.** Same
+  Cargo-discovery caveat as `tests/proptest/`, but for `[[bench]]` instead
+  of `[[test]]`: `tests/performance/engine.rs` (tier 1, #111/#112) is
+  declared with an explicit `path =` in `Cargo.toml` rather than living in
+  the Cargo-default `benches/` directory, so it's discoverable alongside
+  the rest of the test suite instead of siloed in a separate top-level
+  folder. Run via `make bench` (sources `tools/bench_env.sh` first) or
+  `cargo bench --bench engine`.
 
 ## Epic & phase breakdown conventions
 
