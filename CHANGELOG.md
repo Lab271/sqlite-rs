@@ -6,6 +6,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-16
+
+### Fixed
+
+- Comparison affinity was never applied — `WHERE i = '5'`, `WHERE i > 3`,
+  `WHERE r = 1.5` returned no rows instead of matching the oracle (#138).
+  `TableSchema` now captures each column's declared type; codegen derives
+  comparison affinity from both operands (columns/CASTs only, per SQLite's
+  own `comparisonAffinity` rule) instead of hardcoding the P4 affinity
+  byte, and `compare_jump` applies it to operand copies before delegating
+  to `compare()`. Spec 009 Req 5 gains a scenario for the affinity half of
+  the P4 descriptor. Known remaining gap, filed separately (#151): BLOB
+  literals still compile to text, so `WHERE b = x'41'` doesn't match yet.
+
 ## [0.7.1] - 2026-08-16
 
 ### Added
