@@ -206,7 +206,22 @@ def opcode_model():
     return len(implemented & harvested), len(harvested)
 
 
+MAKEFILE_PATH = REPO_ROOT / "Makefile"
 TIERS_DIR = REPO_ROOT / "tests" / "tiers"
+
+
+def mvl_limit_model():
+    """Files exempt from the qualified-subset gate (Makefile MVL_LIMIT_EXCLUDE).
+
+    A style exclusion (no dyn/unsafe/lifetimes ban), not a safety one — the
+    crate is unconditionally #![forbid(unsafe_code)] regardless of this list.
+    """
+    if not MAKEFILE_PATH.exists():
+        return None
+    m = re.search(r"^MVL_LIMIT_EXCLUDE\s*:?=\s*(.+)$", MAKEFILE_PATH.read_text(), re.MULTILINE)
+    if not m:
+        return None
+    return m.group(1).split()
 
 
 def tier_model():
@@ -285,6 +300,9 @@ def report_model():
     if opcodes:
         impl, total = opcodes
         print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
+    exclusions = mvl_limit_model()
+    if exclusions:
+        print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (VFS dyn boundary, not unsafe — #80; src/bin is I/O): {', '.join(exclusions)}")
     print()
 
 
