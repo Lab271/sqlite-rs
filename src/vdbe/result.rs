@@ -1,6 +1,6 @@
 //! Result-row opcodes (spec 009, Requirement 8): literal loading
-//! (`Integer`, `Int64`, `Real`, `Blob`, `Null`, `String8`), record
-//! serialization (`MakeRecord`, reusing spec 003's on-disk record
+//! (`Integer`, `Int64`, `Real`, `Blob`, `Null`, `String8`, `Variable`),
+//! record serialization (`MakeRecord`, reusing spec 003's on-disk record
 //! encoding byte-for-byte), and row emission (`ResultRow`).
 
 use crate::record::{encode_record, TextEncoding, Value};
@@ -76,6 +76,17 @@ pub fn null(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     for reg in instr.p2..=last {
         vm.set_register(reg, Value::Null)?;
     }
+    Ok(Step::Next)
+}
+
+/// `Variable`: loads bound parameter `P1` (1-based, matching SQLite's
+/// `sqlite3_bind_*` indexing) into register `P2`. An unbound parameter
+/// (index past the end of `Vm`'s bound-value list, or no values bound
+/// at all) reads as NULL — the same "unwritten register reads as NULL"
+/// rule the rest of the VM follows, rather than an error.
+pub fn variable(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let value = vm.param(instr.p1).cloned().unwrap_or(Value::Null);
+    vm.set_register(instr.p2, value)?;
     Ok(Step::Next)
 }
 

@@ -1,7 +1,7 @@
 {
   "oracle_version": "3.53.4",
-  "query_count": 37,
-  "opcode_count": 64,
+  "query_count": 38,
+  "opcode_count": 65,
   "opcodes": {
     "Add": {
       "count": 1,
@@ -48,7 +48,7 @@
       "category": "arithmetic"
     },
     "Column": {
-      "count": 125,
+      "count": 129,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -113,7 +113,7 @@
       "category": "compare"
     },
     "Goto": {
-      "count": 39,
+      "count": 40,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -127,7 +127,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 37,
+      "count": 38,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -168,7 +168,7 @@
       "category": "control"
     },
     "Init": {
-      "count": 37,
+      "count": 38,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -295,7 +295,7 @@
       "category": "cursor"
     },
     "OpenRead": {
-      "count": 37,
+      "count": 38,
       "p4_variants": [
         "0",
         "2",
@@ -317,7 +317,7 @@
       "category": "result"
     },
     "RealAffinity": {
-      "count": 32,
+      "count": 33,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "compare"
@@ -329,7 +329,7 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 37,
+      "count": 38,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
@@ -347,13 +347,13 @@
       "category": "cursor"
     },
     "Rowid": {
-      "count": 18,
+      "count": 19,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
     },
     "SeekRowid": {
-      "count": 3,
+      "count": 4,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE id = 2",
       "category": "cursor"
@@ -435,12 +435,18 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 37,
+      "count": 38,
       "p4_variants": [
         "0"
       ],
       "example_query": "SELECT * FROM products",
       "category": "control"
+    },
+    "Variable": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT * FROM products WHERE id = ?1",
+      "category": "result"
     }
   },
   "skipped_queries": []

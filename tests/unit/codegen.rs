@@ -138,12 +138,68 @@ fn rowid_alias_in_where_clause_reads_via_rowid() {
     // The bug's headline symptom: this returned no rows at all, because
     // the WHERE comparison read the placeholder NULL. Covers the
     // `emit_branch_into` call site rather than the result-column one.
+    //
+    // `id = 2` (an equality against the rowid alias) is deliberately not
+    // used here: #137 pattern-matches exactly that shape into a
+    // `SeekRowid` point lookup, which reads the row by seeking rather
+    // than by comparing a `Rowid`-read register — see
+    // `rowid_alias_equality_compiles_to_seek_rowid` below. `id > 2`
+    // stays outside that fast path (range comparisons are out of scope
+    // per #137) and still exercises the original bug's `Rowid`-read
+    // fix.
     let s = schema(IPK_DDL, &["id", "name"]);
-    let program = compile("SELECT name FROM t WHERE id = 2", &s);
+    let program = compile("SELECT name FROM t WHERE id > 2", &s);
     assert!(
         uses(&program, Opcode::Rowid),
         "a rowid-alias column in WHERE must read through Rowid"
     );
+}
+
+#[test]
+fn rowid_alias_equality_compiles_to_seek_rowid() {
+    let s = schema(IPK_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id = 2", &s);
+    assert!(
+        uses(&program, Opcode::SeekRowid),
+        "an equality on the rowid alias must compile to SeekRowid, not a full scan"
+    );
+    assert!(
+        !uses(&program, Opcode::Rewind),
+        "the SeekRowid fast path must not also emit the Rewind/Next scan loop"
+    );
+}
+
+#[test]
+fn bare_rowid_keyword_equality_compiles_to_seek_rowid() {
+    let s = schema(IPK_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE rowid = 2", &s);
+    assert!(uses(&program, Opcode::SeekRowid));
+    assert!(!uses(&program, Opcode::Rewind));
+}
+
+#[test]
+fn rowid_equality_against_parameter_compiles_to_seek_rowid() {
+    let s = schema(IPK_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE rowid = ?", &s);
+    assert!(uses(&program, Opcode::Variable));
+    assert!(uses(&program, Opcode::SeekRowid));
+    assert!(!uses(&program, Opcode::Rewind));
+}
+
+#[test]
+fn rowid_range_comparison_does_not_use_seek_rowid() {
+    let s = schema(IPK_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id > 2", &s);
+    assert!(!uses(&program, Opcode::SeekRowid));
+    assert!(uses(&program, Opcode::Rewind));
+}
+
+#[test]
+fn non_rowid_column_equality_does_not_use_seek_rowid() {
+    let s = schema(IPK_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE name = 'x'", &s);
+    assert!(!uses(&program, Opcode::SeekRowid));
+    assert!(uses(&program, Opcode::Rewind));
 }
 
 #[test]

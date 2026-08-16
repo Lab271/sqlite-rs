@@ -117,6 +117,10 @@ pub struct Vm {
     pub(crate) db: Option<VmDb>,
     rows: Vec<Vec<Value>>,
     pub(crate) once_fired: HashSet<usize>,
+    /// Bound parameter values, 0-indexed internally but addressed
+    /// 1-based by `Opcode::Variable`'s `P1` (SQLite's
+    /// `sqlite3_bind_*` convention) — see [`Vm::param`]/[`Vm::bind_params`].
+    params: Vec<Value>,
 }
 
 /// Caps a single register index and, separately, a register-range
@@ -142,6 +146,21 @@ impl Vm {
             db: Some(VmDb { source, header }),
             ..Self::default()
         }
+    }
+
+    /// Binds parameter values for `Opcode::Variable` to read, 1-based
+    /// (`values[0]` becomes parameter 1). Replaces any previously bound
+    /// values.
+    pub fn bind_params(&mut self, values: Vec<Value>) {
+        self.params = values;
+    }
+
+    /// Reads bound parameter `index` (1-based). `None` for an
+    /// out-of-range or never-bound index — `Opcode::Variable`
+    /// (`src/vdbe/result.rs::variable`) treats that as NULL.
+    pub(crate) fn param(&self, index: i32) -> Option<&Value> {
+        let idx = usize::try_from(index).ok()?.checked_sub(1)?;
+        self.params.get(idx)
     }
 
     pub(crate) fn db(&self) -> Result<&VmDb, ExecError> {
@@ -312,7 +331,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, Real,
         RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence, ShiftLeft,
         ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
-        Subtract, Transaction,
+        Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -358,6 +377,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Blob => result::blob(vm, instr),
         Null => result::null(vm, instr),
         String8 => result::string8(vm, instr),
+        Variable => result::variable(vm, instr),
         MakeRecord => result::make_record(vm, instr),
         ResultRow => result::result_row(vm, instr),
 
@@ -466,6 +486,19 @@ pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
     run(Vm::new(), program)
 }
 
+/// Like [`execute`], but binds `params` for `Opcode::Variable` to read
+/// (1-based, per [`Vm::bind_params`]) — a program compiled with `?`
+/// placeholders (e.g. `WHERE rowid = ?1`, #137) needs this to run
+/// correctly; [`execute`] alone leaves every parameter NULL.
+pub fn execute_with_params(
+    program: &Program,
+    params: Vec<Value>,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let mut vm = Vm::new();
+    vm.bind_params(params);
+    run(vm, program)
+}
+
 /// Like [`execute`], but the `Vm` can service `OpenRead` (cursor
 /// opcodes over real tables) against `source`/`header` — see
 /// [`Vm::with_db`].
@@ -475,6 +508,18 @@ pub fn execute_with_db(
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     run(Vm::with_db(source, header), program)
+}
+
+/// Combines [`execute_with_db`] and [`execute_with_params`].
+pub fn execute_with_db_and_params(
+    program: &Program,
+    source: Rc<dyn PageSource>,
+    header: DatabaseHeader,
+    params: Vec<Value>,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let mut vm = Vm::with_db(source, header);
+    vm.bind_params(params);
+    run(vm, program)
 }
 
 fn run(mut vm: Vm, program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {

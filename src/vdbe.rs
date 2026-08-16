@@ -27,7 +27,9 @@ pub use coerce::{
 };
 pub use collation::{compare_text, Collation};
 pub use compare::compare;
-pub use exec::{execute, execute_with_db, ExecError, Step, Vm};
+pub use exec::{
+    execute, execute_with_db, execute_with_db_and_params, execute_with_params, ExecError, Step, Vm,
+};
 pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, FunctionError};
 pub use program::{Instruction, Opcode, Program, SortKeyColumn, P4};

@@ -488,3 +488,94 @@ fn order_by_expression_with_limit_offset_and_second_key() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// #137: `WHERE rowid = <int literal>` compiles to `SeekRowid` — no
+/// `Rewind`/`Next` full-table scan — and still answers the same row
+/// the ordinary scan would.
+#[test]
+fn rowid_equality_seeks_and_matches_oracle() {
+    let (path, schema) = scratch_fixture_labeled("seek_rowid");
+    let select = match parse_select("SELECT a, b, name FROM t WHERE rowid = 2;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekRowid"),
+        "expected SeekRowid in the compiled program: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "Rewind"),
+        "SeekRowid fast path must not also emit a Rewind/Next scan: {rows:?}"
+    );
+
+    let our = our_rows(&path, &schema, "SELECT a, b, name FROM t WHERE rowid = 2;")
+        .expect("query should compile and execute");
+    if let Some(oracle) = pinned_oracle() {
+        let oracle_out = oracle_rows(&oracle, &path, "SELECT a, b, name FROM t WHERE rowid = 2;");
+        let ours_as_text: Vec<Vec<String>> = our
+            .iter()
+            .map(|row| row.iter().map(value_to_oracle_text).collect())
+            .collect();
+        assert_eq!(ours_as_text, oracle_out);
+    } else {
+        assert_eq!(
+            our,
+            vec![vec![
+                Value::Integer(2),
+                Value::Integer(5),
+                Value::Text("bb".to_string())
+            ]]
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #137: a rowid seek by a missing rowid returns no rows (the
+/// `SeekRowid` not-found jump lands cleanly on `Halt`, not a panic or a
+/// phantom row).
+#[test]
+fn rowid_equality_seek_missing_row_returns_empty() {
+    let (path, schema) = scratch_fixture_labeled("seek_rowid_missing");
+    let rows = our_rows(&path, &schema, "SELECT a FROM t WHERE rowid = 999;")
+        .expect("query should compile and execute");
+    assert!(rows.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #137: `WHERE rowid = ?` compiles to `Variable` + `SeekRowid`, and
+/// the bound parameter value actually drives the seek (exercising the
+/// bind-parameter plumbing added alongside the fast path, not just the
+/// opcode shape).
+#[test]
+fn rowid_equality_against_bound_parameter_seeks() {
+    let select = match parse_select("SELECT a, name FROM t WHERE rowid = ?;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let (path, schema) = scratch_fixture_labeled("seek_rowid_param");
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(rows.iter().any(|r| r.opcode == "Variable"));
+    assert!(rows.iter().any(|r| r.opcode == "SeekRowid"));
+
+    let vfs = UnixVfs;
+    let file = vfs.open_read(&path).unwrap();
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0).unwrap();
+    let header = DatabaseHeader::parse(&header_buf).unwrap();
+    let source = VfsPageSource::open(&vfs, &path, header.page_size).unwrap();
+    let result = sqlite_rs::vdbe::execute_with_db_and_params(
+        &program,
+        Rc::new(source),
+        header,
+        vec![Value::Integer(3)],
+    )
+    .expect("executes");
+    assert_eq!(
+        result,
+        vec![vec![Value::Integer(3), Value::Text("cc".to_string())]]
+    );
+    let _ = std::fs::remove_file(&path);
+}

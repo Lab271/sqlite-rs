@@ -10,9 +10,10 @@ date: 2026-08-16
 The bytecode virtual machine — SQLite's `vdbe.c`/`vdbeaux.c` instruction set
 and register model, plus the codegen that emits it from the V2 AST (#61).
 Backs V2 phase 3 (#89/#90/#91), part of epic #56. The opcode set is frozen
-by the phase-3 opener (#87), grown by #139's bitwise/concat harvest and
-#142's literal-fidelity/CAST harvest (`Real`, `Blob`, `Int64`, `Cast`):
-the harvested, scope-decided `tools/opcodes-v2.json` (64 opcodes,
+by the phase-3 opener (#87), grown by #139's bitwise/concat harvest,
+#142's literal-fidelity/CAST harvest (`Real`, `Blob`, `Int64`, `Cast`),
+and #137's bound-parameter harvest (`Variable`, for `WHERE rowid = ?`
+point lookups): the harvested, scope-decided `tools/opcodes-v2.json` (65 opcodes,
 oracle 3.53.4) is the exhaustive
 denominator for every requirement below — no opcode outside that inventory
 is in scope for V2, and every opcode inside it must appear as a scenario
@@ -209,6 +210,23 @@ the just-produced duplicate row if present.
   `SELECT id FROM t` was fixed (#131, #134)
 
 **Tests:** `tests/unit/codegen.rs::star_expansion_reads_the_rowid_alias_via_rowid`, `tests/unit/codegen.rs::rowid_alias_result_column_reads_via_rowid_not_column`, `tests/parity/v02.rs::star_expansion_acceptance_and_output_match_for_a_rowid_alias_table`
+
+#### Scenario: `WHERE rowid = <literal or ?>` seeks directly instead of scanning
+
+- GIVEN `SELECT * FROM products WHERE id = 2` (harvested: `Integer`,
+  `SeekRowid` — per `tools/opcodes-v2.json`, #137/#128), where `id` is
+  either the bare `rowid`/`_rowid_`/`oid` keyword or the table's actual
+  `INTEGER PRIMARY KEY` alias column
+- THEN codegen recognizes the single top-level equality against a rowid
+  reference and emits `Integer` (or `Variable` for `= ?`) followed by
+  `SeekRowid` directly on the table cursor, in place of the
+  `Rewind`/`[test, emit]`/`Next` scan loop — an O(log n) point lookup
+  instead of an O(n) full-table scan. Out of this scenario's scope
+  (falls back to the ordinary scan): range comparisons (`rowid > 5`),
+  compound conditions (`rowid = 5 AND x = 3`), DISTINCT, and any
+  non-rowid column — those stay V4 per the issue's bounded scope
+
+**Tests:** `tests/unit/codegen.rs::rowid_alias_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::bare_rowid_keyword_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_equality_against_parameter_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_range_comparison_does_not_use_seek_rowid`, `tests/unit/codegen.rs::non_rowid_column_equality_does_not_use_seek_rowid`, `tests/codegen/select_test.rs::rowid_equality_seeks_and_matches_oracle`, `tests/codegen/select_test.rs::rowid_equality_seek_missing_row_returns_empty`
 
 #### Scenario: DISTINCT probes an ephemeral index before emitting each row
 
@@ -418,15 +436,17 @@ it callable via this opcode, with no VDBE-layer change required.
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
-The 8 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,
-`Null`, `String8`, `MakeRecord`, `ResultRow` — MUST implement literal
-loading (`Integer`: load an `i64` constant into a register from `P1`;
-`Int64`: load an `i64` constant carried in `P4` — the 64-bit
+The 9 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,
+`Null`, `String8`, `Variable`, `MakeRecord`, `ResultRow` — MUST implement
+literal loading (`Integer`: load an `i64` constant into a register from
+`P1`; `Int64`: load an `i64` constant carried in `P4` — the 64-bit
 counterpart for a literal outside `P1`'s `i32` range, #142; `Real`:
 load an `f64` constant from `P4`; `Blob`: load a byte-string constant
 from `P4`; `Null`: write NULL into the register range `P2..=P3`, or
 just `P2` when `P3` does not name a higher register; `String8`: load a
-UTF-8 string constant from `P4` into a register), record serialization (`MakeRecord`:
+UTF-8 string constant from `P4` into a register; `Variable`: load bound
+parameter `P1` (1-based, `sqlite3_bind_*` convention) into register `P2`,
+reading NULL for an unbound or out-of-range index), record serialization (`MakeRecord`:
 pack a contiguous run of registers into spec 003's record format, using
 `P4`'s per-column serial-type hints where present), and row emission
 (`ResultRow`: yield a contiguous run of registers as one output row to the
@@ -469,6 +489,19 @@ VDBE-private serialization.
 
 **Tests:** `src/vdbe/result.rs::tests::int64_real_and_blob_load_typed_literals`,
 `tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+
+#### Scenario: Variable loads a bound parameter, defaulting to NULL when unbound
+
+- GIVEN `SELECT * FROM products WHERE id = ?1` (harvested: `Variable`
+  once — per `tools/opcodes-v2.json`, #137)
+- THEN `Variable` reads the parameter at its 1-based `P1` index from
+  whatever `Vm::bind_params`/`execute_with_params` bound before the run
+  started, and writes it into register `P2`; an index past the end of
+  the bound-value list (including "nothing was ever bound") writes NULL
+  rather than erroring — consistent with the rest of the VM's
+  unwritten-register-reads-as-NULL rule
+
+**Tests:** `tests/codegen/select_test.rs::rowid_equality_against_bound_parameter_seeks`
 
 #### Scenario: Null writes NULL over a register that already holds a value
 
@@ -751,7 +784,7 @@ opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
-harvested opcode set — the full 60-opcode inventory, independent of how
+harvested opcode set — the full 61-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
 line tracks how many of those 60 are actually dispatched in
 `src/vdbe/exec.rs` (58/60 — it read 52/54 before #139 harvested and
