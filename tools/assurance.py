@@ -119,6 +119,7 @@ PARITY_DIMENSIONS = ("acceptance", "output", "schema", "plan")
 CARGO_TOML = REPO_ROOT / "Cargo.toml"
 PLAN_PATH = REPO_ROOT / ".openspec" / "plan.md"
 OPCODES_JSON = REPO_ROOT / "tools" / "opcodes-v2.json"
+SQLLOGICTEST_JSON = REPO_ROOT / "tools" / "sqllogictest-status.json"
 VDBE_EXEC = REPO_ROOT / "src" / "vdbe" / "exec.rs"
 
 # Versioning policy (CHANGELOG): one minor per completed plan phase.
@@ -229,6 +230,35 @@ def opcode_model():
         if arm and arm.group(1) not in ("other", "_"):
             implemented.add(arm.group(1))
     return len(implemented & harvested), len(harvested)
+
+
+def sqllogictest_model():
+    """sqllogictest slice results (`tools/sqllogictest-status.json`, #96).
+
+    Returns (pass, attempted, queries) or None if the runner has never
+    been run. Unlike the other models here this file is *generated* by
+    `make sqllogictest` rather than derived from source, so a stale
+    file reports the last run, not the current tree — the CI job
+    regenerates it on every push.
+
+    Reported as a pair (pass rate AND coverage) on purpose: pass rate
+    alone reads as a perfect score while most of the corpus is still
+    skipped as out-of-slice.
+    """
+    if not SQLLOGICTEST_JSON.exists():
+        return None
+    import json
+
+    try:
+        total = json.loads(SQLLOGICTEST_JSON.read_text())["total"]
+        return (
+            total["pass"],
+            total["attempted"],
+            total["queries"],
+            total.get("suspect", 0),
+        )
+    except (ValueError, KeyError):
+        return None
 
 
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
@@ -348,6 +378,19 @@ def report_model():
     if opcodes:
         impl, total = opcodes
         print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
+    slt = sqllogictest_model()
+    if slt:
+        passed, attempted, queries, suspect = slt
+        rate = (passed / attempted * 100) if attempted else 0.0
+        cov = (attempted / queries * 100) if queries else 0.0
+        # A nonzero suspect count means queries were declined for a
+        # reason that should not happen against oracle-validated input
+        # — surfaced inline so it can't hide inside the skip bucket.
+        suspect_note = f", {suspect} SUSPECT" if suspect else ""
+        print(
+            f"sqllogictest slice:   {passed}/{attempted} passing ({rate:.1f}%), "
+            f"{attempted}/{queries} attempted ({cov:.1f}% of corpus{suspect_note}, #96)"
+        )
     print()
     return detail
 

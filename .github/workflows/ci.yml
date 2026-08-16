@@ -137,3 +137,27 @@ jobs:
       # Runs last: it is the slowest step in this job (~8s) and the only one
       # depending on the oracle built above.
       - run: make test-corpus
+
+      # Informational, NOT a gate (#96). The sqllogictest slice is a
+      # coverage ratchet rather than a pass/fail contract: today it
+      # attempts ~7% of the vendored corpus and skips the rest as
+      # out-of-slice, so a red run here means "a query we DO support
+      # diverged", which is worth surfacing but is already covered by
+      # the gating suites above. Flip `continue-on-error` off once the
+      # slice's coverage is high enough that a divergence should block
+      # a merge on its own.
+      - name: sqllogictest slice (informational)
+        continue-on-error: true
+        run: make sqllogictest
+
+      # The runner rewrites tools/sqllogictest-status.json in place, and
+      # tools/assurance.py publishes those numbers. Without this, the
+      # committed metric could drift from what a run actually produces
+      # and nothing would say so. Informational like the step above —
+      # the point is to make drift visible in the job log, not to block.
+      - name: sqllogictest status drift (informational)
+        continue-on-error: true
+        run: |
+          if ! git diff --exit-code -- tools/sqllogictest-status.json; then
+            echo "::warning::tools/sqllogictest-status.json is stale — re-run 'make sqllogictest' and commit the result"
+          fi

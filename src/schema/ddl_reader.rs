@@ -133,30 +133,14 @@ struct ParsedCreateTable {
 /// caller treats that identically to a virtual table (empty columns,
 /// never an error).
 fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
-    let start = sql.find('(')?;
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, c) in sql.get(start..)?.char_indices() {
-        match c {
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(start.saturating_add(i));
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end = end?;
-    let inner = sql.get(start.saturating_add(1)..end)?;
+    let (start, end) = column_list_span(sql)?;
+    let inner = sql.get(start..end)?;
     let trailer = sql.get(end.saturating_add(1)..)?.to_ascii_uppercase();
 
     let columns = split_top_level_commas(inner)
         .into_iter()
         .filter(|def| !is_table_constraint(def))
-        .map(|def| column_name(&def))
+        .map(column_name)
         .collect();
 
     Some(ParsedCreateTable {
@@ -180,7 +164,34 @@ fn is_table_constraint(def: &str) -> bool {
         || upper.starts_with("CONSTRAINT")
 }
 
-fn split_top_level_commas(inner: &str) -> Vec<String> {
+/// Byte range *between* the outer parens of a `CREATE TABLE`'s
+/// column-definition list, or `None` when there is no balanced list.
+fn column_list_span(sql: &str) -> Option<(usize, usize)> {
+    let start = sql.find('(')?;
+    let mut depth = 0i32;
+    for (i, c) in sql.get(start..)?.char_indices() {
+        match c {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((start.saturating_add(1), start.saturating_add(i)));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The single top-level-comma splitter behind both
+/// [`parse_create_table`]'s `columns` and [`column_defs`]. These two
+/// MUST agree position-for-position: [`rowid_alias_column`] returns an
+/// index into `column_defs`, and `src/codegen/expr.rs` resolves that
+/// index against `TableSchema::columns`. Two copies of this loop would
+/// let the lists drift and silently mis-target the rowid substitution,
+/// so they share one implementation rather than mirroring each other.
+fn split_top_level_commas(inner: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut part_start = 0usize;
@@ -190,13 +201,13 @@ fn split_top_level_commas(inner: &str) -> Vec<String> {
             b'(' => depth = depth.saturating_add(1),
             b')' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
-                parts.push(inner.get(part_start..i).unwrap_or("").trim().to_string());
+                parts.push(inner.get(part_start..i).unwrap_or("").trim());
                 part_start = i.saturating_add(1);
             }
             _ => {}
         }
     }
-    parts.push(inner.get(part_start..).unwrap_or("").trim().to_string());
+    parts.push(inner.get(part_start..).unwrap_or("").trim());
     parts
 }
 
@@ -207,6 +218,62 @@ fn column_name(def: &str) -> String {
         .trim_matches(['"', '`', '['].as_ref())
         .trim_matches([']'].as_ref())
         .to_string()
+}
+
+/// Splits a `CREATE TABLE ...(col-defs)...` statement's column-definition
+/// list into raw per-column definition strings, in declared order —
+/// re-derived from `schema.sql` rather than kept alongside `columns`,
+/// which holds names only — `src/dump.rs` needs each column's declared
+/// type text, and [`rowid_alias_column`] needs its full constraint
+/// text. Shares [`split_top_level_commas`] and [`is_table_constraint`]
+/// with [`parse_create_table`], so the two column lists cannot drift.
+pub(crate) fn column_defs(schema: &TableSchema) -> Vec<&str> {
+    let Some((start, end)) = column_list_span(&schema.sql) else {
+        return Vec::new();
+    };
+    let Some(inner) = schema.sql.get(start..end) else {
+        return Vec::new();
+    };
+    split_top_level_commas(inner)
+        .into_iter()
+        .filter(|def| !is_table_constraint(def))
+        .collect()
+}
+
+/// The one-column special case SQLite calls the rowid alias: a table
+/// declared with a single `INTEGER PRIMARY KEY` column (not `WITHOUT
+/// ROWID`) stores that column as a NULL placeholder in every record and
+/// expects the reader to substitute the cursor's own rowid instead (see
+/// `src/btree/mod.rs`'s module doc and spike 003 finding 1). Returns the
+/// 0-based column index to substitute, if any.
+///
+/// Detection is textual and shares this module's documented naivety —
+/// see the `known_fragile_*` tests below for the two forms it still
+/// gets wrong. That matters more than it used to: `src/codegen/expr.rs`
+/// now emits `Rowid` instead of `Column` based on this answer, so a
+/// wrong index is a wrong query result, not just wrong `dump` output.
+pub(crate) fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
+    if schema.without_rowid {
+        return None;
+    }
+    for (idx, def) in column_defs(schema).iter().enumerate() {
+        let upper = def.to_ascii_uppercase();
+        let is_int_pk = upper
+            .split(|c: char| !c.is_alphanumeric())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w == ["PRIMARY", "KEY"])
+            && upper.split_whitespace().any(|w| w == "INTEGER")
+            // `INTEGER PRIMARY KEY DESC` is deliberately NOT a rowid
+            // alias in SQLite — the DESC form gets its own b-tree index
+            // and the column is stored normally, so substituting the
+            // cursor's rowid would return values that aren't there.
+            && !upper.split_whitespace().any(|w| w == "DESC");
+        if is_int_pk {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

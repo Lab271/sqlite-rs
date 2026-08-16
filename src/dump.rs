@@ -17,7 +17,7 @@ use crate::btree::{BtreeError, IndexCursor, IndexRow, TableCursor, TableRow};
 use crate::header::{DatabaseHeader, HeaderError, HEADER_LEN};
 use crate::pager::{Pager, PagerError};
 use crate::record::{decode_record, RecordError, TextEncoding, Value};
-use crate::schema::{read_schema, DdlError, TableSchema};
+use crate::schema::{column_defs, read_schema, rowid_alias_column, DdlError, TableSchema};
 use crate::vfs::{PageSource, Vfs, VfsError};
 
 #[derive(Debug, Error)]
@@ -103,90 +103,6 @@ pub fn dump_database<V: Vfs>(vfs: &V, path: &Path) -> Result<DumpResult, DumpErr
     }
 
     Ok(DumpResult { tables, warnings })
-}
-
-/// Splits a `CREATE TABLE ...(col-defs)...` statement's column-definition
-/// list into raw per-column definition strings, in declared order —
-/// deliberately re-derived from `schema.sql` here (rather than exposed
-/// from `src/schema`) since only this module needs per-column type text,
-/// not just names. Mirrors `src/schema/ddl_reader.rs`'s own naive
-/// top-level-comma splitter and table-constraint filter.
-fn column_defs(schema: &TableSchema) -> Vec<&str> {
-    let Some(start) = schema.sql.find('(') else {
-        return Vec::new();
-    };
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, c) in schema.sql[start..].char_indices() {
-        match c {
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(start.saturating_add(i));
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(end) = end else {
-        return Vec::new();
-    };
-    let inner = &schema.sql[start.saturating_add(1)..end];
-
-    let mut depth = 0i32;
-    let mut part_start = 0usize;
-    let mut defs = Vec::new();
-    let bytes = inner.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' => depth = depth.saturating_add(1),
-            b')' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                defs.push(inner[part_start..i].trim());
-                part_start = i.saturating_add(1);
-            }
-            _ => {}
-        }
-    }
-    defs.push(inner[part_start..].trim());
-
-    defs.into_iter()
-        .filter(|def| {
-            let upper = def.to_ascii_uppercase();
-            !(upper.starts_with("PRIMARY KEY")
-                || upper.starts_with("UNIQUE")
-                || upper.starts_with("FOREIGN KEY")
-                || upper.starts_with("CHECK")
-                || upper.starts_with("CONSTRAINT"))
-        })
-        .collect()
-}
-
-/// The one-column special case SQLite calls the rowid alias: a table
-/// declared with a single `INTEGER PRIMARY KEY` column (not `WITHOUT
-/// ROWID`) stores that column as a NULL placeholder in every record and
-/// expects the reader to substitute the cursor's own rowid instead (see
-/// `src/btree/mod.rs`'s module doc and spike 003 finding 1). Returns the
-/// 0-based column index to substitute, if any.
-fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
-    if schema.without_rowid {
-        return None;
-    }
-    for (idx, def) in column_defs(schema).iter().enumerate() {
-        let upper = def.to_ascii_uppercase();
-        let is_int_pk = upper
-            .split(|c: char| !c.is_alphanumeric())
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|w| w == ["PRIMARY", "KEY"])
-            && upper.split_whitespace().any(|w| w == "INTEGER");
-        if is_int_pk {
-            return Some(idx);
-        }
-    }
-    None
 }
 
 /// Column indices with REAL type affinity (declared type containing
@@ -354,5 +270,49 @@ mod tests {
             vec![true],
             "constraint text mentioning FLOAT was wrongly detected as REAL affinity"
         );
+    }
+
+    // The two `rowid_alias_column` cases below are the reason that
+    // function's naivety now carries more weight than it did: since #96,
+    // `src/codegen/expr.rs` emits `Rowid` instead of `Column` based on
+    // its answer, so a wrong index is a wrong query result rather than
+    // only wrong `dump` output. Both are tracked for a quote-aware
+    // rewrite in #135; these tests pin today's behavior so the fix is
+    // visible when it lands.
+
+    #[test]
+    fn known_fragile_string_literal_mentioning_primary_key_false_positives() {
+        // The DEFAULT literal supplies the PRIMARY/KEY token pair and the
+        // column supplies INTEGER, so this reads as a rowid alias and the
+        // compiled read path would substitute the cursor rowid for `a`.
+        let s = schema("CREATE TABLE t (a INTEGER DEFAULT 'primary key', b TEXT)");
+        assert_eq!(
+            rowid_alias_column(&s),
+            Some(0),
+            "PRIMARY KEY inside a string literal was wrongly read as a real constraint"
+        );
+    }
+
+    #[test]
+    fn known_fragile_table_level_primary_key_misses_the_alias() {
+        // SQLite treats `CREATE TABLE t(x INTEGER, PRIMARY KEY(x))` as a
+        // rowid alias, but the table-constraint filter drops that def
+        // before the scan sees it — so `x` reads back NULL, which is the
+        // original #96 bug surviving for this DDL spelling.
+        let s = schema("CREATE TABLE t (x INTEGER, PRIMARY KEY(x))");
+        assert_eq!(
+            rowid_alias_column(&s),
+            None,
+            "table-level PRIMARY KEY(x) over an INTEGER column is a rowid alias in SQLite"
+        );
+    }
+
+    #[test]
+    fn rowid_alias_none_for_integer_primary_key_desc() {
+        // Not fragile — a real rule: the DESC form gets its own b-tree
+        // index and stores the column normally, so it must NOT be
+        // substituted (SQLite's "ROWIDs and the INTEGER PRIMARY KEY").
+        let s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY DESC, name TEXT)");
+        assert_eq!(rowid_alias_column(&s), None);
     }
 }
