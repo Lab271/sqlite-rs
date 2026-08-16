@@ -51,7 +51,11 @@ fn t1_expression_kernel_affinity_and_collation_vectors() {
         Ordering::Less
     );
     assert_eq!(
-        compare(&Value::Integer(1), &Value::Text("a".into()), Collation::Binary),
+        compare(
+            &Value::Integer(1),
+            &Value::Text("a".into()),
+            Collation::Binary
+        ),
         Ordering::Less
     );
 

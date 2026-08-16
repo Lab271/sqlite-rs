@@ -76,17 +76,22 @@ a trivial budget.
   with a defined meaning (oracle-diff corpus, per-V-block oracle parity,
   tier-model contracts, public-API unit tests, respectively — see the
   tier-stub-flip and spec-traceability conventions above).
-- **Property tests are top-level files, not a subdirectory.** `tests/*_proptest.rs`
-  (e.g. `tests/record_proptest.rs`, `tests/semantics_proptest.rs`,
-  `tests/tokenizer_proptest.rs`) live directly under `tests/`, each its own
-  Cargo integration-test binary — there is no `tests/proptest/` directory.
-  Don't move them into one: spec `Tests:` links
-  (`tests/record_proptest.rs::prop_integer_i8_roundtrip`) and the
-  `test-proptest` Makefile target (`cargo test --test record_proptest`)
-  hard-code these paths, and `tools/assurance.py` would report DEAD LINKs
-  on a rename. `tests/proptest-regressions/` is unrelated — it's
-  proptest's own auto-generated regression-seed storage, not a home for
-  the test files themselves.
+- **Property tests live under `tests/proptest/`.** `tests/proptest/record_proptest.rs`,
+  `tests/proptest/semantics_proptest.rs`, `tests/proptest/tokenizer_proptest.rs`
+  are each declared as an explicit `[[test]]` in `Cargo.toml` (subdirectory
+  files aren't Cargo-auto-discovered — only direct children of `tests/`
+  are, which is why every non-top-level test file, `tests/unit/*`
+  included, needs its own `[[test]]` block). Each `[[test]]`'s `name`
+  stays the short form (`record_proptest`, not the path), so
+  `cargo test --test record_proptest` and the `test-proptest` Makefile
+  target are unaffected by where the file physically lives.
+  `tests/proptest/proptest-regressions/` sits alongside the property-test
+  files themselves — proptest derives that path from the source file's
+  own location via `file!()`, so it moves with the files, not
+  independently. Spec `Tests:` links use the full current path
+  (`tests/proptest/record_proptest.rs::prop_integer_i8_roundtrip`); update
+  them in the same PR as any future move so `tools/assurance.py` doesn't
+  report DEAD LINKs.
 
 ## Epic & phase breakdown conventions
 
