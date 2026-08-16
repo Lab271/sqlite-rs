@@ -110,8 +110,8 @@ opcodes: ## Harvest V2 (single-table SELECT) opcodes via pinned oracle EXPLAIN, 
 
 # === Assurance ===
 
-assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence (VERBOSE=true for per-requirement detail)
-	@python3 tools/assurance.py $(if $(VERBOSE),--verbose)
+assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence, with per-requirement/model detail
+	@python3 tools/assurance.py --verbose
 
 assurance-gate: ## CI gate: fail if completeness or scenario-weighted coverage is below 75%
 	@python3 tools/assurance.py --min 0.75

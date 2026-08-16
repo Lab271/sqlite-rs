@@ -243,8 +243,17 @@ def tier_model():
 
 
 def report_model():
-    """Print the Model level: plan position (plan.md + Cargo.toml) + grammar model (sqlite.ebnf)."""
+    """Print the Model level: totals only. Returns detail lines for --verbose.
+
+    Plan position (plan.md + Cargo.toml) + grammar/parity/tier/opcode/
+    qualified-subset models. Each model line here is a total; the
+    per-V-block/per-tier/per-file breakdown behind it is returned as
+    detail lines, printed under a separate "Model Detail" section only
+    when --verbose is passed — keeps the default dashboard to one line
+    per model instead of wrapping onto a second line per model.
+    """
     print("-- Model " + "-" * 51)
+    detail = []
     blocks = plan_blocks()
     ver = crate_version()
     if ver:
@@ -268,10 +277,9 @@ def report_model():
     model = grammar_model()
     if model:
         total = sum(model.values())
+        print(f"Grammar model:        {total} rules defined, covers {len(model)}/{len(blocks) or '?'} plan blocks — .openspec/grammar/sqlite.ebnf")
         parts = ", ".join(f"{k}: {v}" for k, v in sorted(model.items()))
-        tagged = ", ".join(sorted(model))
-        print(f"Grammar model:        {total} rules defined ({parts}) — .openspec/grammar/sqlite.ebnf")
-        print(f"                      covers {len(model)}/{len(blocks) or '?'} plan blocks; drift-checked by `make grammar-drift`")
+        detail.append(f"Grammar model:        {parts}; drift-checked by `make grammar-drift`")
         unknown_tags = sorted(set(model) - set(blocks)) if blocks else []
         if unknown_tags:
             print(f"  DRIFT: grammar tags not in plan.md value blocks: {', '.join(unknown_tags)}")
@@ -280,6 +288,9 @@ def report_model():
     parity = parity_model()
     if parity:
         n_gated = len(PARITY_DIMENSIONS)
+        gated_blocks = sum(1 for n in parity.values() if n > 0)
+        denom = len(blocks) or len(parity)
+        print(f"Parity:               {gated_blocks}/{denom} plan blocks gated (of {n_gated} dimensions each) — tests/parity/ (#72)")
         parts = []
         pending = []
         for block in sorted(parity):
@@ -291,19 +302,20 @@ def report_model():
         summary = " · ".join(parts)
         if pending:
             summary += (" · " if summary else "") + f"{pending[0]}+ pending"
-        print(f"Parity:               {summary} — tests/parity/ (#72)")
+        detail.append(f"Parity:               {summary}")
     tiers = tier_model()
     if tiers:
+        active_total = sum(a for a, _ in tiers.values())
+        total_total = sum(t for _, t in tiers.values())
+        print(f"Tier contracts:       {active_total}/{total_total} active — tests/tiers/")
         parts = " · ".join(f"{k} {active}/{total}" for k, (active, total) in sorted(tiers.items()))
-        print(f"Tier contracts:       {parts}")
+        detail.append(f"Tier contracts:       {parts}")
     opcodes = opcode_model()
     if opcodes:
         impl, total = opcodes
         print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
-    exclusions = mvl_limit_model()
-    if exclusions:
-        print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (VFS dyn boundary, not unsafe — #80; src/bin is I/O): {', '.join(exclusions)}")
     print()
+    return detail
 
 
 def _validate_link(entry):
@@ -506,7 +518,7 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"Requirements:     {total}" + (f" ({planned_count} planned excluded)" if planned_count else ""))
     print(f"Scenarios:        {total_scenarios}")
     print()
-    report_model()
+    model_detail = report_model()
     print("-- Traceability " + "-" * 44)
     print(f"Completeness (S->P):  {impl_exists}/{total} requirements implemented  ({completeness:.0%})")
     print(f"Coverage (E->P):      {backed}/{total_scenarios} scenarios test-backed  ({coverage:.0%}, {direct} per-scenario)")
@@ -528,10 +540,19 @@ def report(requirements, verbose=False, traceability_only=False):
 
     print()
     print("-- Verification " + "-" * 44)
-    print("Not measured here — run `make verification` (alias for `make test`)")
+    exclusions = mvl_limit_model()
+    if exclusions:
+        print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (VFS dyn boundary, not unsafe — #80; src/bin is I/O)")
+        model_detail.append(f"Qualified-subset:     {', '.join(exclusions)}")
+    print("Not measured here — run `make verification` (alias for `make test`) or `make mvl-limit`")
     print("=" * 60)
 
     if verbose:
+        if model_detail:
+            print()
+            print("-- Model Detail " + "-" * 44)
+            for line in model_detail:
+                print(line)
         print()
         print("  Legend: [impl][tests][corpus]")
         print("    impl:   ✓=exists  ○=linked/missing  P=planned  ✗=not linked")
