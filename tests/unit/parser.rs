@@ -357,6 +357,61 @@ fn test_roundtrip_fixpoint() {
         "SELECT CASE a WHEN 1 THEN 'x' ELSE 'y' END",
         "SELECT CAST(a AS TEXT)",
         "SELECT count(DISTINCT a), sum(*)",
+        // Select-level DISTINCT/ALL — the top of Select::fmt.
+        "SELECT DISTINCT a FROM t",
+        "SELECT ALL a FROM t",
+        // ResultColumn::TableStar and TableRef alias.
+        "SELECT t.* FROM t AS x",
+        // Qualified/catalog column references.
+        "SELECT db.t.a FROM t",
+        // Multi-arg function call (the i > 0 comma branch).
+        "SELECT foo(a, b, c)",
+        // All four UnaryOp variants.
+        "SELECT NOT a",
+        "SELECT +a",
+        "SELECT -a",
+        "SELECT ~a",
+        // IS / IS NOT, ISNULL / NOTNULL.
+        "SELECT a IS b",
+        "SELECT a IS NOT b",
+        "SELECT a ISNULL",
+        "SELECT a NOTNULL",
+        // LIKE / GLOB, with and without ESCAPE.
+        "SELECT a LIKE 'x%'",
+        "SELECT a NOT LIKE 'x%' ESCAPE '\\'",
+        "SELECT a GLOB '*x*'",
+        // COLLATE.
+        "SELECT a COLLATE nocase",
+        // The remaining BinaryOp variants (AND/</>/+/-/* already covered above).
+        "SELECT a OR b",
+        "SELECT a = b",
+        "SELECT a != b",
+        "SELECT a <= b",
+        "SELECT a >= b",
+        "SELECT a & b",
+        "SELECT a | b",
+        "SELECT a << b",
+        "SELECT a >> b",
+        "SELECT a / b",
+        "SELECT a % b",
+        "SELECT a || b",
+        // Literal variants: Float, Blob, Null, True, False.
+        "SELECT 1.5",
+        "SELECT X'DEADBEEF'",
+        "SELECT NULL",
+        "SELECT TRUE",
+        "SELECT FALSE",
+        // Every ParamKind.
+        "SELECT ?",
+        "SELECT ?1",
+        "SELECT :name",
+        "SELECT @name",
+        "SELECT $name",
+        // OrderingTerm's implicit order and NULLS FIRST branches.
+        "SELECT a FROM t ORDER BY a",
+        "SELECT a FROM t ORDER BY a NULLS FIRST",
+        // CASE without an operand and without ELSE.
+        "SELECT CASE WHEN a THEN 1 END",
     ];
     for src in cases {
         let select1 = accept(src);
