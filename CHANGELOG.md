@@ -6,6 +6,26 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-16
+
+### Fixed
+
+- `query` `-list`-mode rendering diverged from `sqlite3 -list` on NULL,
+  BLOB, and REAL (#143): `query`'s default output reused `dump`'s
+  `.dump`-`quote()`-style renderer (`NULL` literal, `X'HEX'` blobs)
+  instead of the shell's actual `-list` rules (empty string for NULL,
+  raw blob bytes, truncated at the first embedded NUL byte since the
+  shell prints via a null-terminated C string). A dedicated byte-based
+  `format_query_value` renderer now backs `query`'s `-list` branch;
+  `dump`/`export` are unchanged.
+- REAL columns storing exactly `0.0`/`1.0` (SQLite's integer-serial-type
+  storage optimization) decoded as a bare `Integer` and rendered `0`
+  instead of `0.0` for *any* reader, not just `query` — `emit_column_read`
+  never applied REAL-affinity coercion on column reads. `apply_affinity`
+  now converts `Integer -> Real` for REAL affinity (matching SQLite's
+  documented affinity rule), and `emit_column_read` emits `RealAffinity`
+  after `Column` for REAL-affinity columns.
+
 ## [0.7.3] - 2026-08-16
 
 ### Fixed
