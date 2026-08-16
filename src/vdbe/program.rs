@@ -1,13 +1,13 @@
 //! Instruction format and the linear bytecode `Program` (spec 009,
 //! Requirement 1). `Opcode` enumerates the full frozen V2 opcode set
-//! (`tools/opcodes-v2.json`, 54 opcodes, oracle 3.53.3, #87) — every
+//! (`tools/opcodes-v2.json`, 60 opcodes, oracle 3.53.4, #87/#139) — every
 //! variant listed here, whether or not `src/vdbe/exec.rs` implements it
 //! yet, so the enum stays the single source of truth for "in scope for
 //! V2" across #89/#90/#91.
 
 use crate::vdbe::Collation;
 
-/// The 54 V2 opcodes, grouped by category to match
+/// The 60 V2 opcodes, grouped by category to match
 /// `tools/opcodes-v2.json`'s taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
@@ -57,6 +57,12 @@ pub enum Opcode {
     Divide,
     Remainder,
     Not,
+    BitAnd,
+    BitOr,
+    ShiftLeft,
+    ShiftRight,
+    BitNot,
+    Concat,
     // function
     Function,
     // result
@@ -80,7 +86,7 @@ impl Opcode {
     /// `tools/opcodes-v2.json` (#65). Kept honest by `_exhaustive` below:
     /// an unmatched new variant fails the build rather than silently
     /// falling out of this list.
-    pub const ALL: [Opcode; 54] = [
+    pub const ALL: [Opcode; 60] = [
         Opcode::Init,
         Opcode::Goto,
         Opcode::Once,
@@ -123,6 +129,12 @@ impl Opcode {
         Opcode::Divide,
         Opcode::Remainder,
         Opcode::Not,
+        Opcode::BitAnd,
+        Opcode::BitOr,
+        Opcode::ShiftLeft,
+        Opcode::ShiftRight,
+        Opcode::BitNot,
+        Opcode::Concat,
         Opcode::Function,
         Opcode::Integer,
         Opcode::Null,
@@ -185,6 +197,12 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Divide
         | Opcode::Remainder
         | Opcode::Not
+        | Opcode::BitAnd
+        | Opcode::BitOr
+        | Opcode::ShiftLeft
+        | Opcode::ShiftRight
+        | Opcode::BitNot
+        | Opcode::Concat
         | Opcode::Function
         | Opcode::Integer
         | Opcode::Null

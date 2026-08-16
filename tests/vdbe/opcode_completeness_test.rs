@@ -1,6 +1,6 @@
 //! Spec 009's opcode inventory vs. the harvested scope (#65, follow-up to
-//! #58/#87). `tools/opcodes-v2.json` is the oracle-harvested 52-opcode set
-//! that pinned `Opcode`'s variants in the first place; this test is the
+//! #58/#87/#139). `tools/opcodes-v2.json` is the oracle-harvested 60-opcode
+//! set that pinned `Opcode`'s variants in the first place; this test is the
 //! machine-checked guarantee that the two never drift apart silently.
 
 use std::collections::BTreeSet;

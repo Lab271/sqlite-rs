@@ -270,9 +270,10 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   `RealAffinity`), and even those don't match SQLite's lossy-cast
 ///   semantics exactly (`MustBeInt` errors instead of truncating) — see
 ///   `compile_value`'s `Cast` arm doc comment.
-/// - `&`/`|`/`<<`/`>>`/`~`/`||`: no bitwise/concat opcode exists in the
-///   frozen V2 54-opcode set — see `compile_value`'s catch-all `Binary`
-///   arm and `UnaryOp::BitNot` arm.
+///
+/// `&`/`|`/`<<`/`>>`/`~`/`||` used to be listed here — #139 harvested
+/// `BitAnd`/`BitOr`/`ShiftLeft`/`ShiftRight`/`BitNot`/`Concat` and wired
+/// them in `compile_value`, so those vectors now run.
 ///
 /// `NOT`/`AND`/`OR`/`BETWEEN`/`IN` over NULL operands used to be listed
 /// here — the 2-target jump scheme conflated NULL with FALSE, which is
@@ -289,19 +290,7 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   exists), so arithmetic on them takes the TEXT-coercion path
 ///   instead of a true floating-point path — see `Literal::Float`'s
 ///   doc comment in `compile_value`.
-const KNOWN_GAPS: &[&str] = &[
-    "CAST(",
-    "&",
-    "5|2",
-    "<<",
-    ">>",
-    "~5",
-    "||",
-    "-9223372036854775808",
-    "7.0/2",
-    "7/2.0",
-    "7%2.5",
-];
+const KNOWN_GAPS: &[&str] = &["CAST(", "-9223372036854775808", "7.0/2", "7/2.0", "7%2.5"];
 
 #[test]
 fn walker_vectors_pass_through_the_compiled_path() {
@@ -344,15 +333,14 @@ fn walker_vectors_pass_through_the_compiled_path() {
         }
         passed += 1;
     }
-    // A ratchet, not a floor: 46 is what passes today (44 before #134
-    // fixed three-valued logic, +2 from the two `ESCAPE` vectors the
-    // harness used to mis-parse). Adding vectors or closing a
-    // `KNOWN_GAPS` entry should raise this number in the same commit;
-    // a drop means a regression the per-vector assertion below cannot
-    // see, because a vector that stops *compiling* is skipped, not
-    // failed.
+    // A ratchet, not a floor: 55 is what passes today (46 before #139
+    // harvested and wired the six bitwise/concat opcodes, +9 vectors
+    // freed from KNOWN_GAPS). Adding vectors or closing a `KNOWN_GAPS`
+    // entry should raise this number in the same commit; a drop means a
+    // regression the per-vector assertion below cannot see, because a
+    // vector that stops *compiling* is skipped, not failed.
     assert!(
-        passed >= 46,
+        passed >= 55,
         "expected most walker vectors to pass through the compiled path, only {passed} did ({skipped} known-gap skipped)"
     );
     assert!(

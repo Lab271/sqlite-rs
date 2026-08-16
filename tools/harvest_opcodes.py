@@ -79,6 +79,11 @@ QUERIES = [
     # register-level fact that jump-mode codegen cannot express).
     "SELECT CASE WHEN price > 100 THEN 1 END FROM products",
     "SELECT NOT qty FROM products",
+    # Bitwise/concat (#139): all six operators are in the frozen V2
+    # EBNF slice but none of the prior queries exercise them, so none
+    # of BitAnd/BitOr/ShiftLeft/ShiftRight/BitNot/Concat were ever
+    # harvested even though CLASSIFICATION already names them.
+    "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
     "SELECT rowid, * FROM products WHERE rowid = 2",
 ]
 

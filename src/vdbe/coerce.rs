@@ -2,6 +2,7 @@
 //! Requirement 5). Integer overflow promotes to REAL rather than
 //! silently wrapping — the CVE-2025-29087/3277 class.
 
+use crate::format::format_real;
 use crate::record::Value;
 
 /// Locates the longest valid numeric prefix of `s`: optional leading
@@ -184,6 +185,84 @@ pub fn cast_to_integer(v: &Value) -> i64 {
     }
 }
 
+/// Bitwise AND, coercing both operands to INTEGER first (SQLite's rule
+/// for `&`/`|`/`<<`/`>>` — no REAL path, unlike arithmetic).
+pub fn bit_and(a: &Value, b: &Value) -> Value {
+    Value::Integer(cast_to_integer(&as_numeric(a)) & cast_to_integer(&as_numeric(b)))
+}
+
+/// Bitwise OR, coercing both operands to INTEGER first.
+pub fn bit_or(a: &Value, b: &Value) -> Value {
+    Value::Integer(cast_to_integer(&as_numeric(a)) | cast_to_integer(&as_numeric(b)))
+}
+
+/// Bitwise NOT (`~x`), coercing the operand to INTEGER first.
+pub fn bit_not(a: &Value) -> Value {
+    Value::Integer(!cast_to_integer(&as_numeric(a)))
+}
+
+/// Shifts `a` left/right by `b` bits, both coerced to INTEGER first.
+/// Matches SQLite's `vdbe.c` `OP_ShiftLeft`/`OP_ShiftRight` handling: a
+/// negative shift amount reverses direction, and a magnitude of 64 or
+/// more collapses to 0 (non-negative operand) or -1 (negative operand)
+/// rather than relying on Rust's shift-amount-in-range requirement.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+fn shift(a: i64, b: i64, mut left: bool) -> i64 {
+    let mut n = b;
+    if n < 0 {
+        n = if n > -64 { n.wrapping_neg() } else { 64 };
+        left = !left;
+    }
+    if n >= 64 {
+        return if a >= 0 { 0 } else { -1 };
+    }
+    let ua = a as u64;
+    let result = if left {
+        ua << n
+    } else if a >= 0 {
+        ua >> n
+    } else {
+        !(!ua >> n)
+    };
+    result as i64
+}
+
+/// Left shift (`<<`), coercing both operands to INTEGER first.
+pub fn shift_left(a: &Value, b: &Value) -> Value {
+    let (x, y) = (
+        cast_to_integer(&as_numeric(a)),
+        cast_to_integer(&as_numeric(b)),
+    );
+    Value::Integer(shift(x, y, true))
+}
+
+/// Right shift (`>>`), coercing both operands to INTEGER first.
+pub fn shift_right(a: &Value, b: &Value) -> Value {
+    let (x, y) = (
+        cast_to_integer(&as_numeric(a)),
+        cast_to_integer(&as_numeric(b)),
+    );
+    Value::Integer(shift(x, y, false))
+}
+
+/// Renders `v` as `CAST(v AS TEXT)` would, for `||` operands.
+fn as_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(r) => format_real(*r),
+        Value::Text(s) => s.clone(),
+        Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),
+    }
+}
+
+/// String concatenation (`||`): both operands coerce to TEXT: NULL
+/// propagation is handled by the caller (`arithmetic::binary_op`), same
+/// as every other binary opcode.
+pub fn concat(a: &Value, b: &Value) -> Value {
+    Value::Text(format!("{}{}", as_text(a), as_text(b)))
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
@@ -247,6 +326,86 @@ mod tests {
         assert_eq!(
             checked_sub(&Value::Integer(5), &Value::Integer(3)),
             Value::Integer(2)
+        );
+    }
+
+    #[test]
+    fn bitwise_and_or_not_match_oracle_vectors() {
+        assert_eq!(
+            bit_and(&Value::Integer(5), &Value::Integer(3)),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            bit_or(&Value::Integer(5), &Value::Integer(3)),
+            Value::Integer(7)
+        );
+        assert_eq!(bit_not(&Value::Integer(5)), Value::Integer(-6));
+        assert_eq!(bit_not(&Value::Integer(0)), Value::Integer(-1));
+        assert_eq!(bit_not(&Value::Integer(-7)), Value::Integer(6));
+    }
+
+    #[test]
+    fn shift_matches_oracle_vectors() {
+        assert_eq!(
+            shift_left(&Value::Integer(5), &Value::Integer(1)),
+            Value::Integer(10)
+        );
+        assert_eq!(
+            shift_left(&Value::Integer(0), &Value::Integer(1)),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            shift_left(&Value::Integer(-7), &Value::Integer(1)),
+            Value::Integer(-14)
+        );
+        assert_eq!(
+            shift_right(&Value::Integer(5), &Value::Integer(1)),
+            Value::Integer(2)
+        );
+        assert_eq!(
+            shift_right(&Value::Integer(0), &Value::Integer(1)),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            shift_right(&Value::Integer(-7), &Value::Integer(1)),
+            Value::Integer(-4)
+        );
+    }
+
+    #[test]
+    fn shift_handles_negative_and_oversized_amounts() {
+        // Negative shift amount reverses direction (SQLite vdbe.c rule).
+        assert_eq!(
+            shift_left(&Value::Integer(5), &Value::Integer(-1)),
+            Value::Integer(2)
+        );
+        assert_eq!(
+            shift_right(&Value::Integer(5), &Value::Integer(-1)),
+            Value::Integer(10)
+        );
+        // Magnitude >= 64 collapses to 0/-1 by sign.
+        assert_eq!(
+            shift_left(&Value::Integer(5), &Value::Integer(64)),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            shift_right(&Value::Integer(-5), &Value::Integer(64)),
+            Value::Integer(-1)
+        );
+    }
+
+    #[test]
+    fn concat_coerces_to_text_and_propagates_no_null_itself() {
+        assert_eq!(
+            concat(
+                &Value::Text("apple".to_string()),
+                &Value::Text("x".to_string())
+            ),
+            Value::Text("applex".to_string())
+        );
+        assert_eq!(
+            concat(&Value::Integer(1), &Value::Real(2.5)),
+            Value::Text("12.5".to_string())
         );
     }
 

@@ -10,8 +10,9 @@ date: 2026-08-16
 The bytecode virtual machine — SQLite's `vdbe.c`/`vdbeaux.c` instruction set
 and register model, plus the codegen that emits it from the V2 AST (#61).
 Backs V2 phase 3 (#89/#90/#91), part of epic #56. The opcode set is frozen
-by the phase-3 opener (#87): the harvested, scope-decided
-`tools/opcodes-v2.json` (54 opcodes, oracle 3.53.3) is the exhaustive
+by the phase-3 opener (#87), grown once since by #139's bitwise/concat
+harvest: the harvested, scope-decided `tools/opcodes-v2.json` (60 opcodes,
+oracle 3.53.4) is the exhaustive
 denominator for every requirement below — no opcode outside that inventory
 is in scope for V2, and every opcode inside it must appear as a scenario
 somewhere in this spec (#65 wires the count into the assurance dashboard).
@@ -274,16 +275,22 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
 
 ### Requirement 6: Arithmetic Opcodes [MUST]
 
-The 6 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
-`Divide`, `Remainder`, `Not` — MUST delegate all overflow,
-NULL-propagation, and numeric-coercion behavior to spec 008's
+The 12 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
+`Divide`, `Remainder`, `Not`, `BitAnd`, `BitOr`, `ShiftLeft`,
+`ShiftRight`, `BitNot`, `Concat` — MUST delegate all overflow,
+NULL-propagation, and numeric/text-coercion behavior to spec 008's
 `src/vdbe/coerce.rs` (Requirement 5 there: `i64` overflow promotes to
-REAL, never wraps) and `src/vdbe/value.rs` (Requirement 4 there: NULL
-propagates through arithmetic); the opcode layer supplies only register
-addressing (read the source register(s), write one destination
+REAL, never wraps; bitwise/shift operands coerce to INTEGER, `||`
+operands coerce to TEXT) and `src/vdbe/value.rs` (Requirement 4 there:
+NULL propagates through arithmetic); the opcode layer supplies only
+register addressing (read the source register(s), write one destination
 register). `Not` is the unary member: it MUST write the boolean
 complement of `P1` into `P2`, and MUST write NULL — not 1 — when `P1`
-is NULL, since `NOT unknown` is unknown (#134).
+is NULL, since `NOT unknown` is unknown (#134). `BitNot` is the other
+unary member: it MUST write the bitwise complement of `P1` (coerced to
+INTEGER) into `P2`, and — unlike `Not` — MUST write NULL when `P1` is
+NULL, since `~NULL` stays NULL rather than resolving to a definite
+value (#139).
 
 **Implementation:** `src/vdbe/arithmetic.rs` (#89)
 
@@ -313,6 +320,28 @@ is NULL, since `NOT unknown` is unknown (#134).
   one of them
 
 **Tests:** `src/vdbe/arithmetic.rs::tests::not_complements_truthiness_and_propagates_null`
+
+#### Scenario: Bitwise/shift/concat opcodes coerce operands and propagate NULL
+
+- GIVEN `SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note
+  FROM products` (harvested: `BitAnd`, `BitOr`, `ShiftLeft`, `ShiftRight`,
+  `BitNot`, `Concat`, each once — per `tools/opcodes-v2.json`, #139)
+- WHEN `qty`/`name`/`note` are non-NULL, and again when one operand is
+  NULL
+- THEN `BitAnd`/`BitOr`/`ShiftLeft`/`ShiftRight` coerce both operands to
+  INTEGER before computing, `Concat` coerces both operands to TEXT
+  before concatenating, `BitNot` coerces its one operand to INTEGER
+  before complementing, and every one of the six writes NULL to its
+  destination register when any operand register holds NULL — matching
+  the oracle table in #139 (`i & 3`, `i | 3`, `i << 1`, `i >> 1`, `~i`,
+  `s || 'x'`) exactly, including negative-shift-amount and
+  shift-magnitude-≥64 edge cases (SQLite's `vdbe.c` reversal/clamp rule)
+
+**Tests:** `src/vdbe/arithmetic.rs::tests::bitwise_and_or_shift_concat_read_two_registers_write_one`,
+`src/vdbe/arithmetic.rs::tests::bit_not_complements_and_propagates_null`,
+`src/vdbe/arithmetic.rs::tests::null_propagates_through_bitwise_shift_and_concat`,
+`src/vdbe/coerce.rs::tests::shift_handles_negative_and_oversized_amounts`,
+`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 ### Requirement 7: Function Opcode [MUST]
 
@@ -597,9 +626,9 @@ opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
-harvested opcode set — the full 54-opcode inventory, independent of how
+harvested opcode set — the full 60-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
-line tracks how many of those 54 are actually dispatched in
-`src/vdbe/exec.rs` (52/54 — it read 50/52 before #134 added `Not` and
-`Null`, both dispatched on arrival, so the two undispatched opcodes are
-unchanged).
+line tracks how many of those 60 are actually dispatched in
+`src/vdbe/exec.rs` (58/60 — it read 52/54 before #139 harvested and
+dispatched `BitAnd`/`BitOr`/`ShiftLeft`/`ShiftRight`/`BitNot`/`Concat`
+on arrival, so the two undispatched opcodes are unchanged).
