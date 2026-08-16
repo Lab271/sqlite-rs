@@ -4,6 +4,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.7] - 2026-08-16
+
+### Fixed
+
+- `parse_select` was reporting several syntactically-valid-but-unimplemented
+  SELECT constructs as `ParseOutcome::Invalid` (genuine syntax error)
+  instead of `Unsupported` (#110): `IN <table-name>`, bare `VALUES` /
+  compound, `HAVING` without `GROUP BY`, `NOT INDEXED`, schema-qualified
+  table names (`aux.t5`), `->`/`->>` operators, and
+  `OUTER LEFT NATURAL JOIN`. This matters for #96's slice-boundary
+  triage, which otherwise misreads these as our-bug.
+- Along the way, found and fixed a pre-existing dead-code bug: the
+  subquery-in-FROM `Unsupported` branch in `table_ref()` was
+  unreachable because `identifier()` was called before the `(` check.
+- Spend: on track vs #110's ~120k token estimate.
+
 ## [0.6.6] - 2026-08-16
 
 ### Added
