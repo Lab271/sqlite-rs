@@ -1,0 +1,69 @@
+-- Extracted by tools/extract_sql_corpus.py from the vendored SQLite
+-- TCL suite subset (version 3.53.3) under tests/corpus/sql/vendor/tcl/.
+-- Do not edit by hand; run `make sql-corpus` to regenerate (#70).
+DELETE FROM objlist
+DELETE FROM tbl2
+DELETE FROM t1
+DELETE FROM t2
+DELETE FROM abc WHERE a = 4
+DELETE FROM table1 WHERE f1=3
+DELETE FROM 'table1' WHERE f1=3
+DELETE FROM table1 WHERE f1=2
+DELETE FROM table1
+DELETE FROM table2
+DELETE FROM table1 WHERE f1>7
+DELETE FROM table2 WHERE f1>7
+DELETE FROM t3
+DELETE FROM t4
+DELETE FROM t5
+DELETE FROM t1 WHERE a='1' AND b='2'
+DELETE FROM t11 AS xyz WHERE EXISTS(SELECT 1 FROM t11 WHERE t11.a>xyz.a AND t11.b<=xyz.b)
+DELETE FROM t0 WHERE NOT ( (t0.vkey <= t0.c1) AND (t0.vkey <> (SELECT vkey FROM t0 ORDER BY vkey LIMIT 1 OFFSET 2)) )
+DELETE FROM t1 WHERE y=1
+DELETE FROM t1 WHERE a='two' OR b='iv'
+DELETE FROM t4 WHERE col0=69 OR col0>7
+DELETE FROM t1 WHERE b=2
+DELETE FROM t2 WHERE EXISTS(SELECT 1 FROM t2 AS v WHERE v.x=t2.x-1)
+DELETE FROM t2 WHERE EXISTS(SELECT 1 FROM t2 AS v WHERE v.x=t2.x+1)
+DELETE FROM t3 WHERE a=4 OR b=1
+DELETE FROM t4 WHERE b='world'
+DELETE FROM t3 WHERE a IN(2, 5, 8)
+DELETE FROM tbl1
+DELETE FROM t1 WHERE b IN (SELECT b FROM t1 WHERE a>8)
+DELETE FROM t1 WHERE b NOT IN (SELECT b FROM t1 WHERE a>4)
+DELETE FROM t1 WHERE b=12
+DELETE FROM t1 WHERE b IN (2, 4, 6, 8)
+DELETE FROM t1 WHERE b = 2 OR b = 4 OR b = 6 OR b = 8
+DELETE FROM t1 WHERE b>2
+DELETE FROM t1 WHERE b BETWEEN 8 AND 12
+DELETE FROM t1 WHERE c>=101
+DELETE FROM test1
+DELETE FROM test2
+DELETE FROM fire
+DELETE FROM t3; INSERT INTO t3(a,b,c,d) VALUES(1,1,1,1),(2,1,3,2),(3,4,5,6); DROP TRIGGER t3r1; CREATE TRIGGER t3r1 AFTER DELETE ON t3 BEGIN INSERT INTO t3(b,c,d) VALUES(old.b,old.c,old.d); END
+DELETE FROM t4 WHERE x!=123
+DELETE FROM t2dup
+DELETE FROM t1 WHERE rowid%2
+DELETE FROM t7b
+DELETE FROM t7c
+DELETE FROM t2 WHERE d IS NOT NULL
+DELETE FROM t1 WHERE c='bellum' RETURNING rowid, *, '|'
+DELETE FROM t1 WHERE a<>'xray' RETURNING a, b, '@'
+DELETE FROM log
+DELETE FROM t3 WHERE f>100 RETURNING 'D', e, f
+DELETE FROM t1 RETURNING x, affinity(x)
+DELETE FROM t1 WHERE a<>3 RETURNING a, (SELECT min(a) FROM t1), (SELECT max(a) FROM t1), (SELECT round(avg(a),2) FROM t1)
+DELETE FROM t1 RETURNING a, (SELECT min(a) FROM t1), (SELECT max(a) FROM t1), (SELECT round(avg(a),2) FROM t1)
+DELETE FROM t1 RETURNING a, (SELECT min(t2.a)+t1.a*100 FROM t1 AS t2), (SELECT max(t2.a)+t1.a*100 FROM t1 AS t2), (SELECT round(avg(t2.a),2)+t1.a*100 FROM t1 AS t2)
+DELETE FROM rlog; DELETE FROM tbl; INSERT INTO tbl VALUES (100, 100); INSERT INTO tbl VALUES (300, 200); CREATE TRIGGER delete_before_row BEFORE DELETE ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), old.a, old.b, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), 0, 0); END; CREATE TRIGGER delete_after_row AFTER DELETE ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), old.a, old.b, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), 0, 0); END
+DELETE FROM tbl
+DELETE FROM rlog; CREATE TRIGGER insert_before_row BEFORE INSERT ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), 0, 0, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), new.a, new.b); END; CREATE TRIGGER insert_after_row AFTER INSERT ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), 0, 0, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), new.a, new.b); END
+DELETE FROM abcd WHERE a = 1
+DELETE FROM tlog
+DELETE FROM v1 WHERE x=3
+DELETE FROM v1log
+DELETE FROM v1 WHERE y=11
+DELETE FROM test1 WHERE f1<=5
+DELETE FROM c1
+DELETE FROM record
+DELETE FROM t WHERE rowid=2

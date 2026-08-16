@@ -108,6 +108,9 @@ fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/g
 opcodes: ## Harvest V2 (single-table SELECT) opcodes via pinned oracle EXPLAIN, write tools/opcodes-v2.json (spike 007, #58; needs a pinned, non-codec sqlite3 matching Cargo.toml's [package.metadata.oracle] version — override with --oracle)
 	python3 tools/harvest_opcodes.py
 
+sql-corpus: ## Regenerate tests/corpus/sql/{select,insert,update,delete,ddl}/ from the vendored sqllogictest + TCL subsets (#70; offline. Add FETCH=1 to refresh the vendored subsets from upstream)
+	python3 tools/extract_sql_corpus.py $(if $(FETCH),--fetch,)
+
 # === Assurance ===
 
 assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence, with per-requirement/model detail
