@@ -156,6 +156,15 @@ name = "sqllogictest"
 path = "tests/sqllogictest/main.rs"
 test = false
 
+# Shells out to the pinned oracle to build multi-thousand-row fixtures
+# and takes several seconds — same rationale as "corpus"/"parity" above,
+# stays behind `make test-point-lookup-perf` rather than the default
+# `cargo test` run.
+[[test]]
+name = "point_lookup_perf"
+path = "tests/performance/point_lookup.rs"
+test = false
+
 [[test]]
 name = "tier0"
 path = "tests/tiers/tier0.rs"
