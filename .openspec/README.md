@@ -73,9 +73,7 @@ make traceability           # fast path, no I/O
 
 ## ADRs
 
-| # | ADR | Status |
-|---|-----|--------|
-| — | — | — |
+Decision records — why the system is shaped this way, with rejected alternatives. See [adr/index.md](adr/index.md) for all 13. Convention: **a decision that closes an alternative gets an ADR in the same PR** (immutable; supersede, don't edit).
 
 ## Compatibility Target
 

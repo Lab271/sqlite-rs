@@ -144,3 +144,14 @@ these conventions in sync with how #56 is actually structured:
   (even inside a `.../lemon-rs/` directory) follows the same no-`mod.rs`
   convention as `src/`. The gate itself only scans `src/`, so this is a
   style rule for spike code, not a `make lint` failure.
+
+
+## ADR convention
+
+- **A decision that closes an alternative gets an ADR in the same PR.**
+  `.openspec/adr/NNNN-title.md`: Context / Decision / Alternatives rejected /
+  Consequences, half a page, dated, indexed in `adr/index.md`. ADRs are
+  immutable — supersede with a new one, never edit an accepted one.
+- **Check the ADR index before proposing architectural changes** — if your
+  proposal contradicts an accepted ADR, the PR must include the superseding
+  ADR that argues why the context changed.
