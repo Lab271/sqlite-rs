@@ -48,6 +48,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   and `multi_arg_function_call_compiles_with_contiguous_registers` compile
   real SQL through the full parse → codegen → VDBE path and assert on actual
   output values, complementing the program-shape tests above.
+- Two opcodes join the frozen V2 set, taking it from 52 to 54 (#134):
+  `Not` (`r[P2] = !r[P1]`, NULL in / NULL out) and `Null` (writes NULL
+  over the register range `P2..=P3`). Both were harvested, not
+  hand-added — `tools/harvest_opcodes.py` gained the two oracle queries
+  that emit them (`SELECT NOT qty FROM products`,
+  `SELECT CASE WHEN price > 100 THEN 1 END FROM products`), so
+  `make opcodes` reproduces the inventory. Opcode completeness moves
+  50/52 → 52/54; both are dispatched on arrival.
+- `tests/parity/v02.rs`: a three-valued-logic parity dimension over
+  `serialtypes/values.db` (the fixture that actually has NULL rows) —
+  14 cases covering `NOT` over every comparison, connective, `IN`,
+  `BETWEEN`, and `IS NULL` form, plus value-context cases wrapped in
+  `IS NULL` so the assertion is about semantics rather than about how
+  each engine spells a null.
 
 ### Fixed
 
@@ -58,10 +72,8 @@ Codegen defects the runner and its review surfaced, all affecting
   operands. Both were compiled as their positive form with true/false jump
   targets swapped, which turns SQL's "unknown" into "true"; they now lower
   the way SQLite does (`NOT BETWEEN` as `x < lo OR x > hi`, `NOT IN` with an
-  explicit saw-NULL guard). Note this fixes the two dedicated grammar forms
-  only: generic `NOT (...)` still resolves NULL to true, because the
-  boolean-to-value path has no NULL to materialize (no `Null` opcode in the
-  V2 set). Tracked separately.
+  explicit saw-NULL guard). The generic `NOT (...)` case this left open is
+  fixed by #134, below.
 - Every scalar function call with arguments failed to compile
   (`function argument registers were not contiguous`), making V2's scalar
   functions unreachable through the compiled query path — `SELECT abs(id)`
@@ -69,6 +81,24 @@ Codegen defects the runner and its review surfaced, all affecting
   the arguments were compiled, so they always landed past it; the window is
   now taken from where the arguments actually land. Slice coverage rose from
   7.2% to 8.6% as a result.
+- Generic `NOT (...)` resolved SQL's "unknown" to true, so
+  `WHERE NOT (x = 5)` returned rows where `x IS NULL`, and the two
+  spellings `NOT (x IN (...))` and `x NOT IN (...)` disagreed (#134).
+  `compile_cond` now carries a third piece of contract alongside its
+  true/false continuations — `NullTarget`, which names the one the
+  *unknown* outcome joins, exactly SQLite's `jumpIfNull` flag. `NOT`
+  swaps the two targets and flips it, leaving unknown on the address it
+  already had; `AND`/`OR`/`BETWEEN`/`IN` thread it through unchanged.
+  The same flip fixes `x <> 5`, which had the identical bug for the
+  identical reason (`<>` is `Eq` with the targets exchanged) and also
+  returned NULL rows.
+- Conditions used as values (`SELECT x = 5`, `SELECT a AND b`) answered
+  NULL for every row — they fell into `compile_value`'s catch-all,
+  which allocates an unwritten register. They now materialize all three
+  outcomes, and `SELECT NOT x` yields NULL for a NULL `x` instead of 1.
+  `CASE ... ELSE NULL` leaked the previous row's result, since its NULL
+  branch emitted no instruction at all to overwrite the shared
+  destination register.
 - Aggregate calls (`count`, `sum`, `avg`, ...) compiled as ordinary per-row
   scalar functions, so `SELECT count(*) FROM t` emitted one row per input row
   instead of one count. Codegen now rejects them as unsupported — V2 has no

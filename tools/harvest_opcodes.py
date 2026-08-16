@@ -72,6 +72,13 @@ QUERIES = [
     "SELECT coalesce(note, 'none') FROM products",
     "SELECT ifnull(note, 'none') FROM products",
     "SELECT CASE WHEN price > 10 THEN 'expensive' ELSE 'cheap' END FROM products",
+    # Three-valued logic (#134): a CASE with no ELSE is the shape that
+    # makes the oracle emit `Null` (the no-branch-matched result has to
+    # be written, not just left unwritten), and `NOT` over a value is
+    # the shape that makes it emit `Not` (NULL in, NULL out — the
+    # register-level fact that jump-mode codegen cannot express).
+    "SELECT CASE WHEN price > 100 THEN 1 END FROM products",
+    "SELECT NOT qty FROM products",
     "SELECT rowid, * FROM products WHERE rowid = 2",
 ]
 
@@ -103,6 +110,7 @@ CLASSIFICATION = {
     "Divide": "arithmetic", "Remainder": "arithmetic", "BitAnd": "arithmetic",
     "BitOr": "arithmetic", "ShiftLeft": "arithmetic", "ShiftRight": "arithmetic",
     "BitNot": "arithmetic", "Negative": "arithmetic", "Concat": "arithmetic",
+    "Not": "arithmetic",
     "Cast": "arithmetic", "AddImm": "arithmetic",
     # function
     "Function": "function", "PureFunc": "function",

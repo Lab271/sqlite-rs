@@ -1,5 +1,5 @@
 //! Result-row opcodes (spec 009, Requirement 8): literal loading
-//! (`Integer`, `String8`), record serialization (`MakeRecord`, reusing
+//! (`Integer`, `Null`, `String8`), record serialization (`MakeRecord`, reusing
 //! spec 003's on-disk record encoding byte-for-byte), and row emission
 //! (`ResultRow`).
 
@@ -10,6 +10,20 @@ use crate::vdbe::program::{Instruction, P4};
 /// `Integer`: loads the `i64` constant `P1` into register `P2`.
 pub fn integer(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     vm.set_register(instr.p2, Value::Integer(i64::from(instr.p1)))?;
+    Ok(Step::Next)
+}
+
+/// `Null`: writes NULL into the register range `P2..=P3` (just `P2`
+/// when `P3` is 0 or below `P2`). The only opcode that puts a NULL
+/// into a register on purpose — without it, codegen's only NULL source
+/// was "a register nobody ever wrote", which cannot express a NULL
+/// that has to overwrite a live value (a three-valued comparison
+/// result, a CASE with no matching branch).
+pub fn null(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let last = instr.p3.max(instr.p2);
+    for reg in instr.p2..=last {
+        vm.set_register(reg, Value::Null)?;
+    }
     Ok(Step::Next)
 }
 
@@ -84,6 +98,24 @@ mod tests {
         let instr = Instruction::with_p4(Opcode::String8, 0, 1, 0, P4::Str("hello".to_string()));
         string8(&mut vm, &instr).unwrap();
         assert_eq!(*vm.register(1).unwrap(), Value::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn null_overwrites_a_live_register_and_spans_p2_to_p3() {
+        let mut vm = Vm::new();
+        for r in 0..3 {
+            vm.set_register(r, Value::Integer(9)).unwrap();
+        }
+        // P3 = 0 means "just P2", not "the range 1..=0".
+        null(&mut vm, &Instruction::new(Opcode::Null, 0, 1, 0)).unwrap();
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(9));
+        assert_eq!(*vm.register(1).unwrap(), Value::Null);
+        assert_eq!(*vm.register(2).unwrap(), Value::Integer(9));
+
+        null(&mut vm, &Instruction::new(Opcode::Null, 0, 0, 2)).unwrap();
+        for r in 0..3 {
+            assert_eq!(*vm.register(r).unwrap(), Value::Null);
+        }
     }
 
     #[test]

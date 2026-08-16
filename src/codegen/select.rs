@@ -16,7 +16,7 @@
 use thiserror::Error;
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
-use crate::codegen::{Emitter, Label, RegAlloc, Target};
+use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Target};
 use crate::parser::ast::{Distinctness, Expr, ExprKind, ResultColumn, Select};
 use crate::schema::TableSchema;
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
@@ -307,8 +307,10 @@ fn compile_direct_scan(
             schema,
             TABLE_CURSOR,
             where_expr,
-            Target::Fallthrough,
-            Target::Jump(row_skip),
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
     }
     emit_distinct_guard(em, reg, select, schema, TABLE_CURSOR, row_skip)?;
@@ -369,8 +371,10 @@ fn compile_sorted_scan(
             schema,
             TABLE_CURSOR,
             where_expr,
-            Target::Fallthrough,
-            Target::Jump(scan_skip),
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
         )?;
     }
     let (first, count) = compile_row_values(

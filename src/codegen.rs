@@ -28,6 +28,87 @@ pub(crate) enum Target {
     Fallthrough,
 }
 
+/// Where a condition's *unknown* (SQL NULL) outcome continues — SQLite's
+/// own `jumpIfNull` flag (`sqlite3ExprIfTrue`/`sqlite3ExprIfFalse`),
+/// carried as the third field of [`CondTargets`].
+///
+/// It names one of the other two targets rather than being a third
+/// [`Target`] of its own, on purpose. NULL is never an independent
+/// continuation in practice: `WHERE` folds it into false (a NULL
+/// predicate excludes the row), and `NOT` must leave it pinned to the
+/// same address while swapping which of the two targets that address
+/// is — which [`CondTargets::negate`] does in one line. An absolute
+/// third label would have to be rewritten every time `AND`/`OR`
+/// synthesize a fresh false/true label, and, worse, would be
+/// unrepresentable for `AND`/`OR` at all: `NULL AND false` is *false*,
+/// so a genuinely independent unknown continuation could not be taken
+/// until the second operand had been evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NullTarget {
+    /// NULL continues where [`CondTargets::on_true`] does.
+    True,
+    /// NULL continues where [`CondTargets::on_false`] does — what
+    /// `WHERE`, `CASE WHEN`, and every other boolean consumer in V2
+    /// wants.
+    False,
+}
+
+/// The full jump-mode contract: where a condition's true, false, and
+/// unknown outcomes each continue. Bundled rather than passed as three
+/// parameters because [`negate`](CondTargets::negate) has to move all
+/// three together — swapping true and false without flipping
+/// `on_null` is precisely the #134 bug.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CondTargets {
+    pub(crate) on_true: Target,
+    pub(crate) on_false: Target,
+    pub(crate) on_null: NullTarget,
+}
+
+impl CondTargets {
+    /// The setting every boolean consumer in V2 wants: unknown joins
+    /// false.
+    pub(crate) fn null_is_false(on_true: Target, on_false: Target) -> Self {
+        CondTargets {
+            on_true,
+            on_false,
+            on_null: NullTarget::False,
+        }
+    }
+
+    /// Unknown joins true — used only to separate "definitely false"
+    /// from "unknown" when materializing a condition into a register.
+    pub(crate) fn null_is_true(on_true: Target, on_false: Target) -> Self {
+        CondTargets {
+            on_true,
+            on_false,
+            on_null: NullTarget::True,
+        }
+    }
+
+    /// The contract for the operand of a `NOT`: true and false trade
+    /// places, and `on_null` flips so the unknown outcome still names
+    /// the address it named before the swap.
+    pub(crate) fn negate(self) -> Self {
+        CondTargets {
+            on_true: self.on_false,
+            on_false: self.on_true,
+            on_null: match self.on_null {
+                NullTarget::True => NullTarget::False,
+                NullTarget::False => NullTarget::True,
+            },
+        }
+    }
+
+    pub(crate) fn with_true(self, on_true: Target) -> Self {
+        CondTargets { on_true, ..self }
+    }
+
+    pub(crate) fn with_false(self, on_false: Target) -> Self {
+        CondTargets { on_false, ..self }
+    }
+}
+
 /// Builds a [`Program`] with forward-referenceable jump targets:
 /// `new_label`/`place` mark an address, `patch_p2` records a pending
 /// fixup (every jump-carrying opcode this ticket emits targets `P2`),

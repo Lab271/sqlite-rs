@@ -281,10 +281,10 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
     use Opcode::{
         Add, BeginSubrtn, Column, DecrJumpZero, Delete, Divide, Eq, Found, Function, Ge, Goto, Gt,
         Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Integer, IsNull, Last, Le, Lt,
-        MakeRecord, Multiply, MustBeInt, Next, NotNull, NullRow, OffsetLimit, Once, OpenEphemeral,
-        OpenPseudo, OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid,
-        Sequence, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
-        Subtract, Transaction,
+        MakeRecord, Multiply, MustBeInt, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once,
+        OpenEphemeral, OpenPseudo, OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind,
+        Rowid, SeekRowid, Sequence, Sort, SorterData, SorterInsert, SorterNext, SorterOpen,
+        SorterSort, String8, Subtract, Transaction,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -315,8 +315,10 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Multiply => arithmetic::multiply(vm, instr),
         Divide => arithmetic::divide(vm, instr),
         Remainder => arithmetic::remainder(vm, instr),
+        Not => arithmetic::not(vm, instr),
 
         Integer => result::integer(vm, instr),
+        Null => result::null(vm, instr),
         String8 => result::string8(vm, instr),
         MakeRecord => result::make_record(vm, instr),
         ResultRow => result::result_row(vm, instr),

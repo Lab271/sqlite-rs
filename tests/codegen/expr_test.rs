@@ -241,15 +241,14 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   semantics exactly (`MustBeInt` errors instead of truncating) — see
 ///   `compile_value`'s `Cast` arm doc comment.
 /// - `&`/`|`/`<<`/`>>`/`~`/`||`: no bitwise/concat opcode exists in the
-///   frozen V2 52-opcode set — see `compile_value`'s catch-all `Binary`
+///   frozen V2 54-opcode set — see `compile_value`'s catch-all `Binary`
 ///   arm and `UnaryOp::BitNot` arm.
-/// - `AND`/`OR`/`BETWEEN`/`IN` combined with a NULL operand: this
-///   ticket's 2-target (true/false) jump scheme conflates NULL with
-///   FALSE, which is correct for a top-level WHERE (both exclude the
-///   row) but not for full three-valued propagation into a value
-///   result — a known, documented scope gap (see `codegen/expr.rs`'s
-///   module doc and this file's `and_short_circuits_on_false_first_operand`-
-///   style scenarios, which only exercise NULL-free operands).
+///
+/// `NOT`/`AND`/`OR`/`BETWEEN`/`IN` over NULL operands used to be listed
+/// here — the 2-target jump scheme conflated NULL with FALSE, which is
+/// right for a top-level WHERE and wrong everywhere else. #134 gave
+/// `compile_cond` a `NullTarget` and value mode the `Null`/`Not`
+/// opcodes, so those vectors now run.
 /// - Bare `-9223372036854775808`: `i64::MIN`'s literal token doesn't
 ///   round-trip through this ticket's `i32`-truncating `Integer` opcode
 ///   path for values outside `i32`'s range in the same way SQLite's own
@@ -257,7 +256,11 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   not a control-flow one.
 /// - `LIKE ... ESCAPE`: the escape-character argument's register
 ///   ordering has a known bug in this ticket's `Like` value-mode
-///   lowering (tracked as a follow-up, not chased further here).
+///   lowering (tracked as a follow-up, not chased further here). This
+///   is the only NULL-unrelated gap #134 re-confirmed still failing;
+///   the short-circuit vectors (`AND (1/0)`, `OR (1/0)`) it used to
+///   sit beside now pass, since value-mode `AND`/`OR` no longer
+///   compile to a bare NULL register.
 /// - Real-literal arithmetic (`7.0/2`, `7%2.5`, etc.): REAL literals
 ///   compile to their textual form (no `OP_Real`-equivalent opcode
 ///   exists), so arithmetic on them takes the TEXT-coercion path
@@ -265,6 +268,7 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   doc comment in `compile_value`.
 const KNOWN_GAPS: &[&str] = &[
     "CAST(",
+    "ESCAPE",
     "&",
     "5|2",
     "<<",
@@ -272,15 +276,6 @@ const KNOWN_GAPS: &[&str] = &[
     "~5",
     "||",
     "-9223372036854775808",
-    "ESCAPE",
-    "AND (1/0)",
-    "OR (1/0)",
-    "NULL AND",
-    "NULL OR",
-    "BETWEEN NULL",
-    "NULL BETWEEN",
-    "(1,NULL,3)",
-    "NULL IN",
     "7.0/2",
     "7/2.0",
     "7%2.5",

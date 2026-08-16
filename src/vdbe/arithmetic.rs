@@ -1,8 +1,9 @@
 //! Arithmetic opcodes (spec 009, Requirement 6): `Add`, `Subtract`,
-//! `Multiply`, `Divide`, `Remainder`. Each reads two source registers
-//! and writes one destination register — all overflow, NULL-propagation,
-//! and numeric-coercion behavior is spec 008's, via `src/vdbe/coerce.rs`
-//! and `src/vdbe/value.rs`. No arithmetic happens in this file.
+//! `Multiply`, `Divide`, `Remainder`, plus the unary `Not`. Each reads
+//! its source register(s) and writes one destination register — all
+//! overflow, NULL-propagation, and numeric-coercion behavior is spec
+//! 008's, via `src/vdbe/coerce.rs` and `src/vdbe/value.rs`. No
+//! arithmetic happens in this file.
 
 use crate::record::Value;
 use crate::vdbe::coerce::{checked_add, checked_div, checked_mul, checked_rem, checked_sub};
@@ -78,6 +79,21 @@ pub fn remainder(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `Not`: `r[P2] = !r[P1]`, interpreting `P1` as a boolean. A NULL
+/// operand yields NULL, not 1 — SQL's `NOT unknown` is still unknown,
+/// and this opcode is the only place that fact survives into a
+/// register (the jump-mode compiler folds unknown into one of its two
+/// continuations by design; see `src/codegen/expr.rs`'s `NullTarget`).
+pub fn not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let v = vm.register(instr.p1)?.clone();
+    let result = match v {
+        Value::Null => Value::Null,
+        other => Value::Integer(i64::from(crate::vdbe::control::is_falsy(&other))),
+    };
+    vm.set_register(instr.p2, result)?;
+    Ok(Step::Next)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -116,6 +132,26 @@ mod tests {
         let instr = Instruction::new(Opcode::Divide, 0, 1, 2);
         divide(&mut vm, &instr).unwrap();
         assert_eq!(*vm.register(2).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn not_complements_truthiness_and_propagates_null() {
+        // The NULL row is the whole point of this opcode (#134): every
+        // other lowering of `NOT` in this codebase resolves unknown to
+        // a definite 0 or 1.
+        for (input, expected) in [
+            (Value::Integer(0), Value::Integer(1)),
+            (Value::Integer(7), Value::Integer(0)),
+            (Value::Real(0.0), Value::Integer(1)),
+            (Value::Text("0".to_string()), Value::Integer(1)),
+            (Value::Text("abc".to_string()), Value::Integer(1)),
+            (Value::Null, Value::Null),
+        ] {
+            let mut vm = vm_with(vec![input.clone()]);
+            let instr = Instruction::new(Opcode::Not, 0, 1, 0);
+            not(&mut vm, &instr).unwrap();
+            assert_eq!(*vm.register(1).unwrap(), expected, "NOT {input:?}");
+        }
     }
 
     #[test]

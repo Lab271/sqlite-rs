@@ -1,7 +1,7 @@
 {
   "oracle_version": "3.53.4",
-  "query_count": 26,
-  "opcode_count": 52,
+  "query_count": 28,
+  "opcode_count": 54,
   "opcodes": {
     "Add": {
       "count": 1,
@@ -16,7 +16,7 @@
       "category": "control"
     },
     "Column": {
-      "count": 105,
+      "count": 107,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -75,7 +75,7 @@
       "category": "compare"
     },
     "Goto": {
-      "count": 27,
+      "count": 30,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -89,7 +89,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 26,
+      "count": 28,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -130,13 +130,13 @@
       "category": "control"
     },
     "Init": {
-      "count": 26,
+      "count": 28,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
     },
     "Integer": {
-      "count": 20,
+      "count": 22,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE price > 10",
       "category": "result"
@@ -154,7 +154,7 @@
       "category": "cursor"
     },
     "Le": {
-      "count": 2,
+      "count": 3,
       "p4_variants": [
         "BINARY-8"
       ],
@@ -190,16 +190,28 @@
       "category": "control"
     },
     "Next": {
-      "count": 25,
+      "count": 27,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
+    },
+    "Not": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT NOT qty FROM products",
+      "category": "arithmetic"
     },
     "NotNull": {
       "count": 3,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE note IS NULL",
       "category": "control"
+    },
+    "Null": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT CASE WHEN price > 100 THEN 1 END FROM products",
+      "category": "result"
     },
     "NullRow": {
       "count": 1,
@@ -235,7 +247,7 @@
       "category": "cursor"
     },
     "OpenRead": {
-      "count": 26,
+      "count": 28,
       "p4_variants": [
         "2",
         "3",
@@ -246,7 +258,7 @@
       "category": "cursor"
     },
     "RealAffinity": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "compare"
@@ -258,7 +270,7 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 26,
+      "count": 28,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
@@ -270,7 +282,7 @@
       "category": "control"
     },
     "Rewind": {
-      "count": 24,
+      "count": 26,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -352,7 +364,7 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 26,
+      "count": 28,
       "p4_variants": [
         "0"
       ],

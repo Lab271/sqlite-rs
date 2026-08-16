@@ -109,7 +109,12 @@ pub fn if_not(vm: &Vm, instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-fn is_falsy(v: &Value) -> bool {
+/// Truthiness for the boolean-consuming opcodes (`IfNot` here,
+/// `Not` in `arithmetic.rs`): SQLite's `sqlite3VdbeBooleanValue`, i.e.
+/// numeric-coerced zero is false and everything else is true. NULL is
+/// neither — callers decide what to do with it, which is why this
+/// answers `false` for NULL rather than pretending it is a boolean.
+pub(crate) fn is_falsy(v: &Value) -> bool {
     match v {
         Value::Integer(i) => *i == 0,
         Value::Real(r) => *r == 0.0,
