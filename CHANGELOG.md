@@ -4,6 +4,26 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.4] - 2026-08-16
+
+### Added
+
+- Test coverage raised on every file that `make coverage` flagged below
+  85% line coverage: `vdbe/value.rs` (80.7% → 100%, `sql_lt` was
+  entirely untested), `vfs/page_source.rs` (76.0% → 97.78%, page-zero
+  and short-read error paths), `vdbe/coerce.rs` (83.5% → 94.87%,
+  `checked_sub` was entirely untested plus the Real-operand arithmetic
+  path), `vdbe/functions.rs` (70.3% → 89.96%, `nullif`/`sign`/`instr`/
+  `trim`/`ltrim`/`rtrim`/`replace` were registered but never invoked by
+  any test), and `parser/printer.rs` (64.47% → 98.48%, its
+  `test_roundtrip_fixpoint` corpus expanded from 9 to ~40 SQL strings
+  covering the AST's full print surface — DISTINCT/ALL, table aliases,
+  qualified columns, all unary/remaining binary operators, every
+  literal and param kind, LIKE/GLOB/ESCAPE, COLLATE, CASE variants).
+  `parser/grammar.rs` also moved 82.4% → 91.46% as a side effect.
+  Every file in the project is now ≥85%; TOTAL 89.11% → 94.00%. Spend:
+  small, matched estimate.
+
 ## [0.6.3] - 2026-08-16
 
 ### Added
