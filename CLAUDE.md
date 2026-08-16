@@ -70,6 +70,43 @@ a trivial budget.
   (`SQLITE_VERSION` in the tool) is a deliberate, reviewed change, like an
   oracle bump.
 
+## Epic & phase breakdown conventions
+
+Each value block (`V1`…`V12` in `.openspec/plan.md`) gets one GitHub `epic`-labeled
+tracking issue (e.g. #5 for V1, #56 for V2). The epic body — not CLAUDE.md, not
+plan.md — is the live source of truth for that block's phase breakdown; keep
+these conventions in sync with how #56 is actually structured:
+
+- **One minor version per completed phase, not per block.** A phase's version
+  ships only when every ticket in its checklist is closed — a phase in
+  progress does not get a version bump partway through. State this
+  explicitly in the epic ("0.6.0 requires phase 1 fully closed AND phase 2
+  complete"), and encode the block→version mapping in
+  `tools/assurance.py`'s `VERSION_MAP` so the dashboard's Model line tracks
+  it automatically. If a version ever ships ahead of its phase actually
+  closing (it has happened once, #56 phase 1/0.5.0), call that out inline
+  in the epic as a one-time exception, not a new pattern.
+- **Phase tickets are titled `V{N} phase {M}[{letter}] — <name>`**, e.g. `V2
+  phase 2 — value-semantics kernel`, with sub-phases split by trailing
+  letter (`V2 phase 3A/3B/3C`) when a phase's work is parallelizable across
+  independent tickets that converge at the end (3C explicitly lists what it
+  needs from 3A/3B). A phase's final ticket is the deliverable/exit gate
+  (`V{N} exit gate — close epic #{epic} at {version}`), which also seeds the
+  next value block's epic.
+- **Each phase checklist item is a `- [ ]`/`- [x]` line linking the ticket
+  number**, with the phase's acceptance gate stated as prose above the list
+  (e.g. "Gate: oracle-generated expression vectors pass bit/byte-exact").
+  Disposable spikes that feed a phase (per the `spike/DDD_xxxxx` branch
+  convention) get their own checklist under a `## Spikes` section, separate
+  from shippable phase tickets, so the completeness math isn't polluted by
+  throwaway exploration.
+- **Cross-reference the other tracked regimes at the bottom.** An epic ends
+  with a `## Related regimes` line pointing at the tier-suite ticket (tier
+  stubs flip as phases land — see tier-stub-flip convention above), the
+  parity-suite ticket (new V-block dimensions activate per phase), and any
+  corpus follow-on ticket — so a reader can jump straight to the
+  cross-cutting tickets a phase touches instead of re-deriving them.
+
 ## Module layout conventions
 
 - **No `mod.rs` files.** Use the modern per-file module style — `foo.rs`
