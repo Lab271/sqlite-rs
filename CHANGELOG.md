@@ -6,6 +6,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-08-16
+
+### Fixed
+
+- Literal fidelity: REAL/BLOB literals compiled to `String8` text instead
+  of typed values, integers outside `i32` were a hard codegen error, and
+  `CAST` misused `MustBeInt`/`RealAffinity` (aborting instead of
+  truncating, leaving TEXT/BLOB/NUMERIC targets as no-ops) (#142).
+  Harvests `Real`, `Blob`, `Int64`, `Cast` from the pinned oracle and adds
+  `src/vdbe/cast.rs`, a kernel module implementing SQLite's real `CAST`
+  conversion rule (longest-numeric-prefix parsing, saturating
+  truncation, the NUMERIC whole-number downgrade that applies only to
+  text/blob sources). Also fixes a `%` bug this exposed: `checked_rem`
+  always returned `Integer`, but SQLite promotes to `REAL` when either
+  operand is `REAL`. 24 new oracle-harvested CAST vectors added to
+  `tests/corpus/expr_vectors/walker.jsonl`; supersedes the narrower
+  BLOB-only follow-up filed as #151.
+
 ## [0.7.5] - 2026-08-16
 
 ### Added

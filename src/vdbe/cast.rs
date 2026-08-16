@@ -1,11 +1,12 @@
 //! `CAST` value conversion (spec 008, its own design study distinct from
 //! column-affinity coercion — #142): SQLite's `sqlite3VdbeMemCast`.
 //! Unlike [`crate::vdbe::affinity::apply_affinity`] (which only converts
-//! a *fully well-formed* numeric string, and only touches `Value::Text`),
-//! `CAST` converts every source type to the target affinity's storage
-//! class, parses only the *longest numeric prefix* of a string (`'123abc'`
-//! casts to `123`, not left as text), and never errors — an unconvertible
-//! source becomes `0`, `0.0`, or an empty/verbatim string as the target
+//! a *fully well-formed* numeric string, or forces an `Integer` into
+//! `Real` for REAL affinity, and never touches BLOB), `CAST` converts
+//! every source type to the target affinity's storage class, parses
+//! only the *longest numeric prefix* of a string (`'123abc'` casts to
+//! `123`, not left as text), and never errors — an unconvertible source
+//! becomes `0`, `0.0`, or an empty/verbatim string as the target
 //! demands. Every rule below is oracle-verified (`sqlite3 :memory:`
 //! against the pinned 3.53.4 build), not paraphrased from memory, per
 //! this ticket's own instruction.
