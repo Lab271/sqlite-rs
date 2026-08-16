@@ -431,12 +431,128 @@ fn csv_quote_matches_oracle_on_edge_values() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `query` on a clean, in-scope single-table `SELECT` exits 0, writes
+/// rows to stdout, and leaves stderr empty — the same stream discipline
+/// `dump` follows.
+#[test]
+fn query_writes_rows_to_stdout_and_keeps_stderr_clean() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-clean");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT a FROM t WHERE a = 1")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "query failed: {stderr}");
+    assert_eq!(stdout, "1\n");
+    assert!(
+        stderr.is_empty(),
+        "a clean query must leave stderr empty; got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `-csv` renders rows CSV-style with no header row — matching plain
+/// `sqlite3 file "sql"`, which never headers unless `-header` is given.
+#[test]
+fn query_csv_flag_renders_without_header() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-csv");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg("-csv")
+        .arg(&db)
+        .arg("SELECT a FROM t WHERE a <= 2 ORDER BY a")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query -csv {}: {e}", db.display()));
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1\r\n2\r\n",
+        "csv output should have no header row and CRLF row terminators"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A syntactically-recognized-but-unsupported construct (a `JOIN`, out
+/// of this compiler's single-table V2 scope) must fail cleanly: non-zero
+/// exit, a diagnostic naming it as unsupported (not a bare "syntax
+/// error", per the three-way outcome from #61), empty stdout, no panic.
+#[test]
+fn query_unsupported_sql_fails_cleanly_and_says_so() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-unsupported");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT a FROM t JOIN t2 ON t.a = t2.a")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected an unsupported-construct diagnostic; got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A genuine syntax error must fail cleanly and be distinguishable from
+/// the unsupported-construct case above.
+#[test]
+fn query_syntax_error_fails_cleanly_and_says_so() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-syntax-error");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELEC a FROM t")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("syntax error"),
+        "expected a syntax-error diagnostic; got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Usage errors are exit code 2, distinct from a fatal read error's 1, so
 /// a caller can tell "you invoked me wrongly" from "this database is
 /// broken".
 #[test]
 fn usage_errors_exit_two() {
-    for args in [vec![], vec!["dump"], vec!["nonsense", "x.db"]] {
+    for args in [
+        vec![],
+        vec!["dump"],
+        vec!["nonsense", "x.db"],
+        vec!["query"],
+        vec!["query", "x.db"],
+    ] {
         let output = Command::new(CLI)
             .args(&args)
             .output()

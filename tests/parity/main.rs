@@ -30,9 +30,9 @@ mod harness;
 #[path = "../corpus/oracle.rs"]
 mod oracle;
 
-// Unused until V2 activates a query engine to run ParityCase.sql through
-// (v01 mirrors dump/schema paths directly, same as tests/corpus does,
-// since there's no SQL execution to drive at V1).
+// `ParityCase`/`run_case` are exercised by v02 onward, now that a query
+// engine exists to drive them through; `#[allow(dead_code)]` covers
+// `unix_vfs_open_ok`, still unused pending a v-block that needs it.
 #[allow(dead_code)]
 mod driver;
 
