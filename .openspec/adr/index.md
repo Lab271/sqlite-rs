@@ -16,4 +16,3 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0010](0010-deterministic-inventories.md) | Deterministic inventories over estimates | 2026-08-15 |
 | [0011](0011-strict-metrics-declared-vs-delivered.md) | Strict metrics: declared is not delivered | 2026-08-14 |
 | [0012](0012-ephemeral-tables-in-memory.md) | Ephemeral tables: opcode semantics, in-memory backing | 2026-08-15 |
-| [0013](0013-scalar-subqueries-out-of-v2.md) | Scalar subqueries out of V2; aggregates with V4 | 2026-08-15 |
