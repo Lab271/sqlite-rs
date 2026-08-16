@@ -1,0 +1,71 @@
+{"expr": "CASE WHEN 1=0 THEN 'a' WHEN 1=1 THEN 'b' ELSE 'c' END", "type": "text", "value_quoted": "'b'"}
+{"expr": "CASE WHEN NULL THEN 'a' ELSE 'b' END", "type": "text", "value_quoted": "'b'"}
+{"expr": "CASE WHEN 0 THEN 'a' END", "type": "null", "value_quoted": "NULL"}
+{"expr": "CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' ELSE 'c' END", "type": "text", "value_quoted": "'b'"}
+{"expr": "CASE NULL WHEN NULL THEN 'a' ELSE 'b' END", "type": "text", "value_quoted": "'b'"}
+{"expr": "CASE 1 WHEN 1 THEN 'a' WHEN 1 THEN 'b' END", "type": "text", "value_quoted": "'a'"}
+{"expr": "CAST('123' AS INTEGER)", "type": "integer", "value_quoted": "123"}
+{"expr": "CAST('123abc' AS INTEGER)", "type": "integer", "value_quoted": "123"}
+{"expr": "CAST('abc' AS REAL)", "type": "real", "value_quoted": "0.0"}
+{"expr": "CAST(3.9 AS INTEGER)", "type": "integer", "value_quoted": "3"}
+{"expr": "CAST(-3.9 AS INTEGER)", "type": "integer", "value_quoted": "-3"}
+{"expr": "CAST(123 AS TEXT)", "type": "text", "value_quoted": "'123'"}
+{"expr": "CAST(1.5 AS TEXT)", "type": "text", "value_quoted": "'1.5'"}
+{"expr": "CAST(NULL AS INTEGER)", "type": "null", "value_quoted": "NULL"}
+{"expr": "CAST('abc' AS BLOB)", "type": "blob", "value_quoted": "X'616263'"}
+{"expr": "CAST(x'4142' AS TEXT)", "type": "text", "value_quoted": "'AB'"}
+{"expr": "CAST('99999999999999999999' AS INTEGER)", "type": "integer", "value_quoted": "9223372036854775807"}
+{"expr": "'abc' LIKE 'abc'", "type": "integer", "value_quoted": "1"}
+{"expr": "'ABC' LIKE 'abc'", "type": "integer", "value_quoted": "1"}
+{"expr": "'axxb' LIKE 'a%b'", "type": "integer", "value_quoted": "1"}
+{"expr": "'ab' LIKE 'a%b'", "type": "integer", "value_quoted": "1"}
+{"expr": "'axb' LIKE 'a_b'", "type": "integer", "value_quoted": "1"}
+{"expr": "'a%b' LIKE 'a\\%b' ESCAPE '\\'", "type": "integer", "value_quoted": "1"}
+{"expr": "'a_b' LIKE 'a\\_b' ESCAPE '\\'", "type": "integer", "value_quoted": "1"}
+{"expr": "NULL LIKE 'x'", "type": "null", "value_quoted": "NULL"}
+{"expr": "'x' LIKE NULL", "type": "null", "value_quoted": "NULL"}
+{"expr": "'abc' GLOB 'abc'", "type": "integer", "value_quoted": "1"}
+{"expr": "'ABC' GLOB 'abc'", "type": "integer", "value_quoted": "0"}
+{"expr": "'abc' GLOB 'a[bc]c'", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc' GLOB 'a[^b]c'", "type": "integer", "value_quoted": "0"}
+{"expr": "'axc' GLOB 'a[^b]c'", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc' GLOB 'a?c'", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc' GLOB 'a*'", "type": "integer", "value_quoted": "1"}
+{"expr": "'abc' NOT LIKE 'xyz'", "type": "integer", "value_quoted": "1"}
+{"expr": "5 BETWEEN 1 AND 10", "type": "integer", "value_quoted": "1"}
+{"expr": "5 NOT BETWEEN 1 AND 10", "type": "integer", "value_quoted": "0"}
+{"expr": "5 BETWEEN 10 AND 1", "type": "integer", "value_quoted": "0"}
+{"expr": "NULL BETWEEN 1 AND 10", "type": "null", "value_quoted": "NULL"}
+{"expr": "5 BETWEEN NULL AND 10", "type": "null", "value_quoted": "NULL"}
+{"expr": "5 IN (1,2,3)", "type": "integer", "value_quoted": "0"}
+{"expr": "5 IN (1,2,5)", "type": "integer", "value_quoted": "1"}
+{"expr": "5 NOT IN (1,2,3)", "type": "integer", "value_quoted": "1"}
+{"expr": "NULL IN (1,2,3)", "type": "null", "value_quoted": "NULL"}
+{"expr": "5 IN (1,NULL,5)", "type": "integer", "value_quoted": "1"}
+{"expr": "5 IN (1,NULL,3)", "type": "null", "value_quoted": "NULL"}
+{"expr": "5 NOT IN (1,NULL,3)", "type": "null", "value_quoted": "NULL"}
+{"expr": "0 AND (1/0)", "type": "integer", "value_quoted": "0"}
+{"expr": "1 OR (1/0)", "type": "integer", "value_quoted": "1"}
+{"expr": "NULL AND 0", "type": "integer", "value_quoted": "0"}
+{"expr": "NULL OR 1", "type": "integer", "value_quoted": "1"}
+{"expr": "7/2", "type": "integer", "value_quoted": "3"}
+{"expr": "-7/2", "type": "integer", "value_quoted": "-3"}
+{"expr": "7.0/2", "type": "real", "value_quoted": "3.5"}
+{"expr": "7/0", "type": "null", "value_quoted": "NULL"}
+{"expr": "7/2.0", "type": "real", "value_quoted": "3.5"}
+{"expr": "7%2", "type": "integer", "value_quoted": "1"}
+{"expr": "-7%2", "type": "integer", "value_quoted": "-1"}
+{"expr": "7%2.5", "type": "real", "value_quoted": "1.0"}
+{"expr": "7%0", "type": "null", "value_quoted": "NULL"}
+{"expr": "5&3", "type": "integer", "value_quoted": "1"}
+{"expr": "5|2", "type": "integer", "value_quoted": "7"}
+{"expr": "1<<3", "type": "integer", "value_quoted": "8"}
+{"expr": "256>>4", "type": "integer", "value_quoted": "16"}
+{"expr": "5&3.5", "type": "integer", "value_quoted": "1"}
+{"expr": "-5", "type": "integer", "value_quoted": "-5"}
+{"expr": "~5", "type": "integer", "value_quoted": "-6"}
+{"expr": "-9223372036854775808", "type": "integer", "value_quoted": "-9223372036854775808"}
+{"expr": "'a'||'b'", "type": "text", "value_quoted": "'ab'"}
+{"expr": "1||2", "type": "text", "value_quoted": "'12'"}
+{"expr": "1.5||'x'", "type": "text", "value_quoted": "'1.5x'"}
+{"expr": "NULL||'x'", "type": "null", "value_quoted": "NULL"}

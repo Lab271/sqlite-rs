@@ -149,6 +149,22 @@ fn test_function_call_distinct_and_star() {
     assert!(*distinct);
 }
 
+/// Spike #59 found this: `replace`/`glob` etc. tokenize as keywords, but
+/// SQLite still accepts them as function names when followed by `(` —
+/// only CASE/CAST/EXISTS/CURRENT_* are true reserved words here.
+#[test]
+fn test_keyword_named_function_call() {
+    let select = accept("SELECT replace('abcabc','a','Z')");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!()
+    };
+    let ExprKind::FunctionCall { name, args, .. } = &expr.kind else {
+        panic!("expected a function call, got {:?}", expr.kind)
+    };
+    assert_eq!(name, "REPLACE");
+    assert!(matches!(args, FunctionArgs::List(list) if list.len() == 3));
+}
+
 #[test]
 fn test_operator_precedence() {
     // AND binds tighter than OR: a OR (b AND c)

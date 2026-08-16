@@ -809,6 +809,14 @@ impl Parser {
                 };
                 Ok(Expr { kind, span })
             }
+            // SQLite treats most keywords as usable function names when
+            // followed by `(` (e.g. `replace(...)`, `glob(...)`) — only
+            // the handful matched above (CASE/CAST/EXISTS/CURRENT_*)
+            // are true reserved words in expression position.
+            TokenKind::Keyword(kw) if matches!(self.peek_at(1).kind, TokenKind::LParen) => {
+                self.advance();
+                self.function_call(format!("{kw:?}"), tok.span)
+            }
             TokenKind::LParen => {
                 self.advance();
                 if self.at_kw(Keyword::SELECT) {

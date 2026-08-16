@@ -156,6 +156,9 @@ FUNCTION_EXPRS = [
     "replace('abcabc','a','Z')",
     "typeof(zeroblob(3))", "length(zeroblob(3))",
     "iif(1,'a','b')", "iif(0,'a','b')", "iif(NULL,'a','b')",
+    "iif('0.0','a','b')",
+    "round(1.5,NULL)", "round(1.5,40)",
+    "length(zeroblob(-1))",
 ]
 
 COERCION_EXPRS = [
@@ -167,6 +170,73 @@ COERCION_EXPRS = [
     "cast('123' AS INTEGER)", "cast('123abc' AS INTEGER)",
     "cast('abc' AS REAL)", "cast(3.9 AS INTEGER)",
     "cast(-3.9 AS INTEGER)",
+]
+
+
+WALKER_EXPRS = [
+    # CASE (searched and simple forms)
+    "CASE WHEN 1=0 THEN 'a' WHEN 1=1 THEN 'b' ELSE 'c' END",
+    "CASE WHEN NULL THEN 'a' ELSE 'b' END",
+    "CASE WHEN 0 THEN 'a' END",
+    "CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' ELSE 'c' END",
+    "CASE NULL WHEN NULL THEN 'a' ELSE 'b' END",
+    "CASE 1 WHEN 1 THEN 'a' WHEN 1 THEN 'b' END",
+    # CAST
+    "CAST('123' AS INTEGER)",
+    "CAST('123abc' AS INTEGER)",
+    "CAST('abc' AS REAL)",
+    "CAST(3.9 AS INTEGER)",
+    "CAST(-3.9 AS INTEGER)",
+    "CAST(123 AS TEXT)",
+    "CAST(1.5 AS TEXT)",
+    "CAST(NULL AS INTEGER)",
+    "CAST('abc' AS BLOB)",
+    "CAST(x'4142' AS TEXT)",
+    "CAST('99999999999999999999' AS INTEGER)",
+    # LIKE / GLOB
+    "'abc' LIKE 'abc'",
+    "'ABC' LIKE 'abc'",
+    "'axxb' LIKE 'a%b'",
+    "'ab' LIKE 'a%b'",
+    "'axb' LIKE 'a_b'",
+    "'a%b' LIKE 'a\\%b' ESCAPE '\\'",
+    "'a_b' LIKE 'a\\_b' ESCAPE '\\'",
+    "NULL LIKE 'x'",
+    "'x' LIKE NULL",
+    "'abc' GLOB 'abc'",
+    "'ABC' GLOB 'abc'",
+    "'abc' GLOB 'a[bc]c'",
+    "'abc' GLOB 'a[^b]c'",
+    "'axc' GLOB 'a[^b]c'",
+    "'abc' GLOB 'a?c'",
+    "'abc' GLOB 'a*'",
+    "'abc' NOT LIKE 'xyz'",
+    # BETWEEN
+    "5 BETWEEN 1 AND 10",
+    "5 NOT BETWEEN 1 AND 10",
+    "5 BETWEEN 10 AND 1",
+    "NULL BETWEEN 1 AND 10",
+    "5 BETWEEN NULL AND 10",
+    # IN-list
+    "5 IN (1,2,3)",
+    "5 IN (1,2,5)",
+    "5 NOT IN (1,2,3)",
+    "NULL IN (1,2,3)",
+    "5 IN (1,NULL,5)",
+    "5 IN (1,NULL,3)",
+    "5 NOT IN (1,NULL,3)",
+    # Short-circuit AND/OR (functional result only — evaluation-order
+    # findings are behavioral, captured in findings.md, not here)
+    "0 AND (1/0)",
+    "1 OR (1/0)",
+    "NULL AND 0",
+    "NULL OR 1",
+    # Arithmetic: division/modulo/bitwise/concat/unary
+    "7/2", "-7/2", "7.0/2", "7/0", "7/2.0",
+    "7%2", "-7%2", "7%2.5", "7%0",
+    "5&3", "5|2", "1<<3", "256>>4", "5&3.5",
+    "-5", "~5", "-9223372036854775808",
+    "'a'||'b'", "1||2", "1.5||'x'", "NULL||'x'",
 ]
 
 
@@ -190,6 +260,7 @@ def main():
     write_jsonl(OUT_DIR / "null.jsonl", eval_exprs(oracle, NULL_EXPRS))
     write_jsonl(OUT_DIR / "coercion.jsonl", eval_exprs(oracle, COERCION_EXPRS))
     write_jsonl(OUT_DIR / "functions.jsonl", eval_exprs(oracle, FUNCTION_EXPRS))
+    write_jsonl(OUT_DIR / "walker.jsonl", eval_exprs(oracle, WALKER_EXPRS))
 
     print(f"wrote vectors to {OUT_DIR} using oracle {oracle} ({ORACLE_VERSION})")
 
