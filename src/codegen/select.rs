@@ -89,10 +89,18 @@ fn resolve_order_by(
         };
         let idx = column_index(schema, name)
             .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
+        let descending = term.desc.unwrap_or(false);
+        // No NULLS clause defaults to NULLS FIRST for ASC, NULLS LAST for
+        // DESC (SQLite's default, matching this compiler's prior
+        // behavior); an explicit clause overrides that per direction.
+        let nulls_first = term
+            .nulls_last
+            .map_or(!descending, |nulls_last| !nulls_last);
         keys.push(SortKeyColumn {
             index: idx,
-            descending: term.desc.unwrap_or(false),
+            descending,
             collation: Collation::Binary,
+            nulls_first,
         });
     }
     Ok(keys)

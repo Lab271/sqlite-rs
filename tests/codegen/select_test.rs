@@ -180,3 +180,110 @@ const KNOWN_GAPS: &[&str] = &[
     "a >> 1",
     "~a",
 ];
+
+/// Regression fixture for #140: `ORDER BY ... NULLS FIRST/LAST` was
+/// parsed and stored (`ast::OrderingTerm::nulls_last`) but never read by
+/// `resolve_order_by`, so the explicit modifier was silently ignored.
+fn nulls_fixture(label: &str) -> (PathBuf, TableSchema) {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_nulls_test_{}_{}.db",
+        std::process::id(),
+        label
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(i INTEGER); \
+             INSERT INTO t VALUES (5), (NULL), (-7), (0), (5);",
+        )
+        .status()
+        .expect("creating nulls fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["i".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+    };
+    (path, schema)
+}
+
+#[test]
+fn order_by_asc_nulls_last_matches_oracle() {
+    let (path, schema) = nulls_fixture("asc_nulls_last");
+    let rows = our_rows(&path, &schema, "SELECT i FROM t ORDER BY i ASC NULLS LAST;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(-7)],
+            vec![Value::Integer(0)],
+            vec![Value::Integer(5)],
+            vec![Value::Integer(5)],
+            vec![Value::Null],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn order_by_desc_nulls_first_matches_oracle() {
+    let (path, schema) = nulls_fixture("desc_nulls_first");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT i FROM t ORDER BY i DESC NULLS FIRST;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Null],
+            vec![Value::Integer(5)],
+            vec![Value::Integer(5)],
+            vec![Value::Integer(0)],
+            vec![Value::Integer(-7)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn order_by_asc_default_places_nulls_first() {
+    let (path, schema) = nulls_fixture("asc_default");
+    let rows = our_rows(&path, &schema, "SELECT i FROM t ORDER BY i ASC;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Null],
+            vec![Value::Integer(-7)],
+            vec![Value::Integer(0)],
+            vec![Value::Integer(5)],
+            vec![Value::Integer(5)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn order_by_desc_default_places_nulls_last() {
+    let (path, schema) = nulls_fixture("desc_default");
+    let rows = our_rows(&path, &schema, "SELECT i FROM t ORDER BY i DESC;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(5)],
+            vec![Value::Integer(5)],
+            vec![Value::Integer(0)],
+            vec![Value::Integer(-7)],
+            vec![Value::Null],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
