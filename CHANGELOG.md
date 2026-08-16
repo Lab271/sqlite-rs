@@ -4,6 +4,43 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.7.0] - 2026-08-16
+
+### Added
+
+- Phase 3C (#91, epic #56): the codegen convergence ticket — `src/codegen/`
+  (`select.rs`, `expr.rs`) compiles a parsed `Select` AST into a VDBE
+  `Program`: full-table scan (`Init -> OpenRead -> Rewind -> ... -> Next
+  -> Halt`), WHERE/AND/OR/CASE/BETWEEN/IN/LIKE as jump-based control flow
+  (never an intermediate boolean register, per spec 009 Req 11), ORDER BY
+  via the sorter, LIMIT/OFFSET counters, DISTINCT via the ephemeral index.
+- Wires the previously-missing `Function` opcode dispatch in
+  `src/vdbe/exec.rs` (spec 009 Req 7).
+- `src/vdbe/explain.rs`: the `EXPLAIN` bytecode printer (spec 009 Req 10).
+- Flips spec 009 Requirements 7/10/11 from `(planned)` to active — all 11
+  requirements now backed, zero dead links.
+- Un-ignores `tests/tiers/tier1.rs`'s `t1_single_table_where_matches_oracle`
+  and `t1_explain_prints_bytecode`.
+
+Known scope gaps (documented via `KNOWN_GAPS` in the test files, and now
+erroring loudly rather than silently corrupting, per PR #117 review):
+no bitwise/concat opcode in the frozen V2 52-opcode set; CAST's
+lossy-conversion semantics beyond affinity coercion; REAL literals
+represented as text (no `OP_Real`-equivalent opcode); integer literals
+outside `i32` range; CASE branch results other than a bare literal or
+column reference (no MOVE opcode); full three-valued NULL propagation
+through `NOT`/`AND`/`OR`/`BETWEEN`/`IN` in value (non-WHERE) context.
+
+**0.7.0 completes V2 phase 3** (#87, #88, #89, #90, #91 all closed) —
+epic #56's engine phase: VDBE interpreter, cursor/sorter/ephemeral
+opcodes, and now codegen + EXPLAIN, all oracle-parity-tested end to end
+against the V2 query corpus.
+
+Spend: estimated Large on take (#91 had no prior complexity estimate);
+actual spend matched, including a follow-up fix pass for PR #117's
+review findings (reachable panics, a silent CASE data leak, and the
+project's `mvl-limit` qualified-subset CI gate).
+
 ## [0.6.7] - 2026-08-16
 
 ### Fixed

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
 //! Tier 1 — QUERY CORE (spec 001-architecture Tier Model, `plan.md` Core
 //! Definition): single-table SELECT, core scalar functions, affinity,
 //! built-in collations. Planner droppable (full scans are correct);
@@ -80,14 +87,79 @@ fn t1_scalar_functions_match_oracle() {
     assert!(call_function("nope", &[]).is_err());
 }
 
+/// V2 phase 3C — codegen (#91): `parse_select` -> `compile_select` ->
+/// `execute_with_db` for a single-table WHERE query, oracle-parity
+/// acceptance covered exhaustively by
+/// `tests/codegen/select_test.rs::v2_corpus_compiles_and_matches_oracle_row_for_row`
+/// and `tests/codegen/expr_test.rs`'s named scenarios — this stub just
+/// exercises the same pipeline directly as the tier contract.
 #[test]
-#[ignore = "V2 phase 3 — single-table SELECT execution"]
 fn t1_single_table_where_matches_oracle() {
-    unimplemented!()
+    use std::process::Command;
+    use std::rc::Rc;
+
+    use sqlite_rs::codegen::compile_select;
+    use sqlite_rs::header::DatabaseHeader;
+    use sqlite_rs::parser::{parse_select, ParseOutcome};
+    use sqlite_rs::record::Value;
+    use sqlite_rs::schema::TableSchema;
+    use sqlite_rs::vdbe::execute_with_db;
+    use sqlite_rs::vfs::{UnixVfs, Vfs, VfsPageSource};
+
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_tier1_where_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg("CREATE TABLE t(a INTEGER, b INTEGER); INSERT INTO t VALUES (1, 10), (2, 5), (3, 20);")
+        .status()
+        .expect("creating scratch fixture db (requires sqlite3 on PATH)");
+    if !status.success() {
+        eprintln!("skipping t1_single_table_where_matches_oracle: no sqlite3 on PATH");
+        return;
+    }
+
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["a".to_string(), "b".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+    };
+    let select = match parse_select("SELECT a FROM t WHERE b > 5") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected parse to succeed, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).unwrap();
+
+    let vfs = UnixVfs;
+    let file = vfs.open_read(&path).unwrap();
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0).unwrap();
+    let header = DatabaseHeader::parse(&header_buf).unwrap();
+    let source = VfsPageSource::open(&vfs, &path, header.page_size).unwrap();
+    let rows = execute_with_db(&program, Rc::new(source), header).unwrap();
+
+    assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]);
 }
 
+/// V2 phase 3C — codegen (#91): `EXPLAIN`'s addr/opcode/p1-p5/p4 output
+/// format, per spec 009 Requirement 10. Full named-scenario coverage
+/// lives in `tests/vdbe/explain_test.rs`.
 #[test]
-#[ignore = "V2 phase 3 — EXPLAIN bytecode output"]
 fn t1_explain_prints_bytecode() {
-    unimplemented!()
+    use sqlite_rs::vdbe::{explain, Instruction, Opcode};
+
+    let program = sqlite_rs::vdbe::Program::new(vec![
+        Instruction::new(Opcode::Init, 0, 1, 0),
+        Instruction::new(Opcode::Halt, 0, 0, 0),
+    ]);
+    let rows = explain(&program);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].opcode, "Init");
+    assert_eq!(rows[1].opcode, "Halt");
 }
