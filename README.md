@@ -13,6 +13,14 @@ SQLite is the most widely deployed database in the world — every phone, browse
 
 The file format and SQL dialect are the moat. That is why sqlite-rs targets *compatibility* rather than a new engine: the interesting gap in the market is not "a better SQLite" — it is a **memory-safe, extensible SQLite**.
 
+### The safety thesis
+
+SQLite's legendary test discipline (a 700:1 test-to-code ratio, 100% MC/DC) exists because in C, the test suite must prove two things at once: *the code doesn't corrupt memory* and *the code computes the right answer*. Every recent SQLite CVE is a memory-safety failure downstream of an arithmetic error — an integer overflow or truncation feeding an unchecked read or write.
+
+sqlite-rs splits that burden: **the Rust compiler carries the memory-safety half by construction** (`forbid(unsafe_code)`, ownership instead of `Mem`'s lifetime flags, enums instead of flag-tagged unions, checked arithmetic instead of silent truncation), so the entire evidence budget — the pinned-oracle corpus, fuzzing, property tests, mutation runs — is spent on the only question types cannot answer: *is the behavior SQLite's behavior?*
+
+The honest caveat: safety is not correctness. Memory-safe code can still return the wrong answer politely — which is why every claim in this repo is ultimately backed by a byte-level diff against a pinned stock `sqlite3`, not by the type system alone.
+
 ## The Landscape
 
 SQLite has no credible replacement in its core niche — embedded, transactional, SQL, zero-config. The alternatives all occupy adjacent niches:
