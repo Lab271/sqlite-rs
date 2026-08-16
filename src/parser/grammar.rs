@@ -314,6 +314,10 @@ impl Parser {
     }
 
     fn table_ref(&mut self) -> PResult<TableRef> {
+        if matches!(self.peek().kind, TokenKind::LParen) {
+            return self
+                .unsupported("table-valued functions / subqueries in FROM not yet supported");
+        }
         let (name, start) = self.identifier()?;
         if matches!(self.peek().kind, TokenKind::Dot) {
             return self.unsupported("schema-qualified table names not yet supported");
