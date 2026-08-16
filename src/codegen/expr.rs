@@ -40,6 +40,14 @@ pub(crate) fn compile_cond(
             compile_cond(em, reg, schema, cursor, inner, true_target, false_target)
         }
 
+        // KNOWN WRONG (#134): swapping the targets resolves SQL's
+        // "unknown" to true, so `WHERE NOT (x = 5)` returns rows where
+        // `x IS NULL` — the same defect the `Between`/`In` arms below
+        // now avoid. It cannot be fixed here: this function's contract
+        // already merges FALSE and NULL into `false_target`, and the
+        // value path has no NULL to materialize (no `Null` opcode in
+        // the V2 set). Fixing it needs one of those two contracts to
+        // change, which #134 scopes.
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
@@ -666,17 +674,34 @@ pub(crate) fn compile_value(
                 crate::parser::ast::FunctionArgs::Star => &[][..],
                 crate::parser::ast::FunctionArgs::List(list) => list.as_slice(),
             };
-            let first = reg.alloc_range(arg_exprs.len().max(1));
+            // `Function` reads its arguments from a contiguous register
+            // window starting at P2, so the args must land next to each
+            // other. Reserving the window up front and *then* compiling
+            // into it does not work: `compile_value` allocates its own
+            // destination, so every argument landed past the reservation
+            // and the contiguity check below rejected every call with
+            // arguments — `abs(id)` included. Instead, compile the args
+            // first and take the window from where they actually landed.
+            // Each `compile_value` returns the last register it
+            // allocated, so consecutive simple args are naturally
+            // adjacent; the check still catches the nested cases where
+            // that does not hold (e.g. an argument whose own lowering
+            // allocates its destination before its operands).
+            let mut first = 0i32;
             for (i, arg) in arg_exprs.iter().enumerate() {
                 let r = compile_value(em, reg, schema, cursor, arg)?;
-                if r != first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)) {
-                    // Bump allocator guarantees contiguity when args
-                    // are compiled in order with no intervening
-                    // allocation; this branch should not trigger.
+                if i == 0 {
+                    first = r;
+                } else if r != first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)) {
                     return Err(CodegenError::Unsupported {
                         reason: "function argument registers were not contiguous".to_string(),
                     });
                 }
+            }
+            if arg_exprs.is_empty() {
+                // Zero-arg call (or `f(*)`): P2 still has to point at a
+                // register, and nothing reads it.
+                first = reg.alloc();
             }
             let dest = reg.alloc();
             em.emit(Instruction::with_p4(

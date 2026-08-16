@@ -17,30 +17,53 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   oracle, since this engine has no write path yet.
 - Skip-not-fail policy per spec 004 Req 4: out-of-slice grammar/opcode gaps
   skip, only a genuine result divergence fails. `make sqllogictest` +
-  informational (non-gating) CI step.
-- `tools/sqllogictest-status.json`: committed pass/skip/fail counts, reported
-  on the assurance dashboard's Model line as a pass-rate AND coverage pair —
-  currently 167/167 passing over 7.2% of the corpus.
+  informational (non-gating) CI step, plus a companion step that reports
+  drift between the committed status file and what a run produces.
+- `tools/sqllogictest-status.json`: committed pass/skip/suspect/fail counts,
+  reported on the assurance dashboard's Model line as a pass-rate AND
+  coverage pair — currently 199/199 passing over 8.6% of the corpus. The
+  `suspect` bucket counts queries declined for reasons that should not occur
+  against oracle-validated input (malformed-SQL verdict, unreadable schema),
+  so an engine regression there surfaces instead of hiding among the skips.
+- `tests/unit/codegen.rs`: oracle-free program-shape tests pinning each
+  codegen fix below, so a regression fails `make test` rather than only the
+  non-gating slice.
 
 ### Fixed
 
-Four codegen defects the runner surfaced on its first green run, all
-affecting `sqlite-rs query` output (#95's shipped CLI), not just tests:
+Codegen defects the runner and its review surfaced, all affecting
+`sqlite-rs query` output (#95's shipped CLI), not just tests:
 
 - `x NOT IN (...)` and `x NOT BETWEEN a AND b` returned rows for NULL
   operands. Both were compiled as their positive form with true/false jump
   targets swapped, which turns SQL's "unknown" into "true"; they now lower
   the way SQLite does (`NOT BETWEEN` as `x < lo OR x > hi`, `NOT IN` with an
-  explicit saw-NULL guard).
+  explicit saw-NULL guard). Note this fixes the two dedicated grammar forms
+  only: generic `NOT (...)` still resolves NULL to true, because the
+  boolean-to-value path has no NULL to materialize (no `Null` opcode in the
+  V2 set). Tracked separately.
+- Every scalar function call with arguments failed to compile
+  (`function argument registers were not contiguous`), making V2's scalar
+  functions unreachable through the compiled query path — `SELECT abs(id)`
+  included. `Function`'s contiguous argument window was reserved *before*
+  the arguments were compiled, so they always landed past it; the window is
+  now taken from where the arguments actually land. Slice coverage rose from
+  7.2% to 8.6% as a result.
 - Aggregate calls (`count`, `sum`, `avg`, ...) compiled as ordinary per-row
   scalar functions, so `SELECT count(*) FROM t` emitted one row per input row
   instead of one count. Codegen now rejects them as unsupported — V2 has no
-  grouping pass — since a refusal beats silently wrong output.
+  grouping pass — since a refusal beats silently wrong output. In slice terms
+  this is a boundary re-label rather than a repair: those queries move from
+  the fail column to the skip column, which is why the metric publishes
+  coverage alongside pass rate.
 - A rowid-alias column (`INTEGER PRIMARY KEY`) read back as NULL, because it
   is stored as a placeholder in every record and needs the cursor's rowid
   substituted. `SELECT x FROM t WHERE x=2` silently matched nothing.
   `rowid_alias_column` moved from `src/dump.rs` to `src/schema/` so the
-  compiled read path can share the substitution `dump` already did.
+  compiled read path can share the substitution `dump` already did. Its
+  detection now also excludes `INTEGER PRIMARY KEY DESC`, which SQLite
+  deliberately does not treat as a rowid alias; two remaining textual
+  misreads are pinned by `known_fragile_*` tests.
 
 ## [0.7.0] - 2026-08-16
 

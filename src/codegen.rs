@@ -111,15 +111,6 @@ impl RegAlloc {
         self.next = self.next.saturating_add(1);
         r
     }
-
-    /// Allocates `count` contiguous registers, returning the first.
-    pub(crate) fn alloc_range(&mut self, count: usize) -> i32 {
-        let first = self.next;
-        self.next = self
-            .next
-            .saturating_add(i32::try_from(count).unwrap_or(i32::MAX));
-        first
-    }
 }
 
 pub(crate) fn p4_coll_seq(collation: crate::vdbe::Collation) -> P4 {

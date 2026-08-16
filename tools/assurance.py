@@ -251,7 +251,12 @@ def sqllogictest_model():
 
     try:
         total = json.loads(SQLLOGICTEST_JSON.read_text())["total"]
-        return total["pass"], total["attempted"], total["queries"]
+        return (
+            total["pass"],
+            total["attempted"],
+            total["queries"],
+            total.get("suspect", 0),
+        )
     except (ValueError, KeyError):
         return None
 
@@ -375,12 +380,16 @@ def report_model():
         print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
     slt = sqllogictest_model()
     if slt:
-        passed, attempted, queries = slt
+        passed, attempted, queries, suspect = slt
         rate = (passed / attempted * 100) if attempted else 0.0
         cov = (attempted / queries * 100) if queries else 0.0
+        # A nonzero suspect count means queries were declined for a
+        # reason that should not happen against oracle-validated input
+        # — surfaced inline so it can't hide inside the skip bucket.
+        suspect_note = f", {suspect} SUSPECT" if suspect else ""
         print(
             f"sqllogictest slice:   {passed}/{attempted} passing ({rate:.1f}%), "
-            f"{attempted}/{queries} attempted ({cov:.1f}% of corpus, #96)"
+            f"{attempted}/{queries} attempted ({cov:.1f}% of corpus{suspect_note}, #96)"
         )
     print()
     return detail

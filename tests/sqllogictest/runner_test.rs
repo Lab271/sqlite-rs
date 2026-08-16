@@ -47,6 +47,22 @@ use std::path::PathBuf;
 use crate::oracle::{pinned_oracle, skip_no_oracle};
 use crate::runner::{run_file, FileTally};
 
+/// The slice vendored by #70 — `select1.test`, `select2.test`, and the
+/// `evidence/` files. Pinned so an accidental prune of the vendor
+/// directory fails loudly instead of quietly shrinking coverage.
+const EXPECTED_FILE_COUNT: usize = 14;
+
+/// Vendored files that legitimately contain no `query` records at all
+/// (they exercise DDL this engine has no write path for), and so are
+/// exempt from the "every file contributes something" floor below.
+const QUERYLESS_FILES: &[&str] = &[
+    "slt_lang_createtrigger.test",
+    "slt_lang_dropindex.test",
+    "slt_lang_droptable.test",
+    "slt_lang_droptrigger.test",
+    "slt_lang_reindex.test",
+];
+
 fn vendor_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/sql/vendor/sqllogictest/test")
 }
@@ -97,6 +113,7 @@ fn json_escape(s: &str) -> String {
 fn write_status_json(tallies: &[FileTally]) {
     let total_pass: usize = tallies.iter().map(|t| t.pass).sum();
     let total_skip: usize = tallies.iter().map(|t| t.skip).sum();
+    let total_suspect: usize = tallies.iter().map(|t| t.suspect).sum();
     let total_fail: usize = tallies.iter().map(|t| t.fail).sum();
     let attempted = total_pass.saturating_add(total_fail);
     let pass_rate = if attempted == 0 {
@@ -108,10 +125,11 @@ fn write_status_json(tallies: &[FileTally]) {
     let mut json = String::from("{\n  \"files\": [\n");
     for (i, t) in tallies.iter().enumerate() {
         json.push_str(&format!(
-            "    {{\"file\": \"{}\", \"pass\": {}, \"skip\": {}, \"fail\": {}}}",
+            "    {{\"file\": \"{}\", \"pass\": {}, \"skip\": {}, \"suspect\": {}, \"fail\": {}}}",
             json_escape(&t.file),
             t.pass,
             t.skip,
+            t.suspect,
             t.fail
         ));
         if i.saturating_add(1) < tallies.len() {
@@ -119,7 +137,9 @@ fn write_status_json(tallies: &[FileTally]) {
         }
         json.push('\n');
     }
-    let queries = attempted.saturating_add(total_skip);
+    let queries = attempted
+        .saturating_add(total_skip)
+        .saturating_add(total_suspect);
     let coverage = if queries == 0 {
         0.0
     } else {
@@ -132,7 +152,8 @@ fn write_status_json(tallies: &[FileTally]) {
     // of queries this engine even attempts) is committed beside it —
     // the honest headline is the pair, not the rate.
     json.push_str(&format!(
-        "  \"total\": {{\"pass\": {total_pass}, \"skip\": {total_skip}, \"fail\": {total_fail}, \
+        "  \"total\": {{\"pass\": {total_pass}, \"skip\": {total_skip}, \
+         \"suspect\": {total_suspect}, \"fail\": {total_fail}, \
          \"queries\": {queries}, \"attempted\": {attempted}, \"pass_rate\": {pass_rate:.4}, \
          \"coverage\": {coverage:.4}}}\n"
     ));
@@ -156,19 +177,50 @@ fn sqllogictest_slice() {
         return;
     };
 
-    let tallies: Vec<FileTally> = discover_files()
-        .iter()
-        .map(|path| run_file(&oracle, path))
-        .collect();
+    let files = discover_files();
+    assert_eq!(
+        files.len(),
+        EXPECTED_FILE_COUNT,
+        "expected the {EXPECTED_FILE_COUNT} vendored slice files (#70), found {}: \
+         re-run `make sql-corpus FETCH=1`",
+        files.len()
+    );
+
+    let tallies: Vec<FileTally> = files.iter().map(|path| run_file(&oracle, path)).collect();
 
     write_status_json(&tallies);
 
-    let mut failures: Vec<&str> = Vec::new();
+    // A truncated or mis-vendored `.test` parses to zero records, which
+    // would otherwise report 0/0/0 for that file and still go green —
+    // silently dropping corpus coverage with nothing to notice it. Files
+    // legitimately contributing no `query` records are named explicitly.
     for tally in &tallies {
-        for failure in &tally.failures {
-            failures.push(failure);
+        if QUERYLESS_FILES.contains(&tally.file.as_str()) {
+            continue;
         }
+        assert!(
+            tally.pass + tally.skip + tally.suspect + tally.fail > 0,
+            "{} yielded no query records at all — truncated or mis-vendored?",
+            tally.file
+        );
     }
+
+    let suspects: Vec<&str> = tallies
+        .iter()
+        .flat_map(|t| t.suspects.iter().map(String::as_str))
+        .collect();
+    assert!(
+        suspects.is_empty(),
+        "{} quer(ies) this engine declined for a reason that should not \
+         happen against oracle-validated input (see Outcome::Suspect):\n{}",
+        suspects.len(),
+        suspects.join("\n")
+    );
+
+    let failures: Vec<&str> = tallies
+        .iter()
+        .flat_map(|t| t.failures.iter().map(String::as_str))
+        .collect();
     assert!(
         failures.is_empty(),
         "{} divergence(s) from the pinned oracle:\n{}",

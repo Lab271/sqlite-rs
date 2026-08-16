@@ -271,4 +271,48 @@ mod tests {
             "constraint text mentioning FLOAT was wrongly detected as REAL affinity"
         );
     }
+
+    // The two `rowid_alias_column` cases below are the reason that
+    // function's naivety now carries more weight than it did: since #96,
+    // `src/codegen/expr.rs` emits `Rowid` instead of `Column` based on
+    // its answer, so a wrong index is a wrong query result rather than
+    // only wrong `dump` output. Both are tracked for a quote-aware
+    // rewrite in #135; these tests pin today's behavior so the fix is
+    // visible when it lands.
+
+    #[test]
+    fn known_fragile_string_literal_mentioning_primary_key_false_positives() {
+        // The DEFAULT literal supplies the PRIMARY/KEY token pair and the
+        // column supplies INTEGER, so this reads as a rowid alias and the
+        // compiled read path would substitute the cursor rowid for `a`.
+        let s = schema("CREATE TABLE t (a INTEGER DEFAULT 'primary key', b TEXT)");
+        assert_eq!(
+            rowid_alias_column(&s),
+            Some(0),
+            "PRIMARY KEY inside a string literal was wrongly read as a real constraint"
+        );
+    }
+
+    #[test]
+    fn known_fragile_table_level_primary_key_misses_the_alias() {
+        // SQLite treats `CREATE TABLE t(x INTEGER, PRIMARY KEY(x))` as a
+        // rowid alias, but the table-constraint filter drops that def
+        // before the scan sees it — so `x` reads back NULL, which is the
+        // original #96 bug surviving for this DDL spelling.
+        let s = schema("CREATE TABLE t (x INTEGER, PRIMARY KEY(x))");
+        assert_eq!(
+            rowid_alias_column(&s),
+            None,
+            "table-level PRIMARY KEY(x) over an INTEGER column is a rowid alias in SQLite"
+        );
+    }
+
+    #[test]
+    fn rowid_alias_none_for_integer_primary_key_desc() {
+        // Not fragile — a real rule: the DESC form gets its own b-tree
+        // index and stores the column normally, so it must NOT be
+        // substituted (SQLite's "ROWIDs and the INTEGER PRIMARY KEY").
+        let s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY DESC, name TEXT)");
+        assert_eq!(rowid_alias_column(&s), None);
+    }
 }

@@ -36,10 +36,16 @@ pub struct FileTally {
     pub file: String,
     pub pass: usize,
     pub skip: usize,
+    /// Queries this engine declined for a reason that should not happen
+    /// against oracle-validated input — see [`Outcome::Suspect`]. Not
+    /// scored as failures, but tracked so a regression here is visible.
+    pub suspect: usize,
     pub fail: usize,
     /// One line per fail, `<line>: <reason>` — kept short, printed by
     /// the caller for triage.
     pub failures: Vec<String>,
+    /// Same shape as `failures`, for the `suspect` bucket.
+    pub suspects: Vec<String>,
 }
 
 /// Runs `sqlite3 <db_path> <sql>` read-write, to build fixture state a
@@ -66,44 +72,88 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Renders one column value the way the sqllogictest reference tool
-/// does: `NULL` for null, `(empty)` for an empty string, and — only for
-/// columns declared `R` — a fixed 3-decimal form regardless of the
-/// value's actual precision. Verified against the pinned oracle via
+/// does. The declared type letter, not the runtime value's variant,
+/// decides the rendering — the reference tool binds each result column
+/// through `sqlite3_column_int`/`_double`/`_text` according to the
+/// letter, so a `T` column holding a float prints as text and an `I`
+/// column holding text prints as that text's integer cast (`0` when it
+/// isn't numeric). Only `NULL` ignores the letter.
+///
+/// The `R` form is a fixed 3 decimals regardless of the value's own
+/// precision. Verified against the pinned oracle via
 /// `tests/corpus/sql/vendor/sqllogictest/test/evidence/slt_lang_aggfunc.test`,
 /// whose `avg(x)` result (exactly representable as `1.25`) is committed
 /// as the literal `1.250`, not `1.25` — ruling out this crate's own
 /// `%.15g`-style [`format_real`] for `R` columns specifically.
 fn sqllogictest_value(value: &Value, type_letter: char) -> String {
-    if type_letter == 'R' {
-        let as_f64 = match value {
-            Value::Null => return "NULL".to_string(),
-            Value::Integer(i) => *i as f64,
-            Value::Real(r) => *r,
-            Value::Text(s) => s.parse().unwrap_or(0.0),
-            Value::Blob(_) => 0.0,
-        };
-        return format!("{as_f64:.3}");
+    if matches!(value, Value::Null) {
+        return "NULL".to_string();
     }
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(i) => i.to_string(),
-        Value::Real(r) => format_real(*r),
-        Value::Text(s) if s.is_empty() => "(empty)".to_string(),
-        Value::Text(s) => s.clone(),
-        Value::Blob(b) => format_blob(b),
+    match type_letter {
+        'R' => {
+            let as_f64 = match value {
+                Value::Integer(i) => *i as f64,
+                Value::Real(r) => *r,
+                Value::Text(s) => s.trim().parse().unwrap_or(0.0),
+                Value::Null | Value::Blob(_) => 0.0,
+            };
+            format!("{as_f64:.3}")
+        }
+        'I' => {
+            let as_i64 = match value {
+                Value::Integer(i) => *i,
+                // C casts toward zero, and a non-numeric prefix yields 0
+                // — matching `sqlite3_column_int` on a text value.
+                Value::Real(r) => *r as i64,
+                Value::Text(s) => s
+                    .trim()
+                    .parse::<i64>()
+                    .unwrap_or_else(|_| s.trim().parse::<f64>().map(|f| f as i64).unwrap_or(0)),
+                Value::Null | Value::Blob(_) => 0,
+            };
+            as_i64.to_string()
+        }
+        // 'T' and any unrecognized letter: text rendering.
+        _ => match value {
+            Value::Null => "NULL".to_string(),
+            Value::Integer(i) => i.to_string(),
+            Value::Real(r) => format_real(*r),
+            Value::Text(s) if s.is_empty() => "(empty)".to_string(),
+            Value::Text(s) => sanitize_text(s),
+            Value::Blob(b) => format_blob(b),
+        },
     }
+}
+
+/// The reference tool replaces every byte outside printable ASCII with
+/// `@` before comparing or hashing, so a result differing only in
+/// non-printing bytes still matches its committed expected block.
+fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if ('\x20'..='\x7e').contains(&c) {
+                c
+            } else {
+                '@'
+            }
+        })
+        .collect()
 }
 
 /// Flattens `rows` (each already rendered to its per-column text form)
 /// row-major, applying the query's sort mode: `rowsort` reorders whole
-/// rows (lexicographic over each row's rendered columns) before
-/// flattening, `valuesort` flattens first and then sorts every
-/// individual value, `nosort` keeps the engine's own row order.
+/// rows before flattening, `valuesort` flattens first and then sorts
+/// every individual value, `nosort` keeps the engine's own row order.
 fn flatten_sorted(mut rows: Vec<Vec<String>>, mode: SortMode) -> Vec<String> {
     match mode {
         SortMode::NoSort => rows.into_iter().flatten().collect(),
         SortMode::RowSort => {
-            rows.sort();
+            // Sort on each row's newline-joined text, matching the
+            // reference tool's `strcmp` over the row as one string —
+            // NOT `Vec<String>`'s element-wise ordering, which ranks
+            // `["a", "bb"]` before `["ab", "b"]` where the joined forms
+            // compare equal up to the separator.
+            rows.sort_by(|a, b| a.join("\n").cmp(&b.join("\n")));
             rows.into_iter().flatten().collect()
         }
         SortMode::ValueSort => {
@@ -117,13 +167,23 @@ fn flatten_sorted(mut rows: Vec<Vec<String>>, mode: SortMode) -> Vec<String> {
 enum Outcome {
     Pass,
     Skip,
+    /// Not scored as a failure, but not an honest out-of-slice gap
+    /// either: the vendored files are oracle-validated SQL over fixtures
+    /// the oracle just built, so a *malformed*-SQL verdict or an
+    /// unreadable schema means this engine regressed, not that the query
+    /// is outside the V2 slice. Counted separately so such a regression
+    /// shows up as a bucket shift instead of disappearing into `skip`.
+    Suspect(String),
     Fail(String),
 }
 
 fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
     let select = match parse_select(&record.sql) {
         ParseOutcome::Accepted(select) => *select,
-        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => return Outcome::Skip,
+        ParseOutcome::Unsupported { .. } => return Outcome::Skip,
+        ParseOutcome::Invalid { message, .. } => {
+            return Outcome::Suspect(format!("parser rejected oracle-valid SQL: {message}"))
+        }
     };
     let Some(from) = &select.from else {
         return Outcome::Skip;
@@ -138,12 +198,16 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
     let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
     let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
         Ok(s) => s,
-        Err(_) => return Outcome::Skip,
+        Err(e) => return Outcome::Suspect(format!("reading fixture schema: {e}")),
     };
     let Some(schema) = schemas
         .iter()
         .find(|s| s.name.eq_ignore_ascii_case(&from.name))
     else {
+        // Not a suspect: `read_schema` returns only `type = 'table'`
+        // rows, so a name it doesn't know is most likely a VIEW —
+        // out-of-slice for V2, and indistinguishable from a genuinely
+        // missing table without reading sqlite_master's other row types.
         return Outcome::Skip;
     };
 
@@ -240,8 +304,10 @@ pub fn run_file(oracle: &Path, script_path: &Path) -> FileTally {
         file: file_name,
         pass: 0,
         skip: 0,
+        suspect: 0,
         fail: 0,
         failures: Vec::new(),
+        suspects: Vec::new(),
     };
     let mut pending_setup = String::new();
 
@@ -258,9 +324,23 @@ pub fn run_file(oracle: &Path, script_path: &Path) -> FileTally {
                     oracle_exec_write(oracle, &db_path, &pending_setup);
                     pending_setup.clear();
                 }
-                match run_query(&db_path, query) {
+                // A panic in the engine would otherwise abort the whole
+                // run before the caller can commit the tallies, leaving
+                // the published metric stale rather than red.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_query(&db_path, query)
+                }))
+                .unwrap_or_else(|_| Outcome::Fail("engine panicked".to_string()));
+                match outcome {
                     Outcome::Pass => tally.pass = tally.pass.saturating_add(1),
                     Outcome::Skip => tally.skip = tally.skip.saturating_add(1),
+                    Outcome::Suspect(reason) => {
+                        tally.suspect = tally.suspect.saturating_add(1);
+                        tally.suspects.push(format!(
+                            "{}:{}: {reason} — {:?}",
+                            tally.file, query.line, query.sql
+                        ));
+                    }
                     Outcome::Fail(reason) => {
                         tally.fail = tally.fail.saturating_add(1);
                         tally.failures.push(format!(
