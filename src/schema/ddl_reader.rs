@@ -178,18 +178,107 @@ fn is_table_constraint(def: &str) -> bool {
         || upper.starts_with("CONSTRAINT")
 }
 
+/// Replaces the contents of quoted regions (`'...'`, `"..."`,
+/// `` `...` ``, `[...]`) and comments (`--...`, `/*...*/`) with spaces,
+/// preserving every other byte and the overall byte length — so a
+/// masked offset always lines up with the same offset in the original
+/// string. Callers that need to find top-level structure (parens,
+/// commas, keywords) scan the masked bytes but slice the *original*
+/// string for the text they return, so quoted content survives intact
+/// while it can no longer be mistaken for syntax (#135: a comma or the
+/// words PRIMARY/KEY inside a string literal used to be indistinguishable
+/// from the real thing).
+fn mask_quotes_and_comments(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0usize;
+    let at = |i: usize| bytes.get(i).copied();
+    let blank = |out: &mut [u8], i: usize| {
+        if let Some(b) = out.get_mut(i) {
+            *b = b' ';
+        }
+    };
+    while let Some(here) = at(i) {
+        match here {
+            b'\'' | b'"' => {
+                let quote = here;
+                blank(&mut out, i);
+                i = i.saturating_add(1);
+                while let Some(b) = at(i) {
+                    if b == quote {
+                        blank(&mut out, i);
+                        i = i.saturating_add(1);
+                        // A doubled quote (`''`/`""`) is an escaped
+                        // literal quote character, not the closing one.
+                        if at(i) == Some(quote) {
+                            blank(&mut out, i);
+                            i = i.saturating_add(1);
+                            continue;
+                        }
+                        break;
+                    }
+                    blank(&mut out, i);
+                    i = i.saturating_add(1);
+                }
+            }
+            b'`' | b'[' => {
+                let close = if here == b'`' { b'`' } else { b']' };
+                blank(&mut out, i);
+                i = i.saturating_add(1);
+                while let Some(b) = at(i) {
+                    blank(&mut out, i);
+                    i = i.saturating_add(1);
+                    if b == close {
+                        break;
+                    }
+                }
+            }
+            b'-' if at(i.saturating_add(1)) == Some(b'-') => {
+                while let Some(b) = at(i) {
+                    if b == b'\n' {
+                        break;
+                    }
+                    blank(&mut out, i);
+                    i = i.saturating_add(1);
+                }
+            }
+            b'/' if at(i.saturating_add(1)) == Some(b'*') => {
+                blank(&mut out, i);
+                blank(&mut out, i.saturating_add(1));
+                i = i.saturating_add(2);
+                while let Some(b) = at(i) {
+                    if b == b'*' && at(i.saturating_add(1)) == Some(b'/') {
+                        blank(&mut out, i);
+                        blank(&mut out, i.saturating_add(1));
+                        i = i.saturating_add(2);
+                        break;
+                    }
+                    blank(&mut out, i);
+                    i = i.saturating_add(1);
+                }
+            }
+            _ => i = i.saturating_add(1),
+        }
+    }
+    out
+}
+
 /// Byte range *between* the outer parens of a `CREATE TABLE`'s
 /// column-definition list, or `None` when there is no balanced list.
+/// Paren depth is tracked over the quote/comment-masked text (#135) so a
+/// paren inside a string literal can't unbalance the scan, but the
+/// returned range indexes the original `sql` string.
 fn column_list_span(sql: &str) -> Option<(usize, usize)> {
-    let start = sql.find('(')?;
+    let masked = mask_quotes_and_comments(sql);
+    let start = masked.iter().position(|&b| b == b'(')?;
     let mut depth = 0i32;
-    for (i, c) in sql.get(start..)?.char_indices() {
-        match c {
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
+    for (offset, &b) in masked.get(start..)?.iter().enumerate() {
+        match b {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return Some((start.saturating_add(1), start.saturating_add(i)));
+                    return Some((start.saturating_add(1), start.saturating_add(offset)));
                 }
             }
             _ => {}
@@ -205,12 +294,15 @@ fn column_list_span(sql: &str) -> Option<(usize, usize)> {
 /// index against `TableSchema::columns`. Two copies of this loop would
 /// let the lists drift and silently mis-target the rowid substitution,
 /// so they share one implementation rather than mirroring each other.
+/// Splits over the quote/comment-masked text (#135) so a comma inside a
+/// string literal (e.g. `DEFAULT 'a,b'`) is not mistaken for a column
+/// separator; the returned slices still come from the original `inner`.
 fn split_top_level_commas(inner: &str) -> Vec<&str> {
+    let masked = mask_quotes_and_comments(inner);
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut part_start = 0usize;
-    let bytes = inner.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
+    for (i, &b) in masked.iter().enumerate() {
         match b {
             b'(' => depth = depth.saturating_add(1),
             b')' => depth = depth.saturating_sub(1),
@@ -270,6 +362,17 @@ fn column_type(def: &str) -> String {
 /// text. Shares [`split_top_level_commas`] and [`is_table_constraint`]
 /// with [`parse_create_table`], so the two column lists cannot drift.
 pub(crate) fn column_defs(schema: &TableSchema) -> Vec<&str> {
+    all_defs(schema)
+        .into_iter()
+        .filter(|def| !is_table_constraint(def))
+        .collect()
+}
+
+/// Every top-level def in the column list, column definitions and
+/// table-level constraints alike — the raw material [`column_defs`]
+/// filters down and [`rowid_alias_column`] additionally needs the
+/// constraint side of (to recognize a table-level `PRIMARY KEY(col)`).
+fn all_defs(schema: &TableSchema) -> Vec<&str> {
     let Some((start, end)) = column_list_span(&schema.sql) else {
         return Vec::new();
     };
@@ -277,9 +380,69 @@ pub(crate) fn column_defs(schema: &TableSchema) -> Vec<&str> {
         return Vec::new();
     };
     split_top_level_commas(inner)
+}
+
+/// The table-level constraint defs `column_defs` filters out — the
+/// counterpart `rowid_alias_column` scans for a `PRIMARY KEY(col)` form.
+fn table_constraint_defs(schema: &TableSchema) -> Vec<&str> {
+    all_defs(schema)
         .into_iter()
-        .filter(|def| !is_table_constraint(def))
+        .filter(|def| is_table_constraint(def))
         .collect()
+}
+
+/// Whether `def` is a column definition carrying an inline
+/// `INTEGER PRIMARY KEY` (excluding the `DESC` form, which SQLite does
+/// not treat as a rowid alias). Scans the quote/comment-masked text
+/// (#135) so a string literal mentioning "primary key" — e.g.
+/// `DEFAULT 'primary key'` — can't be mistaken for the real constraint.
+fn is_integer_primary_key_inline(def: &str) -> bool {
+    let masked = mask_quotes_and_comments(def);
+    let masked = std::str::from_utf8(&masked).unwrap_or_default();
+    let upper = masked.to_ascii_uppercase();
+    let is_pk = upper
+        .split(|c: char| !c.is_alphanumeric())
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w == ["PRIMARY", "KEY"]);
+    is_pk
+        && upper.split_whitespace().any(|w| w == "INTEGER")
+        // `INTEGER PRIMARY KEY DESC` is deliberately NOT a rowid
+        // alias in SQLite — the DESC form gets its own b-tree index
+        // and the column is stored normally, so substituting the
+        // cursor's rowid would return values that aren't there.
+        && !upper.split_whitespace().any(|w| w == "DESC")
+}
+
+/// Whether `def` declares an `INTEGER` type (masked, so a string literal
+/// can't supply the word), regardless of any inline constraint.
+fn is_integer_column(def: &str) -> bool {
+    let masked = mask_quotes_and_comments(def);
+    let masked = std::str::from_utf8(&masked).unwrap_or_default();
+    masked
+        .to_ascii_uppercase()
+        .split_whitespace()
+        .any(|w| w == "INTEGER")
+}
+
+/// If `constraint` is a table-level `PRIMARY KEY(col)` naming exactly
+/// one column, returns that column's (unquoted) name.
+fn primary_key_single_column(constraint: &str) -> Option<String> {
+    let upper = constraint.trim_start().to_ascii_uppercase();
+    if !upper.starts_with("PRIMARY KEY") {
+        return None;
+    }
+    let open = constraint.find('(')?;
+    let close = constraint.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let inner = constraint.get(open.saturating_add(1)..close)?;
+    let cols = split_top_level_commas(inner);
+    match cols.as_slice() {
+        [only] => Some(column_name(only)),
+        _ => None,
+    }
 }
 
 /// The one-column special case SQLite calls the rowid alias: a table
@@ -298,21 +461,26 @@ pub(crate) fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
     if schema.without_rowid {
         return None;
     }
-    for (idx, def) in column_defs(schema).iter().enumerate() {
-        let upper = def.to_ascii_uppercase();
-        let is_int_pk = upper
-            .split(|c: char| !c.is_alphanumeric())
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|w| w == ["PRIMARY", "KEY"])
-            && upper.split_whitespace().any(|w| w == "INTEGER")
-            // `INTEGER PRIMARY KEY DESC` is deliberately NOT a rowid
-            // alias in SQLite — the DESC form gets its own b-tree index
-            // and the column is stored normally, so substituting the
-            // cursor's rowid would return values that aren't there.
-            && !upper.split_whitespace().any(|w| w == "DESC");
-        if is_int_pk {
+    let defs = column_defs(schema);
+    for (idx, def) in defs.iter().enumerate() {
+        if is_integer_primary_key_inline(def) {
             return Some(idx);
+        }
+    }
+    // The table-level `PRIMARY KEY(col)` form: SQLite only treats this
+    // as a rowid alias when it names the table's one and only column,
+    // and that column is INTEGER-typed (a composite key, or a second
+    // column, rules it out).
+    if let [only] = defs.as_slice() {
+        if is_integer_column(only) {
+            let col_name = column_name(only);
+            let is_alias = table_constraint_defs(schema)
+                .iter()
+                .filter_map(|c| primary_key_single_column(c))
+                .any(|pk_col| pk_col.eq_ignore_ascii_case(&col_name));
+            if is_alias {
+                return Some(0);
+            }
         }
     }
     None
