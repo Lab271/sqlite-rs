@@ -224,6 +224,11 @@ the just-produced duplicate row if present.
 **Tests:** `src/vdbe/cursor.rs::tests::distinct_probes_ephemeral_index_before_emit`,
 `tests/vdbe/cursor_sorter_test.rs::distinct_program_discards_rows_already_seen`
 
+DISTINCT's NULL-equals-NULL dedup — unlike `=`, and unlike ORDER BY's
+default NULL placement — is pinned separately in Requirement 9's "NULL
+is comparison-distinct across `=`, DISTINCT, and ORDER BY" scenario
+(#146).
+
 #### Scenario: Equality lookup uses SeekRowid instead of a full scan
 
 - GIVEN `SELECT * FROM products WHERE id = 2` (harvested: `SeekRowid`
@@ -562,6 +567,24 @@ sorter-sourced rows.
 **Tests:** `tests/codegen/select_test.rs::order_by_ordinal_resolves_result_column`,
 `tests/codegen/select_test.rs::order_by_alias_resolves_result_column`,
 `tests/codegen/select_test.rs::order_by_expression_is_refused`
+
+#### Scenario: NULL is comparison-distinct across `=`, DISTINCT, and ORDER BY (#146)
+
+- GIVEN a column containing NULL alongside non-NULL values, with no
+  explicit `NULLS FIRST`/`NULLS LAST` in the `ORDER BY` (that override is
+  Requirement 9's own `SorterOpen`-descriptor mechanism, unaffected by
+  this scenario)
+- THEN `=` (spec 008 Requirement 4's three-valued logic) treats two NULLs
+  as UNKNOWN, never equal; DISTINCT's ephemeral-index dedup (Requirement
+  4 of this spec) treats two NULLs as equal via exact record-byte
+  equality, collapsing them to one row; and the sorter's default (no
+  `NULLS` clause) places NULL first on `ASC` and last on `DESC` — three
+  independent rules for the same value, none derivable from another, so
+  a refactor unifying these comparison paths must preserve all three
+
+**Tests:** `src/vdbe/sorter.rs::tests::ascending_default_places_nulls_first`,
+`src/vdbe/sorter.rs::tests::descending_default_places_nulls_last`,
+`src/vdbe/cursor.rs::tests::distinct_treats_two_nulls_as_equal_unlike_the_eq_operator`
 
 ### Requirement 10: EXPLAIN Output Format [MUST]
 
