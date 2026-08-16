@@ -183,6 +183,51 @@ fn case_compiles_to_a_jump_chain() {
 /// through the real compiled path rather than a hand-assembled
 /// `Program` (`tests/vdbe/oracle_vectors_test.rs` covers the
 /// hand-assembled acceptance bar for #89).
+/// Reads one JSON string field out of a `.jsonl` line, honouring JSON's
+/// backslash escapes.
+///
+/// The obvious `split('"').next()` shortcut is wrong twice over: it
+/// stops at an escaped `\"` instead of the closing quote, and it leaves
+/// `\\` doubled. That second one silently changed the SQL under test —
+/// `'a%b' LIKE 'a\\%b' ESCAPE '\\'` reached the compiler with a
+/// two-character escape, which SQLite itself rejects ("ESCAPE
+/// expression must be a single character"). The resulting failure was
+/// filed against `Like`'s codegen for a long time; the engine had been
+/// right all along, and the two `ESCAPE` vectors pass now that the
+/// query they describe is the query that runs.
+fn json_string_field(line: &str, field: &str) -> String {
+    let rest = line
+        .split(&format!(r#""{field}": ""#))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {field} field in {line}"));
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return out,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    let code = u32::from_str_radix(&hex, 16)
+                        .unwrap_or_else(|_| panic!("bad \\u escape in {line}"));
+                    out.push(
+                        char::from_u32(code).unwrap_or_else(|| panic!("bad code point in {line}")),
+                    );
+                }
+                // `\\`, `\"`, `\/` and anything else: the escape is the
+                // character itself.
+                Some(other) => out.push(other),
+                None => panic!("trailing backslash in {line}"),
+            },
+            other => out.push(other),
+        }
+    }
+    panic!("unterminated {field} field in {line}")
+}
+
 fn walker_vectors() -> Vec<(String, Value)> {
     let content = std::fs::read_to_string("tests/corpus/expr_vectors/walker.jsonl")
         .expect("reading walker.jsonl");
@@ -190,24 +235,9 @@ fn walker_vectors() -> Vec<(String, Value)> {
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
-            let expr = line
-                .split(r#""expr": ""#)
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or_else(|| panic!("no expr field in {line}"))
-                .to_string();
-            let type_ = line
-                .split(r#""type": ""#)
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or_else(|| panic!("no type field in {line}"))
-                .to_string();
-            let value_quoted = line
-                .split(r#""value_quoted": ""#)
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or_else(|| panic!("no value_quoted field in {line}"))
-                .to_string();
+            let expr = json_string_field(line, "expr");
+            let type_ = json_string_field(line, "type");
+            let value_quoted = json_string_field(line, "value_quoted");
             let expected = match type_.as_str() {
                 "null" => Value::Null,
                 "integer" => Value::Integer(value_quoted.parse().unwrap()),
@@ -241,23 +271,19 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   semantics exactly (`MustBeInt` errors instead of truncating) — see
 ///   `compile_value`'s `Cast` arm doc comment.
 /// - `&`/`|`/`<<`/`>>`/`~`/`||`: no bitwise/concat opcode exists in the
-///   frozen V2 52-opcode set — see `compile_value`'s catch-all `Binary`
+///   frozen V2 54-opcode set — see `compile_value`'s catch-all `Binary`
 ///   arm and `UnaryOp::BitNot` arm.
-/// - `AND`/`OR`/`BETWEEN`/`IN` combined with a NULL operand: this
-///   ticket's 2-target (true/false) jump scheme conflates NULL with
-///   FALSE, which is correct for a top-level WHERE (both exclude the
-///   row) but not for full three-valued propagation into a value
-///   result — a known, documented scope gap (see `codegen/expr.rs`'s
-///   module doc and this file's `and_short_circuits_on_false_first_operand`-
-///   style scenarios, which only exercise NULL-free operands).
+///
+/// `NOT`/`AND`/`OR`/`BETWEEN`/`IN` over NULL operands used to be listed
+/// here — the 2-target jump scheme conflated NULL with FALSE, which is
+/// right for a top-level WHERE and wrong everywhere else. #134 gave
+/// `compile_cond` a `NullTarget` and value mode the `Null`/`Not`
+/// opcodes, so those vectors now run.
 /// - Bare `-9223372036854775808`: `i64::MIN`'s literal token doesn't
 ///   round-trip through this ticket's `i32`-truncating `Integer` opcode
 ///   path for values outside `i32`'s range in the same way SQLite's own
 ///   64-bit literal handling does — a numeric-literal-width limitation,
 ///   not a control-flow one.
-/// - `LIKE ... ESCAPE`: the escape-character argument's register
-///   ordering has a known bug in this ticket's `Like` value-mode
-///   lowering (tracked as a follow-up, not chased further here).
 /// - Real-literal arithmetic (`7.0/2`, `7%2.5`, etc.): REAL literals
 ///   compile to their textual form (no `OP_Real`-equivalent opcode
 ///   exists), so arithmetic on them takes the TEXT-coercion path
@@ -272,15 +298,6 @@ const KNOWN_GAPS: &[&str] = &[
     "~5",
     "||",
     "-9223372036854775808",
-    "ESCAPE",
-    "AND (1/0)",
-    "OR (1/0)",
-    "NULL AND",
-    "NULL OR",
-    "BETWEEN NULL",
-    "NULL BETWEEN",
-    "(1,NULL,3)",
-    "NULL IN",
     "7.0/2",
     "7/2.0",
     "7%2.5",
@@ -327,8 +344,15 @@ fn walker_vectors_pass_through_the_compiled_path() {
         }
         passed += 1;
     }
+    // A ratchet, not a floor: 46 is what passes today (44 before #134
+    // fixed three-valued logic, +2 from the two `ESCAPE` vectors the
+    // harness used to mis-parse). Adding vectors or closing a
+    // `KNOWN_GAPS` entry should raise this number in the same commit;
+    // a drop means a regression the per-vector assertion below cannot
+    // see, because a vector that stops *compiling* is skipped, not
+    // failed.
     assert!(
-        passed >= 20,
+        passed >= 46,
         "expected most walker vectors to pass through the compiled path, only {passed} did ({skipped} known-gap skipped)"
     );
     assert!(

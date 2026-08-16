@@ -6,7 +6,9 @@
 //! entry point used for result columns, function arguments, and CASE
 //! branch results.
 
-use crate::codegen::{p4_coll_seq, CodegenError, Emitter, Label, RegAlloc, Target};
+use crate::codegen::{
+    p4_coll_seq, CodegenError, CondTargets, Emitter, Label, NullTarget, RegAlloc, Target,
+};
 use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{Collation, Instruction, Opcode, P4};
@@ -23,65 +25,77 @@ pub(crate) fn column_index(schema: &TableSchema, name: &str) -> Option<usize> {
         .position(|c| c.eq_ignore_ascii_case(name))
 }
 
-/// Compiles `expr` as a boolean condition: `true_target`/`false_target`
-/// name where control continues on each outcome (a real jump label, or
-/// "fall through to the next emitted instruction").
+/// Compiles `expr` as a boolean condition. [`CondTargets`] says where
+/// control continues on each of the three outcomes: `on_true`/
+/// `on_false` are real jump labels (or "fall through to the next
+/// emitted instruction"), and `on_null` names which of those two the
+/// *unknown* outcome joins — SQL is three-valued, and a jump has two
+/// destinations.
+///
+/// Callers that want SQL's `WHERE` semantics use
+/// [`CondTargets::null_is_false`]: a predicate whose truth is unknown
+/// excludes the row exactly like a false one. What they must NOT do is
+/// assume that stays true under negation — `NOT unknown` is still
+/// unknown, so [`CondTargets::negate`] swaps the two targets *and*
+/// flips `on_null`, leaving the unknown outcome on the address it
+/// already had (#134).
 pub(crate) fn compile_cond(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     schema: &TableSchema,
     cursor: i32,
     expr: &Expr,
-    true_target: Target,
-    false_target: Target,
+    targets: CondTargets,
 ) -> Result<(), CodegenError> {
     match &expr.kind {
-        ExprKind::Paren(inner) => {
-            compile_cond(em, reg, schema, cursor, inner, true_target, false_target)
-        }
+        ExprKind::Paren(inner) => compile_cond(em, reg, schema, cursor, inner, targets),
 
-        // KNOWN WRONG (#134): swapping the targets resolves SQL's
-        // "unknown" to true, so `WHERE NOT (x = 5)` returns rows where
-        // `x IS NULL` — the same defect the `Between`/`In` arms below
-        // now avoid. It cannot be fixed here: this function's contract
-        // already merges FALSE and NULL into `false_target`, and the
-        // value path has no NULL to materialize (no `Null` opcode in
-        // the V2 set). Fixing it needs one of those two contracts to
-        // change, which #134 scopes.
+        // Swapping the targets is right — it is what SQLite's own
+        // `sqlite3ExprIfTrue`/`sqlite3ExprIfFalse` pair does for
+        // `TK_NOT` — but only once `on_null` comes along for the
+        // ride. Flipping it keeps the unknown outcome on the same
+        // address across the swap; without that (the #134 bug) NULL
+        // silently inherited whichever target had just become "false",
+        // i.e. the keep-the-row one, and `WHERE NOT (x = 5)` returned
+        // rows where `x IS NULL`.
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
-        } => compile_cond(em, reg, schema, cursor, inner, false_target, true_target),
+        } => compile_cond(em, reg, schema, cursor, inner, targets.negate()),
 
         ExprKind::Binary {
             op: BinaryOp::And,
             lhs,
             rhs,
         } => {
-            // `false_target` must be a real label before `lhs` compiles
+            // `on_false` must be a real label before `lhs` compiles
             // — if it were left as `Fallthrough`, "fall through" would
             // wrongly mean "continue into rhs's test code" (the next
             // thing physically emitted) rather than the AND's actual
             // false continuation, which only exists after `rhs` compiles.
-            let (false_label, is_new) = ensure_label(em, false_target);
+            //
+            // `on_null` passes to both operands unchanged, and that
+            // is exactly three-valued AND, both ways round. With
+            // `NullTarget::False`: an unknown `lhs` goes straight to
+            // the false continuation, which is right because every
+            // completion of `unknown AND rhs` (false, or unknown) lands
+            // there too. With `NullTarget::True`: an unknown `lhs`
+            // falls through into `rhs`'s test, which is also right —
+            // `unknown AND false` is false and reaches `false_label`
+            // via `rhs`, while `unknown AND true`/`unknown AND unknown`
+            // are unknown and reach `on_true`, where NULL belongs
+            // under this setting.
+            let (false_label, is_new) = ensure_label(em, targets.on_false);
+            let operand = targets.with_false(Target::Jump(false_label));
             compile_cond(
                 em,
                 reg,
                 schema,
                 cursor,
                 lhs,
-                Target::Fallthrough,
-                Target::Jump(false_label),
+                operand.with_true(Target::Fallthrough),
             )?;
-            compile_cond(
-                em,
-                reg,
-                schema,
-                cursor,
-                rhs,
-                true_target,
-                Target::Jump(false_label),
-            )?;
+            compile_cond(em, reg, schema, cursor, rhs, operand)?;
             if is_new {
                 em.place(false_label);
             }
@@ -93,29 +107,27 @@ pub(crate) fn compile_cond(
             lhs,
             rhs,
         } => {
-            // Symmetric to `And` above: `true_target` must be a real
+            // Symmetric to `And` above: `on_true` must be a real
             // label before `lhs` compiles, or a `Fallthrough` true
             // would wrongly land in `rhs`'s test code instead of OR's
-            // actual true continuation.
-            let (true_label, is_new) = ensure_label(em, true_target);
+            // actual true continuation. `on_null` threads through
+            // unchanged for the mirror-image reason: under
+            // `NullTarget::True` an unknown `lhs` jumps straight to
+            // `true_label` (every completion of `unknown OR rhs` is
+            // true or unknown, and both belong there), and under
+            // `NullTarget::False` it falls into `rhs`, which decides
+            // between true and the false/unknown continuation.
+            let (true_label, is_new) = ensure_label(em, targets.on_true);
+            let operand = targets.with_true(Target::Jump(true_label));
             compile_cond(
                 em,
                 reg,
                 schema,
                 cursor,
                 lhs,
-                Target::Jump(true_label),
-                Target::Fallthrough,
+                operand.with_false(Target::Fallthrough),
             )?;
-            compile_cond(
-                em,
-                reg,
-                schema,
-                cursor,
-                rhs,
-                Target::Jump(true_label),
-                false_target,
-            )?;
+            compile_cond(em, reg, schema, cursor, rhs, operand)?;
             if is_new {
                 em.place(true_label);
             }
@@ -136,7 +148,7 @@ pub(crate) fn compile_cond(
             let collation = collation_of(lhs).or_else(|| collation_of(rhs));
             let l = compile_value(em, reg, schema, cursor, lhs)?;
             let r = compile_value(em, reg, schema, cursor, rhs)?;
-            emit_compare_false_jump(em, *op, l, r, collation, true_target, false_target)
+            emit_compare_false_jump(em, *op, l, r, collation, targets)
         }
 
         ExprKind::Is { lhs, rhs, negated } => {
@@ -145,10 +157,15 @@ pub(crate) fn compile_cond(
             // No single opcode expresses this; compute it into a
             // 0/1 register first, then test truthiness like any other
             // value-mode boolean (LIKE/GLOB take the same shape).
+            // `on_null` is deliberately ignored here and in the
+            // `IsNull` arm below: these two are the only conditions in
+            // SQL that are always definitely true or definitely false,
+            // so they have no unknown outcome to route, and swapping
+            // the targets for `negated` is sound without flipping it.
             let (t, f) = if *negated {
-                (false_target, true_target)
+                (targets.on_false, targets.on_true)
             } else {
-                (true_target, false_target)
+                (targets.on_true, targets.on_false)
             };
             let l = compile_value(em, reg, schema, cursor, lhs)?;
             let r = compile_value(em, reg, schema, cursor, rhs)?;
@@ -203,7 +220,7 @@ pub(crate) fn compile_cond(
             } else {
                 Opcode::NotNull
             };
-            finish_bool(em, true_target, false_target, |em, false_label| {
+            finish_bool(em, targets.on_true, targets.on_false, |em, false_label| {
                 let addr = em.emit(Instruction::new(false_jump_op, r, 0, 0));
                 em.patch_p2(addr, false_label);
             });
@@ -236,50 +253,34 @@ pub(crate) fn compile_cond(
             if *negated {
                 let lt_lo = cmp(BinaryOp::Lt, lo);
                 let gt_hi = cmp(BinaryOp::Gt, hi);
-                let (t_label, t_is_new) = ensure_label(em, true_target);
+                let (t_label, t_is_new) = ensure_label(em, targets.on_true);
+                let arm = targets.with_true(Target::Jump(t_label));
                 compile_cond(
                     em,
                     reg,
                     schema,
                     cursor,
                     &lt_lo,
-                    Target::Jump(t_label),
-                    Target::Fallthrough,
+                    arm.with_false(Target::Fallthrough),
                 )?;
-                compile_cond(
-                    em,
-                    reg,
-                    schema,
-                    cursor,
-                    &gt_hi,
-                    Target::Jump(t_label),
-                    false_target,
-                )?;
+                compile_cond(em, reg, schema, cursor, &gt_hi, arm)?;
                 if t_is_new {
                     em.place(t_label);
                 }
             } else {
                 let ge_lo = cmp(BinaryOp::Ge, lo);
                 let le_hi = cmp(BinaryOp::Le, hi);
-                let (f_label, f_is_new) = ensure_label(em, false_target);
+                let (f_label, f_is_new) = ensure_label(em, targets.on_false);
+                let arm = targets.with_false(Target::Jump(f_label));
                 compile_cond(
                     em,
                     reg,
                     schema,
                     cursor,
                     &ge_lo,
-                    Target::Fallthrough,
-                    Target::Jump(f_label),
+                    arm.with_true(Target::Fallthrough),
                 )?;
-                compile_cond(
-                    em,
-                    reg,
-                    schema,
-                    cursor,
-                    &le_hi,
-                    true_target,
-                    Target::Jump(f_label),
-                )?;
+                compile_cond(em, reg, schema, cursor, &le_hi, arm)?;
                 if f_is_new {
                     em.place(f_label);
                 }
@@ -296,9 +297,9 @@ pub(crate) fn compile_cond(
                 // `x IN ()` is always false, even for a NULL `x` — an
                 // empty list leaves nothing to be uncertain against.
                 let (t, f) = if *negated {
-                    (false_target, true_target)
+                    (targets.on_false, targets.on_true)
                 } else {
-                    (true_target, false_target)
+                    (targets.on_true, targets.on_false)
                 };
                 return compile_always_false(em, t, f);
             }
@@ -319,8 +320,8 @@ pub(crate) fn compile_cond(
             let saw_null = reg.alloc();
             em.emit(Instruction::new(Opcode::Integer, 0, saw_null, 0));
 
-            let (true_label, true_is_new) = ensure_label(em, true_target);
-            let (false_label, false_is_new) = ensure_label(em, false_target);
+            let (true_label, true_is_new) = ensure_label(em, targets.on_true);
+            let (false_label, false_is_new) = ensure_label(em, targets.on_false);
             // A match found means IN is true; exhausting the list
             // without one means IN is false — `negated` (`NOT IN`)
             // swaps which final label each of those routes to. An
@@ -331,9 +332,18 @@ pub(crate) fn compile_cond(
             } else {
                 (true_label, false_label)
             };
+            // `negated` does not move the unknown outcome — `NOT
+            // unknown` is still unknown — so it routes by `on_null`
+            // alone, exactly like every other arm (#134). Before that
+            // ticket this was hardcoded to `false_label`, which was
+            // right only because `WHERE` was the sole caller.
+            let null_label = match targets.on_null {
+                NullTarget::True => true_label,
+                NullTarget::False => false_label,
+            };
 
             let inner_null_addr = em.emit(Instruction::new(Opcode::IsNull, l, 0, 0));
-            em.patch_p2(inner_null_addr, false_label);
+            em.patch_p2(inner_null_addr, null_label);
 
             for item in list.iter() {
                 let collation = collation_of(inner).or_else(|| collation_of(item));
@@ -357,11 +367,10 @@ pub(crate) fn compile_cond(
             // `unmatched_label` only if every comparison was a clean
             // non-match (`saw_null` still 0); otherwise at least one
             // comparison was against NULL, so the honest answer is
-            // "unknown", which — like any NULL condition — excludes
-            // the row via `false_label`.
+            // "unknown", which goes wherever `on_null` says.
             let addr = em.emit(Instruction::new(Opcode::IfNot, saw_null, 0, 0));
             em.patch_p2(addr, unmatched_label);
-            em.goto(false_label);
+            em.goto(null_label);
 
             if false_is_new {
                 em.place(false_label);
@@ -374,13 +383,7 @@ pub(crate) fn compile_cond(
 
         ExprKind::Like { .. } => {
             let r = compile_value(em, reg, schema, cursor, expr)?;
-            finish_bool(em, true_target, false_target, |em, false_label| {
-                // IfNot: jump to false_label when r is falsy OR NULL
-                // (p3=1), matching three-valued WHERE semantics — NULL
-                // excludes the row just like FALSE.
-                let addr = em.emit(Instruction::new(Opcode::IfNot, r, 0, 1));
-                em.patch_p2(addr, false_label);
-            });
+            finish_truthy(em, r, targets);
             Ok(())
         }
 
@@ -389,18 +392,50 @@ pub(crate) fn compile_cond(
         // truthiness the same way as LIKE above.
         _ => {
             let r = compile_value(em, reg, schema, cursor, expr)?;
-            finish_bool(em, true_target, false_target, |em, false_label| {
-                let addr = em.emit(Instruction::new(Opcode::IfNot, r, 0, 1));
-                em.patch_p2(addr, false_label);
-            });
+            finish_truthy(em, r, targets);
             Ok(())
         }
     }
 }
 
-/// `x IN ()` / other statically-false conditions: jump to `false_target`
-/// (or fall through if it's already the fallthrough), never touching
-/// `true_target`.
+/// Tests an already-computed value register for truthiness as a
+/// three-valued condition. `IfNot`'s `P3` flag folds NULL into the
+/// false jump, which covers `NullTarget::False` in one instruction;
+/// the other setting needs an explicit `IsNull` probe first, because
+/// no single opcode routes NULL and falsy to *different* addresses.
+fn finish_truthy(em: &mut Emitter, r: i32, targets: CondTargets) {
+    match targets.on_null {
+        NullTarget::False => {
+            finish_bool(em, targets.on_true, targets.on_false, |em, false_label| {
+                let addr = em.emit(Instruction::new(Opcode::IfNot, r, 0, 1));
+                em.patch_p2(addr, false_label);
+            });
+        }
+        NullTarget::True => {
+            let (t_label, t_is_new) = ensure_label(em, targets.on_true);
+            let addr = em.emit(Instruction::new(Opcode::IsNull, r, 0, 0));
+            em.patch_p2(addr, t_label);
+            // NULL is already gone, so `IfNot`'s P3 stays 0 and the
+            // remaining test is the plain two-valued one.
+            finish_bool(
+                em,
+                Target::Jump(t_label),
+                targets.on_false,
+                |em, false_label| {
+                    let addr = em.emit(Instruction::new(Opcode::IfNot, r, 0, 0));
+                    em.patch_p2(addr, false_label);
+                },
+            );
+            if t_is_new {
+                em.place(t_label);
+            }
+        }
+    }
+}
+
+/// `x IN ()` / other statically-false conditions: jump to the false
+/// target (or fall through if it's already the fallthrough), never
+/// touching the true one.
 fn compile_always_false(
     em: &mut Emitter,
     _true_target: Target,
@@ -414,7 +449,7 @@ fn compile_always_false(
 
 /// Given a primitive that emits a "jump to `false_label` when the
 /// condition is false, fall through when true" instruction, resolves
-/// the full `(true_target, false_target)` combination — inserting an
+/// the full `(on_true, on_false)` combination — inserting an
 /// extra `Goto` when both are already real jump targets.
 fn finish_bool(
     em: &mut Emitter,
@@ -479,32 +514,47 @@ fn emit_compare_false_jump(
     lhs: i32,
     rhs: i32,
     collation: Option<Collation>,
-    true_target: Target,
-    false_target: Target,
+    targets: CondTargets,
 ) -> Result<(), CodegenError> {
     let p4 = collation.map_or(P4::None, p4_coll_seq);
-    // `Ne` has no opcode of its own; it's `Eq` with true/false swapped.
-    // The caller only ever passes a comparison operator (guarded by its
-    // own `matches!` filter), so `Some` always holds; a non-comparison
-    // op is a codegen-internal error, not a reachable SQL-input case.
+    // `Ne` has no opcode of its own; it's `Eq` with true/false swapped
+    // — and that swap needs `null_target` flipped with it for the same
+    // reason `NOT` does (#134). Without the flip, `WHERE x <> 5`
+    // returned rows where `x IS NULL`: the NULL comparison reached the
+    // trailing `Goto`, which the swap had just repointed at the
+    // keep-the-row target. The caller only ever passes a comparison
+    // operator (guarded by its own `matches!` filter), so `Some` always
+    // holds; a non-comparison op is a codegen-internal error, not a
+    // reachable SQL-input case.
     let resolved = match op {
-        BinaryOp::Ne => Some((Opcode::Eq, false_target, true_target)),
-        BinaryOp::Eq => Some((Opcode::Eq, true_target, false_target)),
-        BinaryOp::Lt => Some((Opcode::Lt, true_target, false_target)),
-        BinaryOp::Le => Some((Opcode::Le, true_target, false_target)),
-        BinaryOp::Gt => Some((Opcode::Gt, true_target, false_target)),
-        BinaryOp::Ge => Some((Opcode::Ge, true_target, false_target)),
+        BinaryOp::Ne => Some((Opcode::Eq, targets.negate())),
+        BinaryOp::Eq => Some((Opcode::Eq, targets)),
+        BinaryOp::Lt => Some((Opcode::Lt, targets)),
+        BinaryOp::Le => Some((Opcode::Le, targets)),
+        BinaryOp::Gt => Some((Opcode::Gt, targets)),
+        BinaryOp::Ge => Some((Opcode::Ge, targets)),
         _ => None,
     };
-    let Some((opcode, t, f)) = resolved else {
+    let Some((opcode, targets)) = resolved else {
         return Err(CodegenError::Unsupported {
             reason: "emit_compare_false_jump called with a non-comparison operator".to_string(),
         });
     };
-    let (t_label, t_is_new) = ensure_label(em, t);
+    let (t_label, t_is_new) = ensure_label(em, targets.on_true);
+    // A NULL operand makes the compare opcode not jump at all, so it
+    // otherwise always lands on `f`. When the unknown outcome belongs
+    // with `t` instead, probe for it explicitly first — SQLite spells
+    // the same thing as the `SQLITE_JUMPIFNULL` bit in the compare
+    // instruction's P5, which this instruction format does not carry.
+    if targets.on_null == NullTarget::True {
+        let addr = em.emit(Instruction::new(Opcode::IsNull, lhs, 0, 0));
+        em.patch_p2(addr, t_label);
+        let addr = em.emit(Instruction::new(Opcode::IsNull, rhs, 0, 0));
+        em.patch_p2(addr, t_label);
+    }
     let addr = em.emit(Instruction::with_p4(opcode, lhs, 0, rhs, p4));
     em.patch_p2(addr, t_label);
-    if let Target::Jump(fl) = f {
+    if let Target::Jump(fl) = targets.on_false {
         em.goto(fl);
     }
     if t_is_new {
@@ -513,8 +563,6 @@ fn emit_compare_false_jump(
     Ok(())
 }
 
-/// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
-/// unrecognized collation names fall back to `None` (BINARY default).
 /// Reads column `idx` of the row at `cursor` into `dest`, emitting
 /// `Rowid` rather than `Column` for a rowid-alias column. A table's
 /// `INTEGER PRIMARY KEY` column is stored as a NULL placeholder in
@@ -522,7 +570,12 @@ fn emit_compare_false_jump(
 /// NULL, so `SELECT x FROM t WHERE x=2` silently matched nothing until
 /// this substitution existed. `src/dump.rs` has always done the same
 /// thing; this is the compiled read path catching up.
-fn emit_column_read(
+///
+/// Every column read in the compiled path must come through here.
+/// `select.rs`'s result-column expansion emitted a bare `Column`
+/// instead, which is why `SELECT *` still answered NULL for an
+/// `INTEGER PRIMARY KEY` long after `SELECT id` was fixed.
+pub(crate) fn emit_column_read(
     em: &mut Emitter,
     schema: &TableSchema,
     cursor: i32,
@@ -560,6 +613,8 @@ fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> boo
     }
 }
 
+/// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
+/// unrecognized collation names fall back to `None` (BINARY default).
 fn collation_of(expr: &Expr) -> Option<Collation> {
     match &expr.kind {
         ExprKind::Collate { collation, .. } => match collation.to_ascii_uppercase().as_str() {
@@ -775,7 +830,17 @@ pub(crate) fn compile_value(
                 em.emit(Instruction::new(Opcode::Subtract, r, zero, dest));
                 Ok(dest)
             }
-            UnaryOp::Not => compile_bool_to_value(em, reg, schema, cursor, inner, true),
+            // `Not` is the whole reason this is not routed through
+            // `compile_bool_to_value`: it is the oracle's own lowering
+            // for `SELECT NOT x` (one instruction, verified against the
+            // pinned 3.53.4 `EXPLAIN`), and it propagates NULL in a
+            // register, which jump-mode code cannot do at all.
+            UnaryOp::Not => {
+                let r = compile_value(em, reg, schema, cursor, inner)?;
+                let dest = reg.alloc();
+                em.emit(Instruction::new(Opcode::Not, r, dest, 0));
+                Ok(dest)
+            }
             // No bitwise-NOT opcode exists in the frozen V2 set —
             // known gap; passes the operand through unchanged rather
             // than inventing a new opcode.
@@ -821,12 +886,32 @@ pub(crate) fn compile_value(
             Ok(dest)
         }
 
+        // Comparisons and the logical connectives are conditions used
+        // in a value context: they answer true/false/unknown, which
+        // `compile_bool_to_value` materializes three-valued. Before
+        // #134 they fell into the catch-all below and compiled to a
+        // bare NULL register, so `SELECT price = 10` answered NULL for
+        // every row, NULL operand or not.
+        ExprKind::Binary {
+            op:
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::And
+                | BinaryOp::Or,
+            ..
+        } => compile_bool_to_value(em, reg, schema, cursor, expr),
+
         // No dedicated opcode exists for bitwise AND/OR/shift or `||`
-        // concatenation in the frozen V2 set (spec 009's 52-opcode
+        // concatenation in the frozen V2 set (spec 009's 54-opcode
         // inventory has no such category) — known gap, compiles to
         // NULL rather than inventing a new opcode.
         ExprKind::Binary { .. } => {
             let r = reg.alloc();
+            em.emit(Instruction::new(Opcode::Null, 0, r, 0));
             Ok(r)
         }
 
@@ -872,14 +957,16 @@ pub(crate) fn compile_value(
                     },
                     None => when_expr.clone(),
                 };
+                // A `WHEN` whose condition is unknown is not a match,
+                // exactly like a false one — `NullTarget::False`, the
+                // same setting `WHERE` uses.
                 compile_cond(
                     em,
                     reg,
                     schema,
                     cursor,
                     &cond,
-                    Target::Fallthrough,
-                    Target::Jump(next_label),
+                    CondTargets::null_is_false(Target::Fallthrough, Target::Jump(next_label)),
                 )?;
                 emit_branch_into(em, schema, cursor, then_expr, dest)?;
                 em.goto(end_label);
@@ -894,20 +981,10 @@ pub(crate) fn compile_value(
             match else_ {
                 Some(else_expr) => emit_branch_into(em, schema, cursor, else_expr, dest)?,
                 None => {
-                    // No dedicated "load NULL" opcode exists; an
-                    // out-of-range `Column` read reliably yields NULL
-                    // (`cursor.rs`'s `column` doc: unlisted indices
-                    // read as NULL) regardless of the cursor's real
-                    // schema width, so this is used purely as a NULL
-                    // source, not a real column read.
-                    let sentinel_index =
-                        i32::try_from(schema.columns.len().saturating_add(1)).unwrap_or(i32::MAX);
-                    em.emit(Instruction::new(
-                        Opcode::Column,
-                        cursor,
-                        sentinel_index,
-                        dest,
-                    ));
+                    // This used to fake a NULL with an out-of-range
+                    // `Column` read; `Null` (#134) says what it means,
+                    // and is what the oracle emits here.
+                    em.emit(Instruction::new(Opcode::Null, 0, dest, 0));
                 }
             }
             em.place(end_label);
@@ -921,24 +998,17 @@ pub(crate) fn compile_value(
         ExprKind::Is { .. }
         | ExprKind::IsNull { .. }
         | ExprKind::Between { .. }
-        | ExprKind::In { .. } => compile_bool_to_value(em, reg, schema, cursor, expr, false),
+        | ExprKind::In { .. } => compile_bool_to_value(em, reg, schema, cursor, expr),
     }
 }
 
-/// `IfNot`-based boolean negation of an already-computed truthy value
-/// register (used by `NOT LIKE`/`NOT GLOB`), materializing 0/1 into a
-/// fresh register.
+/// Boolean negation of an already-computed value register (used by
+/// `NOT LIKE`/`NOT GLOB`) into a fresh register. The old `IfNot`-based
+/// 0/1 materialization resolved a NULL `src` to 1; `Not` propagates it
+/// (#134), which is what `x NOT LIKE NULL` has to yield.
 fn compile_negate_value(em: &mut Emitter, reg: &mut RegAlloc, src: i32) -> i32 {
     let out = reg.alloc();
-    let true_label = em.new_label();
-    let end_label = em.new_label();
-    let addr = em.emit(Instruction::new(Opcode::IfNot, src, 0, 1));
-    em.patch_p2(addr, true_label);
-    em.emit(Instruction::new(Opcode::Integer, 0, out, 0));
-    em.goto(end_label);
-    em.place(true_label);
-    em.emit(Instruction::new(Opcode::Integer, 1, out, 0));
-    em.place(end_label);
+    em.emit(Instruction::new(Opcode::Not, src, out, 0));
     out
 }
 
@@ -986,7 +1056,14 @@ fn emit_branch_into(
                 P4::Str(s.clone()),
             ));
         }
-        ExprKind::Literal(Literal::Null) => {}
+        // `dest` is shared across branches and reused every scan
+        // iteration, so an explicit NULL branch has to overwrite it.
+        // Emitting nothing (the pre-#134 behavior, correct only for a
+        // never-written fresh register) leaked the previous row's
+        // result out of `SELECT CASE WHEN c THEN x ELSE NULL END`.
+        ExprKind::Literal(Literal::Null) => {
+            em.emit(Instruction::new(Opcode::Null, 0, dest, 0));
+        }
         ExprKind::Column { name, .. } => {
             let idx = column_index(schema, name)
                 .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
@@ -1004,24 +1081,89 @@ fn emit_branch_into(
     Ok(())
 }
 
+/// Whether a condition's outcome is always definitely true or
+/// definitely false — never SQL's unknown. `IS`/`IS NOT` and
+/// `IS NULL`/`IS NOT NULL` are the only such conditions in the V2
+/// grammar; they exist precisely to answer questions about NULL
+/// without inheriting it.
+fn is_definite(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Paren(inner) => is_definite(inner),
+        ExprKind::Is { .. } | ExprKind::IsNull { .. } => true,
+        _ => false,
+    }
+}
+
+/// Materializes a condition's answer into a register. A condition has
+/// three possible answers and jump-mode code only has two
+/// destinations, so a genuinely three-valued expression is compiled
+/// twice: once asking "is it definitely true?" and once asking "is it
+/// definitely false?" (the same condition with `NullTarget::True`, so
+/// unknown separates from false instead of joining it). Anything that
+/// answers neither is unknown, and lands on the `Null` opcode.
+///
+/// The alternative — a third continuation threaded through
+/// `compile_cond` — does not work: `AND`/`OR` cannot route an unknown
+/// left operand anywhere until the right one has been evaluated (see
+/// `NullTarget`'s doc comment), so they would have to duplicate their
+/// right operand's code anyway, once per path.
 fn compile_bool_to_value(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     schema: &TableSchema,
     cursor: i32,
     expr: &Expr,
-    negate: bool,
 ) -> Result<i32, CodegenError> {
     let dest = reg.alloc();
     let true_label = em.new_label();
     let end_label = em.new_label();
-    let (t, f) = if negate {
-        (Target::Fallthrough, Target::Jump(true_label))
-    } else {
-        (Target::Jump(true_label), Target::Fallthrough)
-    };
-    compile_cond(em, reg, schema, cursor, expr, t, f)?;
+
+    if is_definite(expr) {
+        compile_cond(
+            em,
+            reg,
+            schema,
+            cursor,
+            expr,
+            CondTargets::null_is_false(Target::Jump(true_label), Target::Fallthrough),
+        )?;
+        em.emit(Instruction::new(Opcode::Integer, 0, dest, 0));
+        em.goto(end_label);
+        em.place(true_label);
+        em.emit(Instruction::new(Opcode::Integer, 1, dest, 0));
+        em.place(end_label);
+        return Ok(dest);
+    }
+
+    let null_label = em.new_label();
+    let false_label = em.new_label();
+    // Pass 1: definitely true? Unknown joins false here, so reaching
+    // the fallthrough means "false or unknown".
+    compile_cond(
+        em,
+        reg,
+        schema,
+        cursor,
+        expr,
+        CondTargets::null_is_false(Target::Jump(true_label), Target::Fallthrough),
+    )?;
+    // Pass 2: which of the two was it? `NullTarget::True` sends
+    // unknown to the true side, which pass 1 already ruled out, so
+    // that side can only be reached by an unknown answer.
+    compile_cond(
+        em,
+        reg,
+        schema,
+        cursor,
+        expr,
+        CondTargets::null_is_true(Target::Jump(null_label), Target::Jump(false_label)),
+    )?;
+
+    em.place(false_label);
     em.emit(Instruction::new(Opcode::Integer, 0, dest, 0));
+    em.goto(end_label);
+    em.place(null_label);
+    em.emit(Instruction::new(Opcode::Null, 0, dest, 0));
     em.goto(end_label);
     em.place(true_label);
     em.emit(Instruction::new(Opcode::Integer, 1, dest, 0));

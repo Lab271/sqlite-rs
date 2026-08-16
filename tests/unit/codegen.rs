@@ -108,6 +108,31 @@ fn non_alias_column_still_reads_via_column() {
 }
 
 #[test]
+fn star_expansion_reads_the_rowid_alias_via_rowid() {
+    // `SELECT id` was fixed with the other two call sites; `SELECT *`
+    // was not, because the star-expansion path in `compile_row_values`
+    // emits its own `Column` rather than going through
+    // `emit_column_read`. `SELECT * FROM t` therefore answered NULL for
+    // the rowid-alias column — the most common query in SQL, on the
+    // most common table shape. No corpus fixture has an
+    // `INTEGER PRIMARY KEY`, which is why the oracle suites never saw
+    // it.
+    let s = schema(IPK_DDL, &["id", "name"]);
+    for sql in ["SELECT * FROM t", "SELECT t.* FROM t"] {
+        let program = compile(sql, &s);
+        assert!(
+            uses(&program, Opcode::Rowid),
+            "{sql:?} must read the rowid-alias column through Rowid"
+        );
+        assert_eq!(
+            count(&program, Opcode::Column),
+            1,
+            "{sql:?} should read only the non-alias column through Column"
+        );
+    }
+}
+
+#[test]
 fn rowid_alias_in_where_clause_reads_via_rowid() {
     // The bug's headline symptom: this returned no rows at all, because
     // the WHERE comparison read the placeholder NULL. Covers the
@@ -263,4 +288,120 @@ fn empty_in_list_is_statically_false_without_null_probes() {
     let s = schema(PLAIN_DDL, &["id", "name"]);
     let program = compile("SELECT name FROM t WHERE id IN ()", &s);
     assert!(!uses(&program, Opcode::IsNull));
+}
+
+// ---------------------------------------------------------------
+// Three-valued logic, generic `NOT` (#134). `compile_cond` now carries
+// a `NullTarget` saying which continuation the *unknown* outcome joins;
+// `NOT` swaps true/false and flips it, so NULL stays on the address it
+// already had. The observable consequence in the emitted program is
+// that a negated comparison gains explicit `IsNull` operand probes —
+// the compare opcodes never jump on NULL, so routing unknown to the
+// *true* side has to be spelled out. A revert to the bare target swap
+// emits none of them.
+// ---------------------------------------------------------------
+
+/// Full instruction listing — opcode *and* operands, so a test that
+/// compares two spellings of the same condition catches a divergence
+/// in where a jump goes, not just in which opcodes were emitted.
+fn listing(program: &Program) -> Vec<String> {
+    program
+        .instructions
+        .iter()
+        .map(|i| format!("{:?} {} {} {} {:?}", i.opcode, i.p1, i.p2, i.p3, i.p4))
+        .collect()
+}
+
+#[test]
+fn plain_comparison_needs_no_null_probe() {
+    // Baseline for the two tests below: with unknown joining false —
+    // which is what the compare opcodes already do by not jumping —
+    // `WHERE x = 5` needs no probe at all.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id = 5", &s);
+    assert!(!uses(&program, Opcode::IsNull));
+}
+
+#[test]
+fn not_over_a_comparison_probes_for_null_instead_of_swapping_targets() {
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE NOT (id = 5)", &s);
+    assert!(
+        count(&program, Opcode::IsNull) >= 2,
+        "NOT over a comparison must probe both operands for NULL so the \
+         unknown outcome still excludes the row; a bare target swap \
+         emits no probe and returns rows where id IS NULL"
+    );
+}
+
+#[test]
+fn ne_probes_for_null_like_a_negated_eq() {
+    // `<>` has no opcode of its own — it is `Eq` with the targets
+    // exchanged, the same shape as `NOT`, and it carried the same bug:
+    // `WHERE id <> 5` returned rows where `id IS NULL`.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id <> 5", &s);
+    assert!(count(&program, Opcode::IsNull) >= 2);
+    assert_eq!(
+        listing(&program),
+        listing(&compile("SELECT name FROM t WHERE NOT (id = 5)", &s)),
+        "`x <> 5` and `NOT (x = 5)` are the same condition and must compile alike"
+    );
+}
+
+#[test]
+fn not_in_and_in_negated_compile_to_the_same_program() {
+    // The acceptance criterion #134 names: the two spellings are the
+    // same condition, so they must not disagree. `NOT` routes unknown
+    // to the swapped-in true target, which is the address `NOT IN`'s
+    // own unknown path already used — making the two emissions
+    // instruction-for-instruction identical, not merely equivalent.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    assert_eq!(
+        listing(&compile("SELECT name FROM t WHERE NOT (id IN (1, 2))", &s)),
+        listing(&compile("SELECT name FROM t WHERE id NOT IN (1, 2)", &s)),
+    );
+}
+
+#[test]
+fn not_in_value_context_uses_the_not_opcode() {
+    // `SELECT NOT x` is one instruction in the oracle, and `Not` is the
+    // only way a NULL survives negation into a register — the old
+    // `IfNot`-based 0/1 materialization resolved NULL to 1.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT NOT id FROM t", &s);
+    assert!(uses(&program, Opcode::Not));
+    assert!(
+        !uses(&program, Opcode::IfNot),
+        "negation in value context must not go through a 0/1 truthiness test"
+    );
+}
+
+#[test]
+fn comparison_in_value_context_materializes_three_outcomes() {
+    // `SELECT (x = 5)` answers 1, 0, or NULL. Before #134 it fell into
+    // `compile_value`'s catch-all and answered NULL for every row.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT id = 5 FROM t", &s);
+    assert!(
+        uses(&program, Opcode::Null),
+        "the unknown outcome needs a real NULL to land on"
+    );
+    assert!(uses(&program, Opcode::Eq) && uses(&program, Opcode::Integer));
+}
+
+#[test]
+fn case_without_else_writes_null_rather_than_reading_a_phantom_column() {
+    // The no-match path has to overwrite `dest`, which is shared across
+    // branches and reused every scan iteration. It used to fake the
+    // NULL with an out-of-range `Column` read for want of a `Null`
+    // opcode.
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT CASE WHEN id > 5 THEN 'big' END FROM t", &s);
+    assert!(uses(&program, Opcode::Null));
+    let phantom = program
+        .instructions
+        .iter()
+        .any(|i| i.opcode == Opcode::Column && i.p2 as usize >= s.columns.len());
+    assert!(!phantom, "no out-of-range Column read should remain");
 }

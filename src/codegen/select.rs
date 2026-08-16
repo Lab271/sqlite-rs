@@ -15,8 +15,8 @@
 
 use thiserror::Error;
 
-use crate::codegen::expr::{column_index, compile_cond, compile_value};
-use crate::codegen::{Emitter, Label, RegAlloc, Target};
+use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
+use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Target};
 use crate::parser::ast::{Distinctness, Expr, ExprKind, ResultColumn, Select};
 use crate::schema::TableSchema;
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
@@ -147,14 +147,14 @@ fn compile_row_values(
                         name: (*name).to_string(),
                     })?;
                 let r = reg.alloc();
-                em.emit(Instruction::new(
-                    Opcode::Column,
-                    cursor,
-                    i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
-                        reason: format!("column index {idx} does not fit in a P2 operand"),
-                    })?,
-                    r,
-                ));
+                // Must go through `emit_column_read`, not a bare
+                // `Column`: this is the `*` / `tbl.*` expansion path, and
+                // an `INTEGER PRIMARY KEY` column is a NULL placeholder
+                // in the record. Emitting `Column` here is why
+                // `SELECT * FROM t` answered NULL for the rowid alias
+                // while `SELECT id FROM t` (which routes through
+                // `compile_value`) answered correctly.
+                emit_column_read(em, schema, cursor, idx, r)?;
                 r
             }
             ResultColumnPlan::Expr(expr) => compile_value(em, reg, schema, cursor, expr)?,
@@ -307,8 +307,10 @@ fn compile_direct_scan(
             schema,
             TABLE_CURSOR,
             where_expr,
-            Target::Fallthrough,
-            Target::Jump(row_skip),
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
     }
     emit_distinct_guard(em, reg, select, schema, TABLE_CURSOR, row_skip)?;
@@ -369,8 +371,10 @@ fn compile_sorted_scan(
             schema,
             TABLE_CURSOR,
             where_expr,
-            Target::Fallthrough,
-            Target::Jump(scan_skip),
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
         )?;
     }
     let (first, count) = compile_row_values(

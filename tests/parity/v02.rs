@@ -48,18 +48,117 @@ const CASES: &[ParityCase] = &[
     },
 ];
 
+/// Three-valued logic over a fixture that actually contains NULLs
+/// (#134). Every case is a shape whose answer changes depending on
+/// whether SQL's *unknown* is resolved honestly or folded into true.
+///
+/// The value-mode cases are wrapped in `IS NULL` rather than selected
+/// raw on purpose: the answer being asserted is "did this expression
+/// come out NULL", and `IS NULL` turns that into a 0/1 both engines
+/// render identically. Selecting the NULL itself would compare the
+/// CLI's `NULL` spelling against the oracle shell's default empty
+/// string for a null — a renderer difference, not a semantics one, and
+/// not what this dimension is for.
+const NULL_CASES: &[ParityCase] = &[
+    ParityCase {
+        name: "not_over_eq_excludes_null",
+        sql: "SELECT i FROM t WHERE NOT (i = 0)",
+    },
+    ParityCase {
+        name: "ne_excludes_null",
+        sql: "SELECT i FROM t WHERE i <> 0",
+    },
+    ParityCase {
+        name: "not_over_in",
+        sql: "SELECT i FROM t WHERE NOT (i IN (0, 127))",
+    },
+    ParityCase {
+        name: "not_in_spelling",
+        sql: "SELECT i FROM t WHERE i NOT IN (0, 127)",
+    },
+    ParityCase {
+        name: "not_over_between",
+        sql: "SELECT i FROM t WHERE NOT (i BETWEEN -1 AND 1)",
+    },
+    ParityCase {
+        name: "not_over_and",
+        sql: "SELECT i FROM t WHERE NOT (i = 0 AND txt = 'hello')",
+    },
+    ParityCase {
+        name: "not_over_or",
+        sql: "SELECT i FROM t WHERE NOT (i = 0 OR txt = 'hello')",
+    },
+    ParityCase {
+        name: "not_over_is_null",
+        sql: "SELECT i FROM t WHERE NOT (txt IS NULL)",
+    },
+    ParityCase {
+        name: "double_negation",
+        sql: "SELECT i FROM t WHERE NOT NOT (i = 1)",
+    },
+    ParityCase {
+        name: "value_eq_is_unknown",
+        sql: "SELECT (i = 0) IS NULL FROM t",
+    },
+    ParityCase {
+        name: "value_not_is_unknown",
+        sql: "SELECT (NOT i) IS NULL FROM t",
+    },
+    ParityCase {
+        name: "value_in_is_unknown",
+        sql: "SELECT (i IN (0, 127)) IS NULL FROM t",
+    },
+    ParityCase {
+        name: "value_not_in_is_unknown",
+        sql: "SELECT (i NOT IN (0, 127)) IS NULL FROM t",
+    },
+    ParityCase {
+        name: "value_between_is_unknown",
+        sql: "SELECT (i BETWEEN 0 AND 1) IS NULL FROM t",
+    },
+];
+
+/// `SELECT *` over a table with an `INTEGER PRIMARY KEY`. That column
+/// is a NULL placeholder in every record and has to be read with
+/// `Rowid`, not `Column` — the star-expansion path did the latter, so
+/// `SELECT * FROM t` answered NULL for it while `SELECT id FROM t`
+/// answered correctly.
+///
+/// The fixture is an FTS5 shadow table because no corpus fixture is a
+/// plain table with an `INTEGER PRIMARY KEY` — which is exactly why the
+/// oracle suites never caught this. `t_content` is an ordinary rowid
+/// table despite its provenance, and it is the only one available;
+/// giving the corpus a first-class fixture for this shape is tracked
+/// separately.
+const ROWID_ALIAS_CASES: &[ParityCase] = &[
+    ParityCase {
+        name: "star_expands_rowid_alias",
+        sql: "SELECT * FROM t_content",
+    },
+    ParityCase {
+        name: "qualified_star_expands_rowid_alias",
+        sql: "SELECT t_content.* FROM t_content",
+    },
+    ParityCase {
+        name: "named_rowid_alias_agrees_with_star",
+        sql: "SELECT id, c0 FROM t_content",
+    },
+];
+
 #[test]
-fn acceptance_and_output_match_for_single_table_select() {
+fn star_expansion_acceptance_and_output_match_for_a_rowid_alias_table() {
     if pinned_oracle().is_none() {
-        skip_no_oracle("acceptance_and_output_match_for_single_table_select");
+        skip_no_oracle("star_expansion_acceptance_and_output_match_for_a_rowid_alias_table");
         return;
     }
-    let db = corpus_dir().join("btrees/table_multipage.db");
+    assert_cases_match(&corpus_dir().join("features/fts5.db"), ROWID_ALIAS_CASES);
+}
 
+fn assert_cases_match(db: &Path, cases: &[ParityCase]) {
     let mine: &dyn Fn(&Path, &str) -> Result<Vec<String>, String> = &run_query_cli;
     let mut checked = 0usize;
-    for case in CASES {
-        let Some(report) = run_case(&db, case, Some(mine)) else {
+    for case in cases {
+        let Some(report) = run_case(db, case, Some(mine)) else {
             continue;
         };
         assert_eq!(
@@ -80,4 +179,25 @@ fn acceptance_and_output_match_for_single_table_select() {
         checked > 0,
         "expected at least one case to have been compared"
     );
+}
+
+#[test]
+fn three_valued_logic_acceptance_and_output_match_over_null_rows() {
+    if pinned_oracle().is_none() {
+        skip_no_oracle("three_valued_logic_acceptance_and_output_match_over_null_rows");
+        return;
+    }
+    // `btrees/table_multipage.db` has no NULL in any column, so every
+    // case above would be vacuous there; `serialtypes/values.db` is the
+    // fixture with NULL rows in both an INTEGER and a TEXT column.
+    assert_cases_match(&corpus_dir().join("serialtypes/values.db"), NULL_CASES);
+}
+
+#[test]
+fn acceptance_and_output_match_for_single_table_select() {
+    if pinned_oracle().is_none() {
+        skip_no_oracle("acceptance_and_output_match_for_single_table_select");
+        return;
+    }
+    assert_cases_match(&corpus_dir().join("btrees/table_multipage.db"), CASES);
 }

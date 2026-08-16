@@ -11,7 +11,7 @@ The bytecode virtual machine — SQLite's `vdbe.c`/`vdbeaux.c` instruction set
 and register model, plus the codegen that emits it from the V2 AST (#61).
 Backs V2 phase 3 (#89/#90/#91), part of epic #56. The opcode set is frozen
 by the phase-3 opener (#87): the harvested, scope-decided
-`tools/opcodes-v2.json` (52 opcodes, oracle 3.53.3) is the exhaustive
+`tools/opcodes-v2.json` (54 opcodes, oracle 3.53.3) is the exhaustive
 denominator for every requirement below — no opcode outside that inventory
 is in scope for V2, and every opcode inside it must appear as a scenario
 somewhere in this spec (#65 wires the count into the assurance dashboard).
@@ -193,6 +193,21 @@ the just-produced duplicate row if present.
 **Tests:** `src/vdbe/cursor.rs::tests::full_scan_opens_rewinds_iterates_reads`,
 `tests/vdbe/cursor_sorter_test.rs::full_scan_program_matches_oracle_row_for_row`
 
+#### Scenario: A rowid-alias column is read with Rowid on every path, including `*`
+
+- GIVEN a table whose `INTEGER PRIMARY KEY` column is stored as a NULL
+  placeholder in every record (spec 006 Requirement 4, which defers the
+  substitution to "a higher row-assembly layer" — this is that layer)
+- WHEN any of `SELECT id`, `SELECT *`, `SELECT tbl.*`, or a `WHERE`
+  comparison reads that column
+- THEN codegen emits `Rowid`, never `Column` — the substitution is a
+  property of the column, not of the syntax that names it. Emitting
+  `Column` on any one path answers NULL there while the others answer
+  correctly, which is how `SELECT * FROM t` stayed wrong after
+  `SELECT id FROM t` was fixed (#131, #134)
+
+**Tests:** `tests/unit/codegen.rs::star_expansion_reads_the_rowid_alias_via_rowid`, `tests/unit/codegen.rs::rowid_alias_result_column_reads_via_rowid_not_column`, `tests/parity/v02.rs::star_expansion_acceptance_and_output_match_for_a_rowid_alias_table`
+
 #### Scenario: DISTINCT probes an ephemeral index before emitting each row
 
 - GIVEN `SELECT DISTINCT note FROM products` (harvested: `OpenEphemeral`,
@@ -259,13 +274,16 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
 
 ### Requirement 6: Arithmetic Opcodes [MUST]
 
-The 5 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
-`Divide`, `Remainder` — MUST delegate all overflow, NULL-propagation, and
-numeric-coercion behavior to spec 008's `src/vdbe/coerce.rs` (Requirement
-5 there: `i64` overflow promotes to REAL, never wraps) and `src/vdbe/
-value.rs` (Requirement 4 there: NULL propagates through arithmetic); the
-opcode layer supplies only register addressing (read two source
-registers, write one destination register).
+The 6 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
+`Divide`, `Remainder`, `Not` — MUST delegate all overflow,
+NULL-propagation, and numeric-coercion behavior to spec 008's
+`src/vdbe/coerce.rs` (Requirement 5 there: `i64` overflow promotes to
+REAL, never wraps) and `src/vdbe/value.rs` (Requirement 4 there: NULL
+propagates through arithmetic); the opcode layer supplies only register
+addressing (read the source register(s), write one destination
+register). `Not` is the unary member: it MUST write the boolean
+complement of `P1` into `P2`, and MUST write NULL — not 1 — when `P1`
+is NULL, since `NOT unknown` is unknown (#134).
 
 **Implementation:** `src/vdbe/arithmetic.rs` (#89)
 
@@ -282,6 +300,19 @@ registers, write one destination register).
 **Tests:** `src/vdbe/arithmetic.rs::tests::add_reads_two_registers_writes_one`,
 `src/vdbe/arithmetic.rs::tests::null_propagates_through_every_arithmetic_opcode`,
 `src/vdbe/arithmetic.rs::tests::divide_by_zero_yields_null_not_a_panic`
+
+#### Scenario: Not complements a register's truthiness and leaves NULL as NULL
+
+- GIVEN `SELECT NOT qty FROM products` (harvested: `Not` once — per
+  `tools/opcodes-v2.json`)
+- WHEN the operand register holds a falsy value, a truthy value, and NULL
+  in turn
+- THEN the destination register holds 1, 0, and NULL respectively — the
+  NULL case is what distinguishes this opcode from the jump-mode
+  compiler, which has only two continuations and must fold unknown into
+  one of them
+
+**Tests:** `src/vdbe/arithmetic.rs::tests::not_complements_truthiness_and_propagates_null`
 
 ### Requirement 7: Function Opcode [MUST]
 
@@ -315,10 +346,12 @@ it callable via this opcode, with no VDBE-layer change required.
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
-The 4 result-category opcodes — `Integer`, `String8`, `MakeRecord`,
-`ResultRow` — MUST implement literal loading (`Integer`: load an `i64`
-constant into a register from `P1`; `String8`: load a UTF-8 string
-constant from `P4` into a register), record serialization (`MakeRecord`:
+The 5 result-category opcodes — `Integer`, `Null`, `String8`,
+`MakeRecord`, `ResultRow` — MUST implement literal loading (`Integer`:
+load an `i64` constant into a register from `P1`; `Null`: write NULL
+into the register range `P2..=P3`, or just `P2` when `P3` does not name
+a higher register; `String8`: load a UTF-8 string constant from `P4`
+into a register), record serialization (`MakeRecord`:
 pack a contiguous run of registers into spec 003's record format, using
 `P4`'s per-column serial-type hints where present), and row emission
 (`ResultRow`: yield a contiguous run of registers as one output row to the
@@ -340,6 +373,18 @@ VDBE-private serialization.
   destination register — both are pure literal loads, no computation
 
 **Tests:** `src/vdbe/result.rs::tests::integer_and_string8_load_literals`
+
+#### Scenario: Null writes NULL over a register that already holds a value
+
+- GIVEN `SELECT CASE WHEN price > 100 THEN 1 END FROM products`
+  (harvested: `Null` once — per `tools/opcodes-v2.json`), whose
+  no-branch-matched result register is reused on every scan iteration
+- THEN `Null` writes NULL into `P2` (through `P3` when that names a
+  higher register), overwriting whatever the register held — an
+  unwritten register is not a substitute, because it cannot express a
+  NULL that has to replace a live value
+
+**Tests:** `src/vdbe/result.rs::tests::null_overwrites_a_live_register_and_spans_p2_to_p3`
 
 #### Scenario: ResultRow emits a fixed register range as one output row every iteration
 
@@ -455,16 +500,30 @@ symmetrically to the true target. `CASE` MUST compile to a jump chain: each
 next `WHEN` test, with a final unconditional jump past the chain after the
 matching branch's result is computed.
 
-> **Note (resolved by #91):** spike 008 (#59) has since completed;
-> its kept oracle vectors (`tests/corpus/expr_vectors/walker.jsonl`)
-> now run through the real compiled path
+Because SQL is three-valued and a jump has two destinations, the
+jump-mode entry point MUST also carry which continuation the *unknown*
+outcome joins (`NullTarget`, SQLite's own `jumpIfNull` flag). `WHERE`
+and `CASE WHEN` MUST pass "unknown joins false" — a predicate whose
+truth is unknown excludes the row exactly like a false one. Any
+lowering that exchanges the true and false continuations — `NOT`, and
+`<>` as an `Eq` with the targets swapped — MUST flip that setting with
+them, so the unknown outcome stays on the address it already had.
+Materializing a condition into a register (result columns) MUST be able
+to produce NULL, not only 0/1.
+
+> **Note (resolved by #91, amended by #134):** spike 008 (#59) has since
+> completed; its kept oracle vectors
+> (`tests/corpus/expr_vectors/walker.jsonl`) now run through the real
+> compiled path
 > (`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`),
-> confirming this requirement's jump-shape description. A handful of
-> vectors remain documented gaps (bitwise/concat opcodes absent from
-> the frozen V2 set, full three-valued NULL propagation through NOT/
-> AND/OR/BETWEEN/IN in value context, CAST's lossy-conversion
-> semantics, REAL-literal representation) — see that test file's
-> `KNOWN_GAPS` doc comment.
+> confirming this requirement's jump-shape description. #134 added the
+> `NullTarget` clause above and the `Null`/`Not` opcodes behind it,
+> retiring the NOT/AND/OR/BETWEEN/IN-over-NULL vectors from that test's
+> `KNOWN_GAPS`. The gaps that remain are unrelated to three-valued
+> logic (bitwise/concat opcodes absent from the frozen V2 set, CAST's
+> lossy-conversion semantics, REAL-literal representation, `LIKE ...
+> ESCAPE` operand ordering) — see that test file's `KNOWN_GAPS` doc
+> comment.
 
 **Implementation:** `src/codegen/expr.rs`, `src/codegen/select.rs` (#91)
 
@@ -490,6 +549,41 @@ matching branch's result is computed.
 
 **Tests:** `tests/codegen/expr_test.rs::and_short_circuits_on_false_first_operand`
 
+#### Scenario: NOT over a comparison keeps the unknown outcome excluding the row
+
+- GIVEN `SELECT * FROM products WHERE NOT (price = 10)` over a row whose
+  `price` IS NULL (the pinned oracle emits a single `Eq` jump with
+  `SQLITE_JUMPIFNULL` set in P5, sending both the equal and the unknown
+  outcome to the row-skip target)
+- WHEN the negation swaps the true and false continuations
+- THEN the unknown outcome still reaches the row-skip target, so the
+  NULL row is excluded — this instruction format carries no P5 flag, so
+  the jump-if-null is spelled as explicit `IsNull` operand probes ahead
+  of the compare, which a bare target swap does not emit
+
+**Tests:** `tests/unit/codegen.rs::not_over_a_comparison_probes_for_null_instead_of_swapping_targets`, `tests/unit/codegen.rs::ne_probes_for_null_like_a_negated_eq`, `tests/parity/v02.rs::three_valued_logic_acceptance_and_output_match_over_null_rows`
+
+#### Scenario: NOT (x IN (...)) and x NOT IN (...) compile to the same program
+
+- GIVEN the two spellings of the same condition, over a fixture with
+  NULL rows
+- THEN they emit instruction-for-instruction identical programs, because
+  `NOT`'s flipped null continuation resolves to the same address that
+  `NOT IN`'s own unknown path already used — two spellings of one
+  condition must not return different rows
+
+**Tests:** `tests/unit/codegen.rs::not_in_and_in_negated_compile_to_the_same_program`
+
+#### Scenario: A condition in value context materializes true, false, or NULL
+
+- GIVEN `SELECT NOT qty FROM products` and `SELECT price = 10 FROM products`
+  over a row whose operand IS NULL
+- THEN the result register holds NULL, not 0 or 1 — `NOT` lowers to the
+  `Not` opcode (Requirement 6), and a comparison lowers to a jump-mode
+  test whose unknown branch writes the `Null` opcode (Requirement 8)
+
+**Tests:** `tests/unit/codegen.rs::not_in_value_context_uses_the_not_opcode`, `tests/unit/codegen.rs::comparison_in_value_context_materializes_three_outcomes`, `tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made
@@ -503,8 +597,9 @@ opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
-harvested opcode set — the full 52-opcode inventory, independent of how
+harvested opcode set — the full 54-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
-line tracks how many of those 52 are actually dispatched in
-`src/vdbe/exec.rs` (49/52 with #90's cursor/sorter/ephemeral families
-landed).
+line tracks how many of those 54 are actually dispatched in
+`src/vdbe/exec.rs` (52/54 — it read 50/52 before #134 added `Not` and
+`Null`, both dispatched on arrival, so the two undispatched opcodes are
+unchanged).
