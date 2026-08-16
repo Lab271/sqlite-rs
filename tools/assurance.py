@@ -563,6 +563,13 @@ def report(requirements, verbose=False, traceability_only=False):
     print("=" * 60)
     print("sqlite-rs Assurance Case")
     print("=" * 60)
+    spec_files = sorted(SPEC_DIR.glob("*/spec.md"))
+    # Functional specs are 001-099; 900-999 are cross-cutting concerns. Split
+    # them so the count says what kind of coverage the number represents.
+    cross_cutting = sum(1 for s in spec_files if s.parent.name[:1] == "9")
+    functional = len(spec_files) - cross_cutting
+    suffix = f" ({functional} functional, {cross_cutting} cross-cutting)" if cross_cutting else ""
+    print(f"Specs:            {len(spec_files)}{suffix}")
     print(f"Requirements:     {total}" + (f" ({planned_count} planned excluded)" if planned_count else ""))
     print(f"Scenarios:        {total_scenarios}")
     print()
