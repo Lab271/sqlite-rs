@@ -8,12 +8,20 @@
 //!
 //! Operator precedence (lowest to highest) mirrors `parse.y`'s
 //! `%left`/`%right` declarations exactly — see the grammar file's
-//! "Expressions (V2 slice)" section for the full table. Each precedence
-//! level below is one parser method, in descending-precedence call
-//! order: `expr` (OR) -> `and_expr` -> `not_expr` -> `equality_expr` ->
-//! `relational_expr` -> `bitwise_expr` -> `additive_expr` ->
-//! `multiplicative_expr` -> `concat_expr` -> `collate_expr` ->
-//! `unary_expr` -> `primary_expr`.
+//! "Expressions (V2 slice)" section for the full table. Descending-
+//! precedence call order: `expr` (guarded) -> `bool_expr` (OR/AND,
+//! precedence-climbing) -> `not_expr` (guarded) -> `equality_expr` ->
+//! `binary_expr` (relational/bitwise/additive/multiplicative/concat,
+//! precedence-climbing) -> `arrow_expr` -> `collate_expr` -> `unary_expr`
+//! (guarded) -> `primary_expr`.
+//!
+//! `bool_expr` and `binary_expr` each collapse several historically
+//! separate pass-through levels (OR+AND; relational/bitwise/additive/
+//! multiplicative/concat) into one precedence-climbing function apiece —
+//! one stack frame per nesting level instead of one per former level. That
+//! collapse, plus `#118`'s narrower per-level cost, is what lets
+//! `MAX_EXPR_DEPTH` actually be reached (rather than stack-overflowing
+//! first) within a debug build's default thread stack.
 
 use super::ast::*;
 use super::error::{PResult, ParseFail};
@@ -391,23 +399,37 @@ impl Parser {
     // ---- expressions -----------------------------------------------------
 
     pub(super) fn expr(&mut self) -> PResult<Expr> {
-        self.with_depth_guard(|this| this.or_expr())
+        self.with_depth_guard(|this| this.bool_expr(0))
     }
 
-    fn or_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.and_expr()?;
-        while self.eat_kw(Keyword::OR) {
-            let rhs = self.and_expr()?;
-            lhs = bin(BinaryOp::Or, lhs, rhs);
-        }
-        Ok(lhs)
-    }
-
-    fn and_expr(&mut self) -> PResult<Expr> {
+    /// Precedence climb over `OR` (prec 0) and `AND` (prec 1, binds
+    /// tighter) — one stack frame here instead of two separate
+    /// pass-through functions (`or_expr`/`and_expr`) per nesting level.
+    /// Collapsing these was one part of narrowing the debug/release stack
+    /// gap that let a stack overflow pre-empt the `MAX_EXPR_DEPTH` guard
+    /// (#118); see `binary_expr` for the larger half of that collapse.
+    fn bool_expr(&mut self, min_prec: u8) -> PResult<Expr> {
         let mut lhs = self.not_expr()?;
-        while self.eat_kw(Keyword::AND) {
-            let rhs = self.not_expr()?;
-            lhs = bin(BinaryOp::And, lhs, rhs);
+        loop {
+            // AND binds tighter than OR, so AND's rhs only ever needs
+            // `not_expr` (nothing tighter exists in this pair); OR's rhs
+            // must still climb through any following AND, but never a
+            // sibling OR (left-associative).
+            lhs = if self.at_kw(Keyword::AND) {
+                if min_prec > 1 {
+                    break;
+                }
+                self.advance();
+                bin(BinaryOp::And, lhs, self.not_expr()?)
+            } else if self.at_kw(Keyword::OR) {
+                if min_prec > 0 {
+                    break;
+                }
+                self.advance();
+                bin(BinaryOp::Or, lhs, self.bool_expr(1)?)
+            } else {
+                break;
+            };
         }
         Ok(lhs)
     }
@@ -431,23 +453,23 @@ impl Parser {
     }
 
     fn equality_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.relational_expr()?;
+        let mut lhs = self.binary_expr(1)?;
         loop {
             lhs = match self.peek().kind.clone() {
                 TokenKind::Eq => {
                     self.advance();
-                    let rhs = self.relational_expr()?;
+                    let rhs = self.binary_expr(1)?;
                     bin(BinaryOp::Eq, lhs, rhs)
                 }
                 TokenKind::Ne => {
                     self.advance();
-                    let rhs = self.relational_expr()?;
+                    let rhs = self.binary_expr(1)?;
                     bin(BinaryOp::Ne, lhs, rhs)
                 }
                 TokenKind::Keyword(Keyword::IS) => {
                     self.advance();
                     let negated = self.eat_kw(Keyword::NOT);
-                    let rhs = self.relational_expr()?;
+                    let rhs = self.binary_expr(1)?;
                     let span = join_span(lhs.span, rhs.span);
                     Expr {
                         kind: ExprKind::Is {
@@ -552,9 +574,9 @@ impl Parser {
     }
 
     fn between_tail(&mut self) -> PResult<(Expr, Expr)> {
-        let lo = self.relational_expr()?;
+        let lo = self.binary_expr(1)?;
         self.expect_kw(Keyword::AND)?;
-        let hi = self.relational_expr()?;
+        let hi = self.binary_expr(1)?;
         Ok((lo, hi))
     }
 
@@ -584,10 +606,10 @@ impl Parser {
     }
 
     fn like_tail(&mut self, lhs: Expr, glob: bool, negated: bool) -> PResult<Expr> {
-        let pattern = self.relational_expr()?;
+        let pattern = self.binary_expr(1)?;
         let mut span = join_span(lhs.span, pattern.span);
         let escape = if self.eat_kw(Keyword::ESCAPE) {
-            let e = self.relational_expr()?;
+            let e = self.binary_expr(1)?;
             span = join_span(span, e.span);
             Some(Box::new(e))
         } else {
@@ -605,79 +627,51 @@ impl Parser {
         })
     }
 
-    fn relational_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.bitwise_expr()?;
-        loop {
-            let op = match self.peek().kind {
-                TokenKind::Lt => BinaryOp::Lt,
-                TokenKind::Le => BinaryOp::Le,
-                TokenKind::Gt => BinaryOp::Gt,
-                TokenKind::Ge => BinaryOp::Ge,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.bitwise_expr()?;
-            lhs = bin(op, lhs, rhs);
-        }
-        Ok(lhs)
-    }
-
-    fn bitwise_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.additive_expr()?;
-        loop {
-            let op = match self.peek().kind {
-                TokenKind::BitAnd => BinaryOp::BitAnd,
-                TokenKind::BitOr => BinaryOp::BitOr,
-                TokenKind::Shl => BinaryOp::Shl,
-                TokenKind::Shr => BinaryOp::Shr,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.additive_expr()?;
-            lhs = bin(op, lhs, rhs);
-        }
-        Ok(lhs)
-    }
-
-    fn additive_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.multiplicative_expr()?;
-        loop {
-            let op = match self.peek().kind {
-                TokenKind::Plus => BinaryOp::Add,
-                TokenKind::Minus => BinaryOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.multiplicative_expr()?;
-            lhs = bin(op, lhs, rhs);
-        }
-        Ok(lhs)
-    }
-
-    fn multiplicative_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.concat_expr()?;
-        loop {
-            let op = match self.peek().kind {
-                TokenKind::Star => BinaryOp::Mul,
-                TokenKind::Slash => BinaryOp::Div,
-                TokenKind::Percent => BinaryOp::Mod,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.concat_expr()?;
-            lhs = bin(op, lhs, rhs);
-        }
-        Ok(lhs)
-    }
-
-    fn concat_expr(&mut self) -> PResult<Expr> {
+    /// Precedence climb merging what used to be four separate pass-through
+    /// levels — `relational_expr` (prec 1: `<`/`<=`/`>`/`>=`) ->
+    /// `bitwise_expr` (prec 2: `&`/`|`/`<<`/`>>`) -> `additive_expr` (prec
+    /// 3: `+`/`-`) -> `multiplicative_expr` (prec 4: `*`/`/`/`%`) ->
+    /// `concat_expr` (prec 5: `||`) — into one stack frame per nesting
+    /// level instead of five. All five operator groups are left-
+    /// associative, so a run of same-precedence operators (`1+2+3+...`)
+    /// stays iterative (the `loop`); recursion only climbs one level per
+    /// *distinct* precedence step in the expression, exactly mirroring the
+    /// original call chain's shape. `min_prec` is the lowest precedence
+    /// this call is willing to consume; callers needing the full chain
+    /// (what `relational_expr` used to mean) pass `1`. Narrows the debug
+    /// stack-depth gap that let a stack overflow pre-empt the
+    /// `MAX_EXPR_DEPTH` guard (#118).
+    fn binary_expr(&mut self, min_prec: u8) -> PResult<Expr> {
         let mut lhs = self.arrow_expr()?;
-        while matches!(self.peek().kind, TokenKind::Concat) {
+        while let Some((op, prec)) = Self::binary_op(&self.peek().kind) {
+            if prec < min_prec {
+                break;
+            }
             self.advance();
-            let rhs = self.arrow_expr()?;
-            lhs = bin(BinaryOp::Concat, lhs, rhs);
+            let rhs = self.binary_expr(prec.saturating_add(1))?;
+            lhs = bin(op, lhs, rhs);
         }
         Ok(lhs)
+    }
+
+    fn binary_op(kind: &TokenKind) -> Option<(BinaryOp, u8)> {
+        Some(match kind {
+            TokenKind::Lt => (BinaryOp::Lt, 1),
+            TokenKind::Le => (BinaryOp::Le, 1),
+            TokenKind::Gt => (BinaryOp::Gt, 1),
+            TokenKind::Ge => (BinaryOp::Ge, 1),
+            TokenKind::BitAnd => (BinaryOp::BitAnd, 2),
+            TokenKind::BitOr => (BinaryOp::BitOr, 2),
+            TokenKind::Shl => (BinaryOp::Shl, 2),
+            TokenKind::Shr => (BinaryOp::Shr, 2),
+            TokenKind::Plus => (BinaryOp::Add, 3),
+            TokenKind::Minus => (BinaryOp::Sub, 3),
+            TokenKind::Star => (BinaryOp::Mul, 4),
+            TokenKind::Slash => (BinaryOp::Div, 4),
+            TokenKind::Percent => (BinaryOp::Mod, 4),
+            TokenKind::Concat => (BinaryOp::Concat, 5),
+            _ => return None,
+        })
     }
 
     /// `->` / `->>` (JSON extract operators, V11) are recognized here so

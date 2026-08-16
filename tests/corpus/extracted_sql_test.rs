@@ -60,32 +60,6 @@ fn files_for(category: &str) -> Vec<PathBuf> {
     files
 }
 
-/// Runs `f` on a thread with a stack large enough for the parser's own
-/// `MAX_EXPR_DEPTH` bound.
-///
-/// libtest gives each test thread 2 MiB. That is not enough for a *debug*
-/// build to reach the parser's recursion cap: measured, a debug build burns
-/// ~34 KB of stack per expression-nesting level (no inlining, and every
-/// precedence-ladder function gets its own frame), so 2 MiB is exhausted at
-/// ~61 levels — just *below* the ~62 levels at which the depth guard would
-/// fire. The result is a stack overflow, which aborts the process rather
-/// than failing the test. A release build costs ~104 bytes/level and is
-/// nowhere near the limit.
-///
-/// The corpus contains a legitimately deep statement (61 nested
-/// `zerobloB(...)` calls from sqllogictest's `evidence/in1.test`, which real
-/// sqlite3 accepts), so this is reachable with real input, not a synthetic
-/// edge case. Giving the parse room to hit its own guard is the harness's
-/// job; see #118 for narrowing the debug/release gap.
-fn with_parser_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawning the parser stack thread")
-        .join()
-        .expect("parser thread panicked")
-}
-
 fn all_statements() -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     for category in CATEGORIES {
@@ -120,21 +94,18 @@ fn extracted_corpus_is_present() {
 /// Invariant 1: the tokenizer is total over real SQLite-accepted SQL.
 #[test]
 fn every_extracted_statement_tokenizes_without_error() {
-    let failures = with_parser_stack(|| {
-        let mut failures = Vec::new();
-        for (path, statement) in all_statements() {
-            for token in Tokenizer::tokenize(&statement) {
-                if let TokenKind::Error(reason) = &token.kind {
-                    failures.push(format!(
-                        "{}: {reason}\n    {statement}",
-                        path.file_name().unwrap().to_string_lossy()
-                    ));
-                    break;
-                }
+    let mut failures = Vec::new();
+    for (path, statement) in all_statements() {
+        for token in Tokenizer::tokenize(&statement) {
+            if let TokenKind::Error(reason) = &token.kind {
+                failures.push(format!(
+                    "{}: {reason}\n    {statement}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+                break;
             }
         }
-        failures
-    });
+    }
     assert!(
         failures.is_empty(),
         "tokenizer errored on {} statement(s) real SQLite accepts:\n{}",
@@ -150,27 +121,33 @@ fn every_extracted_statement_tokenizes_without_error() {
 ///
 /// Real sqlite3 accepts 61 levels and rejects far deeper input with
 /// `Parse error: Recursion limit` (its `SQLITE_MAX_EXPR_DEPTH` is 1000); we
-/// accept 61 and reject past ~62. The bound differing from SQLite's is
-/// tracked in #118 — that it *exists* is what this test pins.
+/// accept 61 and reject past ~67 (`MAX_EXPR_DEPTH` divided across the three
+/// depth-guarded recursion points). The bound differing from SQLite's is a
+/// deliberate, documented divergence (ADR 0013, #118) rather than an
+/// accident — that the guard fires *at all*, on a default-size thread
+/// stack, without aborting, is what this test pins. Runs directly on the
+/// default test thread (no oversized stack needed): #118 cut the parser's
+/// own per-level stack cost by collapsing the OR/AND and relational-
+/// through-concat precedence levels into two precedence-climbing loops
+/// (`bool_expr`, `binary_expr`), rather than papering over the cost with a
+/// bigger thread.
 #[test]
 fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
-    with_parser_stack(|| {
-        // 61 levels: accepted by real sqlite3, and present in the corpus.
-        let ok = format!("SELECT {}1{}", "abs(".repeat(61), ")".repeat(61));
-        assert!(
-            !matches!(parse_select(&ok), ParseOutcome::Invalid { .. }),
-            "61 levels of nesting is valid SQL that real sqlite3 accepts"
-        );
+    // 61 levels: accepted by real sqlite3, and present in the corpus.
+    let ok = format!("SELECT {}1{}", "abs(".repeat(61), ")".repeat(61));
+    assert!(
+        !matches!(parse_select(&ok), ParseOutcome::Invalid { .. }),
+        "61 levels of nesting is valid SQL that real sqlite3 accepts"
+    );
 
-        // Pathological input must come back as a diagnostic, not an abort.
-        for depth in [200usize, 5_000] {
-            let deep = format!("SELECT {}1{}", "abs(".repeat(depth), ")".repeat(depth));
-            assert!(
-                matches!(parse_select(&deep), ParseOutcome::Invalid { .. }),
-                "{depth} levels of nesting must be rejected by the depth guard"
-            );
-        }
-    });
+    // Pathological input must come back as a diagnostic, not an abort.
+    for depth in [200usize, 5_000] {
+        let deep = format!("SELECT {}1{}", "abs(".repeat(depth), ")".repeat(depth));
+        assert!(
+            matches!(parse_select(&deep), ParseOutcome::Invalid { .. }),
+            "{depth} levels of nesting must be rejected by the depth guard"
+        );
+    }
 }
 
 /// Ceiling for [`no_extracted_select_is_reported_invalid`] — the count of
@@ -204,27 +181,24 @@ const SELECT_INVALID_BASELINE: usize = 7;
 /// instead of being silently tolerated.
 #[test]
 fn no_extracted_select_is_reported_invalid() {
-    let (failures, accepted, unsupported) = with_parser_stack(|| {
-        let mut failures = Vec::new();
-        let mut accepted = 0usize;
-        let mut unsupported = 0usize;
+    let mut failures = Vec::new();
+    let mut accepted = 0usize;
+    let mut unsupported = 0usize;
 
-        for path in files_for("select") {
-            for statement in statements_in(&path) {
-                match parse_select(&statement) {
-                    ParseOutcome::Accepted(_) => accepted += 1,
-                    ParseOutcome::Unsupported { .. } => unsupported += 1,
-                    ParseOutcome::Invalid { message, span } => failures.push(format!(
-                        "{} [line {} col {}]: {message}\n    {statement}",
-                        path.file_name().unwrap().to_string_lossy(),
-                        span.line,
-                        span.column
-                    )),
-                }
+    for path in files_for("select") {
+        for statement in statements_in(&path) {
+            match parse_select(&statement) {
+                ParseOutcome::Accepted(_) => accepted += 1,
+                ParseOutcome::Unsupported { .. } => unsupported += 1,
+                ParseOutcome::Invalid { message, span } => failures.push(format!(
+                    "{} [line {} col {}]: {message}\n    {statement}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    span.line,
+                    span.column
+                )),
             }
         }
-        (failures, accepted, unsupported)
-    });
+    }
 
     println!(
         "extracted SELECT: {accepted} accepted, {unsupported} unsupported, \
