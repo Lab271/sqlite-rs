@@ -4,6 +4,29 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.6] - 2026-08-16
+
+### Added
+
+- Phase 3B (#90, epic #56): the cursor, ephemeral-index (DISTINCT), and
+  sorter (ORDER BY) VDBE opcode families on top of #89's core —
+  `src/vdbe/cursor.rs` (`OpenRead`/`OpenEphemeral`/`OpenPseudo`/
+  `Rewind`/`Last`/`Next`/`Column`/`Rowid`/`SeekRowid`/`NullRow`/
+  `Sequence`/`Found`/`IdxInsert`/`IdxLE`/`Delete`) and
+  `src/vdbe/sorter.rs` (`SorterOpen`/`SorterInsert`/`SorterSort`/`Sort`/
+  `SorterNext`/`SorterData`), keyed by a new `P4::SortKey`/
+  `SortKeyColumn` descriptor.
+- `TableCursor::last()`/`prev()` (`src/btree.rs`) — reverse b-tree
+  traversal, mirroring `first()`/`next()`.
+- `Vm::with_db`/`execute_with_db` — attaches a shared page source so
+  `OpenRead` can open real cursors, alongside the existing
+  register-only `execute()`.
+- Hand-assembled acceptance programs (`tests/vdbe/cursor_sorter_test.rs`)
+  reproduce full-scan, ORDER BY, and DISTINCT against real corpus
+  fixtures. Spec 009's Requirements 4 (cursor) and 9 (sorter) flip from
+  `(planned)` to active.
+- Spend: on track vs #90's estimate (large, ~2500-3500 lines).
+
 ## [0.6.5] - 2026-08-16
 
 ### Added
