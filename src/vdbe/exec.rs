@@ -6,15 +6,19 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use thiserror::Error;
 
+use crate::header::DatabaseHeader;
 use crate::record::Value;
 use crate::vdbe::affinity::{apply_affinity, Affinity};
 use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
+use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::program::{Instruction, Opcode, Program, P4};
-use crate::vdbe::{arithmetic, control, result};
+use crate::vdbe::{arithmetic, control, cursor, result, sorter};
+use crate::vfs::PageSource;
 
 #[derive(Debug, Error)]
 pub enum ExecError {
@@ -42,6 +46,20 @@ pub enum ExecError {
     #[error("opcode {opcode:?} is not yet implemented by this VM")]
     Unimplemented { opcode: Opcode },
 
+    #[error("cursor slot {slot} is not open")]
+    CursorNotOpen { slot: i32 },
+
+    #[error("{opcode}: cursor slot {slot} is a {found}, not a {expected}")]
+    CursorTypeMismatch {
+        opcode: &'static str,
+        slot: i32,
+        found: &'static str,
+        expected: &'static str,
+    },
+
+    #[error("{opcode} requires a database attached to this VM (see Vm::with_db)")]
+    NoDatabase { opcode: &'static str },
+
     #[error("program counter {pc} is out of range")]
     ProgramCounterOutOfRange { pc: usize },
 
@@ -61,9 +79,28 @@ pub enum Step {
     Halt { code: i32, message: Option<String> },
 }
 
+/// The database a `Vm` reads real table cursors from (`OpenRead`) — the
+/// page source plus the header fields (usable page size) `TableCursor`
+/// needs. Absent for programs that never open a real cursor (e.g. every
+/// #89 arithmetic/control test, and this ticket's sorter/ephemeral-only
+/// tests) — those construct a `Vm` via `Vm::new()` and never hit
+/// `OpenRead`.
+#[derive(Clone)]
+pub(crate) struct VmDb {
+    pub(crate) source: Rc<dyn PageSource>,
+    pub(crate) header: DatabaseHeader,
+}
+
+impl std::fmt::Debug for VmDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VmDb")
+            .field("header", &self.header)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The VM's mutable execution state: a register file of `Value` cells
-/// and a disjoint cursor-slot table (reserved for #90's cursor opcodes;
-/// unused by the opcode families this ticket implements), plus the
+/// and a disjoint cursor-slot table (Requirement 2), plus the
 /// accumulated output rows and the one-shot-guard bookkeeping `Once`
 /// needs.
 #[derive(Debug, Default)]
@@ -71,11 +108,12 @@ pub struct Vm {
     registers: Vec<Value>,
     /// Cursor-slot storage: a disjoint address space from `registers`,
     /// so a cursor slot and a register of the same integer index never
-    /// alias (Requirement 2). This ticket only proves the namespace is
-    /// disjoint; opening a real cursor over `src/btree` is #90's job
-    /// (Requirement 4) — until then, a slot just holds whatever a test
-    /// puts there.
-    cursors: Vec<Value>,
+    /// alias (Requirement 2). `None` until the slot's `Open*` opcode
+    /// runs; each open slot holds one of [`CursorSlot`]'s variants (a
+    /// real table cursor, an in-memory ephemeral index, a sorter, or a
+    /// single-row pseudo-cursor).
+    cursors: Vec<Option<CursorSlot>>,
+    pub(crate) db: Option<VmDb>,
     rows: Vec<Vec<Value>>,
     pub(crate) once_fired: HashSet<usize>,
 }
@@ -91,6 +129,24 @@ pub(crate) const MAX_REGISTERS: usize = 1 << 20;
 impl Vm {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds a `Vm` that can service `OpenRead` against `source` (page
+    /// size / usable size taken from `header`). Every `OpenRead` in the
+    /// program shares this one `source` via cheap `Rc` clones, so
+    /// multiple open cursors never contend over exclusive ownership of
+    /// the underlying file handle.
+    pub fn with_db(source: Rc<dyn PageSource>, header: DatabaseHeader) -> Self {
+        Self {
+            db: Some(VmDb { source, header }),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn db(&self) -> Result<&VmDb, ExecError> {
+        self.db
+            .as_ref()
+            .ok_or(ExecError::NoDatabase { opcode: "OpenRead" })
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -135,21 +191,36 @@ impl Vm {
 
     /// Reads cursor slot `slot`. Occupies a namespace disjoint from
     /// `register` — the same integer index in each never aliases.
-    pub fn cursor_slot(&self, slot: i32) -> Result<&Value, ExecError> {
+    /// Errors if the slot has no cursor open on it (no `Open*` opcode
+    /// has run for this slot, or it was never a valid index).
+    pub(crate) fn cursor(&self, slot: i32) -> Result<&CursorSlot, ExecError> {
         let idx = Self::index("cursor slot read", slot)?;
-        Ok(self.cursors.get(idx).unwrap_or(&Value::Null))
+        self.cursors
+            .get(idx)
+            .and_then(Option::as_ref)
+            .ok_or(ExecError::CursorNotOpen { slot })
     }
 
-    /// Writes cursor slot `slot`, growing the cursor-slot table with
-    /// NULL filler as needed — mirrors `set_register`'s growth policy,
-    /// but into the disjoint `cursors` storage.
-    pub fn set_cursor_slot(&mut self, slot: i32, value: Value) -> Result<(), ExecError> {
+    /// Mutable counterpart to [`Self::cursor`].
+    pub(crate) fn cursor_mut(&mut self, slot: i32) -> Result<&mut CursorSlot, ExecError> {
+        let idx = Self::index("cursor slot write", slot)?;
+        self.cursors
+            .get_mut(idx)
+            .and_then(Option::as_mut)
+            .ok_or(ExecError::CursorNotOpen { slot })
+    }
+
+    /// Opens cursor slot `slot` with `value`, growing the cursor-slot
+    /// table with empty (unopened) filler as needed — mirrors
+    /// `set_register`'s growth policy, but into the disjoint `cursors`
+    /// storage. Overwrites (closes) any cursor already open on `slot`.
+    pub(crate) fn set_cursor(&mut self, slot: i32, value: CursorSlot) -> Result<(), ExecError> {
         let idx = Self::index("cursor slot write", slot)?;
         if idx >= self.cursors.len() {
-            self.cursors.resize(idx.saturating_add(1), Value::Null);
+            self.cursors.resize_with(idx.saturating_add(1), || None);
         }
         if let Some(cell) = self.cursors.get_mut(idx) {
-            *cell = value;
+            *cell = Some(value);
         }
         Ok(())
     }
@@ -164,7 +235,7 @@ impl Vm {
 }
 
 #[allow(clippy::cast_sign_loss)]
-fn to_pc(p2: i32) -> usize {
+pub(crate) fn to_pc(p2: i32) -> usize {
     p2.max(0) as usize
 }
 
@@ -208,9 +279,12 @@ fn real_affinity(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, DecrJumpZero, Divide, Eq, Ge, Goto, Gt, Halt, IfNot, IfNotZero, IfPos,
-        Init, Integer, IsNull, Le, Lt, MakeRecord, Multiply, MustBeInt, NotNull, OffsetLimit, Once,
-        RealAffinity, Remainder, ResultRow, Return, String8, Subtract, Transaction,
+        Add, BeginSubrtn, Column, DecrJumpZero, Delete, Divide, Eq, Found, Ge, Goto, Gt, Halt,
+        IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Integer, IsNull, Last, Le, Lt, MakeRecord,
+        Multiply, MustBeInt, Next, NotNull, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
+        OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence,
+        Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
+        Transaction,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -247,6 +321,28 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         MakeRecord => result::make_record(vm, instr),
         ResultRow => result::result_row(vm, instr),
 
+        OpenRead => cursor::open_read(vm, instr),
+        OpenEphemeral => cursor::open_ephemeral(vm, instr),
+        OpenPseudo => cursor::open_pseudo(vm, instr),
+        Rewind => cursor::rewind(vm, instr),
+        Last => cursor::last(vm, instr),
+        Next => cursor::next(vm, instr),
+        Column => cursor::column(vm, instr),
+        Rowid => cursor::rowid(vm, instr),
+        SeekRowid => cursor::seek_rowid(vm, instr),
+        NullRow => cursor::null_row(vm, instr),
+        Sequence => cursor::sequence(vm, instr),
+        Found => cursor::found(vm, instr),
+        IdxInsert => cursor::idx_insert(vm, instr),
+        IdxLE => cursor::idx_le(vm, instr),
+        Delete => cursor::delete(vm, instr),
+
+        SorterOpen => sorter::sorter_open(vm, instr),
+        SorterInsert => sorter::sorter_insert(vm, instr),
+        SorterSort | Sort => sorter::sorter_sort(vm, instr),
+        SorterNext => sorter::sorter_next(vm, instr),
+        SorterData => sorter::sorter_data(vm, instr),
+
         other => Err(ExecError::Unimplemented { opcode: other }),
     }
 }
@@ -264,7 +360,21 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
 const MAX_STEPS: u32 = 1_000_000;
 
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
-    let mut vm = Vm::new();
+    run(Vm::new(), program)
+}
+
+/// Like [`execute`], but the `Vm` can service `OpenRead` (cursor
+/// opcodes over real tables) against `source`/`header` — see
+/// [`Vm::with_db`].
+pub fn execute_with_db(
+    program: &Program,
+    source: Rc<dyn PageSource>,
+    header: DatabaseHeader,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    run(Vm::with_db(source, header), program)
+}
+
+fn run(mut vm: Vm, program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut pc = 0usize;
     let mut steps = 0u32;
     loop {
@@ -306,9 +416,13 @@ mod tests {
     fn cursor_slots_and_registers_are_disjoint() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(1)).unwrap();
-        vm.set_cursor_slot(0, Value::Integer(99)).unwrap();
+        vm.set_cursor(0, CursorSlot::Pseudo { register: 99 })
+            .unwrap();
         assert_eq!(*vm.register(0).unwrap(), Value::Integer(1));
-        assert_eq!(*vm.cursor_slot(0).unwrap(), Value::Integer(99));
+        assert!(matches!(
+            vm.cursor(0).unwrap(),
+            CursorSlot::Pseudo { register: 99 }
+        ));
     }
 
     #[test]

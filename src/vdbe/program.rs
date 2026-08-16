@@ -194,15 +194,31 @@ fn _exhaustive(o: Opcode) {
     }
 }
 
+/// One column of a [`SorterOpen`](Opcode::SorterOpen) sort-key
+/// descriptor: sort direction plus the collation to compare under —
+/// e.g. the harvested `"k(2,-B,B)"` (2 keys, first descending, both
+/// BINARY) becomes `[{descending: true, ..}, {descending: false, ..}]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortKeyColumn {
+    /// Index into the sorter's record payload this key column reads —
+    /// not assumed to be the key's position among `SortKey`'s own
+    /// `Vec` (a sort key need not be the record's leading columns).
+    pub index: usize,
+    pub descending: bool,
+    pub collation: Collation,
+}
+
 /// P4's dynamic type: absent, an integer constant, a string constant
-/// (or function/index descriptor), or a collation-sequence-plus-affinity
-/// descriptor used by the compare opcodes (e.g. `"BINARY-8"`).
+/// (or function/index descriptor), a collation-sequence-plus-affinity
+/// descriptor used by the compare opcodes (e.g. `"BINARY-8"`), or a
+/// sorter's per-column sort-key descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum P4 {
     None,
     Int(i64),
     Str(String),
     CollSeq { collation: Collation, affinity: u8 },
+    SortKey(Vec<SortKeyColumn>),
 }
 
 /// A single fixed-shape bytecode instruction: an opcode tag, three

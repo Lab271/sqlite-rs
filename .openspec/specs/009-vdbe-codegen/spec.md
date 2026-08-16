@@ -177,7 +177,7 @@ need no special case. `Found`/`IdxInsert`/`Delete` MUST implement
 DISTINCT's dedup path: probe the ephemeral index, insert if absent, delete
 the just-produced duplicate row if present.
 
-**Implementation:** `src/vdbe/cursor.rs` (planned)
+**Implementation:** `src/vdbe/cursor.rs` (#90)
 
 #### Scenario: A full-table scan opens, rewinds, iterates, and reads via cursor opcodes
 
@@ -190,7 +190,8 @@ the just-produced duplicate row if present.
   row without advancing it, and `Next` advances to the following row or
   falls through to end the loop when exhausted
 
-**Tests:** `tests/vdbe/cursor_test.rs::full_scan_opens_rewinds_iterates_reads` (planned)
+**Tests:** `src/vdbe/cursor.rs::tests::full_scan_opens_rewinds_iterates_reads`,
+`tests/vdbe/cursor_sorter_test.rs::full_scan_program_matches_oracle_row_for_row`
 
 #### Scenario: DISTINCT probes an ephemeral index before emitting each row
 
@@ -203,7 +204,8 @@ the just-produced duplicate row if present.
   — the ephemeral index is backed by an in-memory `BTreeMap`, never a
   page-format file structure
 
-**Tests:** `tests/vdbe/cursor_test.rs::distinct_probes_ephemeral_index_before_emit` (planned)
+**Tests:** `src/vdbe/cursor.rs::tests::distinct_probes_ephemeral_index_before_emit`,
+`tests/vdbe/cursor_sorter_test.rs::distinct_program_discards_rows_already_seen`
 
 #### Scenario: Equality lookup uses SeekRowid instead of a full scan
 
@@ -213,7 +215,7 @@ the just-produced duplicate row if present.
   rowid (or jumps past the row-handling code if no such row exists),
   skipping `Rewind`/`Next` scan iteration entirely
 
-**Tests:** `tests/vdbe/cursor_test.rs::seek_rowid_skips_full_scan_on_pk_equality` (planned)
+**Tests:** `src/vdbe/cursor.rs::tests::seek_rowid_skips_full_scan_on_pk_equality`
 
 ### Requirement 5: Compare Opcodes [MUST]
 
@@ -373,7 +375,7 @@ iterate a table cursor, feeding `OpenPseudo`'s single-row cursor
 (Requirement 4) so downstream opcodes need no special case for
 sorter-sourced rows.
 
-**Implementation:** `src/vdbe/sorter.rs` (planned)
+**Implementation:** `src/vdbe/sorter.rs` (#90)
 
 #### Scenario: ORDER BY buffers all rows into a sorter before emitting any
 
@@ -386,7 +388,8 @@ sorter-sourced rows.
   rows in sorted order — no row is emitted before the full input is
   buffered
 
-**Tests:** `tests/vdbe/sorter_test.rs::order_by_buffers_all_rows_before_sorting` (planned)
+**Tests:** `src/vdbe/sorter.rs::tests::order_by_buffers_all_rows_before_sorting`,
+`tests/vdbe/cursor_sorter_test.rs::order_by_program_emits_rows_in_sorted_order`
 
 #### Scenario: Sort key descriptor encodes column count and per-column direction
 
@@ -399,7 +402,7 @@ sorter-sourced rows.
   delegating the actual value comparison to spec 008 (Requirement 5 of
   this spec)
 
-**Tests:** `tests/vdbe/sorter_test.rs::sort_key_descriptor_drives_multi_column_order` (planned)
+**Tests:** `src/vdbe/sorter.rs::tests::sort_key_descriptor_drives_multi_column_order`
 
 ### Requirement 10: EXPLAIN Output Format [MUST]
 
@@ -483,19 +486,21 @@ matching branch's result is computed.
 
 ## Traceability Note
 
-Phase 3A (#89) landed the VDBE core: Requirements 1, 2 (register file;
-the cursor-slot table itself is #90), 3, 5 (compare/affinity; cursor-slot
-comparisons stay #90), 6, and 8 have active `**Implementation:**` links.
-Requirements 4 (cursor), 7 (function registry), 9 (sorter), and 10
-(EXPLAIN) stay `(planned)` pending #90/#91; Requirement 11 (expression
-emission) stays `(planned)` pending #91's codegen work. Per
-`.openspec/README.md`'s dashboard convention, `(planned)` requirements
-are excluded from completeness/coverage scoring until their tickets land
-and flip the links active.
+Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 are now
+active: #89 landed the VDBE core (instruction format, register file,
+control/arithmetic/compare/result opcodes), #90 landed the cursor,
+ephemeral-index, and sorter opcode families. Requirements 7 (`Function`
+opcode dispatch), 10 (`EXPLAIN`), and 11 (expression emission) remain
+`(planned)` — #91 (codegen + EXPLAIN, the convergence ticket needing
+#89+#90+#61+#59) is what will wire a real SQL-to-`Program` pipeline and
+flip those links active. Per `.openspec/README.md`'s dashboard
+convention, `(planned)` requirements stay excluded from completeness/
+coverage scoring until then.
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
 harvested opcode set — the full 52-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
 line tracks how many of those 52 are actually dispatched in
-`src/vdbe/exec.rs` (30/52 as phase 3A lands, #65).
+`src/vdbe/exec.rs` (49/52 with #90's cursor/sorter/ephemeral families
+landed).

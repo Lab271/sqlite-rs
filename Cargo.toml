@@ -1,6 +1,6 @@
 [package]
 name = "sqlite-rs"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
@@ -39,6 +39,10 @@ path = "tests/vdbe/oracle_vectors_test.rs"
 [[test]]
 name = "opcode_completeness"
 path = "tests/vdbe/opcode_completeness_test.rs"
+
+[[test]]
+name = "vdbe_cursor_sorter"
+path = "tests/vdbe/cursor_sorter_test.rs"
 
 [[test]]
 name = "tokenizer_proptest"
