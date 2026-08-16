@@ -279,12 +279,12 @@ fn real_affinity(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, Column, DecrJumpZero, Delete, Divide, Eq, Found, Ge, Goto, Gt, Halt,
-        IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Integer, IsNull, Last, Le, Lt, MakeRecord,
-        Multiply, MustBeInt, Next, NotNull, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
-        OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence,
-        Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
-        Transaction,
+        Add, BeginSubrtn, Column, DecrJumpZero, Delete, Divide, Eq, Found, Function, Ge, Goto, Gt,
+        Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Integer, IsNull, Last, Le, Lt,
+        MakeRecord, Multiply, MustBeInt, Next, NotNull, NullRow, OffsetLimit, Once, OpenEphemeral,
+        OpenPseudo, OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid,
+        Sequence, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
+        Subtract, Transaction,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -343,8 +343,68 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         SorterNext => sorter::sorter_next(vm, instr),
         SorterData => sorter::sorter_data(vm, instr),
 
-        other => Err(ExecError::Unimplemented { opcode: other }),
+        Function => function(vm, instr),
     }
+}
+
+/// `Function` (spec 009, Requirement 7): dispatches by a `P4`
+/// `"name(arity)"` descriptor into the shared scalar-function registry
+/// (`src/vdbe/functions.rs`, spec 008), reading its argument registers
+/// (a contiguous run starting at `P2`) and writing the result to `P3`.
+/// No function-specific logic lives here — adding a function to the
+/// registry is sufficient to make it callable via this opcode.
+fn function(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let descriptor = match &instr.p4 {
+        P4::Str(s) => s.as_str(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Function",
+                reason: format!("expected a \"name(arity)\" string P4, got {other:?}"),
+            })
+        }
+    };
+    let (name, arity) =
+        parse_function_descriptor(descriptor).ok_or_else(|| ExecError::MalformedInstruction {
+            opcode: "Function",
+            reason: format!("malformed function descriptor {descriptor:?}"),
+        })?;
+    let mut args = Vec::with_capacity(arity);
+    for i in 0..arity {
+        let reg = instr
+            .p2
+            .checked_add(
+                i32::try_from(i).map_err(|_| ExecError::RegisterRangeTooLarge {
+                    opcode: "Function",
+                    count: i32::try_from(arity).unwrap_or(i32::MAX),
+                })?,
+            )
+            .ok_or(ExecError::RegisterOutOfRange {
+                opcode: "Function",
+                index: instr.p2,
+            })?;
+        args.push(vm.register(reg)?.clone());
+    }
+    let result =
+        crate::vdbe::functions::call(name, &args).map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Function",
+            reason: e.to_string(),
+        })?;
+    vm.set_register(instr.p3, result)?;
+    Ok(Step::Next)
+}
+
+/// Parses a `"name(arity)"` descriptor (e.g. `"abs(1)"`, `"like(2)"`)
+/// into its parts.
+fn parse_function_descriptor(descriptor: &str) -> Option<(&str, usize)> {
+    let open = descriptor.find('(')?;
+    if !descriptor.ends_with(')') {
+        return None;
+    }
+    let name = descriptor.get(..open)?;
+    let inner_start = open.checked_add(1)?;
+    let inner_end = descriptor.len().checked_sub(1)?;
+    let arity: usize = descriptor.get(inner_start..inner_end)?.parse().ok()?;
+    Some((name, arity))
 }
 
 /// Runs `program` to completion, starting at PC 0. Returns the rows

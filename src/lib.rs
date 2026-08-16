@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod btree;
+pub mod codegen;
 pub mod dump;
 pub mod format;
 pub mod header;
