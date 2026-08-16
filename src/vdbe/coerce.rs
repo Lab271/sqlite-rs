@@ -128,6 +128,46 @@ pub fn checked_mul(a: &Value, b: &Value) -> Value {
     arith(a, b, i64::checked_mul, |x, y| x * y)
 }
 
+/// Divides two values, coercing text operands numerically. Integer
+/// division by zero yields NULL (SQLite's rule, not a panic or an
+/// error); `i64::MIN / -1` overflows and promotes to REAL like any other
+/// arithmetic overflow.
+pub fn checked_div(a: &Value, b: &Value) -> Value {
+    match (as_numeric(a), as_numeric(b)) {
+        (Value::Integer(_), Value::Integer(0)) => Value::Null,
+        (Value::Integer(x), Value::Integer(y)) => match x.checked_div(y) {
+            Some(v) => Value::Integer(v),
+            None => Value::Real(x as f64 / y as f64),
+        },
+        (x, y) => {
+            let (x, y) = (to_f64(&x), to_f64(&y));
+            if y == 0.0 {
+                Value::Null
+            } else {
+                Value::Real(x / y)
+            }
+        }
+    }
+}
+
+/// Computes the remainder of two values, coercing text operands
+/// numerically. Integer remainder by zero yields NULL, matching
+/// `checked_div`'s divide-by-zero rule; non-integer operands are
+/// truncated to integer first, per SQLite's `%` operator semantics.
+pub fn checked_rem(a: &Value, b: &Value) -> Value {
+    let (x, y) = (
+        cast_to_integer(&as_numeric(a)),
+        cast_to_integer(&as_numeric(b)),
+    );
+    if y == 0 {
+        return Value::Null;
+    }
+    match x.checked_rem(y) {
+        Some(v) => Value::Integer(v),
+        None => Value::Integer(0), // i64::MIN % -1 == 0, no overflow needed but checked_rem is conservative
+    }
+}
+
 /// `CAST(... AS INTEGER)`: truncates a REAL toward zero rather than
 /// rounding or flooring.
 #[allow(clippy::cast_possible_truncation)]

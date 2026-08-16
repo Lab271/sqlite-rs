@@ -53,7 +53,7 @@ program counter (PC) 0 and advance by incrementing PC unless an
 instruction explicitly redirects it (jump, subroutine call/return, or
 `Halt`).
 
-**Implementation:** `src/vdbe/program.rs` (planned)
+**Implementation:** `src/vdbe/program.rs` (#89)
 
 #### Scenario: An instruction carries opcode, three integer operands, dynamic P4, and P5 flags
 
@@ -65,7 +65,7 @@ instruction explicitly redirects it (jump, subroutine call/return, or
   integer or absent value — P4's type is opcode- and call-site-dependent,
   not fixed per opcode
 
-**Tests:** `tests/vdbe/program_test.rs::instruction_carries_typed_p4_variant` (planned)
+**Tests:** `src/vdbe/program.rs::tests::instruction_carries_typed_p4_variant`
 
 #### Scenario: Program execution starts at PC 0 and advances linearly absent a jump
 
@@ -77,7 +77,7 @@ instruction explicitly redirects it (jump, subroutine call/return, or
   advances by exactly 1 after every instruction that is not itself a jump,
   call, or `Halt`
 
-**Tests:** `tests/vdbe/program_test.rs::execution_starts_at_pc_zero_and_advances_linearly` (planned)
+**Tests:** `src/vdbe/exec.rs::tests::hand_assembled_program_computes_1_plus_2_and_emits_a_row`
 
 ### Requirement 2: Register Model [MUST]
 
@@ -91,7 +91,7 @@ namespace) and a small integer comparison-flags/last-compare-result cell
 used by control-flow opcodes (`IfNot`/`IfPos`/`DecrJumpZero` — see
 Requirement 3) to make their jump decision without re-reading a register.
 
-**Implementation:** `src/vdbe/exec.rs` (planned)
+**Implementation:** `src/vdbe/exec.rs` (#89; cursor-slot table itself is #90)
 
 #### Scenario: A register retains its value across unrelated instructions
 
@@ -101,7 +101,7 @@ Requirement 3) to make their jump decision without re-reading a register.
 - THEN the `Integer`-loaded register's value is unchanged after the
   `Column` instruction executes — registers are not implicitly cleared
 
-**Tests:** `tests/vdbe/exec_test.rs::register_persists_across_unrelated_instructions` (planned)
+**Tests:** `src/vdbe/exec.rs::tests::register_persists_across_unrelated_instructions`
 
 #### Scenario: Cursor slots and registers occupy disjoint address spaces
 
@@ -111,7 +111,7 @@ Requirement 3) to make their jump decision without re-reading a register.
   `ResultRow`) access independent storage — a cursor-slot index and a
   register index of the same integer value never alias
 
-**Tests:** `tests/vdbe/exec_test.rs::cursor_slots_and_registers_are_disjoint` (planned)
+**Tests:** `src/vdbe/exec.rs::tests::cursor_slots_and_registers_are_disjoint`
 
 ### Requirement 3: Control-Flow Opcodes [MUST]
 
@@ -128,7 +128,7 @@ and OFFSET registers; `IfPos`/`IfNotZero`/`DecrJumpZero` decrement and
 branch on that counter per row). `Halt` MUST terminate execution and
 signal success or a specific SQLite error code via its operands.
 
-**Implementation:** `src/vdbe/control.rs` (planned)
+**Implementation:** `src/vdbe/control.rs` (#89)
 
 #### Scenario: LIMIT/OFFSET decomposes into a setup opcode and per-row counter opcodes
 
@@ -139,7 +139,7 @@ signal success or a specific SQLite error code via its operands.
   iteration inside the loop to test and decrement that counter — LIMIT/
   OFFSET is control flow, not a dedicated single opcode
 
-**Tests:** `tests/vdbe/control_test.rs::limit_offset_uses_setup_plus_per_row_counter_opcodes` (planned)
+**Tests:** `src/vdbe/control.rs::tests::offset_limit_combines_limit_and_offset`
 
 #### Scenario: DecrJumpZero implements the LIMIT-without-OFFSET counter form
 
@@ -149,7 +149,7 @@ signal success or a specific SQLite error code via its operands.
   jumps out of the scan loop the instant it reaches zero, without needing
   a separate `OffsetLimit` setup when OFFSET is absent
 
-**Tests:** `tests/vdbe/control_test.rs::decr_jump_zero_terminates_scan_at_limit` (planned)
+**Tests:** `src/vdbe/control.rs::tests::decr_jump_zero_terminates_at_zero`
 
 #### Scenario: Once guards subroutine initialization on repeat entry
 
@@ -159,7 +159,7 @@ signal success or a specific SQLite error code via its operands.
   reaches it and jumps past that block on every subsequent execution
   within the same statement run
 
-**Tests:** `tests/vdbe/control_test.rs::once_guards_initialization_on_repeat_entry` (planned)
+**Tests:** `src/vdbe/control.rs::tests::once_falls_through_first_time_then_jumps_on_repeat_entry`
 
 ### Requirement 4: Cursor Opcodes [MUST]
 
@@ -230,7 +230,7 @@ affinity coercion applied on cursor-column load, upstream of any actual
 comparison, and MUST delegate to spec 008's `src/vdbe/affinity.rs`
 (Requirement 1 there) rather than reimplementing the coercion rule.
 
-**Implementation:** `src/vdbe/exec.rs` (planned; comparison/affinity
+**Implementation:** `src/vdbe/exec.rs` (#89; comparison/affinity
 delegation target is `src/vdbe/compare.rs`, existing, spec 008)
 
 #### Scenario: Eq/Ge/Gt/Le/Lt jump on the kernel's comparison result, not a re-derived rule
@@ -242,7 +242,7 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
   branches on its result; the opcode itself contains no comparison logic
   of its own
 
-**Tests:** `tests/vdbe/compare_test.rs::comparison_opcodes_delegate_to_kernel_and_branch_on_result` (planned)
+**Tests:** `src/vdbe/exec.rs::tests::compare_opcodes_jump_on_kernel_result_not_a_re_derived_rule`
 
 #### Scenario: RealAffinity applies column affinity on load, independent of any comparison
 
@@ -253,7 +253,7 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
   affinity rules (Requirement 1 there) at load time, regardless of
   whether the query performs any comparison on that column
 
-**Tests:** `tests/vdbe/compare_test.rs::real_affinity_coerces_on_load_not_comparison` (planned)
+**Tests:** `src/vdbe/exec.rs::tests::real_affinity_coerces_register_on_load_independent_of_comparison`
 
 ### Requirement 6: Arithmetic Opcodes [MUST]
 
@@ -265,7 +265,7 @@ value.rs` (Requirement 4 there: NULL propagates through arithmetic); the
 opcode layer supplies only register addressing (read two source
 registers, write one destination register).
 
-**Implementation:** `src/vdbe/arithmetic.rs` (planned)
+**Implementation:** `src/vdbe/arithmetic.rs` (#89)
 
 #### Scenario: Add/Subtract/Divide/Remainder read two registers and write one
 
@@ -277,7 +277,9 @@ registers, write one destination register).
   kernel, and writes the result to its destination register — the opcode
   itself performs no arithmetic
 
-**Tests:** `tests/vdbe/arithmetic_test.rs::arithmetic_opcodes_delegate_to_kernel` (planned)
+**Tests:** `src/vdbe/arithmetic.rs::tests::add_reads_two_registers_writes_one`,
+`src/vdbe/arithmetic.rs::tests::null_propagates_through_every_arithmetic_opcode`,
+`src/vdbe/arithmetic.rs::tests::divide_by_zero_yields_null_not_a_panic`
 
 ### Requirement 7: Function Opcode [MUST]
 
@@ -321,7 +323,7 @@ to spec 003's record encoding — this is the same on-disk record format,
 reused for in-memory ephemeral rows (DISTINCT, sorter), not a
 VDBE-private serialization.
 
-**Implementation:** `src/vdbe/result.rs` (planned)
+**Implementation:** `src/vdbe/result.rs` (#89)
 
 #### Scenario: Integer and String8 load typed literals into registers
 
@@ -333,7 +335,7 @@ VDBE-private serialization.
   register, and `String8` writes its `P4` string constant into its
   destination register — both are pure literal loads, no computation
 
-**Tests:** `tests/vdbe/result_test.rs::integer_and_string8_load_literals` (planned)
+**Tests:** `src/vdbe/result.rs::tests::integer_and_string8_load_literals`
 
 #### Scenario: ResultRow emits a fixed register range as one output row every iteration
 
@@ -344,7 +346,7 @@ VDBE-private serialization.
   logical output row to the statement's caller, without itself advancing
   any cursor or looping — looping is the scan opcodes' job (Requirement 4)
 
-**Tests:** `tests/vdbe/result_test.rs::result_row_emits_fixed_register_range` (planned)
+**Tests:** `src/vdbe/result.rs::tests::result_row_emits_fixed_register_range`
 
 #### Scenario: MakeRecord's output is byte-identical to spec 003's record format
 
@@ -354,7 +356,7 @@ VDBE-private serialization.
   match spec 003's `**Implementation:** src/record.rs` encoding exactly —
   `MakeRecord` calls that encoder rather than reimplementing it
 
-**Tests:** `tests/vdbe/result_test.rs::make_record_output_matches_spec_003_encoding` (planned)
+**Tests:** `src/vdbe/result.rs::tests::make_record_output_matches_spec_003_encoding`
 
 ### Requirement 9: Sorter Opcodes [MUST]
 
