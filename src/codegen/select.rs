@@ -428,15 +428,18 @@ fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: Label) {
     }
 }
 
-/// Recognizes `WHERE rowid = <int literal>` / `WHERE rowid = ?` (#137):
-/// a single top-level equality between a rowid reference (the
-/// `rowid`/`_rowid_`/`oid` keywords, or the table's actual `INTEGER
-/// PRIMARY KEY` alias column) and an integer literal or bind
-/// parameter. Returns the non-rowid side (the value to seek by).
-/// Deliberately narrow — secondary-index columns, ranges, and compound
-/// conditions (`AND`/`OR`) all fall through to the ordinary scan and
-/// stay in V4 per the issue's bounded scope.
-fn rowid_seek_operand<'a>(schema: &TableSchema, expr: &'a Expr) -> Option<&'a Expr> {
+/// The two sides of a top-level `=` expression, or `None` for any other
+/// shape. Used by [`try_compile_rowid_seek`] to recognize `WHERE rowid =
+/// <int literal>` / `WHERE rowid = ?` (#137).
+///
+/// Single input reference, so lifetime elision ties both tuple elements
+/// to it without an explicit `<'a>` annotation — the qualified subset
+/// (`make mvl-limit`) forbids explicit lifetimes, and a helper taking
+/// both `schema` and `expr` by reference while returning a borrow of
+/// `expr` alone would need one. The caller also needs `schema` (to pick
+/// the non-rowid side via [`is_rowid_reference`]), so that step happens
+/// in [`try_compile_rowid_seek`] itself, which already holds both.
+fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)> {
     let ExprKind::Binary {
         op: BinaryOp::Eq,
         lhs,
@@ -445,13 +448,7 @@ fn rowid_seek_operand<'a>(schema: &TableSchema, expr: &'a Expr) -> Option<&'a Ex
     else {
         return None;
     };
-    if is_rowid_reference(schema, lhs) {
-        return Some(rhs);
-    }
-    if is_rowid_reference(schema, rhs) {
-        return Some(lhs);
-    }
-    None
+    Some((lhs, rhs))
 }
 
 fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
@@ -470,11 +467,16 @@ fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
 }
 
 /// Emits `Integer`/`Variable` + `SeekRowid` in place of the
-/// `Rewind`/`Next` scan loop when `select`'s `WHERE` clause matches
-/// [`rowid_seek_operand`]'s bounded shape — O(log n) point lookup
-/// instead of O(n) full scan (#137). Returns `Ok(true)` when the fast
-/// path was taken; `Ok(false)` leaves `em`/`reg` untouched so the
-/// caller falls back to the ordinary scan.
+/// `Rewind`/`Next` scan loop when `select`'s `WHERE` clause is a single
+/// top-level equality between a rowid reference (the `rowid`/`_rowid_`/
+/// `oid` keywords, or the table's actual `INTEGER PRIMARY KEY` alias
+/// column) and an integer literal or bind parameter — O(log n) point
+/// lookup instead of O(n) full scan (#137). Returns `Ok(true)` when the
+/// fast path was taken; `Ok(false)` leaves `em`/`reg` untouched so the
+/// caller falls back to the ordinary scan. Deliberately narrow —
+/// secondary-index columns, ranges, and compound conditions (`AND`/`OR`)
+/// all fall through to the ordinary scan and stay in V4 per the issue's
+/// bounded scope.
 fn try_compile_rowid_seek(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -492,7 +494,14 @@ fn try_compile_rowid_seek(
     let Some(where_expr) = &select.where_clause else {
         return Ok(false);
     };
-    let Some(operand) = rowid_seek_operand(schema, where_expr) else {
+    let Some((lhs, rhs)) = top_level_equality_operands(where_expr) else {
+        return Ok(false);
+    };
+    let operand = if is_rowid_reference(schema, lhs) {
+        rhs
+    } else if is_rowid_reference(schema, rhs) {
+        lhs
+    } else {
         return Ok(false);
     };
     // Bounded to the issue's in-scope shapes: an integer literal, or a
