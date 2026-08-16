@@ -9,10 +9,12 @@ mod coerce;
 mod collation;
 mod compare;
 mod control;
+mod cursor;
 mod exec;
 mod functions;
 mod program;
 mod result;
+mod sorter;
 mod value;
 
 pub use affinity::{affinity_of, apply_affinity, Affinity};
@@ -22,7 +24,7 @@ pub use coerce::{
 };
 pub use collation::{compare_text, Collation};
 pub use compare::compare;
-pub use exec::{execute, ExecError, Step, Vm};
+pub use exec::{execute, execute_with_db, ExecError, Step, Vm};
 pub use functions::{call as call_function, FunctionError};
-pub use program::{Instruction, Opcode, Program, P4};
+pub use program::{Instruction, Opcode, Program, SortKeyColumn, P4};
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};

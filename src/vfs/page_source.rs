@@ -78,6 +78,16 @@ impl PageSource for VfsPageSource {
     }
 }
 
+/// Lets the VDBE (`src/vdbe/cursor.rs`) share one page source across
+/// several `TableCursor`s (one per open `OpenRead` cursor slot) without
+/// cloning the underlying file handle — `Rc` is cheap to clone, and the
+/// VM is single-threaded, so this never needs to be `Send`/`Sync`.
+impl PageSource for std::rc::Rc<dyn PageSource> {
+    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        (**self).read_page(page_num)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {

@@ -41,6 +41,10 @@ name = "opcode_completeness"
 path = "tests/vdbe/opcode_completeness_test.rs"
 
 [[test]]
+name = "vdbe_cursor_sorter"
+path = "tests/vdbe/cursor_sorter_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 
