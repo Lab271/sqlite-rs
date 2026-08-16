@@ -32,6 +32,61 @@ pub fn affinity_of(declared_type: &str) -> Affinity {
     }
 }
 
+impl Affinity {
+    /// SQLite's own affinity byte codes (`expr.h`'s `SQLITE_AFF_*`,
+    /// e.g. `'D'` for INTEGER) — the P4 wire format for compare
+    /// opcodes (spec 009, Requirement 5).
+    pub fn to_p4_byte(self) -> u8 {
+        match self {
+            Affinity::Blob => b'A',
+            Affinity::Text => b'B',
+            Affinity::Numeric => b'C',
+            Affinity::Integer => b'D',
+            Affinity::Real => b'E',
+        }
+    }
+
+    /// Inverse of [`Affinity::to_p4_byte`]; an unrecognized byte
+    /// (should not occur for programs this codegen emits) defaults to
+    /// `Blob`, matching a `None` P4's no-op behavior.
+    pub fn from_p4_byte(byte: u8) -> Affinity {
+        match byte {
+            b'B' => Affinity::Text,
+            b'C' => Affinity::Numeric,
+            b'D' => Affinity::Integer,
+            b'E' => Affinity::Real,
+            _ => Affinity::Blob,
+        }
+    }
+
+    /// NUMERIC/INTEGER/REAL are SQLite's "numeric affinities" —
+    /// `sqlite3IsNumericAffinity`. TEXT/BLOB are not.
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Affinity::Numeric | Affinity::Integer | Affinity::Real)
+    }
+}
+
+/// The affinity applied to a comparison's two operands, derived from
+/// each operand's own affinity per SQLite's `comparisonAffinity`
+/// (`expr.c`): if both operands have an affinity, numeric wins when
+/// either is numeric, else no affinity (BLOB) is applied; if only one
+/// operand has an affinity, that one wins; if neither does, no
+/// affinity is applied. Affinity is derived from *both* operands, not
+/// from either one alone (spec 008, Requirement 1).
+pub fn comparison_affinity(lhs: Option<Affinity>, rhs: Option<Affinity>) -> Affinity {
+    match (lhs, rhs) {
+        (Some(a), Some(b)) => {
+            if a.is_numeric() || b.is_numeric() {
+                Affinity::Numeric
+            } else {
+                Affinity::Blob
+            }
+        }
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => Affinity::Blob,
+    }
+}
+
 /// Converts a well-formed numeric-text literal to its lossless numeric
 /// representation for NUMERIC/INTEGER/REAL affinities. TEXT and BLOB
 /// affinities never convert (spec 008, Requirement 1).

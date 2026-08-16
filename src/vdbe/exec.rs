@@ -255,11 +255,21 @@ fn compare_jump(
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return Ok(Step::Next);
     }
-    let collation = match &instr.p4 {
-        P4::CollSeq { collation, .. } => *collation,
-        _ => Collation::Binary,
+    let (collation, affinity) = match &instr.p4 {
+        P4::CollSeq {
+            collation,
+            affinity,
+        } => (*collation, Affinity::from_p4_byte(*affinity)),
+        _ => (Collation::Binary, Affinity::Blob),
     };
-    let ord = compare(a, b, collation);
+    // Affinity applies to *copies* of the operands, not the live
+    // registers — a comparison must not mutate the row being compared
+    // (spec 008 Requirement 1's comparison-affinity half, #138).
+    let mut a = a.clone();
+    let mut b = b.clone();
+    apply_affinity(&mut a, affinity);
+    apply_affinity(&mut b, affinity);
+    let ord = compare(&a, &b, collation);
     Ok(if holds(ord) {
         Step::Jump(to_pc(instr.p2))
     } else {
@@ -538,6 +548,34 @@ mod tests {
             compare_jump(&vm, &lt, |o| o == Ordering::Less).unwrap(),
             Step::Next
         );
+    }
+
+    #[test]
+    fn compare_jump_applies_comparison_affinity_derived_from_both_operands() {
+        // Mirrors #138: `WHERE i = '5'` against an INTEGER column
+        // compiles a text literal register on one side. Without
+        // applying the P4 affinity byte, `compare()` falls back to
+        // storage-class ordering (text > numeric) and never jumps;
+        // INTEGER affinity coerces the text side to numeric first.
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        vm.set_register(1, Value::Text("5".to_string())).unwrap();
+        let eq = Instruction::with_p4(
+            Opcode::Eq,
+            0,
+            99,
+            1,
+            P4::CollSeq {
+                collation: Collation::Binary,
+                affinity: Affinity::Integer.to_p4_byte(),
+            },
+        );
+        assert_eq!(
+            compare_jump(&vm, &eq, |o| o == Ordering::Equal).unwrap(),
+            Step::Jump(99)
+        );
+        // The source registers must not be mutated by the comparison.
+        assert_eq!(*vm.register(1).unwrap(), Value::Text("5".to_string()));
     }
 
     #[test]

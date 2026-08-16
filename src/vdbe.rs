@@ -18,7 +18,7 @@ mod result;
 mod sorter;
 mod value;
 
-pub use affinity::{affinity_of, apply_affinity, Affinity};
+pub use affinity::{affinity_of, apply_affinity, comparison_affinity, Affinity};
 pub use coerce::{
     cast_to_integer, checked_add, checked_div, checked_mul, checked_rem, checked_sub,
     coerce_text_to_numeric,

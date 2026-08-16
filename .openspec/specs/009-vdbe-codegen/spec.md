@@ -273,6 +273,21 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
 
 **Tests:** `src/vdbe/exec.rs::tests::real_affinity_coerces_register_on_load_independent_of_comparison`
 
+#### Scenario: Compare opcodes apply the P4 affinity byte before comparing, derived from both operands
+
+- GIVEN `SELECT * FROM t WHERE i = '5'` against a table with `i INTEGER`
+  (#138: the oracle emits `Ne r2, →7, r1, BINARY-8, p5=84` — affinity
+  folded into the compare opcode's P4/P5, applied before comparing)
+- THEN codegen derives comparison affinity from both operands per
+  SQLite's own rule (numeric affinity wins if either operand has one;
+  a column/CAST operand's affinity wins over an operand with none;
+  otherwise no affinity is applied) and `compare_jump` applies it, via
+  `src/vdbe/affinity.rs`, to copies of both operands before delegating
+  to `compare()` — so `i = '5'` matches the INTEGER row instead of
+  falling back to NULL/numeric/text/blob storage-class ordering
+
+**Tests:** `src/vdbe/exec.rs::tests::compare_jump_applies_comparison_affinity_derived_from_both_operands`
+
 ### Requirement 6: Arithmetic Opcodes [MUST]
 
 The 12 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,

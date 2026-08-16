@@ -11,7 +11,7 @@ use crate::codegen::{
 };
 use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
 use crate::schema::{rowid_alias_column, TableSchema};
-use crate::vdbe::{Collation, Instruction, Opcode, P4};
+use crate::vdbe::{affinity_of, comparison_affinity, Affinity, Collation, Instruction, Opcode, P4};
 
 /// Resolves a bare `Expr::Column` name against the schema; any other
 /// expression is a codegen error only when a caller specifically
@@ -146,9 +146,11 @@ pub(crate) fn compile_cond(
             ) =>
         {
             let collation = collation_of(lhs).or_else(|| collation_of(rhs));
+            let affinity =
+                comparison_affinity(expr_affinity(schema, lhs), expr_affinity(schema, rhs));
             let l = compile_value(em, reg, schema, cursor, lhs)?;
             let r = compile_value(em, reg, schema, cursor, rhs)?;
-            emit_compare_false_jump(em, *op, l, r, collation, targets)
+            emit_compare_false_jump(em, *op, l, r, collation, affinity, targets)
         }
 
         ExprKind::Is { lhs, rhs, negated } => {
@@ -347,7 +349,9 @@ pub(crate) fn compile_cond(
 
             for item in list.iter() {
                 let collation = collation_of(inner).or_else(|| collation_of(item));
-                let p4 = collation.map_or(P4::None, p4_coll_seq);
+                let affinity =
+                    comparison_affinity(expr_affinity(schema, inner), expr_affinity(schema, item));
+                let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);
                 let r = compile_value(em, reg, schema, cursor, item)?;
 
                 let item_null_label = em.new_label();
@@ -514,9 +518,10 @@ fn emit_compare_false_jump(
     lhs: i32,
     rhs: i32,
     collation: Option<Collation>,
+    affinity: Affinity,
     targets: CondTargets,
 ) -> Result<(), CodegenError> {
-    let p4 = collation.map_or(P4::None, p4_coll_seq);
+    let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);
     // `Ne` has no opcode of its own; it's `Eq` with true/false swapped
     // — and that swap needs `null_target` flipped with it for the same
     // reason `NOT` does (#134). Without the flip, `WHERE x <> 5`
@@ -610,6 +615,26 @@ fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> boo
         "avg" | "count" | "group_concat" | "string_agg" | "sum" | "total" => true,
         "max" | "min" => arity <= 1,
         _ => false,
+    }
+}
+
+/// An expression's own affinity, per SQLite's `sqlite3ExprAffinity`
+/// (spec 008 Requirement 1's comparison-affinity half, #138): a bare
+/// column carries its declared-type affinity, a `CAST` carries its
+/// target type's affinity, and a parenthesized expression defers to
+/// its inner expression. Every other expression (literals, function
+/// calls, arithmetic) has no affinity of its own — matching SQLite,
+/// where only columns and casts do.
+fn expr_affinity(schema: &TableSchema, expr: &Expr) -> Option<Affinity> {
+    match &expr.kind {
+        ExprKind::Column { name, .. } => {
+            let idx = column_index(schema, name)?;
+            let declared = schema.column_types.get(idx)?;
+            Some(affinity_of(declared))
+        }
+        ExprKind::Cast { type_name, .. } => Some(affinity_of(type_name)),
+        ExprKind::Paren(inner) => expr_affinity(schema, inner),
+        _ => None,
     }
 }
 

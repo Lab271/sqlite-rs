@@ -32,6 +32,7 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         name: "t".to_string(),
         root_page: 2,
         columns: columns.iter().map(|c| (*c).to_string()).collect(),
+        column_types: vec![],
         without_rowid: false,
         strict: false,
         is_virtual: false,

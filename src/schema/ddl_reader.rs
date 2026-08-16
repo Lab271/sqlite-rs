@@ -43,6 +43,15 @@ pub struct TableSchema {
     pub columns: Vec<String>,
     pub without_rowid: bool,
     pub strict: bool,
+    /// Each column's declared type text, position-for-position with
+    /// `columns` (empty string when a column has none) — the
+    /// substring `affinity_of` (spec 008 Requirement 1) derives
+    /// column affinity from. Comparison-affinity derivation (#138)
+    /// needs this; `dump.rs` re-derives its own full column text from
+    /// `sql` instead via [`column_defs`], so this is naive on purpose:
+    /// same textual scope as `columns`, no dialect edge cases beyond
+    /// what the corpus exercises.
+    pub column_types: Vec<String>,
     /// `CREATE VIRTUAL TABLE ...` — DDL this reader deliberately does not
     /// parse. `columns` is always empty and `root_page` is `0` (virtual
     /// tables have no b-tree storage of their own).
@@ -91,6 +100,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
             columns: Vec::new(),
             without_rowid: false,
             strict: false,
+            column_types: Vec::new(),
             is_virtual: true,
             sql: sql.to_string(),
         };
@@ -103,6 +113,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
         columns: parsed.columns,
         without_rowid: parsed.without_rowid,
         strict: parsed.strict,
+        column_types: parsed.column_types,
         is_virtual: false,
         sql: sql.to_string(),
     }
@@ -124,6 +135,7 @@ fn is_virtual_table(sql: &str) -> bool {
 #[derive(Default)]
 struct ParsedCreateTable {
     columns: Vec<String>,
+    column_types: Vec<String>,
     without_rowid: bool,
     strict: bool,
 }
@@ -137,14 +149,16 @@ fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
     let inner = sql.get(start..end)?;
     let trailer = sql.get(end.saturating_add(1)..)?.to_ascii_uppercase();
 
-    let columns = split_top_level_commas(inner)
+    let defs: Vec<&str> = split_top_level_commas(inner)
         .into_iter()
         .filter(|def| !is_table_constraint(def))
-        .map(column_name)
         .collect();
+    let columns = defs.iter().map(|def| column_name(def)).collect();
+    let column_types = defs.iter().map(|def| column_type(def)).collect();
 
     Some(ParsedCreateTable {
         columns,
+        column_types,
         without_rowid: trailer.contains("WITHOUT ROWID"),
         strict: trailer.contains("STRICT"),
     })
@@ -218,6 +232,34 @@ fn column_name(def: &str) -> String {
         .trim_matches(['"', '`', '['].as_ref())
         .trim_matches([']'].as_ref())
         .to_string()
+}
+
+/// The declared-type text between a column's name and its first
+/// column-constraint keyword — SQLite's own notion of "declared type"
+/// (datatype3.html §3.1), which may span several words (`DOUBLE
+/// PRECISION`, `UNSIGNED BIG INT`). Empty when the column has no type
+/// (`CREATE TABLE t(x)`).
+fn column_type(def: &str) -> String {
+    const CONSTRAINT_KEYWORDS: [&str; 8] = [
+        "PRIMARY",
+        "NOT",
+        "NULL",
+        "UNIQUE",
+        "CHECK",
+        "DEFAULT",
+        "COLLATE",
+        "REFERENCES",
+    ];
+    def.split_whitespace()
+        .skip(1)
+        .take_while(|word| {
+            let upper = word.to_ascii_uppercase();
+            !CONSTRAINT_KEYWORDS
+                .iter()
+                .any(|kw| upper == *kw || upper.starts_with(&format!("{kw}(")))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Splits a `CREATE TABLE ...(col-defs)...` statement's column-definition

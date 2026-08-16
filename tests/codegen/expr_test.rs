@@ -47,6 +47,11 @@ fn one_row_fixture() -> (std::path::PathBuf, TableSchema) {
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
+        column_types: vec![
+            "INTEGER".to_string(),
+            "INTEGER".to_string(),
+            "TEXT".to_string(),
+        ],
         without_rowid: false,
         strict: false,
         is_virtual: false,
@@ -142,6 +147,53 @@ fn in_list_matches_any_element() {
     assert_eq!(out, vec![vec![Value::Integer(1)]]);
     let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE a IN (5, 9)");
     assert!(out2.is_empty());
+}
+
+/// A two-row `i INTEGER, r REAL` fixture reproducing #138's oracle
+/// table, for comparison-affinity coverage: text/real literals compared
+/// against typed columns.
+fn affinity_fixture() -> (std::path::PathBuf, TableSchema) {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_affinity_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(i INTEGER, r REAL); \
+             INSERT INTO t VALUES (5, 1.5), (6, 2.5);",
+        )
+        .status()
+        .expect("creating scratch fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["i".to_string(), "r".to_string()],
+        column_types: vec!["INTEGER".to_string(), "REAL".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+    };
+    (path, schema)
+}
+
+#[test]
+fn comparison_affinity_coerces_text_and_real_literals_against_typed_columns() {
+    // #138: `i = '5'` compares an INTEGER column against a TEXT
+    // literal — without comparison affinity this falls back to
+    // storage-class ordering (numeric < text) and never matches.
+    let (path, schema) = affinity_fixture();
+    let out = run_select(&path, &schema, "SELECT i FROM t WHERE i = '5'");
+    assert_eq!(out, vec![vec![Value::Integer(5)]]);
+
+    let out = run_select(&path, &schema, "SELECT i FROM t WHERE i > 3");
+    assert_eq!(out, vec![vec![Value::Integer(5)], vec![Value::Integer(6)]]);
+
+    let out = run_select(&path, &schema, "SELECT r FROM t WHERE r = 1.5");
+    assert_eq!(out, vec![vec![Value::Real(1.5)]]);
 }
 
 #[test]

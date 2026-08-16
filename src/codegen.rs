@@ -194,10 +194,12 @@ impl RegAlloc {
     }
 }
 
-pub(crate) fn p4_coll_seq(collation: crate::vdbe::Collation) -> P4 {
-    let affinity: u8 = 8; // Matches the harvested "BINARY-8" P4 rendering (program.rs's own doc example).
+pub(crate) fn p4_coll_seq(
+    collation: crate::vdbe::Collation,
+    affinity: crate::vdbe::Affinity,
+) -> P4 {
     P4::CollSeq {
         collation,
-        affinity,
+        affinity: affinity.to_p4_byte(),
     }
 }

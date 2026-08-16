@@ -212,6 +212,7 @@ mod tests {
             name: "t".to_string(),
             root_page: 1,
             columns: vec![],
+            column_types: vec![],
             without_rowid: false,
             strict: false,
             is_virtual: false,
