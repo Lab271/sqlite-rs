@@ -131,6 +131,17 @@ Codegen defects the runner and its review surfaced, all affecting
   deliberately does not treat as a rowid alias; two remaining textual
   misreads are pinned by `known_fragile_*` tests.
 
+- `&`, `|`, `<<`, `>>`, `~`, and `||` all parsed (in-grammar since V2) but
+  silently answered NULL (binary ops fell into `compile_value`'s catch-all,
+  which emits a bare `Null`) or passed the operand through unchanged
+  (`~`, `UnaryOp::BitNot`) (#139). Harvested the six real SQLite opcodes
+  `BitAnd`/`BitOr`/`ShiftLeft`/`ShiftRight`/`BitNot`/`Concat` (54 -> 60
+  opcodes), added their INTEGER/TEXT coercion and NULL propagation to
+  `src/vdbe/coerce.rs`, and wired dispatch through `src/vdbe/arithmetic.rs`.
+  Shift handles SQLite's negative-shift-amount reversal and
+  magnitude-≥64 clamp rules, not just Rust's native `<<`/`>>`. Six
+  `KNOWN_GAPS` entries close; the walker-vector pass ratchet moves 46 -> 55.
+
 VDBE execution limit, unrelated to codegen, surfaced by #112's bench:
 
 - `src/vdbe/exec.rs`'s `MAX_STEPS` infinite-loop backstop was `1_000_000`,
