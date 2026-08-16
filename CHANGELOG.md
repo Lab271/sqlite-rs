@@ -4,6 +4,34 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.3] - 2026-08-16
+
+### Added
+
+- **`src/vdbe/functions.rs`**: `like`/`glob` scalar functions (spec
+  `008-value-semantics` Req 6, #59). Spec 009 Req 7 (#88) dispatches
+  `like(2)` through the `Function` opcode into spec 008's registry, but
+  the registry had no `like`/`glob` — this closes that gap, so no
+  LIKE-specific VDBE logic is needed. ASCII case-insensitive `%`/`_`
+  matching with `ESCAPE` for `like`; case-sensitive `*`/`?`/`[...]`
+  (incl. `[^...]` negation and `-` ranges) for `glob`. Note SQLite's
+  reversed argument order: `like(pattern, text[, escape])`.
+- **`tests/corpus/expr_vectors/walker.jsonl`**: 71 oracle vectors
+  covering CASE/CAST/LIKE/GLOB/BETWEEN/IN-list/short-circuit/arithmetic,
+  harvested by spike 008 (#59) as phase-3 acceptance material.
+
+### Fixed
+
+- **`src/parser/grammar.rs`**: keyword-named function calls
+  (`replace(...)`, `glob(...)`) were rejected — `REPLACE` tokenizes as a
+  keyword, not an identifier, but SQLite accepts most keywords as
+  function names when followed by `(`. This had silently blocked the
+  `functions.jsonl` corpus (committed since #78/#79) from ever being
+  executed. Found by spike 008 (#59).
+- **`src/parser/grammar.rs`**: `-9223372036854775808` now parses as
+  `Literal::Integer(i64::MIN)` rather than a REAL — the tokenizer folds
+  the positive form to a Float since it has no i64 representation.
+
 ## [0.6.2] - 2026-08-16
 
 ### Fixed
