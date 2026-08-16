@@ -37,6 +37,10 @@ name = "vdbe_oracle_vectors"
 path = "tests/vdbe/oracle_vectors_test.rs"
 
 [[test]]
+name = "opcode_completeness"
+path = "tests/vdbe/opcode_completeness_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 
