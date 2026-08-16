@@ -209,6 +209,91 @@ fn column_name(def: &str) -> String {
         .to_string()
 }
 
+/// Splits a `CREATE TABLE ...(col-defs)...` statement's column-definition
+/// list into raw per-column definition strings, in declared order —
+/// re-derived from `schema.sql` rather than kept alongside `columns`,
+/// which holds names only — `src/dump.rs` needs each column's declared
+/// type text, and [`rowid_alias_column`] needs its full constraint
+/// text. Mirrors this module's own naive top-level-comma splitter and
+/// table-constraint filter.
+pub(crate) fn column_defs(schema: &TableSchema) -> Vec<&str> {
+    let Some(start) = schema.sql.find('(') else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in schema.sql[start..].char_indices() {
+        match c {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(start.saturating_add(i));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let inner = &schema.sql[start.saturating_add(1)..end];
+
+    let mut depth = 0i32;
+    let mut part_start = 0usize;
+    let mut defs = Vec::new();
+    let bytes = inner.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                defs.push(inner[part_start..i].trim());
+                part_start = i.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    defs.push(inner[part_start..].trim());
+
+    defs.into_iter()
+        .filter(|def| {
+            let upper = def.to_ascii_uppercase();
+            !(upper.starts_with("PRIMARY KEY")
+                || upper.starts_with("UNIQUE")
+                || upper.starts_with("FOREIGN KEY")
+                || upper.starts_with("CHECK")
+                || upper.starts_with("CONSTRAINT"))
+        })
+        .collect()
+}
+
+/// The one-column special case SQLite calls the rowid alias: a table
+/// declared with a single `INTEGER PRIMARY KEY` column (not `WITHOUT
+/// ROWID`) stores that column as a NULL placeholder in every record and
+/// expects the reader to substitute the cursor's own rowid instead (see
+/// `src/btree/mod.rs`'s module doc and spike 003 finding 1). Returns the
+/// 0-based column index to substitute, if any.
+pub fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
+    if schema.without_rowid {
+        return None;
+    }
+    for (idx, def) in column_defs(schema).iter().enumerate() {
+        let upper = def.to_ascii_uppercase();
+        let is_int_pk = upper
+            .split(|c: char| !c.is_alphanumeric())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w == ["PRIMARY", "KEY"])
+            && upper.split_whitespace().any(|w| w == "INTEGER");
+        if is_int_pk {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

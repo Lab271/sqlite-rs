@@ -75,6 +75,12 @@ path = "tests/proptest/record_proptest.rs"
 [dev-dependencies]
 proptest = "1"
 
+# MD5 is part of the sqllogictest format itself (`"N values hashing to
+# <md5>"` result blocks, #96) — not a project cryptographic dependency, so
+# pulling in a maintained implementation beats hand-rolling a bit-exact
+# digest for a test-only concern.
+md-5 = "0.10"
+
 # Single source of truth for the pinned sqlite3 version — the oracle binary,
 # the parse.y the grammar is re-derived from, and the TCL suite the SQL corpus
 # is extracted from all track this one value.
@@ -121,6 +127,15 @@ test = false
 [[test]]
 name = "parity"
 path = "tests/parity/main.rs"
+test = false
+
+# Same rationale as "corpus"/"parity" above: shells out to the pinned oracle
+# to build each vendored `.test` file's fixture state, so it stays behind
+# `make sqllogictest` (`cargo test --test sqllogictest`) rather than the
+# default `cargo test` run (#96).
+[[test]]
+name = "sqllogictest"
+path = "tests/sqllogictest/main.rs"
 test = false
 
 [[test]]

@@ -8,7 +8,7 @@
 
 use crate::codegen::{p4_coll_seq, CodegenError, Emitter, Label, RegAlloc, Target};
 use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
-use crate::schema::TableSchema;
+use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{Collation, Instruction, Opcode, P4};
 
 /// Resolves a bare `Expr::Column` name against the schema; any other
@@ -208,40 +208,73 @@ pub(crate) fn compile_cond(
             hi,
             negated,
         } => {
-            let (t, f) = if *negated {
-                (false_target, true_target)
+            // Lowered per SQLite's own rule: `x BETWEEN lo AND hi` is
+            // `x >= lo AND x <= hi`, and `x NOT BETWEEN lo AND hi` is
+            // `x < lo OR x > hi` — NOT the same shape with true/false
+            // swapped. Swapping targets would make a NULL `x` (where
+            // neither comparison jumps at all, per
+            // `emit_compare_false_jump`'s three-valued contract) come
+            // out *true* for `NOT BETWEEN`, when the honest answer is
+            // "unknown", which WHERE excludes just like false.
+            let cmp = |op, rhs: &Expr| Expr {
+                kind: ExprKind::Binary {
+                    op,
+                    lhs: inner.clone(),
+                    rhs: Box::new(rhs.clone()),
+                },
+                span: expr.span,
+            };
+
+            if *negated {
+                let lt_lo = cmp(BinaryOp::Lt, lo);
+                let gt_hi = cmp(BinaryOp::Gt, hi);
+                let (t_label, t_is_new) = ensure_label(em, true_target);
+                compile_cond(
+                    em,
+                    reg,
+                    schema,
+                    cursor,
+                    &lt_lo,
+                    Target::Jump(t_label),
+                    Target::Fallthrough,
+                )?;
+                compile_cond(
+                    em,
+                    reg,
+                    schema,
+                    cursor,
+                    &gt_hi,
+                    Target::Jump(t_label),
+                    false_target,
+                )?;
+                if t_is_new {
+                    em.place(t_label);
+                }
             } else {
-                (true_target, false_target)
-            };
-            let ge_lo = Expr {
-                kind: ExprKind::Binary {
-                    op: BinaryOp::Ge,
-                    lhs: inner.clone(),
-                    rhs: lo.clone(),
-                },
-                span: expr.span,
-            };
-            let le_hi = Expr {
-                kind: ExprKind::Binary {
-                    op: BinaryOp::Le,
-                    lhs: inner.clone(),
-                    rhs: hi.clone(),
-                },
-                span: expr.span,
-            };
-            let (f_label, f_is_new) = ensure_label(em, f);
-            compile_cond(
-                em,
-                reg,
-                schema,
-                cursor,
-                &ge_lo,
-                Target::Fallthrough,
-                Target::Jump(f_label),
-            )?;
-            compile_cond(em, reg, schema, cursor, &le_hi, t, Target::Jump(f_label))?;
-            if f_is_new {
-                em.place(f_label);
+                let ge_lo = cmp(BinaryOp::Ge, lo);
+                let le_hi = cmp(BinaryOp::Le, hi);
+                let (f_label, f_is_new) = ensure_label(em, false_target);
+                compile_cond(
+                    em,
+                    reg,
+                    schema,
+                    cursor,
+                    &ge_lo,
+                    Target::Fallthrough,
+                    Target::Jump(f_label),
+                )?;
+                compile_cond(
+                    em,
+                    reg,
+                    schema,
+                    cursor,
+                    &le_hi,
+                    true_target,
+                    Target::Jump(f_label),
+                )?;
+                if f_is_new {
+                    em.place(f_label);
+                }
             }
             Ok(())
         }
@@ -251,41 +284,82 @@ pub(crate) fn compile_cond(
             list,
             negated,
         } => {
-            let (t, f) = if *negated {
-                (false_target, true_target)
-            } else {
-                (true_target, false_target)
-            };
             if list.is_empty() {
-                // `x IN ()` is always false.
+                // `x IN ()` is always false, even for a NULL `x` — an
+                // empty list leaves nothing to be uncertain against.
+                let (t, f) = if *negated {
+                    (false_target, true_target)
+                } else {
+                    (true_target, false_target)
+                };
                 return compile_always_false(em, t, f);
             }
-            let (t_label, t_is_new) = ensure_label(em, t);
-            for (i, item) in list.iter().enumerate() {
-                let eq = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinaryOp::Eq,
-                        lhs: inner.clone(),
-                        rhs: Box::new(item.clone()),
-                    },
-                    span: expr.span,
-                };
-                if i.saturating_add(1) == list.len() {
-                    compile_cond(em, reg, schema, cursor, &eq, Target::Jump(t_label), f)?;
-                } else {
-                    compile_cond(
-                        em,
-                        reg,
-                        schema,
-                        cursor,
-                        &eq,
-                        Target::Jump(t_label),
-                        Target::Fallthrough,
-                    )?;
-                }
+
+            // `IN`'s three outcomes — a definite match, a definite
+            // non-match, or "unknown" (no match found, but `inner` or
+            // some list item was NULL along the way) — don't collapse
+            // to a single true/false jump the way other comparisons
+            // do: `NOT IN`'s definite-non-match and unknown outcomes
+            // diverge (`NOT FALSE` = true, `NOT NULL` = still NULL),
+            // so a per-item comparison can't just swap targets like
+            // `emit_compare_false_jump` does. `saw_null` is a small
+            // exception to this module's "never an intermediate
+            // boolean register" rule (shared with the `Is`/`IsNot`
+            // handling above), needed to remember that exception past
+            // the loop that discovers it.
+            let l = compile_value(em, reg, schema, cursor, inner)?;
+            let saw_null = reg.alloc();
+            em.emit(Instruction::new(Opcode::Integer, 0, saw_null, 0));
+
+            let (true_label, true_is_new) = ensure_label(em, true_target);
+            let (false_label, false_is_new) = ensure_label(em, false_target);
+            // A match found means IN is true; exhausting the list
+            // without one means IN is false — `negated` (`NOT IN`)
+            // swaps which final label each of those routes to. An
+            // unknown outcome, below, always routes to `false_label`
+            // regardless of `negated`: NULL is never true.
+            let (found_label, unmatched_label) = if *negated {
+                (false_label, true_label)
+            } else {
+                (true_label, false_label)
+            };
+
+            let inner_null_addr = em.emit(Instruction::new(Opcode::IsNull, l, 0, 0));
+            em.patch_p2(inner_null_addr, false_label);
+
+            for item in list.iter() {
+                let collation = collation_of(inner).or_else(|| collation_of(item));
+                let p4 = collation.map_or(P4::None, p4_coll_seq);
+                let r = compile_value(em, reg, schema, cursor, item)?;
+
+                let item_null_label = em.new_label();
+                let skip_label = em.new_label();
+                let addr = em.emit(Instruction::new(Opcode::IsNull, r, 0, 0));
+                em.patch_p2(addr, item_null_label);
+                let addr = em.emit(Instruction::with_p4(Opcode::Eq, l, 0, r, p4));
+                em.patch_p2(addr, found_label);
+                em.goto(skip_label);
+
+                em.place(item_null_label);
+                em.emit(Instruction::new(Opcode::Integer, 1, saw_null, 0));
+                em.place(skip_label);
             }
-            if t_is_new {
-                em.place(t_label);
+
+            // Exhausted the list without a match: route to
+            // `unmatched_label` only if every comparison was a clean
+            // non-match (`saw_null` still 0); otherwise at least one
+            // comparison was against NULL, so the honest answer is
+            // "unknown", which — like any NULL condition — excludes
+            // the row via `false_label`.
+            let addr = em.emit(Instruction::new(Opcode::IfNot, saw_null, 0, 0));
+            em.patch_p2(addr, unmatched_label);
+            em.goto(false_label);
+
+            if false_is_new {
+                em.place(false_label);
+            }
+            if true_is_new {
+                em.place(true_label);
             }
             Ok(())
         }
@@ -433,6 +507,51 @@ fn emit_compare_false_jump(
 
 /// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
 /// unrecognized collation names fall back to `None` (BINARY default).
+/// Reads column `idx` of the row at `cursor` into `dest`, emitting
+/// `Rowid` rather than `Column` for a rowid-alias column. A table's
+/// `INTEGER PRIMARY KEY` column is stored as a NULL placeholder in
+/// every record (spike 003 finding 1) — reading it with `Column` yields
+/// NULL, so `SELECT x FROM t WHERE x=2` silently matched nothing until
+/// this substitution existed. `src/dump.rs` has always done the same
+/// thing; this is the compiled read path catching up.
+fn emit_column_read(
+    em: &mut Emitter,
+    schema: &TableSchema,
+    cursor: i32,
+    idx: usize,
+    dest: i32,
+) -> Result<(), CodegenError> {
+    if rowid_alias_column(schema) == Some(idx) {
+        em.emit(Instruction::new(Opcode::Rowid, cursor, dest, 0));
+        return Ok(());
+    }
+    em.emit(Instruction::new(
+        Opcode::Column,
+        cursor,
+        i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+            reason: format!("column index {idx} does not fit in a P2 operand"),
+        })?,
+        dest,
+    ));
+    Ok(())
+}
+
+/// Whether this call is one of SQLite's built-in aggregates
+/// (`func.c`'s aggregate registry). `max`/`min` are overloaded: the
+/// one-argument form is the aggregate, but `max(a, b)` is an ordinary
+/// scalar function, so arity — not the name alone — decides.
+fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> bool {
+    let arity = match args {
+        crate::parser::ast::FunctionArgs::Star => 0,
+        crate::parser::ast::FunctionArgs::List(list) => list.len(),
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "avg" | "count" | "group_concat" | "string_agg" | "sum" | "total" => true,
+        "max" | "min" => arity <= 1,
+        _ => false,
+    }
+}
+
 fn collation_of(expr: &Expr) -> Option<Collation> {
     match &expr.kind {
         ExprKind::Collate { collation, .. } => match collation.to_ascii_uppercase().as_str() {
@@ -526,18 +645,23 @@ pub(crate) fn compile_value(
             let idx = column_index(schema, name)
                 .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
             let r = reg.alloc();
-            em.emit(Instruction::new(
-                Opcode::Column,
-                cursor,
-                i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
-                    reason: format!("column index {idx} does not fit in a P2 operand"),
-                })?,
-                r,
-            ));
+            emit_column_read(em, schema, cursor, idx, r)?;
             Ok(r)
         }
 
         ExprKind::FunctionCall { name, args, .. } => {
+            // Aggregates need a grouping/accumulator pass this V2
+            // compiler doesn't have. Rejecting them is not just a
+            // missing-feature guard: compiling one as an ordinary
+            // scalar `Function` call emits it *per row*, so
+            // `SELECT count(*) FROM t` silently returns one row per
+            // input row instead of a single count — wrong output is
+            // worse than a refusal.
+            if is_aggregate_call(name, args) {
+                return Err(CodegenError::Unsupported {
+                    reason: format!("aggregate function {}", name.to_ascii_lowercase()),
+                });
+            }
             let arg_exprs = match args {
                 crate::parser::ast::FunctionArgs::Star => &[][..],
                 crate::parser::ast::FunctionArgs::List(list) => list.as_slice(),
@@ -841,14 +965,7 @@ fn emit_branch_into(
         ExprKind::Column { name, .. } => {
             let idx = column_index(schema, name)
                 .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
-            em.emit(Instruction::new(
-                Opcode::Column,
-                cursor,
-                i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
-                    reason: format!("column index {idx} does not fit in a P2 operand"),
-                })?,
-                dest,
-            ));
+            emit_column_read(em, schema, cursor, idx, dest)?;
         }
         _ => {
             return Err(CodegenError::Unsupported {

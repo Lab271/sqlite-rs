@@ -5,4 +5,5 @@
 
 mod ddl_reader;
 
-pub use ddl_reader::{read_schema, DdlError, TableSchema};
+pub(crate) use ddl_reader::column_defs;
+pub use ddl_reader::{read_schema, rowid_alias_column, DdlError, TableSchema};

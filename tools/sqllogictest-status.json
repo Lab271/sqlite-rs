@@ -1,0 +1,19 @@
+{
+  "files": [
+    {"file": "in1.test", "pass": 0, "skip": 187, "fail": 0},
+    {"file": "in2.test", "pass": 44, "skip": 1, "fail": 0},
+    {"file": "slt_lang_aggfunc.test", "pass": 4, "skip": 63, "fail": 0},
+    {"file": "slt_lang_createtrigger.test", "pass": 0, "skip": 0, "fail": 0},
+    {"file": "slt_lang_createview.test", "pass": 1, "skip": 1, "fail": 0},
+    {"file": "slt_lang_dropindex.test", "pass": 0, "skip": 0, "fail": 0},
+    {"file": "slt_lang_droptable.test", "pass": 0, "skip": 0, "fail": 0},
+    {"file": "slt_lang_droptrigger.test", "pass": 0, "skip": 0, "fail": 0},
+    {"file": "slt_lang_dropview.test", "pass": 1, "skip": 1, "fail": 0},
+    {"file": "slt_lang_reindex.test", "pass": 0, "skip": 0, "fail": 0},
+    {"file": "slt_lang_replace.test", "pass": 6, "skip": 0, "fail": 0},
+    {"file": "slt_lang_update.test", "pass": 0, "skip": 9, "fail": 0},
+    {"file": "select1.test", "pass": 0, "skip": 1000, "fail": 0},
+    {"file": "select2.test", "pass": 111, "skip": 889, "fail": 0}
+  ],
+  "total": {"pass": 167, "skip": 2151, "fail": 0, "queries": 2318, "attempted": 167, "pass_rate": 1.0000, "coverage": 0.0720}
+}
