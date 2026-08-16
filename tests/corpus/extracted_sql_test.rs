@@ -125,7 +125,7 @@ fn every_extracted_statement_tokenizes_without_error() {
 /// schema-qualified names (`aux.t5`, `temp.sqlite_master`), `HAVING` without
 /// `GROUP BY`, the `->`/`->>` operators, `NOT INDEXED`, and bare `VALUES`.
 ///
-/// Tracked as a follow-up to #70; lower this number as the parser grows —
+/// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
 /// never raise it. A raise means a regression that reclassified valid SQL as
 /// malformed.
 const SELECT_INVALID_BASELINE: usize = 131;

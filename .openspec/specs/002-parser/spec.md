@@ -464,7 +464,7 @@ performs the extraction; `make sql-corpus` regenerates it offline.
 - GIVEN the extracted SELECT corpus, which is valid SQL by construction
 - WHEN each statement is parsed by `parse_select`
 - THEN `Accepted` and `Unsupported` are both acceptable (the V2 grammar is a deliberate slice) but `Invalid` is not, since it asserts valid SQL is malformed
-- AND the count of such misclassifications is held to a documented baseline that may only decrease — currently non-zero for subquery-in-FROM, `IN <table-name>`, schema-qualified names, `HAVING` without `GROUP BY`, `->`/`->>`, `NOT INDEXED` and bare `VALUES`
+- AND the count of such misclassifications is held to a documented baseline that may only decrease — currently non-zero for subquery-in-FROM, `IN <table-name>`, schema-qualified names, `HAVING` without `GROUP BY`, `->`/`->>`, `NOT INDEXED` and bare `VALUES` (tracked by #110)
 
 **Tests:** `tests/corpus/extracted_sql_test.rs::no_extracted_select_is_reported_invalid`
 
