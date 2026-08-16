@@ -56,7 +56,7 @@ const CASES: &[(&str, Outcome)] = &[
         "WITH cte AS (SELECT a FROM t) SELECT * FROM cte",
         Outcome::Unsupported,
     ),
-    ("SELECT * FROM t WHERE a IN t2", Outcome::Unsupported),
+    ("SELECT * FROM t WHERE a IN u", Outcome::Unsupported),
     ("SELECT * FROM (SELECT 1 AS a) AS x", Outcome::Unsupported),
     ("VALUES(2)", Outcome::Unsupported),
     (
@@ -67,7 +67,7 @@ const CASES: &[(&str, Outcome)] = &[
     ("SELECT * FROM main.t", Outcome::Unsupported),
     ("SELECT 123 -> 456", Outcome::Unsupported),
     (
-        "SELECT * FROM t OUTER LEFT NATURAL JOIN t2",
+        "SELECT * FROM t OUTER LEFT NATURAL JOIN t AS t2",
         Outcome::Unsupported,
     ),
     ("SELECT FROM t", Outcome::Invalid),
@@ -84,7 +84,7 @@ fn scratch_db() -> PathBuf {
     let _ = std::fs::remove_file(&path);
     let status = Command::new("sqlite3")
         .arg(&path)
-        .arg("CREATE TABLE t(a INTEGER, b INTEGER, c INTEGER);")
+        .arg("CREATE TABLE t(a INTEGER, b INTEGER, c INTEGER); CREATE TABLE u(x INTEGER);")
         .status()
         .expect("creating scratch oracle db");
     assert!(status.success(), "failed to create scratch oracle db");
