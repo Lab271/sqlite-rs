@@ -17,3 +17,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0011](0011-strict-metrics-declared-vs-delivered.md) | Strict metrics: declared is not delivered | 2026-08-14 |
 | [0012](0012-ephemeral-tables-in-memory.md) | Ephemeral tables: opcode semantics, in-memory backing | 2026-08-15 |
 | [0013](0013-vdbe-dyn-pagesource-boundary.md) | VDBE keeps a second `dyn` boundary for `PageSource` (rejects generic `Vm`) | 2026-08-16 |
+| [0014](0014-expr-depth-bound-diverges-from-sqlite.md) | Expression nesting bound stays at 200, not SQLite's 1000 | 2026-08-16 |
