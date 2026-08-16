@@ -49,6 +49,18 @@ name = "vdbe_cursor_sorter"
 path = "tests/vdbe/cursor_sorter_test.rs"
 
 [[test]]
+name = "vdbe_explain"
+path = "tests/vdbe/explain_test.rs"
+
+[[test]]
+name = "codegen_expr"
+path = "tests/codegen/expr_test.rs"
+
+[[test]]
+name = "codegen_select"
+path = "tests/codegen/select_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 

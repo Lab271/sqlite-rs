@@ -294,7 +294,7 @@ registers (a contiguous run starting at `P2`) and writing the result to
 adding a scalar function to spec 008's registry MUST be sufficient to make
 it callable via this opcode, with no VDBE-layer change required.
 
-**Implementation:** `src/vdbe/exec.rs` (planned; registry itself is
+**Implementation:** `src/vdbe/exec.rs::function` (#91; registry itself is
 `src/vdbe/functions.rs`, existing, spec 008)
 
 #### Scenario: Function dispatches by name+arity descriptor to the shared registry
@@ -309,7 +309,7 @@ it callable via this opcode, with no VDBE-layer change required.
   `abs(1)` are dispatched through the identical opcode logic, differing
   only in their P4 descriptor
 
-**Tests:** `tests/vdbe/function_test.rs::function_opcode_dispatches_by_name_arity_descriptor` (planned)
+**Tests:** `tests/codegen/expr_test.rs::like_and_glob_dispatch_through_the_function_opcode`
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
@@ -416,7 +416,7 @@ This format MUST be stable enough to feed parity #72's planned VM-diff
 dimension: two programs for the same query, from our engine and the
 pinned oracle, compared instruction-by-instruction.
 
-**Implementation:** `src/vdbe/explain.rs` (planned)
+**Implementation:** `src/vdbe/explain.rs` (#91)
 
 #### Scenario: EXPLAIN renders one row per instruction with all seven columns
 
@@ -425,7 +425,7 @@ pinned oracle, compared instruction-by-instruction.
   populated in all seven columns (`addr` matching the instruction's linear
   position, `p4` empty/blank when absent rather than a placeholder value)
 
-**Tests:** `tests/vdbe/explain_test.rs::explain_renders_one_row_per_instruction_all_columns` (planned)
+**Tests:** `tests/vdbe/explain_test.rs::explain_renders_one_row_per_instruction_all_columns`
 
 #### Scenario: EXPLAIN's p4 column renders the operand's display form, not its raw bytes
 
@@ -435,7 +435,7 @@ pinned oracle, compared instruction-by-instruction.
   shows `g%` — both are the same rendering the oracle itself produces via
   `EXPLAIN`, not an internal debug representation
 
-**Tests:** `tests/vdbe/explain_test.rs::explain_p4_column_matches_oracle_display_form` (planned)
+**Tests:** `tests/vdbe/explain_test.rs::explain_p4_column_matches_oracle_display_form`
 
 ### Requirement 11: Expression Emission — Control Flow, Not Boolean Values [MUST]
 
@@ -453,14 +453,18 @@ symmetrically to the true target. `CASE` MUST compile to a jump chain: each
 next `WHEN` test, with a final unconditional jump past the chain after the
 matching branch's result is computed.
 
-> **Note:** spike 008 (#59, tree-walking evaluator + emission-order
-> findings) has not run as of this writing — the requirement above is
-> derived from SQLite's own `EXPLAIN` output on the pinned oracle, not
-> from spike 008's findings. Scenarios here are provisional and MUST be
-> reconciled against #59's actual findings once that spike completes;
-> treat this requirement as `(pending #59 ratification)` until then.
+> **Note (resolved by #91):** spike 008 (#59) has since completed;
+> its kept oracle vectors (`tests/corpus/expr_vectors/walker.jsonl`)
+> now run through the real compiled path
+> (`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`),
+> confirming this requirement's jump-shape description. A handful of
+> vectors remain documented gaps (bitwise/concat opcodes absent from
+> the frozen V2 set, full three-valued NULL propagation through NOT/
+> AND/OR/BETWEEN/IN in value context, CAST's lossy-conversion
+> semantics, REAL-literal representation) — see that test file's
+> `KNOWN_GAPS` doc comment.
 
-**Implementation:** `src/codegen/expr.rs` (planned)
+**Implementation:** `src/codegen/expr.rs`, `src/codegen/select.rs` (#91)
 
 #### Scenario: WHERE compiles to a jump past the row-handling code, not a boolean register test
 
@@ -472,7 +476,7 @@ matching branch's result is computed.
   scanning) — there is no intermediate register holding a boolean 0/1
   that a separate opcode then branches on
 
-**Tests:** `tests/codegen/expr_test.rs::where_clause_compiles_to_direct_jump` (planned) `(pending #59 ratification)`
+**Tests:** `tests/codegen/expr_test.rs::where_clause_compiles_to_direct_jump`
 
 #### Scenario: AND short-circuits without evaluating its second operand on a false first operand
 
@@ -482,20 +486,18 @@ matching branch's result is computed.
   ever reaching the `Lt` instruction — `qty < 50` is not evaluated when
   `price >= 10` is already false
 
-**Tests:** `tests/codegen/expr_test.rs::and_short_circuits_on_false_first_operand` (planned) `(pending #59 ratification)`
+**Tests:** `tests/codegen/expr_test.rs::and_short_circuits_on_false_first_operand`
 
 ## Traceability Note
 
-Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 are now
-active: #89 landed the VDBE core (instruction format, register file,
-control/arithmetic/compare/result opcodes), #90 landed the cursor,
-ephemeral-index, and sorter opcode families. Requirements 7 (`Function`
-opcode dispatch), 10 (`EXPLAIN`), and 11 (expression emission) remain
-`(planned)` — #91 (codegen + EXPLAIN, the convergence ticket needing
-#89+#90+#61+#59) is what will wire a real SQL-to-`Program` pipeline and
-flip those links active. Per `.openspec/README.md`'s dashboard
-convention, `(planned)` requirements stay excluded from completeness/
-coverage scoring until then.
+Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made
+active by #89 (VDBE core: instruction format, register file, control/
+arithmetic/compare/result opcodes) and #90 (cursor, ephemeral-index, and
+sorter opcode families). Requirements 7 (`Function` opcode dispatch), 10
+(`EXPLAIN`), and 11 (expression emission) are now active too: #91 wired
+the real SQL-to-`Program` pipeline (`src/codegen/`), the `Function`
+opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
+(`src/vdbe/explain.rs`).
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
