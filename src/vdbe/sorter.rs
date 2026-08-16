@@ -141,8 +141,31 @@ pub fn sorter_sort(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         for key in &keys {
             let av = a.first_n(key);
             let bv = b.first_n(key);
-            let ord = compare(av, bv, key.collation);
-            let ord = if key.descending { ord.reverse() } else { ord };
+            let ord = match (av, bv) {
+                (Value::Null, Value::Null) => Ordering::Equal,
+                (Value::Null, _) => {
+                    if key.nulls_first {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (_, Value::Null) => {
+                    if key.nulls_first {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                _ => {
+                    let ord = compare(av, bv, key.collation);
+                    if key.descending {
+                        ord.reverse()
+                    } else {
+                        ord
+                    }
+                }
+            };
             if ord != Ordering::Equal {
                 return ord;
             }
@@ -245,6 +268,7 @@ mod tests {
                 index: 0,
                 descending: false,
                 collation: Collation::Binary,
+                nulls_first: false,
             }],
         );
         insert_row(&mut vm, 0, &[Value::Integer(30)]);
@@ -289,11 +313,13 @@ mod tests {
                     index: 0,
                     descending: true,
                     collation: Collation::Binary,
+                    nulls_first: false,
                 },
                 SortKeyColumn {
                     index: 1,
                     descending: false,
                     collation: Collation::Binary,
+                    nulls_first: false,
                 },
             ],
         );
@@ -337,6 +363,7 @@ mod tests {
                 index: 0,
                 descending: false,
                 collation: Collation::Binary,
+                nulls_first: false,
             }],
         );
         let step = sorter_sort(&mut vm, &Instruction::new(Opcode::SorterSort, 0, 42, 0)).unwrap();
@@ -353,6 +380,7 @@ mod tests {
                 index: 0,
                 descending: false,
                 collation: Collation::Binary,
+                nulls_first: false,
             }],
         );
         insert_row(&mut vm, 0, &[Value::Integer(5)]);
@@ -360,5 +388,100 @@ mod tests {
         // this test exercises the same function `Sort` maps to directly.
         let step = sorter_sort(&mut vm, &Instruction::new(Opcode::Sort, 0, 999, 0)).unwrap();
         assert_eq!(step, Step::Next);
+    }
+
+    fn sorted_ints(nulls_first: bool, descending: bool) -> Vec<Value> {
+        let mut vm = Vm::new();
+        open_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending,
+                collation: Collation::Binary,
+                nulls_first,
+            }],
+        );
+        insert_row(&mut vm, 0, &[Value::Integer(5)]);
+        insert_row(&mut vm, 0, &[Value::Null]);
+        insert_row(&mut vm, 0, &[Value::Integer(-7)]);
+        insert_row(&mut vm, 0, &[Value::Integer(0)]);
+        insert_row(&mut vm, 0, &[Value::Integer(5)]);
+
+        sorter_sort(&mut vm, &Instruction::new(Opcode::SorterSort, 0, 999, 0)).unwrap();
+
+        let mut seen = Vec::new();
+        loop {
+            sorter_data(&mut vm, &Instruction::new(Opcode::SorterData, 0, 5, 0)).unwrap();
+            let Value::Blob(bytes) = vm.register(5).unwrap() else {
+                panic!("expected a Blob");
+            };
+            let row = decode_record(bytes, TextEncoding::Utf8).unwrap();
+            seen.push(row[0].clone());
+            match sorter_next(&mut vm, &Instruction::new(Opcode::SorterNext, 0, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn ascending_default_places_nulls_first() {
+        assert_eq!(
+            sorted_ints(true, false),
+            vec![
+                Value::Null,
+                Value::Integer(-7),
+                Value::Integer(0),
+                Value::Integer(5),
+                Value::Integer(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn descending_default_places_nulls_last() {
+        assert_eq!(
+            sorted_ints(false, true),
+            vec![
+                Value::Integer(5),
+                Value::Integer(5),
+                Value::Integer(0),
+                Value::Integer(-7),
+                Value::Null,
+            ]
+        );
+    }
+
+    #[test]
+    fn ascending_with_nulls_last_matches_oracle() {
+        // SELECT i FROM t ORDER BY i ASC NULLS LAST (issue #140)
+        assert_eq!(
+            sorted_ints(false, false),
+            vec![
+                Value::Integer(-7),
+                Value::Integer(0),
+                Value::Integer(5),
+                Value::Integer(5),
+                Value::Null,
+            ]
+        );
+    }
+
+    #[test]
+    fn descending_with_nulls_first_matches_oracle() {
+        // SELECT i FROM t ORDER BY i DESC NULLS FIRST (issue #140)
+        assert_eq!(
+            sorted_ints(true, true),
+            vec![
+                Value::Null,
+                Value::Integer(5),
+                Value::Integer(5),
+                Value::Integer(0),
+                Value::Integer(-7),
+            ]
+        );
     }
 }

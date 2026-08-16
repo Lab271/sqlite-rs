@@ -89,6 +89,7 @@ fn order_by_program_emits_rows_in_sorted_order() {
                 index: 0,
                 descending: true,
                 collation: Collation::Binary,
+                nulls_first: false,
             }]),
         ), // cursor 1: sorter, key = column 0 descending
         /* 3 */

@@ -230,6 +230,10 @@ pub struct SortKeyColumn {
     pub index: usize,
     pub descending: bool,
     pub collation: Collation,
+    /// Whether NULL sorts before non-NULL values for this key, per an
+    /// explicit `NULLS FIRST`/`NULLS LAST` clause (or SQLite's default:
+    /// NULLs first for ASC, last for DESC, when no clause is given).
+    pub nulls_first: bool,
 }
 
 /// P4's dynamic type: absent, an integer constant, a string constant
