@@ -6,6 +6,8 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-16
+
 ### Added
 
 - Performance regime, first results (#112, epic #111): tier-1
@@ -137,6 +139,16 @@ VDBE execution limit, unrelated to codegen, surfaced by #112's bench:
   which a real ~830k-row full-table scan already exceeds (a handful of
   VDBE steps per row). Raised to `50_000_000` — still a bounded safety net,
   now sized for real workloads instead of only small test fixtures.
+- `ORDER BY ... NULLS FIRST/LAST` (#140) was parsed and stored
+  (`ast::OrderingTerm::nulls_last`) but never read by `resolve_order_by`,
+  so an explicit modifier was silently ignored — the sorter always placed
+  NULLs first for ASC / last for DESC regardless of the clause. `SortKeyColumn`
+  now carries `nulls_first`, derived from the parsed term (defaulting to
+  the prior implicit ASC/DESC-driven placement when no clause is given),
+  and the sorter compares NULL-vs-non-NULL independently of the
+  `descending` reversal. Declared-column collation in ORDER BY remains
+  hardcoded to `Collation::Binary` — schema has no per-column collation
+  storage yet — tracked as a follow-up, not fixed here.
 
 ## [0.7.0] - 2026-08-16
 
