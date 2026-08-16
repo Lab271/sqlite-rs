@@ -6,6 +6,25 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-16
+
+### Fixed
+
+- Quote-aware DDL column splitting (#135, follow-up from #131 review):
+  `column_defs`/`split_top_level_commas` split a `CREATE TABLE` column
+  list on raw top-level commas with no awareness of string literals,
+  quoted identifiers, or comments, and `rowid_alias_column` scanned that
+  raw text for `PRIMARY KEY`/`INTEGER` — since #131 this drives
+  `emit_column_read`'s `Rowid`-vs-`Column` choice, so a mis-split was a
+  silently wrong query result, not just wrong `dump` output. A new
+  length-preserving `mask_quotes_and_comments` blanks out `'...'`,
+  `"..."`, `` `...` ``, `[...]`, `--...`, and `/*...*/` regions before
+  paren-depth/comma-splitting and keyword scanning, while the returned
+  text still slices the original string. `rowid_alias_column` also now
+  recognizes the table-level `PRIMARY KEY(col)` constraint form,
+  previously dropped by the table-constraint filter before it was ever
+  checked.
+
 ## [0.7.2] - 2026-08-16
 
 ### Fixed
