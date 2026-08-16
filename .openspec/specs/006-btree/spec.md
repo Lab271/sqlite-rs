@@ -13,7 +13,7 @@ Everything in this spec is **Tier 0 READ CORE** — never droppable.
 
 ## Philosophy
 
-Transcribed from [fileformat2.html](https://www.sqlite.org/fileformat2.html)'s b-tree page and cell-payload-overflow sections, verified byte-by-byte against the pinned oracle (spec 004) rather than against any secondary source. `src/btree/` is not exempt from the `mvl-limit` qualified-subset gate (no `unsafe`/`dyn`/explicit lifetimes) — only `src/vfs/` is; the `PageSource` trait this module depends on is defined in `src/vfs/` for exactly that reason.
+Transcribed from [fileformat2.html](https://www.sqlite.org/fileformat2.html)'s b-tree page and cell-payload-overflow sections, verified byte-by-byte against the pinned oracle (spec 004) rather than against any secondary source. `src/btree/` is not exempt from the `mvl-limit` qualified-subset gate (no `unsafe`/`dyn`/explicit lifetimes); the `PageSource` trait this module depends on is defined in `src/vfs/` for exactly that reason. Tier 0 core carries no exclusions at all — where the gate and a convenience collide here, the code changes: `TableCursor::prev()`'s precondition is a real `BtreeError::CursorNotPositioned` rather than a `debug_assert!` (outside the gate's macro allowlist), which also makes the check survive into release builds. The exempt set is `src/vfs/` plus, since #90, the VDBE's `Rc<dyn PageSource>` handle in `src/vdbe/{exec,cursor}.rs` — see the Makefile's boundary policy and #114.
 
 ## Requirements
 
