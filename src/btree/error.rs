@@ -18,6 +18,12 @@ pub enum BtreeError {
     #[error("page {page_num} is too short ({len} bytes) to contain a b-tree page header")]
     PageTooShort { page_num: u32, len: usize },
 
+    #[error("{operation} called on a cursor that was never positioned by {required}")]
+    CursorNotPositioned {
+        operation: &'static str,
+        required: &'static str,
+    },
+
     #[error("page {page_num} has unexpected b-tree page type {page_type:#x}")]
     UnexpectedPageType { page_num: u32, page_type: u8 },
 

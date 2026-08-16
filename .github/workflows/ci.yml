@@ -18,6 +18,10 @@ env:
   # the corpus job into theatre rather than a gate.
   SQLITE_ORACLE_VERSION: "3.53.4"
   SQLITE_ORACLE_TARBALL: "sqlite-autoconf-3530400"
+  # cargo-mvl-limit is not published to crates.io, so the qualified-subset
+  # gate builds it from source at this pinned rev (verified against
+  # rust-limit v0.3.0). Bumping it is a reviewed change, like an oracle bump.
+  MVL_RUST_REV: "a64eb33e7c9ef9ad031d22a70405e59aa1ad3cb0"
 
 jobs:
   gate:
@@ -67,7 +71,28 @@ jobs:
           fi
           echo "oracle: $ORACLE ($found, non-codec)"
 
+      # Cheap, dependency-free gates first so a policy violation fails the
+      # job before the expensive steps run.
       - run: make version-pin
+      - run: make mod-files
+      - run: make grammar-drift
+      # The qualified-subset gate. cargo-mvl-limit is not on crates.io, so it
+      # is built from source and cached on the pinned rev — without this step
+      # the gate silently never ran in CI, which is how four violations
+      # reached main (#90 lifetimes/dyn, v0.6.6's debug_assert).
+      - name: Cache cargo-mvl-limit
+        id: cache-mvl
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: ~/.cargo/bin/cargo-mvl-limit
+          key: cargo-mvl-limit-${{ runner.os }}-${{ env.MVL_RUST_REV }}
+      - name: Build cargo-mvl-limit
+        if: steps.cache-mvl.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cargo install --git https://github.com/mvl-lang/mvl-rust \
+            --rev "$MVL_RUST_REV" rust-limit --bin cargo-mvl-limit --locked
+      - run: make mvl-limit
       - run: make test
       - run: make lint
       - run: make deny
