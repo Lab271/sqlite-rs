@@ -42,8 +42,7 @@ sql-stmt        ::= select-stmt        (* V2 *)
                   (* V4+: compound selects, CTEs, views, joins -- see Future blocks *)
 
 (* ===================== SELECT (V2 slice) =====================
- * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :749 from,
- *  :925 orderby_opt, :967 limit_opt, :1002 where_opt]
+ * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :749 from, :925 orderby_opt, :967 limit_opt, :1002 where_opt]
  * V2 restrictions vs full parse.y: single FROM table (no joins, no
  * subqueries), no GROUP BY/HAVING (V4), no compound ops (V4), no
  * window clause (V9).
