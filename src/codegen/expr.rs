@@ -456,7 +456,17 @@ pub(crate) fn compile_value(
             let r = reg.alloc();
             match lit {
                 Literal::Integer(i) => {
-                    let p1 = i32::try_from(*i).unwrap_or(0);
+                    // `Opcode::Integer`'s P1 is i32-only (no P4-carried
+                    // i64 immediate-load opcode exists in the frozen V2
+                    // set) — a literal outside i32 range has no correct
+                    // encoding here, so this errors rather than silently
+                    // substituting a truncated value.
+                    let p1 = i32::try_from(*i).map_err(|_| CodegenError::Unsupported {
+                        reason: format!(
+                            "integer literal {i} is out of range for this V2-scope compiler \
+                             (no 64-bit immediate-load opcode in the frozen V2 set)"
+                        ),
+                    })?;
                     em.emit(Instruction::new(Opcode::Integer, p1, r, 0));
                 }
                 Literal::True => {
@@ -511,7 +521,9 @@ pub(crate) fn compile_value(
             em.emit(Instruction::new(
                 Opcode::Column,
                 cursor,
-                i32::try_from(idx).unwrap_or(0),
+                i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                    reason: format!("column index {idx} does not fit in a P2 operand"),
+                })?,
                 r,
             ));
             Ok(r)
@@ -567,10 +579,22 @@ pub(crate) fn compile_value(
             // contiguous run matching `Function`'s expected layout.
             let pat_r = compile_value(em, reg, schema, cursor, pattern)?;
             let txt_r = compile_value(em, reg, schema, cursor, inner)?;
-            debug_assert_eq!(txt_r, pat_r.saturating_add(1));
+            if txt_r != pat_r.saturating_add(1) {
+                return Err(CodegenError::Unsupported {
+                    reason: "LIKE/GLOB text operand did not land in the register contiguous \
+                             with its pattern operand"
+                        .to_string(),
+                });
+            }
             if let Some(e) = escape {
                 let esc_r = compile_value(em, reg, schema, cursor, e)?;
-                debug_assert_eq!(esc_r, pat_r.saturating_add(2));
+                if esc_r != pat_r.saturating_add(2) {
+                    return Err(CodegenError::Unsupported {
+                        reason: "LIKE ESCAPE operand did not land in the register contiguous \
+                                 with its pattern/text operands"
+                            .to_string(),
+                    });
+                }
             }
             let dest = reg.alloc();
             let p4 = P4::Str(format!("{name}({arity})"));
@@ -692,7 +716,7 @@ pub(crate) fn compile_value(
                     Target::Fallthrough,
                     Target::Jump(next_label),
                 )?;
-                emit_branch_into(em, reg, schema, cursor, then_expr, dest)?;
+                emit_branch_into(em, schema, cursor, then_expr, dest)?;
                 em.goto(end_label);
                 em.place(next_label);
             }
@@ -703,7 +727,7 @@ pub(crate) fn compile_value(
             // iterations), so the no-match path always explicitly
             // (re)writes NULL rather than relying on "never written".
             match else_ {
-                Some(else_expr) => emit_branch_into(em, reg, schema, cursor, else_expr, dest)?,
+                Some(else_expr) => emit_branch_into(em, schema, cursor, else_expr, dest)?,
                 None => {
                     // No dedicated "load NULL" opcode exists; an
                     // out-of-range `Column` read reliably yields NULL
@@ -759,13 +783,14 @@ fn compile_negate_value(em: &mut Emitter, reg: &mut RegAlloc, src: i32) -> i32 {
 /// `Column` branch expressions are re-emitted directly into `dest`
 /// (covers the V2 corpus's actual CASE usage, e.g.
 /// `tests/corpus/sql/valid_in_subset/functions_case_cast.sql`'s
-/// literal-only THEN/ELSE clauses); any other branch expression falls
-/// back to evaluating into a temporary and leaving it there — `dest`
-/// then holds a stale/NULL value for that branch. A future ticket
-/// needs a real MOVE opcode to close this gap generally.
+/// literal-only THEN/ELSE clauses); any other branch expression is
+/// rejected outright — evaluating it into a temporary and leaving
+/// `dest` untouched would silently surface a stale register from a
+/// prior branch or a prior loop iteration as this branch's result, a
+/// wrong-answer bug rather than a documented limitation. A future
+/// ticket needs a real MOVE opcode to close this gap generally.
 fn emit_branch_into(
     em: &mut Emitter,
-    reg: &mut RegAlloc,
     schema: &TableSchema,
     cursor: i32,
     expr: &Expr,
@@ -773,7 +798,12 @@ fn emit_branch_into(
 ) -> Result<(), CodegenError> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(i)) => {
-            let p1 = i32::try_from(*i).unwrap_or(0);
+            let p1 = i32::try_from(*i).map_err(|_| CodegenError::Unsupported {
+                reason: format!(
+                    "integer literal {i} is out of range for this V2-scope compiler \
+                     (no 64-bit immediate-load opcode in the frozen V2 set)"
+                ),
+            })?;
             em.emit(Instruction::new(Opcode::Integer, p1, dest, 0));
         }
         ExprKind::Literal(Literal::True) => {
@@ -798,12 +828,19 @@ fn emit_branch_into(
             em.emit(Instruction::new(
                 Opcode::Column,
                 cursor,
-                i32::try_from(idx).unwrap_or(0),
+                i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                    reason: format!("column index {idx} does not fit in a P2 operand"),
+                })?,
                 dest,
             ));
         }
         _ => {
-            compile_value(em, reg, schema, cursor, expr)?;
+            return Err(CodegenError::Unsupported {
+                reason: "CASE branch results other than a bare literal or column reference are \
+                         not yet supported by this V2-scope compiler (no MOVE opcode to copy a \
+                         computed value into the CASE's shared result register)"
+                    .to_string(),
+            });
         }
     }
     Ok(())

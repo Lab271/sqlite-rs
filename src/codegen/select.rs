@@ -150,7 +150,9 @@ fn compile_row_values(
                 em.emit(Instruction::new(
                     Opcode::Column,
                     cursor,
-                    i32::try_from(idx).unwrap_or(0),
+                    i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                        reason: format!("column index {idx} does not fit in a P2 operand"),
+                    })?,
                     r,
                 ));
                 r
@@ -166,11 +168,16 @@ fn compile_row_values(
         return Ok((reg.alloc(), 0));
     };
     for (i, r) in regs.iter().enumerate() {
-        assert_eq!(
-            *r,
-            first.saturating_add(i32::try_from(i).unwrap_or(0)),
-            "result columns must land in contiguous registers for MakeRecord/ResultRow"
-        );
+        let want = first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
+        if *r != want {
+            return Err(CodegenError::Unsupported {
+                reason:
+                    "result columns must land in contiguous registers for MakeRecord/ResultRow \
+                         (a function call or other multi-register expression mixed with other \
+                         columns is not yet supported)"
+                        .to_string(),
+            });
+        }
     }
     Ok((first, cols.len()))
 }
@@ -415,6 +422,11 @@ fn compile_sorted_scan(
         sorter_data_reg,
         0,
     ));
+    // Re-opened every iteration rather than opened once before the loop
+    // with `sorter_data_reg` merely updated: `cursor.rs`'s pseudo-cursor
+    // is a cheap, idempotent register-pointer rebind (no allocation or
+    // I/O), and this mirrors SQLite's own per-row `OpenPseudo` re-open
+    // when the underlying data register changes each iteration.
     em.emit(Instruction::new(
         Opcode::OpenPseudo,
         PSEUDO_CURSOR,
