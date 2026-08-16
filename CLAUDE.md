@@ -155,3 +155,10 @@ these conventions in sync with how #56 is actually structured:
 - **Check the ADR index before proposing architectural changes** — if your
   proposal contradicts an accepted ADR, the PR must include the superseding
   ADR that argues why the context changed.
+- **Uncited-ADR carve-out.** An ADR may still be edited or removed by a
+  follow-up PR as long as nothing else in the repo cites it yet — no
+  ticket `Refs:` line, no other ADR pointing at it, no spec reference.
+  Once something cites it, it's frozen: fix it forward with a superseding
+  ADR, never edit in place. This exists so a batch of freshly-authored (or
+  backfilled) ADRs can be corrected while they're still wet, without
+  spawning a superseding ADR for every rough edge found a day later.

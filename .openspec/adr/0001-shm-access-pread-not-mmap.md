@@ -10,6 +10,9 @@ this document records the decision retroactively so "how sqlite-rs accesses
 `-shm`" has an explicit architectural rationale rather than living only in a
 module-doc paragraph.
 
+This `-shm`-specific decision was later generalized into the crate-wide
+zero-unsafe policy — see [ADR-0009](0009-zero-unsafe.md).
+
 ## Context
 
 `src/vfs/shm.rs` claims WAL reader-mark slots by reading and writing fields
