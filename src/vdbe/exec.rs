@@ -279,12 +279,13 @@ fn real_affinity(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, Column, DecrJumpZero, Delete, Divide, Eq, Found, Function, Ge, Goto, Gt,
-        Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Integer, IsNull, Last, Le, Lt,
-        MakeRecord, Multiply, MustBeInt, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once,
-        OpenEphemeral, OpenPseudo, OpenRead, RealAffinity, Remainder, ResultRow, Return, Rewind,
-        Rowid, SeekRowid, Sequence, Sort, SorterData, SorterInsert, SorterNext, SorterOpen,
-        SorterSort, String8, Subtract, Transaction,
+        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Column, Concat, DecrJumpZero, Delete, Divide, Eq,
+        Found, Function, Ge, Goto, Gt, Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init,
+        Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, Next, Not, NotNull, Null,
+        NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, RealAffinity, Remainder,
+        ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort,
+        SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
+        Transaction,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -316,6 +317,12 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Divide => arithmetic::divide(vm, instr),
         Remainder => arithmetic::remainder(vm, instr),
         Not => arithmetic::not(vm, instr),
+        BitAnd => arithmetic::bit_and(vm, instr),
+        BitOr => arithmetic::bit_or(vm, instr),
+        ShiftLeft => arithmetic::shift_left(vm, instr),
+        ShiftRight => arithmetic::shift_right(vm, instr),
+        BitNot => arithmetic::bit_not(vm, instr),
+        Concat => arithmetic::concat(vm, instr),
 
         Integer => result::integer(vm, instr),
         Null => result::null(vm, instr),

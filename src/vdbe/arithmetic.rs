@@ -1,11 +1,13 @@
 //! Arithmetic opcodes (spec 009, Requirement 6): `Add`, `Subtract`,
-//! `Multiply`, `Divide`, `Remainder`, plus the unary `Not`. Each reads
-//! its source register(s) and writes one destination register — all
+//! `Multiply`, `Divide`, `Remainder`, `BitAnd`, `BitOr`, `ShiftLeft`,
+//! `ShiftRight`, `Concat`, plus the unary `Not`/`BitNot`. Each reads its
+//! source register(s) and writes one destination register — all
 //! overflow, NULL-propagation, and numeric-coercion behavior is spec
 //! 008's, via `src/vdbe/coerce.rs` and `src/vdbe/value.rs`. No
 //! arithmetic happens in this file.
 
 use crate::record::Value;
+use crate::vdbe::coerce;
 use crate::vdbe::coerce::{checked_add, checked_div, checked_mul, checked_rem, checked_sub};
 use crate::vdbe::exec::{ExecError, Step, Vm};
 use crate::vdbe::program::Instruction;
@@ -79,6 +81,60 @@ pub fn remainder(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `BitAnd`: `r[P3] = r[P1] & r[P2]` (commutative, so operand order
+/// doesn't matter unlike `Subtract`/`Divide`/`Remainder`).
+pub fn bit_and(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    binary_op(vm, instr, coerce::bit_and)
+}
+
+/// `BitOr`: `r[P3] = r[P1] | r[P2]` (commutative).
+pub fn bit_or(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    binary_op(vm, instr, coerce::bit_or)
+}
+
+/// `ShiftLeft`: `r[P3] = r[P2] << r[P1]`, matching SQLite's operand
+/// order (same P2-op-P1 convention as `Subtract`/`Divide`/`Remainder`).
+pub fn shift_left(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let a = vm.register(instr.p1)?.clone();
+    let b = vm.register(instr.p2)?.clone();
+    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        Value::Null
+    } else {
+        coerce::shift_left(&b, &a)
+    };
+    vm.set_register(instr.p3, result)?;
+    Ok(Step::Next)
+}
+
+/// `ShiftRight`: `r[P3] = r[P2] >> r[P1]`, matching SQLite's operand
+/// order.
+pub fn shift_right(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let a = vm.register(instr.p1)?.clone();
+    let b = vm.register(instr.p2)?.clone();
+    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        Value::Null
+    } else {
+        coerce::shift_right(&b, &a)
+    };
+    vm.set_register(instr.p3, result)?;
+    Ok(Step::Next)
+}
+
+/// `Concat`: `r[P3] = r[P2] || r[P1]`, matching SQLite's operand order.
+/// Unlike `Not`, a NULL operand yields NULL rather than a defined
+/// value — handled by `binary_op`'s shared NULL check, not here.
+pub fn concat(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let a = vm.register(instr.p1)?.clone();
+    let b = vm.register(instr.p2)?.clone();
+    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        Value::Null
+    } else {
+        coerce::concat(&b, &a)
+    };
+    vm.set_register(instr.p3, result)?;
+    Ok(Step::Next)
+}
+
 /// `Not`: `r[P2] = !r[P1]`, interpreting `P1` as a boolean. A NULL
 /// operand yields NULL, not 1 — SQL's `NOT unknown` is still unknown,
 /// and this opcode is the only place that fact survives into a
@@ -89,6 +145,18 @@ pub fn not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let result = match v {
         Value::Null => Value::Null,
         other => Value::Integer(i64::from(crate::vdbe::control::is_falsy(&other))),
+    };
+    vm.set_register(instr.p2, result)?;
+    Ok(Step::Next)
+}
+
+/// `BitNot`: `r[P2] = ~r[P1]`. Unlike `Not`, NULL stays NULL rather than
+/// resolving to a defined boolean — SQLite's `~NULL` is NULL.
+pub fn bit_not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let v = vm.register(instr.p1)?.clone();
+    let result = match v {
+        Value::Null => Value::Null,
+        other => coerce::bit_not(&other),
     };
     vm.set_register(instr.p2, result)?;
     Ok(Step::Next)
@@ -151,6 +219,63 @@ mod tests {
             let instr = Instruction::new(Opcode::Not, 0, 1, 0);
             not(&mut vm, &instr).unwrap();
             assert_eq!(*vm.register(1).unwrap(), expected, "NOT {input:?}");
+        }
+    }
+
+    #[test]
+    fn bitwise_and_or_shift_concat_read_two_registers_write_one() {
+        let mut vm = vm_with(vec![Value::Integer(1), Value::Integer(5)]);
+        let instr = Instruction::new(Opcode::BitAnd, 0, 1, 2);
+        bit_and(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(2).unwrap(), Value::Integer(1));
+
+        let mut vm = vm_with(vec![Value::Integer(1), Value::Integer(5)]);
+        let instr = Instruction::new(Opcode::BitOr, 0, 1, 2);
+        bit_or(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(2).unwrap(), Value::Integer(5));
+
+        // ShiftLeft/ShiftRight/Concat: P1=rhs, P2=lhs (SQLite operand order).
+        let mut vm = vm_with(vec![Value::Integer(1), Value::Integer(5)]);
+        let instr = Instruction::new(Opcode::ShiftLeft, 0, 1, 2);
+        shift_left(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(2).unwrap(), Value::Integer(10));
+
+        let mut vm = vm_with(vec![Value::Integer(1), Value::Integer(5)]);
+        let instr = Instruction::new(Opcode::ShiftRight, 0, 1, 2);
+        shift_right(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(2).unwrap(), Value::Integer(2));
+
+        let mut vm = vm_with(vec![
+            Value::Text("x".to_string()),
+            Value::Text("apple".to_string()),
+        ]);
+        let instr = Instruction::new(Opcode::Concat, 0, 1, 2);
+        concat(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(2).unwrap(), Value::Text("applex".to_string()));
+    }
+
+    #[test]
+    fn bit_not_complements_and_propagates_null() {
+        for (input, expected) in [
+            (Value::Integer(5), Value::Integer(-6)),
+            (Value::Integer(0), Value::Integer(-1)),
+            (Value::Integer(-7), Value::Integer(6)),
+            (Value::Null, Value::Null),
+        ] {
+            let mut vm = vm_with(vec![input.clone()]);
+            let instr = Instruction::new(Opcode::BitNot, 0, 1, 0);
+            bit_not(&mut vm, &instr).unwrap();
+            assert_eq!(*vm.register(1).unwrap(), expected, "~{input:?}");
+        }
+    }
+
+    #[test]
+    fn null_propagates_through_bitwise_shift_and_concat() {
+        for op in [bit_and, bit_or, shift_left, shift_right, concat] {
+            let mut vm = vm_with(vec![Value::Null, Value::Integer(2)]);
+            let instr = Instruction::new(Opcode::BitAnd, 0, 1, 2);
+            op(&mut vm, &instr).unwrap();
+            assert_eq!(*vm.register(2).unwrap(), Value::Null);
         }
     }
 

@@ -1,7 +1,7 @@
 {
   "oracle_version": "3.53.4",
-  "query_count": 28,
-  "opcode_count": 54,
+  "query_count": 29,
+  "opcode_count": 60,
   "opcodes": {
     "Add": {
       "count": 1,
@@ -15,11 +15,35 @@
       "example_query": "SELECT * FROM products WHERE id IN (1, 2, 3)",
       "category": "control"
     },
+    "BitAnd": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
+    },
+    "BitNot": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
+    },
+    "BitOr": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
+    },
     "Column": {
-      "count": 107,
+      "count": 114,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
+    },
+    "Concat": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
     },
     "DecrJumpZero": {
       "count": 2,
@@ -75,7 +99,7 @@
       "category": "compare"
     },
     "Goto": {
-      "count": 30,
+      "count": 31,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -89,7 +113,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -130,13 +154,13 @@
       "category": "control"
     },
     "Init": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
     },
     "Integer": {
-      "count": 22,
+      "count": 23,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE price > 10",
       "category": "result"
@@ -190,7 +214,7 @@
       "category": "control"
     },
     "Next": {
-      "count": 27,
+      "count": 28,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -247,7 +271,7 @@
       "category": "cursor"
     },
     "OpenRead": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [
         "2",
         "3",
@@ -270,7 +294,7 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
@@ -282,7 +306,7 @@
       "category": "control"
     },
     "Rewind": {
-      "count": 26,
+      "count": 27,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -304,6 +328,18 @@
       "p4_variants": [],
       "example_query": "SELECT * FROM products ORDER BY price LIMIT 1",
       "category": "cursor"
+    },
+    "ShiftLeft": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
+    },
+    "ShiftRight": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
+      "category": "arithmetic"
     },
     "Sort": {
       "count": 1,
@@ -364,7 +400,7 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 28,
+      "count": 29,
       "p4_variants": [
         "0"
       ],

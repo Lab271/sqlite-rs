@@ -841,10 +841,12 @@ pub(crate) fn compile_value(
                 em.emit(Instruction::new(Opcode::Not, r, dest, 0));
                 Ok(dest)
             }
-            // No bitwise-NOT opcode exists in the frozen V2 set —
-            // known gap; passes the operand through unchanged rather
-            // than inventing a new opcode.
-            UnaryOp::BitNot => compile_value(em, reg, schema, cursor, inner),
+            UnaryOp::BitNot => {
+                let r = compile_value(em, reg, schema, cursor, inner)?;
+                let dest = reg.alloc();
+                em.emit(Instruction::new(Opcode::BitNot, r, dest, 0));
+                Ok(dest)
+            }
         },
 
         ExprKind::Binary { op, lhs, rhs }
@@ -886,6 +888,48 @@ pub(crate) fn compile_value(
             Ok(dest)
         }
 
+        ExprKind::Binary { op, lhs, rhs }
+            if matches!(
+                op,
+                BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::Concat
+            ) =>
+        {
+            let l = compile_value(em, reg, schema, cursor, lhs)?;
+            let r = compile_value(em, reg, schema, cursor, rhs)?;
+            let dest = reg.alloc();
+            let opcode = match op {
+                BinaryOp::BitAnd => Opcode::BitAnd,
+                BinaryOp::BitOr => Opcode::BitOr,
+                BinaryOp::Shl => Opcode::ShiftLeft,
+                BinaryOp::Shr => Opcode::ShiftRight,
+                BinaryOp::Concat => Opcode::Concat,
+                _ => {
+                    return Err(CodegenError::Unsupported {
+                        reason: "bitwise/concat lowering reached with a non-bitwise operator"
+                            .to_string(),
+                    })
+                }
+            };
+            // ShiftLeft/ShiftRight/Concat read as `r[P2] <op> r[P1]`
+            // (SQLite's own operand order, verified against harvested
+            // EXPLAIN) — pass (rhs=P1, lhs=P2) so `lhs <op> rhs` is what's
+            // computed. BitAnd/BitOr are commutative, so operand order
+            // doesn't change the result.
+            match opcode {
+                Opcode::ShiftLeft | Opcode::ShiftRight | Opcode::Concat => {
+                    em.emit(Instruction::new(opcode, r, l, dest));
+                }
+                _ => {
+                    em.emit(Instruction::new(opcode, l, r, dest));
+                }
+            }
+            Ok(dest)
+        }
+
         // Comparisons and the logical connectives are conditions used
         // in a value context: they answer true/false/unknown, which
         // `compile_bool_to_value` materializes three-valued. Before
@@ -905,10 +949,11 @@ pub(crate) fn compile_value(
             ..
         } => compile_bool_to_value(em, reg, schema, cursor, expr),
 
-        // No dedicated opcode exists for bitwise AND/OR/shift or `||`
-        // concatenation in the frozen V2 set (spec 009's 54-opcode
-        // inventory has no such category) — known gap, compiles to
-        // NULL rather than inventing a new opcode.
+        // Unreachable in practice: `BinaryOp` has no variant left
+        // uncovered by the two arms above (#139). Kept as a defensive
+        // fallback rather than a `_ => unreachable!()` so a future
+        // `BinaryOp` addition fails soft (wrong answer) instead of
+        // panicking mid-query.
         ExprKind::Binary { .. } => {
             let r = reg.alloc();
             em.emit(Instruction::new(Opcode::Null, 0, r, 0));
