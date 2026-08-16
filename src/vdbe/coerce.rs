@@ -156,16 +156,24 @@ pub fn checked_div(a: &Value, b: &Value) -> Value {
 /// `checked_div`'s divide-by-zero rule; non-integer operands are
 /// truncated to integer first, per SQLite's `%` operator semantics.
 pub fn checked_rem(a: &Value, b: &Value) -> Value {
-    let (x, y) = (
-        cast_to_integer(&as_numeric(a)),
-        cast_to_integer(&as_numeric(b)),
-    );
+    let (na, nb) = (as_numeric(a), as_numeric(b));
+    // `%` truncates both operands to INTEGER for the modulo itself
+    // (oracle: `7%2.5` computes as `7%2`), but — like every other
+    // arithmetic operator — the *result* promotes to REAL if either
+    // operand was REAL (oracle: `typeof(7%2.5)` is `real`, value `1.0`,
+    // not the integer `1` a naive integer-only remainder would give).
+    let is_real = matches!(na, Value::Real(_)) || matches!(nb, Value::Real(_));
+    let (x, y) = (cast_to_integer(&na), cast_to_integer(&nb));
     if y == 0 {
         return Value::Null;
     }
-    match x.checked_rem(y) {
-        Some(v) => Value::Integer(v),
-        None => Value::Integer(0), // i64::MIN % -1 == 0, no overflow needed but checked_rem is conservative
+    // i64::MIN % -1 == 0, no overflow needed but checked_rem is conservative.
+    let result = x.checked_rem(y).unwrap_or_default();
+    #[allow(clippy::cast_precision_loss)]
+    if is_real {
+        Value::Real(result as f64)
+    } else {
+        Value::Integer(result)
     }
 }
 

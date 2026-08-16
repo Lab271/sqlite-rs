@@ -85,6 +85,19 @@ QUERIES = [
     # harvested even though CLASSIFICATION already names them.
     "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
     "SELECT rowid, * FROM products WHERE rowid = 2",
+    # Literal fidelity (#142): no prior query exercised a REAL literal, a
+    # BLOB literal, an out-of-i32 integer literal, or CAST — so Real,
+    # Blob, Int64, and Cast were never harvested even though
+    # CLASSIFICATION already names Real/Blob/Cast (a forward reference
+    # anticipating this gap).
+    "SELECT 1e3, .5, 1. FROM products LIMIT 1",
+    "SELECT X'414243' FROM products LIMIT 1",
+    "SELECT 3000000000, 9223372036854775807, -9223372036854775808 FROM products LIMIT 1",
+    "SELECT CAST(name AS INTEGER), CAST(price AS INTEGER), CAST(note AS INTEGER) FROM products",
+    "SELECT CAST(qty AS REAL), CAST(name AS REAL) FROM products",
+    "SELECT CAST(qty AS TEXT), CAST(price AS TEXT) FROM products",
+    "SELECT CAST(name AS BLOB), CAST(qty AS BLOB) FROM products",
+    "SELECT CAST(name AS NUMERIC), CAST(price AS NUMERIC) FROM products",
 ]
 
 CLASSIFICATION = {
@@ -136,7 +149,7 @@ CLASSIFICATION = {
     "ResultRow": "result", "MakeRecord": "result", "Copy": "result",
     "SCopy": "result", "Move": "result", "Integer": "result", "Real": "result",
     "String8": "result", "Blob": "result", "Null": "result", "ZeroOrNull": "result",
-    "Variable": "result", "IntCopy": "result",
+    "Variable": "result", "IntCopy": "result", "Int64": "result",
 }
 
 

@@ -1,7 +1,7 @@
 {
   "oracle_version": "3.53.4",
-  "query_count": 29,
-  "opcode_count": 60,
+  "query_count": 37,
+  "opcode_count": 64,
   "opcodes": {
     "Add": {
       "count": 1,
@@ -33,8 +33,22 @@
       "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
       "category": "arithmetic"
     },
+    "Blob": {
+      "count": 1,
+      "p4_variants": [
+        "ABC"
+      ],
+      "example_query": "SELECT X'414243' FROM products LIMIT 1",
+      "category": "result"
+    },
+    "Cast": {
+      "count": 11,
+      "p4_variants": [],
+      "example_query": "SELECT CAST(name AS INTEGER), CAST(price AS INTEGER), CAST(note AS INTEGER) FROM products",
+      "category": "arithmetic"
+    },
     "Column": {
-      "count": 114,
+      "count": 125,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -46,7 +60,7 @@
       "category": "arithmetic"
     },
     "DecrJumpZero": {
-      "count": 2,
+      "count": 5,
       "p4_variants": [],
       "example_query": "SELECT * FROM products LIMIT 2",
       "category": "control"
@@ -99,7 +113,7 @@
       "category": "compare"
     },
     "Goto": {
-      "count": 31,
+      "count": 39,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -113,7 +127,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 29,
+      "count": 37,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -154,13 +168,23 @@
       "category": "control"
     },
     "Init": {
-      "count": 29,
+      "count": 37,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
     },
+    "Int64": {
+      "count": 3,
+      "p4_variants": [
+        "-9223372036854775808",
+        "3000000000",
+        "9223372036854775807"
+      ],
+      "example_query": "SELECT 3000000000, 9223372036854775807, -9223372036854775808 FROM products LIMIT 1",
+      "category": "result"
+    },
     "Integer": {
-      "count": 23,
+      "count": 26,
       "p4_variants": [],
       "example_query": "SELECT * FROM products WHERE price > 10",
       "category": "result"
@@ -214,7 +238,7 @@
       "category": "control"
     },
     "Next": {
-      "count": 28,
+      "count": 36,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -271,8 +295,9 @@
       "category": "cursor"
     },
     "OpenRead": {
-      "count": 29,
+      "count": 37,
       "p4_variants": [
+        "0",
         "2",
         "3",
         "4",
@@ -281,8 +306,18 @@
       "example_query": "SELECT * FROM products",
       "category": "cursor"
     },
+    "Real": {
+      "count": 3,
+      "p4_variants": [
+        "0.5",
+        "1",
+        "1000"
+      ],
+      "example_query": "SELECT 1e3, .5, 1. FROM products LIMIT 1",
+      "category": "result"
+    },
     "RealAffinity": {
-      "count": 29,
+      "count": 32,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "compare"
@@ -294,7 +329,7 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 29,
+      "count": 37,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
@@ -306,7 +341,7 @@
       "category": "control"
     },
     "Rewind": {
-      "count": 27,
+      "count": 35,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -400,7 +435,7 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 29,
+      "count": 37,
       "p4_variants": [
         "0"
       ],

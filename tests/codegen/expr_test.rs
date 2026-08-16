@@ -342,16 +342,91 @@ fn walker_vectors() -> Vec<(String, Value)> {
 ///   exists), so arithmetic on them takes the TEXT-coercion path
 ///   instead of a true floating-point path — see `Literal::Float`'s
 ///   doc comment in `compile_value`.
-const KNOWN_GAPS: &[&str] = &["CAST(", "-9223372036854775808", "7.0/2", "7/2.0", "7%2.5"];
+const KNOWN_GAPS: &[&str] = &[];
+
+/// Runs one `(expr, expected)` walker vector through the real compiled
+/// path (`parse_select` -> `compile_select` -> `execute_with_db`)
+/// against a fresh cursor over `path`/`schema`/`header`, returning
+/// `Ok(None)` for a vector this compiler doesn't accept (skip, not
+/// fail), `Ok(Some(()))` for a match, or `Err(reason)` for an execution
+/// error or a wrong result. Shared by the full walker-vector sweep and
+/// any narrower per-family test (e.g. CAST-only) that wants the same
+/// compiled-path check in isolation.
+fn run_walker_vector(
+    schema: &TableSchema,
+    path: &Path,
+    header: DatabaseHeader,
+    expr: &str,
+    expected: &Value,
+) -> Result<Option<()>, String> {
+    let sql = format!("SELECT {expr} FROM t");
+    let select = match parse_select(&sql) {
+        ParseOutcome::Accepted(s) => *s,
+        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => return Ok(None),
+    };
+    let program = match compile_select(&select, schema) {
+        Ok(p) => p,
+        Err(_) => return Ok(None), // Known-gap constructs — not this test's concern.
+    };
+    let vfs = UnixVfs;
+    let source = VfsPageSource::open(&vfs, path, header.page_size).unwrap();
+    let rows = execute_with_db(&program, Rc::new(source), header)
+        .map_err(|e| format!("{expr}: exec error {e}"))?;
+    let got = rows.first().and_then(|r| r.first()).cloned();
+    if got.as_ref() != Some(expected) {
+        return Err(format!("{expr}: expected {expected:?}, got {got:?}"));
+    }
+    Ok(Some(()))
+}
+
+/// CAST-only slice of the walker vectors (#142), runnable in isolation
+/// from the rest of the expression sweep via `cargo test
+/// cast_vectors_pass_through_the_compiled_path` — every `CAST(...)`
+/// vector oracle-harvested into `tests/corpus/expr_vectors/walker.jsonl`
+/// must compile and match the oracle exactly.
+#[test]
+fn cast_vectors_pass_through_the_compiled_path() {
+    let (path, schema) = one_row_fixture();
+    let file = UnixVfs.open_read(&path).unwrap();
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0).unwrap();
+
+    let cast_vectors: Vec<_> = walker_vectors()
+        .into_iter()
+        .filter(|(expr, _)| expr.starts_with("CAST("))
+        .collect();
+    assert!(
+        !cast_vectors.is_empty(),
+        "expected at least one CAST vector in tests/corpus/expr_vectors/walker.jsonl"
+    );
+
+    let mut failures = Vec::new();
+    let mut passed = 0usize;
+    for (expr, expected) in &cast_vectors {
+        let header = DatabaseHeader::parse(&header_buf).unwrap();
+        match run_walker_vector(&schema, &path, header, expr, expected) {
+            Ok(Some(())) => passed += 1,
+            Ok(None) => failures.push(format!(
+                "{expr}: did not compile (should not happen for CAST)"
+            )),
+            Err(reason) => failures.push(reason),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} unexpected CAST vector failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert_eq!(passed, cast_vectors.len());
+}
 
 #[test]
 fn walker_vectors_pass_through_the_compiled_path() {
     let (path, schema) = one_row_fixture();
-    let vfs = UnixVfs;
-    let file = vfs.open_read(&path).unwrap();
+    let file = UnixVfs.open_read(&path).unwrap();
     let mut header_buf = [0u8; 100];
     file.read_at(&mut header_buf, 0).unwrap();
-    let header = DatabaseHeader::parse(&header_buf).unwrap();
 
     let mut failures = Vec::new();
     let mut passed = 0usize;
@@ -361,38 +436,27 @@ fn walker_vectors_pass_through_the_compiled_path() {
             skipped += 1;
             continue;
         }
-        let sql = format!("SELECT {expr} FROM t");
-        let select = match parse_select(&sql) {
-            ParseOutcome::Accepted(s) => *s,
-            ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => continue,
-        };
-        let program = match compile_select(&select, &schema) {
-            Ok(p) => p,
-            Err(_) => continue, // Known-gap constructs (see codegen doc comments) — not this test's concern.
-        };
-        let source = VfsPageSource::open(&vfs, &path, header.page_size).unwrap();
-        let rows = match execute_with_db(&program, Rc::new(source), header) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!("{expr}: exec error {e}"));
-                continue;
-            }
-        };
-        let got = rows.first().and_then(|r| r.first()).cloned();
-        if got.as_ref() != Some(&expected) {
-            failures.push(format!("{expr}: expected {expected:?}, got {got:?}"));
-            continue;
+        let header = DatabaseHeader::parse(&header_buf).unwrap();
+        match run_walker_vector(&schema, &path, header, &expr, &expected) {
+            Ok(Some(())) => passed += 1,
+            Ok(None) => {} // Known-gap constructs (see codegen doc comments) — not this test's concern.
+            Err(reason) => failures.push(reason),
         }
-        passed += 1;
     }
-    // A ratchet, not a floor: 55 is what passes today (46 before #139
-    // harvested and wired the six bitwise/concat opcodes, +9 vectors
-    // freed from KNOWN_GAPS). Adding vectors or closing a `KNOWN_GAPS`
-    // entry should raise this number in the same commit; a drop means a
-    // regression the per-vector assertion below cannot see, because a
-    // vector that stops *compiling* is skipped, not failed.
+    // A ratchet, not a floor: 86 is what passes today (55 before #142
+    // harvested Real/Blob/Int64/Cast and fixed `%`'s real-promotion
+    // rule: +15 vectors freed from KNOWN_GAPS — CAST/big-integer/mixed-
+    // real-modulo were all gated on the same "no opcode for it"
+    // literal-fidelity gap — plus 16 new CAST vectors harvested by
+    // `tools/gen_expr_vectors.py` closing the corpus's remaining
+    // NUMERIC-target, BLOB-target, nonzero-parsing BLOB-source, and
+    // saturation/precision-loss gaps). Adding vectors or closing a
+    // `KNOWN_GAPS` entry should raise this number in the same commit; a
+    // drop means a regression the per-vector assertion below cannot
+    // see, because a vector that stops *compiling* is skipped, not
+    // failed.
     assert!(
-        passed >= 55,
+        passed >= 86,
         "expected most walker vectors to pass through the compiled path, only {passed} did ({skipped} known-gap skipped)"
     );
     assert!(

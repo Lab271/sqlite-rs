@@ -1,13 +1,13 @@
 //! Instruction format and the linear bytecode `Program` (spec 009,
 //! Requirement 1). `Opcode` enumerates the full frozen V2 opcode set
-//! (`tools/opcodes-v2.json`, 60 opcodes, oracle 3.53.4, #87/#139) — every
-//! variant listed here, whether or not `src/vdbe/exec.rs` implements it
-//! yet, so the enum stays the single source of truth for "in scope for
-//! V2" across #89/#90/#91.
+//! (`tools/opcodes-v2.json`, 64 opcodes, oracle 3.53.4, #87/#139/#142) —
+//! every variant listed here, whether or not `src/vdbe/exec.rs`
+//! implements it yet, so the enum stays the single source of truth for
+//! "in scope for V2" across #89/#90/#91.
 
 use crate::vdbe::Collation;
 
-/// The 60 V2 opcodes, grouped by category to match
+/// The 64 V2 opcodes, grouped by category to match
 /// `tools/opcodes-v2.json`'s taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
@@ -63,10 +63,16 @@ pub enum Opcode {
     ShiftRight,
     BitNot,
     Concat,
+    // #142: CAST forces an affinity via its own dedicated opcode, not
+    // by misusing MustBeInt/RealAffinity.
+    Cast,
     // function
     Function,
     // result
     Integer,
+    Int64,
+    Real,
+    Blob,
     Null,
     String8,
     MakeRecord,
@@ -86,7 +92,7 @@ impl Opcode {
     /// `tools/opcodes-v2.json` (#65). Kept honest by `_exhaustive` below:
     /// an unmatched new variant fails the build rather than silently
     /// falling out of this list.
-    pub const ALL: [Opcode; 60] = [
+    pub const ALL: [Opcode; 64] = [
         Opcode::Init,
         Opcode::Goto,
         Opcode::Once,
@@ -135,8 +141,12 @@ impl Opcode {
         Opcode::ShiftRight,
         Opcode::BitNot,
         Opcode::Concat,
+        Opcode::Cast,
         Opcode::Function,
         Opcode::Integer,
+        Opcode::Int64,
+        Opcode::Real,
+        Opcode::Blob,
         Opcode::Null,
         Opcode::String8,
         Opcode::MakeRecord,
@@ -203,8 +213,12 @@ fn _exhaustive(o: Opcode) {
         | Opcode::ShiftRight
         | Opcode::BitNot
         | Opcode::Concat
+        | Opcode::Cast
         | Opcode::Function
         | Opcode::Integer
+        | Opcode::Int64
+        | Opcode::Real
+        | Opcode::Blob
         | Opcode::Null
         | Opcode::String8
         | Opcode::MakeRecord
@@ -244,6 +258,8 @@ pub struct SortKeyColumn {
 pub enum P4 {
     None,
     Int(i64),
+    Real(f64),
+    Blob(Vec<u8>),
     Str(String),
     CollSeq { collation: Collation, affinity: u8 },
     SortKey(Vec<SortKeyColumn>),

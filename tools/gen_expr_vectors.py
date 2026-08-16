@@ -196,6 +196,28 @@ WALKER_EXPRS = [
     "CAST('abc' AS BLOB)",
     "CAST(x'4142' AS TEXT)",
     "CAST('99999999999999999999' AS INTEGER)",
+    # #142: NUMERIC target and BLOB-from-numeric, plus the NUMERIC
+    # downgrade rule (a text/blob source with no fractional part
+    # downgrades to INTEGER; an already-REAL source does not).
+    "CAST(5 AS NUMERIC)",
+    "CAST(5.0 AS NUMERIC)",
+    "CAST('5.0' AS NUMERIC)",
+    "CAST('abc' AS NUMERIC)",
+    "CAST(x'4142' AS NUMERIC)",
+    "CAST(5 AS BLOB)",
+    "CAST(5.5 AS BLOB)",
+    "CAST(x'4142' AS INTEGER)",
+    "CAST(x'4142' AS REAL)",
+    "CAST(1e300 AS INTEGER)",
+    "CAST(-1e300 AS INTEGER)",
+    "CAST(NULL AS TEXT)",
+    "CAST(NULL AS BLOB)",
+    "CAST('-99999999999999999999' AS INTEGER)",
+    "CAST(9223372036854775807 AS REAL)",
+    "CAST(x'4142' AS BLOB)",
+    "CAST(x'34' AS NUMERIC)",
+    "CAST(x'3435' AS INTEGER)",
+    "CAST('123.5' AS NUMERIC)",
     # LIKE / GLOB
     "'abc' LIKE 'abc'",
     "'ABC' LIKE 'abc'",
