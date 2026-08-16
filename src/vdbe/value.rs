@@ -78,18 +78,58 @@ mod tests {
     }
 
     #[test]
+    fn non_null_comparisons_evaluate_normally() {
+        assert_eq!(
+            sql_eq(&Value::Integer(1), &Value::Integer(1), Collation::Binary),
+            Some(true)
+        );
+        assert_eq!(
+            sql_eq(&Value::Integer(1), &Value::Integer(2), Collation::Binary),
+            Some(false)
+        );
+        assert_eq!(
+            sql_lt(&Value::Integer(1), &Value::Integer(2), Collation::Binary),
+            Some(true)
+        );
+        assert_eq!(
+            sql_lt(&Value::Integer(2), &Value::Integer(1), Collation::Binary),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn sql_lt_propagates_null() {
+        assert_eq!(
+            sql_lt(&Value::Null, &Value::Integer(1), Collation::Binary),
+            None
+        );
+    }
+
+    #[test]
     fn is_and_is_not_treat_null_as_comparable() {
         assert!(is(&Value::Null, &Value::Null, Collation::Binary));
         assert!(!is_not(&Value::Null, &Value::Null, Collation::Binary));
         assert!(!is(&Value::Null, &Value::Integer(1), Collation::Binary));
+        assert!(is(
+            &Value::Integer(1),
+            &Value::Integer(1),
+            Collation::Binary
+        ));
+        assert!(!is(
+            &Value::Integer(1),
+            &Value::Integer(2),
+            Collation::Binary
+        ));
     }
 
     #[test]
     fn and_or_follow_three_valued_logic() {
         assert_eq!(and(None, Some(false)), Some(false));
         assert_eq!(and(None, Some(true)), None);
+        assert_eq!(and(Some(true), Some(true)), Some(true));
         assert_eq!(or(None, Some(true)), Some(true));
         assert_eq!(or(None, Some(false)), None);
+        assert_eq!(or(Some(false), Some(false)), Some(false));
     }
 
     #[test]

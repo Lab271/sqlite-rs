@@ -158,6 +158,8 @@ mod tests {
         assert_eq!(coerce_text_to_numeric("0x10"), Value::Integer(0));
         assert_eq!(coerce_text_to_numeric(".5"), Value::Real(0.5));
         assert_eq!(coerce_text_to_numeric("1e3"), Value::Real(1000.0));
+        assert_eq!(coerce_text_to_numeric("1e+3"), Value::Real(1000.0));
+        assert_eq!(coerce_text_to_numeric("1e-3"), Value::Real(0.001));
     }
 
     #[test]
@@ -193,5 +195,30 @@ mod tests {
     fn cast_to_integer_truncates_toward_zero() {
         assert_eq!(cast_to_integer(&Value::Real(3.9)), 3);
         assert_eq!(cast_to_integer(&Value::Real(-3.9)), -3);
+        assert_eq!(cast_to_integer(&Value::Integer(7)), 7);
+        assert_eq!(cast_to_integer(&Value::Text("12abc".to_string())), 12);
+        assert_eq!(cast_to_integer(&Value::Text("3.9abc".to_string())), 3);
+        assert_eq!(cast_to_integer(&Value::Null), 0);
+        assert_eq!(cast_to_integer(&Value::Blob(vec![1, 2, 3])), 0);
+    }
+
+    #[test]
+    fn checked_sub_matches_oracle_coercion_vectors() {
+        assert_eq!(
+            checked_sub(&Value::Integer(5), &Value::Integer(3)),
+            Value::Integer(2)
+        );
+    }
+
+    #[test]
+    fn arithmetic_on_real_operands_avoids_integer_path() {
+        assert_eq!(
+            checked_add(&Value::Real(1.5), &Value::Real(2.5)),
+            Value::Real(4.0)
+        );
+        assert_eq!(
+            checked_mul(&Value::Null, &Value::Integer(5)),
+            Value::Integer(0)
+        );
     }
 }
