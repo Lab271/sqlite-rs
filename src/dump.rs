@@ -247,15 +247,14 @@ mod tests {
     // see PR #49 review discussion.
 
     #[test]
-    fn known_fragile_comma_inside_string_literal_default_missplits_columns() {
-        // `DEFAULT 'a,b'` contains a comma that isn't a column separator,
-        // but `column_defs` has no string-literal awareness and splits on
-        // every top-level comma.
+    fn comma_inside_string_literal_default_does_not_missplit_columns() {
+        // `DEFAULT 'a,b'` contains a comma that isn't a column separator;
+        // `column_defs` is now quote-aware (#135) and doesn't split on it.
         let s = schema("CREATE TABLE t (a TEXT DEFAULT 'a,b', b INTEGER)");
         assert_eq!(
             column_defs(&s).len(),
-            3,
-            "comma inside the string literal was wrongly treated as a column separator"
+            2,
+            "comma inside a string literal must not be treated as a column separator"
         );
     }
 
@@ -273,39 +272,73 @@ mod tests {
         );
     }
 
-    // The two `rowid_alias_column` cases below are the reason that
-    // function's naivety now carries more weight than it did: since #96,
-    // `src/codegen/expr.rs` emits `Rowid` instead of `Column` based on
-    // its answer, so a wrong index is a wrong query result rather than
-    // only wrong `dump` output. Both are tracked for a quote-aware
-    // rewrite in #135; these tests pin today's behavior so the fix is
-    // visible when it lands.
+    // The two `rowid_alias_column` cases below used to be the reason
+    // that function's naivety carried more weight than it did before
+    // #135: since #96, `src/codegen/expr.rs` emits `Rowid` instead of
+    // `Column` based on its answer, so a wrong index is a wrong query
+    // result rather than only wrong `dump` output.
 
     #[test]
-    fn known_fragile_string_literal_mentioning_primary_key_false_positives() {
-        // The DEFAULT literal supplies the PRIMARY/KEY token pair and the
-        // column supplies INTEGER, so this reads as a rowid alias and the
-        // compiled read path would substitute the cursor rowid for `a`.
+    fn string_literal_mentioning_primary_key_is_not_a_false_positive() {
+        // The DEFAULT literal contains the PRIMARY/KEY token pair, but
+        // #135's quote-aware scan masks string-literal content before
+        // looking for the constraint, so it no longer reads as one.
         let s = schema("CREATE TABLE t (a INTEGER DEFAULT 'primary key', b TEXT)");
         assert_eq!(
             rowid_alias_column(&s),
-            Some(0),
-            "PRIMARY KEY inside a string literal was wrongly read as a real constraint"
+            None,
+            "PRIMARY KEY inside a string literal must not be read as a real constraint"
         );
     }
 
     #[test]
-    fn known_fragile_table_level_primary_key_misses_the_alias() {
+    fn table_level_primary_key_is_detected_as_the_alias() {
         // SQLite treats `CREATE TABLE t(x INTEGER, PRIMARY KEY(x))` as a
-        // rowid alias, but the table-constraint filter drops that def
-        // before the scan sees it — so `x` reads back NULL, which is the
-        // original #96 bug surviving for this DDL spelling.
+        // rowid alias; #135 makes `rowid_alias_column` check the
+        // table-level constraint form, not just an inline one.
         let s = schema("CREATE TABLE t (x INTEGER, PRIMARY KEY(x))");
         assert_eq!(
             rowid_alias_column(&s),
-            None,
+            Some(0),
             "table-level PRIMARY KEY(x) over an INTEGER column is a rowid alias in SQLite"
         );
+    }
+
+    #[test]
+    fn table_level_primary_key_over_two_columns_is_not_the_alias() {
+        // A composite table-level PRIMARY KEY is never a rowid alias,
+        // even though every named column is INTEGER — SQLite only
+        // grants the optimization to a single-column key.
+        let s = schema("CREATE TABLE t (x INTEGER, y INTEGER, PRIMARY KEY(x, y))");
+        assert_eq!(rowid_alias_column(&s), None);
+    }
+
+    #[test]
+    fn escaped_quote_inside_string_literal_does_not_end_it_early() {
+        // `'it''s'` is a single string literal containing a literal
+        // apostrophe (SQL's doubled-quote escape) — the comma that
+        // follows must still be seen as a column separator, and the
+        // constraint text after it must not be split mid-literal.
+        let s = schema("CREATE TABLE t (a TEXT DEFAULT 'it''s, tricky', b INTEGER)");
+        assert_eq!(column_defs(&s).len(), 2);
+    }
+
+    #[test]
+    fn comment_containing_a_comma_does_not_split_columns() {
+        let s = schema("CREATE TABLE t (a INTEGER /* a, b */, b TEXT)");
+        assert_eq!(column_defs(&s).len(), 2);
+    }
+
+    #[test]
+    fn line_comment_containing_primary_key_does_not_false_positive() {
+        let s = schema("CREATE TABLE t (a INTEGER -- not primary key\n, b TEXT)");
+        assert_eq!(rowid_alias_column(&s), None);
+    }
+
+    #[test]
+    fn bracket_quoted_identifier_with_comma_does_not_split_columns() {
+        let s = schema("CREATE TABLE t ([a,b] INTEGER, c TEXT)");
+        assert_eq!(column_defs(&s).len(), 2);
     }
 
     #[test]
