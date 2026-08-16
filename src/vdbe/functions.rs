@@ -449,6 +449,187 @@ fn iif(args: &[Value]) -> Result<Value, FunctionError> {
     })
 }
 
+fn like_match(text: &str, pattern: &str, escape: Option<char>) -> bool {
+    let t: Vec<char> = text.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    like_rec(&t, &p, escape, 0, 0)
+}
+
+fn like_rec(t: &[char], p: &[char], escape: Option<char>, mut ti: usize, mut pi: usize) -> bool {
+    loop {
+        if pi == p.len() {
+            return ti == t.len();
+        }
+        let pc = p[pi];
+        if Some(pc) == escape && pi.saturating_add(1) < p.len() {
+            let literal = p[pi.saturating_add(1)];
+            if ti >= t.len() || !ascii_eq(t[ti], literal) {
+                return false;
+            }
+            ti = ti.saturating_add(1);
+            pi = pi.saturating_add(2);
+            continue;
+        }
+        match pc {
+            '%' => {
+                // Collapse consecutive '%' (a run behaves as one).
+                while pi < p.len() && p[pi] == '%' {
+                    pi = pi.saturating_add(1);
+                }
+                if pi == p.len() {
+                    return true;
+                }
+                for start in ti..=t.len() {
+                    if like_rec(t, p, escape, start, pi) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            '_' => {
+                if ti >= t.len() {
+                    return false;
+                }
+                ti = ti.saturating_add(1);
+                pi = pi.saturating_add(1);
+            }
+            _ => {
+                if ti >= t.len() || !ascii_eq(t[ti], pc) {
+                    return false;
+                }
+                ti = ti.saturating_add(1);
+                pi = pi.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn ascii_eq(a: char, b: char) -> bool {
+    a.eq_ignore_ascii_case(&b)
+}
+
+/// SQLite `GLOB`: case-sensitive, `*` = any run, `?` = any one char,
+/// `[...]`/`[^...]` character classes (with `-` ranges).
+fn glob_match(text: &str, pattern: &str) -> bool {
+    let t: Vec<char> = text.chars().collect();
+    let p: Vec<char> = pattern.chars().collect();
+    glob_rec(&t, &p, 0, 0)
+}
+
+fn glob_rec(t: &[char], p: &[char], mut ti: usize, mut pi: usize) -> bool {
+    loop {
+        if pi == p.len() {
+            return ti == t.len();
+        }
+        match p[pi] {
+            '*' => {
+                while pi < p.len() && p[pi] == '*' {
+                    pi = pi.saturating_add(1);
+                }
+                if pi == p.len() {
+                    return true;
+                }
+                for start in ti..=t.len() {
+                    if glob_rec(t, p, start, pi) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            '?' => {
+                if ti >= t.len() {
+                    return false;
+                }
+                ti = ti.saturating_add(1);
+                pi = pi.saturating_add(1);
+            }
+            '[' => {
+                let Some((matches, next_pi)) = glob_class(p, pi, t.get(ti).copied()) else {
+                    return false;
+                };
+                if ti >= t.len() || !matches {
+                    return false;
+                }
+                ti = ti.saturating_add(1);
+                pi = next_pi;
+            }
+            c => {
+                if ti >= t.len() || t[ti] != c {
+                    return false;
+                }
+                ti = ti.saturating_add(1);
+                pi = pi.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Parses a `[...]`/`[^...]` class starting at `p[start]` (`p[start] ==
+/// '['`); returns whether `c` matched and the index just past the `]`.
+fn glob_class(p: &[char], start: usize, c: Option<char>) -> Option<(bool, usize)> {
+    let mut i = start.saturating_add(1);
+    let negate = p.get(i) == Some(&'^');
+    if negate {
+        i = i.saturating_add(1);
+    }
+    let class_start = i;
+    let mut matched = false;
+    loop {
+        if i >= p.len() {
+            return None; // unterminated class: treat as no match
+        }
+        if p[i] == ']' && i > class_start {
+            i = i.saturating_add(1);
+            break;
+        }
+        if i.saturating_add(2) < p.len()
+            && p[i.saturating_add(1)] == '-'
+            && p[i.saturating_add(2)] != ']'
+        {
+            let (lo, hi) = (p[i], p[i.saturating_add(2)]);
+            if let Some(c) = c {
+                if c >= lo && c <= hi {
+                    matched = true;
+                }
+            }
+            i = i.saturating_add(3);
+        } else {
+            if Some(p[i]) == c {
+                matched = true;
+            }
+            i = i.saturating_add(1);
+        }
+    }
+    Some((matched != negate && c.is_some(), i))
+}
+
+/// `like(pattern, text[, escape])` — note SQLite's argument order is
+/// (pattern, text), the reverse of the `text LIKE pattern` syntax.
+fn like_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if args.iter().any(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let escape = match args.get(2) {
+        Some(e) => as_text(e).chars().next(),
+        None => None,
+    };
+    let pattern = as_text(&args[0]);
+    let text = as_text(&args[1]);
+    Ok(Value::Integer(i64::from(like_match(
+        &text, &pattern, escape,
+    ))))
+}
+
+/// `glob(pattern, text)` — same reversed argument order as `like()`.
+fn glob_fn(args: &[Value]) -> Result<Value, FunctionError> {
+    if args.iter().any(|v| matches!(v, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let pattern = as_text(&args[0]);
+    let text = as_text(&args[1]);
+    Ok(Value::Integer(i64::from(glob_match(&text, &pattern))))
+}
+
 type ScalarFn = fn(&[Value]) -> Result<Value, FunctionError>;
 
 /// Looks up a scalar function by case-insensitive name and arity,
@@ -479,6 +660,8 @@ pub fn call(name: &str, args: &[Value]) -> Result<Value, FunctionError> {
         ("replace", 3) => Some(replace_fn),
         ("zeroblob", 1) => Some(zeroblob),
         ("iif", 3) => Some(iif),
+        ("like", 2 | 3) => Some(like_fn),
+        ("glob", 2) => Some(glob_fn),
         _ => None,
     };
     match f {
@@ -681,6 +864,25 @@ mod tests {
         };
         assert_eq!(b.len() as i64, MAX_BLOB_LEN);
         assert_eq!(v("zeroblob", &[Value::Integer(-1)]), Value::Blob(vec![]));
+    }
+
+    #[test]
+    fn like_and_glob_match_oracle_semantics() {
+        let t = |s: &str| Value::Text(s.to_string());
+        // LIKE is ASCII case-insensitive; GLOB is case-sensitive.
+        assert_eq!(v("like", &[t("abc"), t("ABC")]), Value::Integer(1));
+        assert_eq!(v("glob", &[t("abc"), t("ABC")]), Value::Integer(0));
+        assert_eq!(v("like", &[t("a%b"), t("axxb")]), Value::Integer(1));
+        // ESCAPE makes the following wildcard literal.
+        assert_eq!(
+            v("like", &[t("a\\%b"), t("a%b"), t("\\")]),
+            Value::Integer(1)
+        );
+        // GLOB character classes, including negation.
+        assert_eq!(v("glob", &[t("a[^b]c"), t("abc")]), Value::Integer(0));
+        assert_eq!(v("glob", &[t("a[^b]c"), t("axc")]), Value::Integer(1));
+        assert_eq!(v("glob", &[t("a?c"), t("abc")]), Value::Integer(1));
+        assert_eq!(v("like", &[t("x"), Value::Null]), Value::Null);
     }
 
     #[test]

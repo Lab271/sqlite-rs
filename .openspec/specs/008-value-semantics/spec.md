@@ -256,7 +256,7 @@ INTEGER)` on a REAL truncates toward zero.
 The V2 scalar set (`length`, `upper`, `lower`, `substr`, `abs`, `coalesce`,
 `ifnull`, `nullif`, `typeof`, `hex`, `unhex`, `quote`, scalar `min`/`max`,
 `round`, `sign`, `instr`, `trim`/`ltrim`/`rtrim`, `replace`, `zeroblob`,
-`iif`) MUST be implemented as pure `fn(&[Value]) -> Result<Value,
+`iif`, `like`, `glob`) MUST be implemented as pure `fn(&[Value]) -> Result<Value,
 FunctionError>` and dispatched through a case-insensitive name+arity
 registry. Most functions MUST propagate NULL on any NULL argument;
 `coalesce`/`ifnull` are the documented exception (first non-NULL
@@ -317,3 +317,15 @@ REAL is tracked as a follow-up, not solved by this requirement.
   output
 
 **Tests:** `tests/corpus/expr_vectors_test.rs::function_vectors_quote_output_is_byte_exact_with_escaped_quotes`
+
+#### Scenario: like/glob are registry functions, not a separate matcher
+
+- GIVEN `like('abc','ABC')` and `glob('abc','ABC')` (note SQLite's
+  reversed argument order: pattern first, then text)
+- THEN `like` matches ASCII case-insensitively (`1`) while `glob` is
+  case-sensitive (`0`), both dispatched through the same name+arity
+  registry as every other scalar function — so spec 009's `Function`
+  opcode (Requirement 7 there, which names `"like(2)"` as a P4
+  descriptor) needs no LIKE-specific VDBE logic
+
+**Tests:** `src/vdbe/functions.rs::tests::like_and_glob_match_oracle_semantics`

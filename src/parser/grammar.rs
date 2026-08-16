@@ -686,6 +686,21 @@ impl Parser {
                 let start = this.advance().span;
                 let inner = this.unary_expr()?;
                 let span = join_span(start, inner.span);
+                // `9223372036854775808` has no positive i64
+                // representation, so the tokenizer folds it to a Float.
+                // Negated, it is exactly i64::MIN — SQLite parses
+                // `-9223372036854775808` as an INTEGER literal, not a
+                // REAL (spike #59 finding).
+                if matches!(op, UnaryOp::Minus) {
+                    if let ExprKind::Literal(Literal::Float(f)) = inner.kind {
+                        if f == 9_223_372_036_854_775_808.0 {
+                            return Ok(Expr {
+                                kind: ExprKind::Literal(Literal::Integer(i64::MIN)),
+                                span,
+                            });
+                        }
+                    }
+                }
                 return Ok(Expr {
                     kind: ExprKind::Unary {
                         op,
@@ -808,6 +823,14 @@ impl Parser {
                     },
                 };
                 Ok(Expr { kind, span })
+            }
+            // SQLite treats most keywords as usable function names when
+            // followed by `(` (e.g. `replace(...)`, `glob(...)`) — only
+            // the handful matched above (CASE/CAST/EXISTS/CURRENT_*)
+            // are true reserved words in expression position.
+            TokenKind::Keyword(kw) if matches!(self.peek_at(1).kind, TokenKind::LParen) => {
+                self.advance();
+                self.function_call(format!("{kw:?}"), tok.span)
             }
             TokenKind::LParen => {
                 self.advance();

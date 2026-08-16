@@ -216,3 +216,29 @@ fn function_vectors_quote_output_is_byte_exact_with_escaped_quotes() {
         "quote() must double embedded single quotes byte-exact: {quoted}"
     );
 }
+
+/// Spike #59's added family: the broader expression corpus (CASE/CAST/
+/// LIKE/GLOB/BETWEEN/IN-list/short-circuit/arithmetic) that the
+/// tree-walker's `tests/oracle_diff.rs` (in the now-disposed spike
+/// crate) actually executed — the first family in this file to be
+/// diffed against real evaluation rather than only checked for
+/// well-formedness.
+#[test]
+fn walker_vectors_cover_case_cast_like_between_in_and_short_circuit() {
+    let vectors = read_lines("walker");
+    for expected in [
+        r#""expr": "CASE WHEN 1=0 THEN 'a' WHEN 1=1 THEN 'b' ELSE 'c' END""#,
+        r#""expr": "CAST('123abc' AS INTEGER)""#,
+        r#""expr": "'axxb' LIKE 'a%b'""#,
+        r#""expr": "'abc' GLOB 'a[^b]c'""#,
+        r#""expr": "5 BETWEEN 1 AND 10""#,
+        r#""expr": "5 IN (1,NULL,5)""#,
+        r#""expr": "0 AND (1/0)""#,
+        r#""expr": "1 OR (1/0)""#,
+    ] {
+        assert!(
+            vectors.iter().any(|v| v.contains(expected)),
+            "walker.jsonl missing vector {expected}"
+        );
+    }
+}
