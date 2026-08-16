@@ -159,6 +159,9 @@ FUNCTION_EXPRS = [
     "iif('0.0','a','b')",
     "round(1.5,NULL)", "round(1.5,40)",
     "length(zeroblob(-1))",
+    "like('a%b','axxb')", "like('a\\%b','a%b','\\')", "like('abc','ABC')",
+    "like('x',NULL)", "glob('a[^b]c','abc')", "glob('a[^b]c','axc')",
+    "glob('a?c','abc')", "glob('abc','ABC')",
 ]
 
 COERCION_EXPRS = [

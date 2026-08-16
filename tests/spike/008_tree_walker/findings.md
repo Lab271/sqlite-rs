@@ -67,9 +67,30 @@ than letting it fall through the cracks between "kernel delegation" and
   kernel's contract was always "caller checks NULL first"; the walker
   just hadn't read that contract carefully enough on the first pass.
 
-## Known divergences — NOT fixed here, follow-up issues to file
+## Follow-ups — resolved in this PR (after #88 landed)
 
-1. **`format_real`'s 15-significant-digit rendering vs. the oracle's
+All three open items from the spike's first pass were addressed once
+#88 (spec 009) merged:
+
+1. **LIKE/GLOB's missing home — resolved.** #88's spec 009 Requirement 7
+   settled the design question by dispatching `like(2)` through the
+   `Function` opcode into spec 008's registry (no LIKE-specific VDBE
+   logic). But that registry had no `like`/`glob` — the gap had merely
+   moved. This PR ports the spike's oracle-verified matchers into
+   `src/vdbe/functions.rs` as real registry functions (note SQLite's
+   reversed argument order: `like(pattern, text[, escape])`), adds 8
+   oracle vectors + a unit test, and extends spec 008 Requirement 6's
+   function list and scenarios to match. Spec 009's Requirement 7 is now
+   satisfiable exactly as written.
+2. **i64::MIN literal — fixed.** `src/parser/grammar.rs`'s unary-minus
+   handling now folds `-9223372036854775808` (a Float literal from the
+   tokenizer, since the positive form has no i64 representation) back to
+   `Literal::Integer(i64::MIN)`, matching SQLite. Regression test:
+   `tests/unit/parser.rs::test_negative_i64_min_literal_stays_integer`.
+
+## Known divergence — NOT fixed here, follow-up issue to file
+
+**`format_real`'s 15-significant-digit rendering vs. the oracle's
    ~17-digit REAL rendering on overflow-promoted values.** Confirmed
    via 4 vectors (`9223372036854775807 + 1`, `+ 1.0`, `* 2`,
    `-9223372036854775808 - 1` — all promote to REAL on i64 overflow).
@@ -80,16 +101,24 @@ than letting it fall through the cracks between "kernel delegation" and
    **Follow-up:** file an issue against `src/format.rs`'s `format_real`
    precision (broader fix, not a quick one — SQLite's own REAL
    rendering is build-dependent per the existing `.dump`/`-list`
-   scoping note in issue #37).
-2. **Tokenizer folds `9223372036854775808` (positive, unrepresentable
+   scoping note in issue #37). **Attempted and reverted in this PR**: a
+   naive bump to `%.17g` (plus moving the scientific-notation cutoff
+   from `>=15` to `>=17`) matches the oracle on overflow-promoted values
+   and `1e15`/`1e16`, but regresses ordinary values — the oracle prints
+   `3.14` and `0.33333333333333332` where plain 17-digit truncation
+   gives `3.1400000000000001` and `0.33333333333333331`. SQLite is doing
+   shortest-round-trip-with-a-17-digit-ceiling, not fixed-precision
+   `%.17g`, so this needs a real Grisu/Ryū-style shortest-representation
+   implementation, not a format-string change. Left for its own ticket.
+~~2. Tokenizer folds `9223372036854775808` (positive, unrepresentable
    as i64) to a `Float` literal before unary minus applies**, losing
    SQLite's special-cased `-9223372036854775808` (i64::MIN) integer
    literal parse. Narrow, single-vector edge case — excluded from the
    walker's oracle-diff gate via an explicit `KNOWN_DIVERGENCES` list
    (see `tests/oracle_diff.rs`, now deleted with the rest of the
    crate — the vector itself stays in `walker.jsonl` as a marked TODO
-   for whoever picks this up). **Follow-up:** file a small issue against
-   `src/parser/tokenizer.rs`'s integer-literal lexing.
+   for whoever picks this up).~~ **Fixed in this PR** — see Follow-ups
+   above.
 
 ## Emission-order findings (for #88's spec / #89's codegen)
 

@@ -57,3 +57,11 @@
 {"expr": "round(1.5,NULL)", "type": "null", "value_quoted": "NULL"}
 {"expr": "round(1.5,40)", "type": "real", "value_quoted": "1.5"}
 {"expr": "length(zeroblob(-1))", "type": "integer", "value_quoted": "0"}
+{"expr": "like('a%b','axxb')", "type": "integer", "value_quoted": "1"}
+{"expr": "like('a\\%b','a%b','\\')", "type": "integer", "value_quoted": "1"}
+{"expr": "like('abc','ABC')", "type": "integer", "value_quoted": "1"}
+{"expr": "like('x',NULL)", "type": "null", "value_quoted": "NULL"}
+{"expr": "glob('a[^b]c','abc')", "type": "integer", "value_quoted": "0"}
+{"expr": "glob('a[^b]c','axc')", "type": "integer", "value_quoted": "1"}
+{"expr": "glob('a?c','abc')", "type": "integer", "value_quoted": "1"}
+{"expr": "glob('abc','ABC')", "type": "integer", "value_quoted": "0"}

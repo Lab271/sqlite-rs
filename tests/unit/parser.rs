@@ -165,6 +165,18 @@ fn test_keyword_named_function_call() {
     assert!(matches!(args, FunctionArgs::List(list) if list.len() == 3));
 }
 
+/// Spike #59 finding: `9223372036854775808` has no positive i64 form so
+/// the tokenizer folds it to a Float; negated it is exactly i64::MIN,
+/// which SQLite parses as an INTEGER literal, not a REAL.
+#[test]
+fn test_negative_i64_min_literal_stays_integer() {
+    let select = accept("SELECT -9223372036854775808");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!()
+    };
+    assert_eq!(expr.kind, ExprKind::Literal(Literal::Integer(i64::MIN)));
+}
+
 #[test]
 fn test_operator_precedence() {
     // AND binds tighter than OR: a OR (b AND c)
