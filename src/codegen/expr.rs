@@ -599,6 +599,20 @@ pub(crate) fn emit_column_read(
         })?,
         dest,
     ));
+    // SQLite's on-disk format may store a REAL value using the integer-0/1
+    // serial type optimization (file format doc, serial types 8/9) when
+    // the value is losslessly an integer — independent of the column's
+    // declared affinity. Real SQLite's OP_Column for a REAL-affinity
+    // column is always followed by OP_RealAffinity to undo that
+    // optimization on read; without it, `SELECT r FROM t` for a REAL
+    // column holding `0.0` answered `0` instead of `0.0` (#143).
+    if schema
+        .column_types
+        .get(idx)
+        .is_some_and(|t| affinity_of(t) == Affinity::Real)
+    {
+        em.emit(Instruction::new(Opcode::RealAffinity, dest, 0, 0));
+    }
     Ok(())
 }
 

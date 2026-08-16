@@ -52,13 +52,11 @@ const CASES: &[ParityCase] = &[
 /// (#134). Every case is a shape whose answer changes depending on
 /// whether SQL's *unknown* is resolved honestly or folded into true.
 ///
-/// The value-mode cases are wrapped in `IS NULL` rather than selected
-/// raw on purpose: the answer being asserted is "did this expression
-/// come out NULL", and `IS NULL` turns that into a 0/1 both engines
-/// render identically. Selecting the NULL itself would compare the
-/// CLI's `NULL` spelling against the oracle shell's default empty
-/// string for a null — a renderer difference, not a semantics one, and
-/// not what this dimension is for.
+/// The value-mode cases select the boolean/NULL expression directly —
+/// previously they were wrapped in `IS NULL` to dodge a renderer bug
+/// where the CLI printed a `NULL` literal instead of the shell's default
+/// empty string (#143); now that `query`'s `-list` output matches the
+/// shell's NULL spelling, the raw value can be compared.
 const NULL_CASES: &[ParityCase] = &[
     ParityCase {
         name: "not_over_eq_excludes_null",
@@ -97,26 +95,44 @@ const NULL_CASES: &[ParityCase] = &[
         sql: "SELECT i FROM t WHERE NOT NOT (i = 1)",
     },
     ParityCase {
-        name: "value_eq_is_unknown",
-        sql: "SELECT (i = 0) IS NULL FROM t",
+        name: "value_eq",
+        sql: "SELECT i = 0 FROM t",
     },
     ParityCase {
-        name: "value_not_is_unknown",
-        sql: "SELECT (NOT i) IS NULL FROM t",
+        name: "value_not",
+        sql: "SELECT NOT i FROM t",
     },
     ParityCase {
-        name: "value_in_is_unknown",
-        sql: "SELECT (i IN (0, 127)) IS NULL FROM t",
+        name: "value_in",
+        sql: "SELECT i IN (0, 127) FROM t",
     },
     ParityCase {
-        name: "value_not_in_is_unknown",
-        sql: "SELECT (i NOT IN (0, 127)) IS NULL FROM t",
+        name: "value_not_in",
+        sql: "SELECT i NOT IN (0, 127) FROM t",
     },
     ParityCase {
-        name: "value_between_is_unknown",
-        sql: "SELECT (i BETWEEN 0 AND 1) IS NULL FROM t",
+        name: "value_between",
+        sql: "SELECT i BETWEEN 0 AND 1 FROM t",
     },
 ];
+
+/// `SELECT *` over `serialtypes/values.db`'s `t(i, r, txt, blb)`: a REAL
+/// column, NULLs, and a BLOB with non-UTF-8 bytes all in one row set —
+/// the exact shape #143's renderer bug (`NULL` literal, `X'HEX'` blobs,
+/// bare-integer REALs) would have broken byte-identical output for.
+const REAL_STAR_CASES: &[ParityCase] = &[ParityCase {
+    name: "star_expansion_with_real_and_blob_columns",
+    sql: "SELECT * FROM t",
+}];
+
+#[test]
+fn star_expansion_acceptance_and_output_match_for_a_real_column_table() {
+    if pinned_oracle().is_none() {
+        skip_no_oracle("star_expansion_acceptance_and_output_match_for_a_real_column_table");
+        return;
+    }
+    assert_cases_match(&corpus_dir().join("serialtypes/values.db"), REAL_STAR_CASES);
+}
 
 /// `SELECT *` over a table with an `INTEGER PRIMARY KEY`. That column
 /// is a NULL placeholder in every record and has to be read with

@@ -7,6 +7,7 @@
 //! use `sqlite3`'s single-dash option style rather than GNU `--long`
 //! flags, matching the interface it stays parity with.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -14,7 +15,7 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{compile_select, CodegenError};
 use sqlite_rs::dump::{self, dump_database};
-use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value};
+use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::schema::read_schema;
 use sqlite_rs::vdbe::{execute_with_db, explain};
@@ -248,16 +249,31 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         Err(e) => return fatal(path, &e),
     };
 
+    let mut stdout = io::stdout().lock();
     for row in &rows {
         if csv {
             let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
             print!("{}{CSV_ROW_TERMINATOR}", rendered.join(","));
         } else {
-            let rendered: Vec<String> = row.iter().map(format_list_value).collect();
-            println!("{}", rendered.join("|"));
+            // `-list` mode: raw blob bytes may not be valid UTF-8, so this
+            // writes bytes directly rather than going through `String`.
+            let rendered: Vec<Vec<u8>> = row.iter().map(format_query_value).collect();
+            if let Err(e) = write_list_row(&mut stdout, &rendered) {
+                return fatal(path, &e);
+            }
         }
     }
     ExitCode::SUCCESS
+}
+
+fn write_list_row(out: &mut impl Write, values: &[Vec<u8>]) -> io::Result<()> {
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.write_all(b"|")?;
+        }
+        out.write_all(v)?;
+    }
+    out.write_all(b"\n")
 }
 
 #[cfg(test)]
