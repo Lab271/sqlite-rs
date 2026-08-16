@@ -309,7 +309,9 @@ it callable via this opcode, with no VDBE-layer change required.
   `abs(1)` are dispatched through the identical opcode logic, differing
   only in their P4 descriptor
 
-**Tests:** `tests/codegen/expr_test.rs::like_and_glob_dispatch_through_the_function_opcode`
+**Tests:** `tests/codegen/expr_test.rs::like_and_glob_dispatch_through_the_function_opcode`,
+`tests/codegen/expr_test.rs::single_arg_function_call_compiles`,
+`tests/codegen/expr_test.rs::multi_arg_function_call_compiles_with_contiguous_registers`
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
