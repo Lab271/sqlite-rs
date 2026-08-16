@@ -11,6 +11,7 @@ mod compare;
 mod control;
 mod cursor;
 mod exec;
+pub mod explain;
 mod functions;
 mod program;
 mod result;
@@ -25,6 +26,7 @@ pub use coerce::{
 pub use collation::{compare_text, Collation};
 pub use compare::compare;
 pub use exec::{execute, execute_with_db, ExecError, Step, Vm};
+pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, FunctionError};
 pub use program::{Instruction, Opcode, Program, SortKeyColumn, P4};
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};
