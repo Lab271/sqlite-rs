@@ -10,8 +10,9 @@ date: 2026-08-16
 The bytecode virtual machine — SQLite's `vdbe.c`/`vdbeaux.c` instruction set
 and register model, plus the codegen that emits it from the V2 AST (#61).
 Backs V2 phase 3 (#89/#90/#91), part of epic #56. The opcode set is frozen
-by the phase-3 opener (#87), grown once since by #139's bitwise/concat
-harvest: the harvested, scope-decided `tools/opcodes-v2.json` (60 opcodes,
+by the phase-3 opener (#87), grown by #139's bitwise/concat harvest and
+#142's literal-fidelity/CAST harvest (`Real`, `Blob`, `Int64`, `Cast`):
+the harvested, scope-decided `tools/opcodes-v2.json` (64 opcodes,
 oracle 3.53.4) is the exhaustive
 denominator for every requirement below — no opcode outside that inventory
 is in scope for V2, and every opcode inside it must appear as a scenario
@@ -290,9 +291,9 @@ delegation target is `src/vdbe/compare.rs`, existing, spec 008)
 
 ### Requirement 6: Arithmetic Opcodes [MUST]
 
-The 12 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
+The 13 arithmetic-category opcodes — `Add`, `Subtract`, `Multiply`,
 `Divide`, `Remainder`, `Not`, `BitAnd`, `BitOr`, `ShiftLeft`,
-`ShiftRight`, `BitNot`, `Concat` — MUST delegate all overflow,
+`ShiftRight`, `BitNot`, `Concat`, `Cast` — MUST delegate all overflow,
 NULL-propagation, and numeric/text-coercion behavior to spec 008's
 `src/vdbe/coerce.rs` (Requirement 5 there: `i64` overflow promotes to
 REAL, never wraps; bitwise/shift operands coerce to INTEGER, `||`
@@ -358,6 +359,28 @@ value (#139).
 `src/vdbe/coerce.rs::tests::shift_handles_negative_and_oversized_amounts`,
 `tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
+#### Scenario: Cast forces P1's target affinity via the kernel's own CAST rule, never MustBeInt/RealAffinity
+
+- GIVEN `SELECT CAST(name AS INTEGER), CAST(price AS REAL), CAST(qty AS
+  TEXT), CAST(name AS BLOB), CAST(price AS NUMERIC) FROM products`
+  (harvested: `Cast` 11 times, P1 = the register to convert in place,
+  P2 = the target affinity's ASCII byte — e.g. `68`/`'D'` for INTEGER —
+  P4 absent, per `tools/opcodes-v2.json`, #142)
+- THEN `Cast` decodes `P2` back to an `Affinity` and delegates the
+  conversion to `src/vdbe/cast.rs`'s `cast_to`, SQLite's own lossy
+  `CAST` rule (`sqlite3VdbeMemCast`) — never `MustBeInt` (a guard opcode
+  that aborts instead of truncating: `CAST('apple' AS INTEGER)` is `0`,
+  not an error) or `RealAffinity` (a column-load coercion opcode with a
+  different, narrower rule: only well-formed numeric text converts, and
+  BLOB never does)
+
+**Tests:** `src/vdbe/cast.rs::tests::cast_to_integer_matches_oracle_truth_table`,
+`src/vdbe/cast.rs::tests::cast_to_real_matches_oracle_truth_table`,
+`src/vdbe/cast.rs::tests::cast_to_text_matches_oracle_truth_table`,
+`src/vdbe/cast.rs::tests::cast_to_blob_matches_oracle_truth_table`,
+`src/vdbe/cast.rs::tests::cast_to_numeric_matches_oracle_truth_table`,
+`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+
 ### Requirement 7: Function Opcode [MUST]
 
 The single function-category opcode, `Function`, MUST dispatch by a P4
@@ -390,12 +413,15 @@ it callable via this opcode, with no VDBE-layer change required.
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
-The 5 result-category opcodes — `Integer`, `Null`, `String8`,
-`MakeRecord`, `ResultRow` — MUST implement literal loading (`Integer`:
-load an `i64` constant into a register from `P1`; `Null`: write NULL
-into the register range `P2..=P3`, or just `P2` when `P3` does not name
-a higher register; `String8`: load a UTF-8 string constant from `P4`
-into a register), record serialization (`MakeRecord`:
+The 8 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,
+`Null`, `String8`, `MakeRecord`, `ResultRow` — MUST implement literal
+loading (`Integer`: load an `i64` constant into a register from `P1`;
+`Int64`: load an `i64` constant carried in `P4` — the 64-bit
+counterpart for a literal outside `P1`'s `i32` range, #142; `Real`:
+load an `f64` constant from `P4`; `Blob`: load a byte-string constant
+from `P4`; `Null`: write NULL into the register range `P2..=P3`, or
+just `P2` when `P3` does not name a higher register; `String8`: load a
+UTF-8 string constant from `P4` into a register), record serialization (`MakeRecord`:
 pack a contiguous run of registers into spec 003's record format, using
 `P4`'s per-column serial-type hints where present), and row emission
 (`ResultRow`: yield a contiguous run of registers as one output row to the
@@ -417,6 +443,27 @@ VDBE-private serialization.
   destination register — both are pure literal loads, no computation
 
 **Tests:** `src/vdbe/result.rs::tests::integer_and_string8_load_literals`
+
+#### Scenario: Int64/Real/Blob load a literal as its own typed Value, not text relying on coercion
+
+- GIVEN `SELECT 3000000000, 9223372036854775807, -9223372036854775808
+  FROM products LIMIT 1` (harvested: `Int64` 3 times, P4 the literal's
+  decimal text), `SELECT 1e3, .5, 1. FROM products LIMIT 1` (harvested:
+  `Real` 3 times, P4 the literal's decimal text), and `SELECT X'414243'
+  FROM products LIMIT 1` (harvested: `Blob` once, P1 = byte length 3,
+  P4 the raw bytes rendered as text `"ABC"` — per `tools/opcodes-v2.json`,
+  #142)
+- THEN `Int64` writes its `P4`-carried `i64` into its destination
+  register (closing the gap where a literal outside `Opcode::Integer`'s
+  `i32`-only `P1` was a hard codegen error), `Real` writes its
+  `P4`-carried `f64` as an actual `Value::Real` (not `String8` text —
+  the #138 comparison-affinity bug this used to cause), and `Blob`
+  writes its `P4`-carried bytes as an actual `Value::Blob` (not
+  `String8` hex text, which BLOB affinity never converts back — the
+  reason `WHERE b = x'41'` always returned zero rows before this)
+
+**Tests:** `src/vdbe/result.rs::tests::int64_real_and_blob_load_typed_literals`,
+`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 #### Scenario: Null writes NULL over a register that already holds a value
 

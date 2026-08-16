@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::header::DatabaseHeader;
 use crate::record::Value;
 use crate::vdbe::affinity::{apply_affinity, Affinity};
+use crate::vdbe::cast::cast_to;
 use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
@@ -287,15 +288,31 @@ fn real_affinity(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `Cast` (#142): forces register `P1` to `P2`'s affinity byte via the
+/// kernel's `CAST` conversion rule (`src/vdbe/cast.rs`) — never
+/// `apply_affinity`'s column-affinity rule, which only converts
+/// well-formed numeric text and never touches BLOB or errors instead of
+/// truncating. This is `CAST`'s only opcode; `MustBeInt`/`RealAffinity`
+/// are guard/coercion opcodes for other purposes and must not be
+/// reused here (the bug this ticket fixes).
+fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let affinity_byte = instr.p2 as u8;
+    let affinity = Affinity::from_p4_byte(affinity_byte);
+    let v = vm.register(instr.p1)?.clone();
+    vm.set_register(instr.p1, cast_to(&v, affinity))?;
+    Ok(Step::Next)
+}
+
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Column, Concat, DecrJumpZero, Delete, Divide, Eq,
-        Found, Function, Ge, Goto, Gt, Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init,
-        Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, Next, Not, NotNull, Null,
-        NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, RealAffinity, Remainder,
-        ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort,
-        SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
-        Transaction,
+        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, DecrJumpZero, Delete,
+        Divide, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos,
+        Init, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, Next, Not,
+        NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, Real,
+        RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence, ShiftLeft,
+        ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
+        Subtract, Transaction,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -320,6 +337,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Le => compare_jump(vm, instr, |o| o != Ordering::Greater),
         Lt => compare_jump(vm, instr, |o| o == Ordering::Less),
         RealAffinity => real_affinity(vm, instr),
+        Cast => cast(vm, instr),
 
         Add => arithmetic::add(vm, instr),
         Subtract => arithmetic::subtract(vm, instr),
@@ -335,6 +353,9 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Concat => arithmetic::concat(vm, instr),
 
         Integer => result::integer(vm, instr),
+        Int64 => result::int64(vm, instr),
+        Real => result::real(vm, instr),
+        Blob => result::blob(vm, instr),
         Null => result::null(vm, instr),
         String8 => result::string8(vm, instr),
         MakeRecord => result::make_record(vm, instr),

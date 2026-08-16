@@ -1,7 +1,7 @@
 //! Result-row opcodes (spec 009, Requirement 8): literal loading
-//! (`Integer`, `Null`, `String8`), record serialization (`MakeRecord`, reusing
-//! spec 003's on-disk record encoding byte-for-byte), and row emission
-//! (`ResultRow`).
+//! (`Integer`, `Int64`, `Real`, `Blob`, `Null`, `String8`), record
+//! serialization (`MakeRecord`, reusing spec 003's on-disk record
+//! encoding byte-for-byte), and row emission (`ResultRow`).
 
 use crate::record::{encode_record, TextEncoding, Value};
 use crate::vdbe::exec::{ExecError, Step, Vm};
@@ -10,6 +10,58 @@ use crate::vdbe::program::{Instruction, P4};
 /// `Integer`: loads the `i64` constant `P1` into register `P2`.
 pub fn integer(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     vm.set_register(instr.p2, Value::Integer(i64::from(instr.p1)))?;
+    Ok(Step::Next)
+}
+
+/// `Int64` (#142): loads the `i64` constant carried in `P4` into
+/// register `P2` — the 64-bit counterpart to `Integer`, whose `P1`
+/// operand is `i32`-only and cannot hold a literal outside that range.
+pub fn int64(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let i = match &instr.p4 {
+        P4::Int(i) => *i,
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Int64",
+                reason: format!("expected an integer P4, got {other:?}"),
+            })
+        }
+    };
+    vm.set_register(instr.p2, Value::Integer(i))?;
+    Ok(Step::Next)
+}
+
+/// `Real` (#142): loads the `f64` constant carried in `P4` into
+/// register `P2` — a real literal loaded as an actual `Value::Real`,
+/// not `String8` text relying on coercion at comparison/arithmetic time.
+pub fn real(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let r = match &instr.p4 {
+        P4::Real(r) => *r,
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Real",
+                reason: format!("expected a real P4, got {other:?}"),
+            })
+        }
+    };
+    vm.set_register(instr.p2, Value::Real(r))?;
+    Ok(Step::Next)
+}
+
+/// `Blob` (#142): loads the byte-string constant carried in `P4` into
+/// register `P2` as an actual `Value::Blob` — a blob literal, not
+/// `String8` hex text relying on coercion that never actually happens
+/// (BLOB affinity never converts text to blob, matching SQLite).
+pub fn blob(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let bytes = match &instr.p4 {
+        P4::Blob(bytes) => bytes.clone(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Blob",
+                reason: format!("expected a blob P4, got {other:?}"),
+            })
+        }
+    };
+    vm.set_register(instr.p2, Value::Blob(bytes))?;
     Ok(Step::Next)
 }
 
@@ -98,6 +150,28 @@ mod tests {
         let instr = Instruction::with_p4(Opcode::String8, 0, 1, 0, P4::Str("hello".to_string()));
         string8(&mut vm, &instr).unwrap();
         assert_eq!(*vm.register(1).unwrap(), Value::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn int64_real_and_blob_load_typed_literals() {
+        // #142: the harvested `Int64`/`Real`/`Blob` opcodes load an
+        // actual typed `Value`, not `String8` text relying on coercion.
+        let mut vm = Vm::new();
+        let instr =
+            Instruction::with_p4(Opcode::Int64, 0, 0, 0, P4::Int(9_223_372_036_854_775_807));
+        int64(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(i64::MAX));
+
+        let instr = Instruction::with_p4(Opcode::Real, 0, 1, 0, P4::Real(1.5));
+        real(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Real(1.5));
+
+        let instr = Instruction::with_p4(Opcode::Blob, 3, 2, 0, P4::Blob(vec![0x41, 0x42, 0x43]));
+        blob(&mut vm, &instr).unwrap();
+        assert_eq!(
+            *vm.register(2).unwrap(),
+            Value::Blob(vec![0x41, 0x42, 0x43])
+        );
     }
 
     #[test]

@@ -177,19 +177,10 @@ fn v2_corpus_compiles_and_matches_oracle_row_for_row() {
 }
 
 /// Corpus statements this ticket's codegen is known not to reproduce
-/// oracle-exactly yet — see `tests/codegen/expr_test.rs`'s `KNOWN_GAPS`
-/// doc comment for the underlying reasons (no bitwise/concat opcode in
-/// the frozen V2 set, CAST's lossy-conversion semantics beyond
-/// affinity coercion, and REAL-literal representation as text).
-const KNOWN_GAPS: &[&str] = &[
-    "CAST(name AS REAL)",
-    "a = 1.;",
-    "a & 1",
-    "a | 1",
-    "a << 1",
-    "a >> 1",
-    "~a",
-];
+/// oracle-exactly yet. Empty as of #142: bitwise/concat opcodes landed
+/// in #139, and CAST/REAL-literal fidelity (the last two live entries,
+/// `CAST(name AS REAL)` and `a = 1.;`) landed in #142.
+const KNOWN_GAPS: &[&str] = &[];
 
 /// Regression fixture for #140: `ORDER BY ... NULLS FIRST/LAST` was
 /// parsed and stored (`ast::OrderingTerm::nulls_last`) but never read by

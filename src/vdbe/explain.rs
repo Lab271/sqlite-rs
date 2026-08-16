@@ -4,6 +4,7 @@
 //! to feed parity #72's planned VM-diff dimension (instruction-by-
 //! instruction comparison against the pinned oracle's own `EXPLAIN`).
 
+use crate::format::format_real;
 use crate::vdbe::program::{Opcode, Program, SortKeyColumn, P4};
 
 /// One rendered `EXPLAIN` row.
@@ -43,6 +44,8 @@ fn render_p4(p4: &P4) -> String {
     match p4 {
         P4::None => String::new(),
         P4::Int(i) => i.to_string(),
+        P4::Real(r) => format_real(*r),
+        P4::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         P4::Str(s) => s.clone(),
         P4::CollSeq {
             collation,
@@ -130,8 +133,12 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::ShiftRight => "ShiftRight",
         Opcode::BitNot => "BitNot",
         Opcode::Concat => "Concat",
+        Opcode::Cast => "Cast",
         Opcode::Function => "Function",
         Opcode::Integer => "Integer",
+        Opcode::Int64 => "Int64",
+        Opcode::Real => "Real",
+        Opcode::Blob => "Blob",
         Opcode::Null => "Null",
         Opcode::String8 => "String8",
         Opcode::MakeRecord => "MakeRecord",

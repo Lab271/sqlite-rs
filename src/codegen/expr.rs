@@ -685,18 +685,19 @@ pub(crate) fn compile_value(
             let r = reg.alloc();
             match lit {
                 Literal::Integer(i) => {
-                    // `Opcode::Integer`'s P1 is i32-only (no P4-carried
-                    // i64 immediate-load opcode exists in the frozen V2
-                    // set) — a literal outside i32 range has no correct
-                    // encoding here, so this errors rather than silently
-                    // substituting a truncated value.
-                    let p1 = i32::try_from(*i).map_err(|_| CodegenError::Unsupported {
-                        reason: format!(
-                            "integer literal {i} is out of range for this V2-scope compiler \
-                             (no 64-bit immediate-load opcode in the frozen V2 set)"
-                        ),
-                    })?;
-                    em.emit(Instruction::new(Opcode::Integer, p1, r, 0));
+                    // #142: `Opcode::Integer`'s P1 is i32-only, so a
+                    // literal outside that range (but within i64) loads
+                    // via `Int64`'s P4-carried i64 immediate instead —
+                    // the harvested 64-bit counterpart, not a codegen
+                    // error.
+                    match i32::try_from(*i) {
+                        Ok(p1) => {
+                            em.emit(Instruction::new(Opcode::Integer, p1, r, 0));
+                        }
+                        Err(_) => {
+                            em.emit(Instruction::with_p4(Opcode::Int64, 0, r, 0, P4::Int(*i)));
+                        }
+                    }
                 }
                 Literal::True => {
                     em.emit(Instruction::new(Opcode::Integer, 1, r, 0));
@@ -713,25 +714,33 @@ pub(crate) fn compile_value(
                         P4::Str(s.clone()),
                     ));
                 }
-                // No opcode in the frozen V2 set loads a REAL or BLOB
-                // constant directly (SQLite's own OP_Real has no V2
-                // counterpart here) — known simplification: represent
-                // as text and rely on the value-semantics kernel's
-                // text-to-numeric coercion at comparison/arithmetic
-                // time. Exact literal round-tripping of REAL/BLOB
-                // constants is out of this ticket's scope.
+                // #142: a real literal loads as an actual `Value::Real`
+                // via the harvested `Real` opcode, not `String8` text
+                // relying on coercion at comparison/arithmetic time
+                // (the #138 bug this used to cause).
                 Literal::Float(f) => {
+                    em.emit(Instruction::with_p4(Opcode::Real, 0, r, 0, P4::Real(*f)));
+                }
+                // #142: a blob literal loads as an actual `Value::Blob`
+                // via the harvested `Blob` opcode — hex-text never
+                // actually coerced back to a blob (BLOB affinity never
+                // converts text to blob, matching SQLite), so
+                // `WHERE b = x'41'` always failed under the old scheme.
+                Literal::Blob(bytes) => {
+                    let len =
+                        i32::try_from(bytes.len()).map_err(|_| CodegenError::Unsupported {
+                            reason: format!(
+                                "blob literal of {} bytes does not fit in a P1 operand",
+                                bytes.len()
+                            ),
+                        })?;
                     em.emit(Instruction::with_p4(
-                        Opcode::String8,
-                        0,
+                        Opcode::Blob,
+                        len,
                         r,
                         0,
-                        P4::Str(format!("{f}")),
+                        P4::Blob(bytes.clone()),
                     ));
-                }
-                Literal::Blob(bytes) => {
-                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    em.emit(Instruction::with_p4(Opcode::String8, 0, r, 0, P4::Str(hex)));
                 }
                 Literal::Null => {} // Fresh registers already read as NULL.
             }
@@ -999,26 +1008,23 @@ pub(crate) fn compile_value(
             Ok(r)
         }
 
+        // #142: `CAST` forces its target affinity via the harvested
+        // `Cast` opcode (P2 = the affinity's ASCII byte, matching the
+        // oracle's own `EXPLAIN` shape: `Cast r[N], affinity(r[N])`),
+        // never `MustBeInt`/`RealAffinity` — those are a guard opcode
+        // (aborts instead of truncating, wrong for `CAST('apple' AS
+        // INTEGER)` = `0`) and a column-load coercion opcode
+        // respectively, neither of which implements `CAST`'s own lossy
+        // conversion rule (`src/vdbe/cast.rs`).
         ExprKind::Cast {
             expr: inner,
             type_name,
         } => {
             let r = compile_value(em, reg, schema, cursor, inner)?;
-            match type_name.to_ascii_uppercase() {
-                t if t.contains("INT") => {
-                    em.emit(Instruction::new(Opcode::MustBeInt, r, 0, 0));
-                    Ok(r)
-                }
-                t if t.contains("REAL") || t.contains("FLOA") || t.contains("DOUB") => {
-                    em.emit(Instruction::new(Opcode::RealAffinity, r, 0, 0));
-                    Ok(r)
-                }
-                // TEXT/BLOB/NUMERIC CAST targets: no dedicated opcode
-                // exists to force those affinities standalone (only
-                // RealAffinity is in the frozen set) — known gap,
-                // passes the value through unchanged.
-                _ => Ok(r),
-            }
+            let affinity = affinity_of(type_name);
+            let p2 = i32::from(affinity.to_p4_byte());
+            em.emit(Instruction::new(Opcode::Cast, r, p2, 0));
+            Ok(r)
         }
 
         ExprKind::Case {
@@ -1116,15 +1122,14 @@ fn emit_branch_into(
     dest: i32,
 ) -> Result<(), CodegenError> {
     match &expr.kind {
-        ExprKind::Literal(Literal::Integer(i)) => {
-            let p1 = i32::try_from(*i).map_err(|_| CodegenError::Unsupported {
-                reason: format!(
-                    "integer literal {i} is out of range for this V2-scope compiler \
-                     (no 64-bit immediate-load opcode in the frozen V2 set)"
-                ),
-            })?;
-            em.emit(Instruction::new(Opcode::Integer, p1, dest, 0));
-        }
+        ExprKind::Literal(Literal::Integer(i)) => match i32::try_from(*i) {
+            Ok(p1) => {
+                em.emit(Instruction::new(Opcode::Integer, p1, dest, 0));
+            }
+            Err(_) => {
+                em.emit(Instruction::with_p4(Opcode::Int64, 0, dest, 0, P4::Int(*i)));
+            }
+        },
         ExprKind::Literal(Literal::True) => {
             em.emit(Instruction::new(Opcode::Integer, 1, dest, 0));
         }
@@ -1138,6 +1143,24 @@ fn emit_branch_into(
                 dest,
                 0,
                 P4::Str(s.clone()),
+            ));
+        }
+        ExprKind::Literal(Literal::Float(f)) => {
+            em.emit(Instruction::with_p4(Opcode::Real, 0, dest, 0, P4::Real(*f)));
+        }
+        ExprKind::Literal(Literal::Blob(bytes)) => {
+            let len = i32::try_from(bytes.len()).map_err(|_| CodegenError::Unsupported {
+                reason: format!(
+                    "blob literal of {} bytes does not fit in a P1 operand",
+                    bytes.len()
+                ),
+            })?;
+            em.emit(Instruction::with_p4(
+                Opcode::Blob,
+                len,
+                dest,
+                0,
+                P4::Blob(bytes.clone()),
             ));
         }
         // `dest` is shared across branches and reused every scan
