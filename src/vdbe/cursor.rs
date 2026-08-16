@@ -613,6 +613,43 @@ mod tests {
     }
 
     #[test]
+    fn distinct_treats_two_nulls_as_equal_unlike_the_eq_operator() {
+        // DISTINCT's ephemeral-index dedup is exact-byte record equality,
+        // not SQL's `=` — two NULL rows collapse to one here (spec 008's
+        // three-valued logic says `NULL = NULL` is UNKNOWN, never true;
+        // spec 009 Requirement 9's ORDER BY default NULL placement is a
+        // third, independent rule again). See spec 009 Requirement 9's
+        // "NULL is comparison-distinct across `=`, DISTINCT, and ORDER BY"
+        // scenario (#146).
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 1, 0)).unwrap();
+
+        // Row NULL: not found, insert, passes through.
+        vm.set_register(0, Value::Null).unwrap();
+        let found_first_null = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(found_first_null, Step::Next);
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap();
+
+        // Row NULL again: found, discard — NULL is equal to NULL for
+        // DISTINCT's dedup, unlike `=`.
+        vm.set_register(0, Value::Null).unwrap();
+        let found_second_null = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(found_second_null, Step::Jump(99));
+    }
+
+    #[test]
     fn sequence_hands_out_a_monotonic_counter_independent_of_the_dedup_key() {
         let mut vm = Vm::new();
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 1, 0)).unwrap();
