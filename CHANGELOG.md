@@ -6,6 +6,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-08-16
+
+### Added
+
+- `ORDER BY` by a genuine computed expression — unary/binary operators,
+  scalar function calls, and an alias whose own result expression is
+  computed rather than a bare column (#155). `compile_sorted_scan`
+  computes each such term into its own register, appended after the
+  raw schema-column block already fed to `MakeRecord`/`SorterInsert`;
+  the `SorterOpen` sort-key descriptor is patched in once that layout
+  is known (new `Emitter::patch_p4`), and the record's span is widened
+  to the register allocator's post-compile watermark (new
+  `RegAlloc::peek`) so expressions with internal temporaries (e.g.
+  `CASE`) stay record-contiguous. Closes the gap #144 left open.
+
 ## [0.7.6] - 2026-08-16
 
 ### Fixed

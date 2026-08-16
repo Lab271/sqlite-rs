@@ -150,6 +150,17 @@ impl Emitter {
         self.patches.push((addr, label));
     }
 
+    /// Overwrites an already-emitted instruction's `P4`, for cases
+    /// where the value (e.g. a sort-key descriptor) isn't known until
+    /// after later instructions — computing it requires registers that
+    /// only get allocated once the code between the placeholder and
+    /// the fixup has been emitted — have already been generated.
+    pub(crate) fn patch_p4(&mut self, addr: usize, p4: P4) {
+        if let Some(instr) = self.instructions.get_mut(addr) {
+            instr.p4 = p4;
+        }
+    }
+
     /// Resolves every pending patch against its placed label's address,
     /// consuming the emitter into a finished [`Program`].
     pub(crate) fn finish(mut self) -> Program {
@@ -191,6 +202,14 @@ impl RegAlloc {
         let r = self.next;
         self.next = self.next.saturating_add(1);
         r
+    }
+
+    /// The register the next `alloc()` call would hand out, without
+    /// allocating it — used to find the highest register a just-compiled
+    /// expression touched (its last-allocated register isn't always its
+    /// own return value, e.g. `CASE` allocates its destination first).
+    pub(crate) fn peek(&self) -> i32 {
+        self.next
     }
 }
 
