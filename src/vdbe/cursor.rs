@@ -105,35 +105,39 @@ pub(crate) struct EphemeralState {
     last_key: Option<Vec<u8>>,
 }
 
-fn table_cursor_mut<'v>(
-    vm: &'v mut Vm,
-    slot: i32,
-    opcode: &'static str,
-) -> Result<&'v mut TableCursorState, ExecError> {
-    match vm.cursor_mut(slot)? {
-        CursorSlot::Table(state) => Ok(state),
-        other => Err(ExecError::CursorTypeMismatch {
-            opcode,
-            slot,
-            found: other.type_name(),
-            expected: "table cursor",
-        }),
+// Methods rather than free functions so the borrow of `self` elides — see the
+// note on the equivalent helpers in sorter.rs.
+impl Vm {
+    fn table_cursor_mut(
+        &mut self,
+        slot: i32,
+        opcode: &'static str,
+    ) -> Result<&mut TableCursorState, ExecError> {
+        match self.cursor_mut(slot)? {
+            CursorSlot::Table(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "table cursor",
+            }),
+        }
     }
-}
 
-fn ephemeral_mut<'v>(
-    vm: &'v mut Vm,
-    slot: i32,
-    opcode: &'static str,
-) -> Result<&'v mut EphemeralState, ExecError> {
-    match vm.cursor_mut(slot)? {
-        CursorSlot::Ephemeral(state) => Ok(state),
-        other => Err(ExecError::CursorTypeMismatch {
-            opcode,
-            slot,
-            found: other.type_name(),
-            expected: "ephemeral cursor",
-        }),
+    fn ephemeral_mut(
+        &mut self,
+        slot: i32,
+        opcode: &'static str,
+    ) -> Result<&mut EphemeralState, ExecError> {
+        match self.cursor_mut(slot)? {
+            CursorSlot::Ephemeral(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "ephemeral cursor",
+            }),
+        }
     }
 }
 
@@ -214,7 +218,7 @@ pub fn open_pseudo(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// `Rewind`: positions cursor `P1` at its first row, jumping to `P2` if
 /// the table is empty (mirrors the oracle's own `OP_Rewind` shape).
 pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = table_cursor_mut(vm, instr.p1, "Rewind")?;
+    let state = vm.table_cursor_mut(instr.p1, "Rewind")?;
     state.forced_null = false;
     state.current = state
         .cursor
@@ -233,7 +237,7 @@ pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `Last`: positions cursor `P1` at its last row (highest rowid),
 /// jumping to `P2` if the table is empty.
 pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = table_cursor_mut(vm, instr.p1, "Last")?;
+    let state = vm.table_cursor_mut(instr.p1, "Last")?;
     state.forced_null = false;
     state.current = state
         .cursor
@@ -253,7 +257,7 @@ pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// (typically back to the loop body's start) if another row was found —
 /// falls through (ending the loop) once exhausted.
 pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = table_cursor_mut(vm, instr.p1, "Next")?;
+    let state = vm.table_cursor_mut(instr.p1, "Next")?;
     state.current = state
         .cursor
         .next()
@@ -376,7 +380,7 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             })
         }
     };
-    let state = table_cursor_mut(vm, instr.p1, "SeekRowid")?;
+    let state = vm.table_cursor_mut(instr.p1, "SeekRowid")?;
     state.forced_null = false;
     state.current = state
         .cursor
@@ -395,7 +399,7 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `NullRow`: forces cursor `P1` to read as an all-NULL row until its
 /// next real positioning (`Rewind`/`Last`/`Next`/`SeekRowid`).
 pub fn null_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = table_cursor_mut(vm, instr.p1, "NullRow")?;
+    let state = vm.table_cursor_mut(instr.p1, "NullRow")?;
     state.forced_null = true;
     state.current = None;
     Ok(Step::Next)
@@ -406,7 +410,7 @@ pub fn null_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// allocate a synthetic rowid for an ephemeral-table row).
 pub fn sequence(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let value = {
-        let state = ephemeral_mut(vm, instr.p1, "Sequence")?;
+        let state = vm.ephemeral_mut(instr.p1, "Sequence")?;
         let v = state.sequence;
         state.sequence = state.sequence.saturating_add(1);
         v
@@ -423,7 +427,7 @@ pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = p4_count(instr, "Found")?;
     let values = read_register_range(vm, instr.p3, count, "Found")?;
     let key = encode_record(&values, TextEncoding::Utf8);
-    let state = ephemeral_mut(vm, instr.p1, "Found")?;
+    let state = vm.ephemeral_mut(instr.p1, "Found")?;
     let present = state.entries.contains_key(&key);
     state.last_key = Some(key);
     Ok(if present {
@@ -439,7 +443,7 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = p4_count(instr, "IdxInsert")?;
     let values = read_register_range(vm, instr.p2, count, "IdxInsert")?;
     let key = encode_record(&values, TextEncoding::Utf8);
-    let state = ephemeral_mut(vm, instr.p1, "IdxInsert")?;
+    let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
     state.entries.insert(key.clone(), values);
     state.last_key = Some(key);
     Ok(Step::Next)
@@ -464,7 +468,7 @@ pub fn idx_le(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = p4_count(instr, "IdxLE")?;
     let values = read_register_range(vm, instr.p3, count, "IdxLE")?;
     let probe = encode_record(&values, TextEncoding::Utf8);
-    let state = ephemeral_mut(vm, instr.p1, "IdxLE")?;
+    let state = vm.ephemeral_mut(instr.p1, "IdxLE")?;
     let holds = match &state.last_key {
         Some(key) => *key <= probe,
         None => true,
@@ -481,7 +485,7 @@ pub fn idx_le(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// "insert then delete the just-produced duplicate" path (spec 009
 /// Requirement 4).
 pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = ephemeral_mut(vm, instr.p1, "Delete")?;
+    let state = vm.ephemeral_mut(instr.p1, "Delete")?;
     if let Some(key) = state.last_key.take() {
         state.entries.remove(&key);
     }

@@ -117,14 +117,19 @@ impl<P: PageSource> TableCursor<P> {
     /// positioned via `first`/`next` cannot be walked backward with
     /// `prev` — the two directions maintain independent stack state.
     ///
-    /// Debug builds assert that `last()` ran first: calling `prev()`
-    /// before any `last()` would otherwise silently return `None`
-    /// (empty stack), indistinguishable from "table exhausted."
+    /// Calling `prev()` before any `last()` is a usage error, reported as
+    /// [`BtreeError::CursorNotPositioned`] rather than silently returning
+    /// `None` (empty stack), which is indistinguishable from "table
+    /// exhausted." Checked in every build, not just debug ones — a
+    /// misuse that only surfaces under `debug_assert` is a misuse that
+    /// reaches release.
     pub fn prev(&mut self) -> Result<Option<TableRow>, BtreeError> {
-        debug_assert!(
-            self.positioned_reverse,
-            "TableCursor::prev() called without a prior last()"
-        );
+        if !self.positioned_reverse {
+            return Err(BtreeError::CursorNotPositioned {
+                operation: "TableCursor::prev()",
+                required: "TableCursor::last()",
+            });
+        }
         self.advance_rev()
     }
 
@@ -717,6 +722,19 @@ mod tests {
         let last = decode_record(&rows[2999].payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&last[0]), 3000);
         assert_eq!(text(&last[1]), "row number 3000");
+    }
+
+    #[test]
+    fn prev_without_last_errors_rather_than_looking_exhausted() {
+        // Regression guard for the precondition `prev()` documents: before
+        // this was an error it was a `debug_assert`, so a release build
+        // returned `None` — indistinguishable from a genuinely exhausted
+        // cursor, which is the confusing outcome the check exists to prevent.
+        let mut cursor = open_cursor("table_multipage.db");
+        assert!(matches!(
+            cursor.prev(),
+            Err(BtreeError::CursorNotPositioned { .. })
+        ));
     }
 
     #[test]

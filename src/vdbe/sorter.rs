@@ -43,35 +43,37 @@ pub(crate) struct SorterState {
     pos: usize,
 }
 
-fn sorter_mut<'v>(
-    vm: &'v mut Vm,
-    slot: i32,
-    opcode: &'static str,
-) -> Result<&'v mut SorterState, ExecError> {
-    match vm.cursor_mut(slot)? {
-        CursorSlot::Sorter(state) => Ok(state),
-        other => Err(ExecError::CursorTypeMismatch {
-            opcode,
-            slot,
-            found: other.type_name(),
-            expected: "sorter cursor",
-        }),
+// Methods rather than free functions so the borrow of `self` elides: a free
+// `fn(vm: &Vm, opcode: &'static str) -> Result<&SorterState, _>` has two input
+// lifetime positions and so needs an explicit parameter, which is outside the
+// qualified subset (`make mvl-limit`). The `&self` elision rule resolves it.
+impl Vm {
+    fn sorter_mut(
+        &mut self,
+        slot: i32,
+        opcode: &'static str,
+    ) -> Result<&mut SorterState, ExecError> {
+        match self.cursor_mut(slot)? {
+            CursorSlot::Sorter(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "sorter cursor",
+            }),
+        }
     }
-}
 
-fn sorter_ref<'v>(
-    vm: &'v Vm,
-    slot: i32,
-    opcode: &'static str,
-) -> Result<&'v SorterState, ExecError> {
-    match vm.cursor(slot)? {
-        CursorSlot::Sorter(state) => Ok(state),
-        other => Err(ExecError::CursorTypeMismatch {
-            opcode,
-            slot,
-            found: other.type_name(),
-            expected: "sorter cursor",
-        }),
+    fn sorter_ref(&self, slot: i32, opcode: &'static str) -> Result<&SorterState, ExecError> {
+        match self.cursor(slot)? {
+            CursorSlot::Sorter(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "sorter cursor",
+            }),
+        }
     }
 }
 
@@ -112,7 +114,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             })
         }
     };
-    let state = sorter_mut(vm, instr.p1, "SorterInsert")?;
+    let state = vm.sorter_mut(instr.p1, "SorterInsert")?;
     state.buffer.push(blob);
     state.sorted = false;
     Ok(Step::Next)
@@ -123,7 +125,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
 /// the actual value comparison to the kernel (spec 009 Requirement 5).
 /// Jumps to `P2` if the sorter is empty (mirrors `Rewind`).
 pub fn sorter_sort(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = sorter_mut(vm, instr.p1, "SorterSort")?;
+    let state = vm.sorter_mut(instr.p1, "SorterSort")?;
     let keys = state.keys.clone();
     let mut decoded = Vec::with_capacity(state.buffer.len());
     for bytes in &state.buffer {
@@ -161,7 +163,7 @@ pub fn sorter_sort(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// `P2` (typically back to the loop body's start) if another row
 /// remains — falls through once exhausted, mirroring `Next`.
 pub fn sorter_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = sorter_mut(vm, instr.p1, "SorterNext")?;
+    let state = vm.sorter_mut(instr.p1, "SorterNext")?;
     state.pos = state.pos.saturating_add(1);
     Ok(if state.pos < state.buffer.len() {
         Step::Jump(to_pc(instr.p2))
@@ -176,7 +178,7 @@ pub fn sorter_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// sorter-specific case.
 pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let bytes = {
-        let state = sorter_ref(vm, instr.p1, "SorterData")?;
+        let state = vm.sorter_ref(instr.p1, "SorterData")?;
         if !state.sorted {
             return Err(ExecError::MalformedInstruction {
                 opcode: "SorterData",
