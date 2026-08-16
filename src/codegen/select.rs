@@ -15,9 +15,11 @@
 
 use thiserror::Error;
 
-use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
+use crate::codegen::expr::{
+    collation_of, column_index, compile_cond, compile_value, emit_column_read,
+};
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Target};
-use crate::parser::ast::{Distinctness, Expr, ExprKind, ResultColumn, Select};
+use crate::parser::ast::{Distinctness, Expr, ExprKind, Literal, ResultColumn, Select};
 use crate::schema::TableSchema;
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
 
@@ -81,14 +83,8 @@ fn resolve_order_by(
 ) -> Result<Vec<SortKeyColumn>, CodegenError> {
     let mut keys = Vec::with_capacity(select.order_by.len());
     for term in &select.order_by {
-        let ExprKind::Column { name, .. } = &term.expr.kind else {
-            return Err(CodegenError::Unsupported {
-                reason: "ORDER BY only supports plain column references in this V2-scope compiler"
-                    .to_string(),
-            });
-        };
-        let idx = column_index(schema, name)
-            .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
+        let base_expr = strip_collate(&term.expr);
+        let idx = resolve_order_by_target(base_expr, select, schema)?;
         let descending = term.desc.unwrap_or(false);
         // No NULLS clause defaults to NULLS FIRST for ASC, NULLS LAST for
         // DESC (SQLite's default, matching this compiler's prior
@@ -99,11 +95,123 @@ fn resolve_order_by(
         keys.push(SortKeyColumn {
             index: idx,
             descending,
-            collation: Collation::Binary,
+            collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
             nulls_first,
         });
     }
     Ok(keys)
+}
+
+/// Unwraps `expr COLLATE name` (and surrounding parens) down to the
+/// expression the ordering is actually keyed on; the collation itself
+/// is read separately via `collation_of`.
+fn strip_collate(expr: &Expr) -> &Expr {
+    match &expr.kind {
+        ExprKind::Collate { expr: inner, .. } | ExprKind::Paren(inner) => strip_collate(inner),
+        _ => expr,
+    }
+}
+
+/// One result column as seen by ORDER BY ordinal/alias resolution:
+/// the underlying table column it reads (`None` for a computed
+/// expression, which can't yet be a sort key — see the `Unsupported`
+/// case in `resolve_order_by_target`) and its `AS` alias, if any.
+/// `*`/`table.*` expand against `schema` the same way `result_columns`
+/// does, since this compiler is single-table (V2 scope).
+struct OrderByEntry {
+    column: Option<String>,
+    alias: Option<String>,
+}
+
+fn order_by_entries(select: &Select, schema: &TableSchema) -> Vec<OrderByEntry> {
+    let mut out = Vec::new();
+    for col in &select.columns {
+        match col {
+            ResultColumn::Star | ResultColumn::TableStar { .. } => {
+                for name in &schema.columns {
+                    out.push(OrderByEntry {
+                        column: Some(name.clone()),
+                        alias: None,
+                    });
+                }
+            }
+            ResultColumn::Expr { expr, alias } => {
+                let column = match &expr.kind {
+                    ExprKind::Column {
+                        table: None, name, ..
+                    } => Some(name.clone()),
+                    _ => None,
+                };
+                out.push(OrderByEntry {
+                    column,
+                    alias: alias.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+const UNSUPPORTED_SORT_KEY: &str = "ORDER BY only supports column references, ordinals and \
+    aliases resolving to a column in this V2-scope compiler — a computed sort key would need \
+    the sorter's record payload extended beyond raw table columns";
+
+fn resolve_order_by_target(
+    expr: &Expr,
+    select: &Select,
+    schema: &TableSchema,
+) -> Result<usize, CodegenError> {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Integer(n)) => {
+            let entries = order_by_entries(select, schema);
+            let zero_based = usize::try_from(*n)
+                .ok()
+                .and_then(|ordinal| ordinal.checked_sub(1));
+            let entry = zero_based
+                .and_then(|zero_based| entries.get(zero_based))
+                .ok_or_else(|| CodegenError::Unsupported {
+                    reason: format!(
+                        "ORDER BY position {n} is out of range for a {}-column result set",
+                        entries.len()
+                    ),
+                })?;
+            match &entry.column {
+                Some(name) => column_index(schema, name)
+                    .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() }),
+                None => Err(CodegenError::Unsupported {
+                    reason: UNSUPPORTED_SORT_KEY.to_string(),
+                }),
+            }
+        }
+        ExprKind::Column {
+            table: None, name, ..
+        } => {
+            // Result-column aliases take precedence over table columns
+            // for ORDER BY (unlike WHERE, where aliases aren't visible
+            // at all).
+            let entries = order_by_entries(select, schema);
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.alias.as_deref() == Some(name.as_str()))
+            {
+                return match &entry.column {
+                    Some(col_name) => {
+                        column_index(schema, col_name).ok_or_else(|| CodegenError::UnknownColumn {
+                            name: col_name.clone(),
+                        })
+                    }
+                    None => Err(CodegenError::Unsupported {
+                        reason: UNSUPPORTED_SORT_KEY.to_string(),
+                    }),
+                };
+            }
+            column_index(schema, name)
+                .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })
+        }
+        _ => Err(CodegenError::Unsupported {
+            reason: UNSUPPORTED_SORT_KEY.to_string(),
+        }),
+    }
 }
 
 enum ResultColumnPlan {

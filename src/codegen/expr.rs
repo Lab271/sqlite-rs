@@ -654,7 +654,7 @@ fn expr_affinity(schema: &TableSchema, expr: &Expr) -> Option<Affinity> {
 
 /// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
 /// unrecognized collation names fall back to `None` (BINARY default).
-fn collation_of(expr: &Expr) -> Option<Collation> {
+pub(crate) fn collation_of(expr: &Expr) -> Option<Collation> {
     match &expr.kind {
         ExprKind::Collate { collation, .. } => match collation.to_ascii_uppercase().as_str() {
             "BINARY" => Some(Collation::Binary),
