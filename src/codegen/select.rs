@@ -98,21 +98,21 @@ fn resolve_order_by(
     Ok(keys)
 }
 
-enum ResultColumnPlan<'a> {
-    Column(&'a str),
-    Expr(&'a Expr),
+enum ResultColumnPlan {
+    Column(String),
+    Expr(Expr),
 }
 
-fn result_columns<'a>(select: &'a Select, schema: &'a TableSchema) -> Vec<ResultColumnPlan<'a>> {
+fn result_columns(select: &Select, schema: &TableSchema) -> Vec<ResultColumnPlan> {
     let mut out = Vec::new();
     for col in &select.columns {
         match col {
             ResultColumn::Star | ResultColumn::TableStar { .. } => {
                 for name in &schema.columns {
-                    out.push(ResultColumnPlan::Column(name));
+                    out.push(ResultColumnPlan::Column(name.clone()));
                 }
             }
-            ResultColumn::Expr { expr, .. } => out.push(ResultColumnPlan::Expr(expr)),
+            ResultColumn::Expr { expr, .. } => out.push(ResultColumnPlan::Expr(expr.clone())),
         }
     }
     out
@@ -124,7 +124,7 @@ fn compile_row_values(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     schema: &TableSchema,
-    cols: &[ResultColumnPlan<'_>],
+    cols: &[ResultColumnPlan],
     cursor: i32,
 ) -> Result<(i32, usize), CodegenError> {
     // Each column is compiled into whatever register the bump
@@ -380,7 +380,7 @@ fn compile_sorted_scan(
         &schema
             .columns
             .iter()
-            .map(|c| ResultColumnPlan::Column(c.as_str()))
+            .map(|c| ResultColumnPlan::Column(c.clone()))
             .collect::<Vec<_>>(),
         TABLE_CURSOR,
     )?;

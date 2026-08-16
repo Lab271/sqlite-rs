@@ -128,8 +128,7 @@ pub(crate) fn compile_cond(
             let collation = collation_of(lhs).or_else(|| collation_of(rhs));
             let l = compile_value(em, reg, schema, cursor, lhs)?;
             let r = compile_value(em, reg, schema, cursor, rhs)?;
-            emit_compare_false_jump(em, *op, l, r, collation, true_target, false_target);
-            Ok(())
+            emit_compare_false_jump(em, *op, l, r, collation, true_target, false_target)
         }
 
         ExprKind::Is { lhs, rhs, negated } => {
@@ -400,17 +399,25 @@ fn emit_compare_false_jump(
     collation: Option<Collation>,
     true_target: Target,
     false_target: Target,
-) {
+) -> Result<(), CodegenError> {
     let p4 = collation.map_or(P4::None, p4_coll_seq);
     // `Ne` has no opcode of its own; it's `Eq` with true/false swapped.
-    let (opcode, t, f) = match op {
-        BinaryOp::Ne => (Opcode::Eq, false_target, true_target),
-        BinaryOp::Eq => (Opcode::Eq, true_target, false_target),
-        BinaryOp::Lt => (Opcode::Lt, true_target, false_target),
-        BinaryOp::Le => (Opcode::Le, true_target, false_target),
-        BinaryOp::Gt => (Opcode::Gt, true_target, false_target),
-        BinaryOp::Ge => (Opcode::Ge, true_target, false_target),
-        _ => unreachable!("caller only passes comparison operators"),
+    // The caller only ever passes a comparison operator (guarded by its
+    // own `matches!` filter), so `Some` always holds; a non-comparison
+    // op is a codegen-internal error, not a reachable SQL-input case.
+    let resolved = match op {
+        BinaryOp::Ne => Some((Opcode::Eq, false_target, true_target)),
+        BinaryOp::Eq => Some((Opcode::Eq, true_target, false_target)),
+        BinaryOp::Lt => Some((Opcode::Lt, true_target, false_target)),
+        BinaryOp::Le => Some((Opcode::Le, true_target, false_target)),
+        BinaryOp::Gt => Some((Opcode::Gt, true_target, false_target)),
+        BinaryOp::Ge => Some((Opcode::Ge, true_target, false_target)),
+        _ => None,
+    };
+    let Some((opcode, t, f)) = resolved else {
+        return Err(CodegenError::Unsupported {
+            reason: "emit_compare_false_jump called with a non-comparison operator".to_string(),
+        });
     };
     let (t_label, t_is_new) = ensure_label(em, t);
     let addr = em.emit(Instruction::with_p4(opcode, lhs, 0, rhs, p4));
@@ -421,6 +428,7 @@ fn emit_compare_false_jump(
     if t_is_new {
         em.place(t_label);
     }
+    Ok(())
 }
 
 /// If `expr` is `x COLLATE name`, resolves `name` to a [`Collation`];
@@ -634,13 +642,21 @@ pub(crate) fn compile_value(
             let l = compile_value(em, reg, schema, cursor, lhs)?;
             let r = compile_value(em, reg, schema, cursor, rhs)?;
             let dest = reg.alloc();
+            // The caller's own `matches!` filter guarantees `op` is one
+            // of these five; any other value is a codegen-internal
+            // error, not a reachable SQL-input case.
             let opcode = match op {
                 BinaryOp::Add => Opcode::Add,
                 BinaryOp::Sub => Opcode::Subtract,
                 BinaryOp::Mul => Opcode::Multiply,
                 BinaryOp::Div => Opcode::Divide,
                 BinaryOp::Mod => Opcode::Remainder,
-                _ => unreachable!(),
+                _ => {
+                    return Err(CodegenError::Unsupported {
+                        reason: "arithmetic lowering reached with a non-arithmetic operator"
+                            .to_string(),
+                    })
+                }
             };
             // Subtract/Divide/Remainder read as `r[P2] <op> r[P1]`
             // (SQLite's own operand order, per arithmetic.rs) — pass
