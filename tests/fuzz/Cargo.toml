@@ -54,3 +54,10 @@ path = "fuzz_targets/scalar_functions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "vdbe_exec"
+path = "fuzz_targets/vdbe_exec.rs"
+test = false
+doc = false
+bench = false

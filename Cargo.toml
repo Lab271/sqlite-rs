@@ -33,6 +33,10 @@ name = "unit_parser"
 path = "tests/unit/parser.rs"
 
 [[test]]
+name = "vdbe_oracle_vectors"
+path = "tests/vdbe/oracle_vectors_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 
