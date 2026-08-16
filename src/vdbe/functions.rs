@@ -892,4 +892,124 @@ mod tests {
             Err(FunctionError::Unknown { .. })
         ));
     }
+
+    #[test]
+    fn nullif_returns_null_on_equal_else_first_arg() {
+        assert_eq!(
+            v("nullif", &[Value::Integer(1), Value::Integer(1)]),
+            Value::Null
+        );
+        assert_eq!(
+            v("nullif", &[Value::Integer(1), Value::Integer(2)]),
+            Value::Integer(1)
+        );
+        assert_eq!(v("nullif", &[Value::Null, Value::Integer(2)]), Value::Null);
+    }
+
+    #[test]
+    fn sign_reports_negative_zero_positive_and_propagates_null() {
+        assert_eq!(v("sign", &[Value::Integer(-5)]), Value::Integer(-1));
+        assert_eq!(v("sign", &[Value::Integer(0)]), Value::Integer(0));
+        assert_eq!(v("sign", &[Value::Real(2.5)]), Value::Integer(1));
+        assert_eq!(v("sign", &[Value::Null]), Value::Null);
+    }
+
+    #[test]
+    fn instr_finds_substring_position_or_zero() {
+        assert_eq!(
+            v(
+                "instr",
+                &[
+                    Value::Text("hello world".to_string()),
+                    Value::Text("world".to_string())
+                ]
+            ),
+            Value::Integer(7)
+        );
+        assert_eq!(
+            v(
+                "instr",
+                &[
+                    Value::Text("hello".to_string()),
+                    Value::Text("xyz".to_string())
+                ]
+            ),
+            Value::Integer(0)
+        );
+        assert_eq!(
+            v(
+                "instr",
+                &[Value::Blob(vec![1, 2, 3, 4]), Value::Blob(vec![3, 4])]
+            ),
+            Value::Integer(3)
+        );
+        assert_eq!(
+            v("instr", &[Value::Null, Value::Text("x".to_string())]),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn trim_ltrim_rtrim_default_to_whitespace_or_use_given_charset() {
+        assert_eq!(
+            v("trim", &[Value::Text("  hi  ".to_string())]),
+            Value::Text("hi".to_string())
+        );
+        assert_eq!(
+            v("ltrim", &[Value::Text("  hi  ".to_string())]),
+            Value::Text("hi  ".to_string())
+        );
+        assert_eq!(
+            v("rtrim", &[Value::Text("  hi  ".to_string())]),
+            Value::Text("  hi".to_string())
+        );
+        assert_eq!(
+            v(
+                "trim",
+                &[
+                    Value::Text("xxhixx".to_string()),
+                    Value::Text("x".to_string())
+                ]
+            ),
+            Value::Text("hi".to_string())
+        );
+        assert_eq!(v("trim", &[Value::Null]), Value::Null);
+    }
+
+    #[test]
+    fn replace_substitutes_all_occurrences_and_handles_empty_from() {
+        assert_eq!(
+            v(
+                "replace",
+                &[
+                    Value::Text("banana".to_string()),
+                    Value::Text("a".to_string()),
+                    Value::Text("o".to_string())
+                ]
+            ),
+            Value::Text("bonono".to_string())
+        );
+        assert_eq!(
+            v(
+                "replace",
+                &[
+                    Value::Text("hi".to_string()),
+                    Value::Text("".to_string()),
+                    Value::Text("x".to_string())
+                ]
+            ),
+            Value::Text("hi".to_string())
+        );
+        assert_eq!(
+            v(
+                "replace",
+                &[
+                    Value::Null,
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string())
+                ]
+            ),
+            Value::Null
+        );
+    }
 }
