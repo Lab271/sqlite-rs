@@ -154,6 +154,20 @@ fn like_and_glob_dispatch_through_the_function_opcode() {
 }
 
 #[test]
+fn single_arg_function_call_compiles() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT abs(b) FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(10)]]);
+}
+
+#[test]
+fn multi_arg_function_call_compiles_with_contiguous_registers() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT instr(name, 'a') FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
 fn case_compiles_to_a_jump_chain() {
     let (path, schema) = one_row_fixture();
     let out = run_select(

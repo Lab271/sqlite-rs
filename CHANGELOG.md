@@ -28,6 +28,11 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 - `tests/unit/codegen.rs`: oracle-free program-shape tests pinning each
   codegen fix below, so a regression fails `make test` rather than only the
   non-gating slice.
+- `tests/codegen/expr_test.rs`: two end-to-end regression tests (#125/#133)
+  for the scalar-function contiguity fix below — `single_arg_function_call_compiles`
+  and `multi_arg_function_call_compiles_with_contiguous_registers` compile
+  real SQL through the full parse → codegen → VDBE path and assert on actual
+  output values, complementing the program-shape tests above.
 
 ### Fixed
 
