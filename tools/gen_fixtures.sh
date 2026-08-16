@@ -236,6 +236,17 @@ SQL
 CREATE TABLE t(a INTEGER, blb BLOB);
 INSERT INTO t VALUES(1, zeroblob(60000));
 SQL
+
+"$ORACLE" btrees/select_parity.db <<'SQL'
+CREATE TABLE t(id INTEGER PRIMARY KEY, i INTEGER, s TEXT, r REAL, b BLOB);
+INSERT INTO t VALUES(1, NULL, NULL, NULL, NULL);
+INSERT INTO t VALUES(2, 0, '', 0.0, X'');
+INSERT INTO t VALUES(3, 0, 'alice', 3.14, X'deadbeef');
+INSERT INTO t VALUES(4, 1, 'ALICE', 3.14, X'deadbeef');
+INSERT INTO t VALUES(5, 1, 'Alice', -3.14, NULL);
+INSERT INTO t VALUES(6, 1, 'Alice', -3.14, NULL);
+INSERT INTO t VALUES(7, 42, '42', 42.0, NULL);
+SQL
 cat > btrees/manifest.txt <<'EOF'
 table_single_page.db — one row, a single leaf page.
 table_multipage.db — 3000 rows, forces interior table b-tree nodes.
@@ -243,6 +254,10 @@ index.db — an indexed column over 3000 rows, multi-page index b-tree.
 without_rowid.db — WITHOUT ROWID table, 500 rows.
 overflow_single_page.db — a 6000-byte blob, forces one overflow page.
 overflow_multi_page.db — a 60000-byte blob, forces a 14-page overflow chain.
+select_parity.db — a plain INTEGER PRIMARY KEY table aimed at SELECT
+parity: NULL in every nullable column, empty string vs NULL, zero vs
+NULL, duplicate rows (for DISTINCT), mixed-case text (for NOCASE), and
+a text-encoded number (for affinity comparisons).
 EOF
 
 # --- features/: extensions and modes Tier 0 must read as raw rows ---

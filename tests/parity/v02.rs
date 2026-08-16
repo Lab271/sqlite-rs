@@ -59,8 +59,11 @@ const CASES: &[ParityCase] = &[
 ];
 
 /// Three-valued logic over a fixture that actually contains NULLs
-/// (#134). Every case is a shape whose answer changes depending on
-/// whether SQL's *unknown* is resolved honestly or folded into true.
+/// (#134), moved onto `btrees/select_parity.db` (#145) — a fixture built
+/// for query semantics rather than serial-type edge values, so cases
+/// don't have to dodge unrelated REAL/BLOB renderer divergences. Every
+/// case is a shape whose answer changes depending on whether SQL's
+/// *unknown* is resolved honestly or folded into true.
 ///
 /// The value-mode cases select the boolean/NULL expression directly —
 /// previously they were wrapped in `IS NULL` to dodge a renderer bug
@@ -78,11 +81,11 @@ const NULL_CASES: &[ParityCase] = &[
     },
     ParityCase {
         name: "not_over_in",
-        sql: "SELECT i FROM t WHERE NOT (i IN (0, 127))",
+        sql: "SELECT i FROM t WHERE NOT (i IN (0, 1))",
     },
     ParityCase {
         name: "not_in_spelling",
-        sql: "SELECT i FROM t WHERE i NOT IN (0, 127)",
+        sql: "SELECT i FROM t WHERE i NOT IN (0, 1)",
     },
     ParityCase {
         name: "not_over_between",
@@ -90,15 +93,15 @@ const NULL_CASES: &[ParityCase] = &[
     },
     ParityCase {
         name: "not_over_and",
-        sql: "SELECT i FROM t WHERE NOT (i = 0 AND txt = 'hello')",
+        sql: "SELECT i FROM t WHERE NOT (i = 0 AND s = 'alice')",
     },
     ParityCase {
         name: "not_over_or",
-        sql: "SELECT i FROM t WHERE NOT (i = 0 OR txt = 'hello')",
+        sql: "SELECT i FROM t WHERE NOT (i = 0 OR s = 'alice')",
     },
     ParityCase {
         name: "not_over_is_null",
-        sql: "SELECT i FROM t WHERE NOT (txt IS NULL)",
+        sql: "SELECT i FROM t WHERE NOT (s IS NULL)",
     },
     ParityCase {
         name: "double_negation",
@@ -114,11 +117,11 @@ const NULL_CASES: &[ParityCase] = &[
     },
     ParityCase {
         name: "value_in",
-        sql: "SELECT i IN (0, 127) FROM t",
+        sql: "SELECT i IN (0, 1) FROM t",
     },
     ParityCase {
         name: "value_not_in",
-        sql: "SELECT i NOT IN (0, 127) FROM t",
+        sql: "SELECT i NOT IN (0, 1) FROM t",
     },
     ParityCase {
         name: "value_between",
@@ -144,30 +147,23 @@ fn star_expansion_acceptance_and_output_match_for_a_real_column_table() {
     assert_cases_match(&corpus_dir().join("serialtypes/values.db"), REAL_STAR_CASES);
 }
 
-/// `SELECT *` over a table with an `INTEGER PRIMARY KEY`. That column
-/// is a NULL placeholder in every record and has to be read with
-/// `Rowid`, not `Column` — the star-expansion path did the latter, so
-/// `SELECT * FROM t` answered NULL for it while `SELECT id FROM t`
-/// answered correctly.
-///
-/// The fixture is an FTS5 shadow table because no corpus fixture is a
-/// plain table with an `INTEGER PRIMARY KEY` — which is exactly why the
-/// oracle suites never caught this. `t_content` is an ordinary rowid
-/// table despite its provenance, and it is the only one available;
-/// giving the corpus a first-class fixture for this shape is tracked
-/// separately.
+/// `SELECT *` over `btrees/select_parity.db`, a plain table with an
+/// `INTEGER PRIMARY KEY` (#145). That column is a NULL placeholder in
+/// every record and has to be read with `Rowid`, not `Column` — the
+/// star-expansion path did the latter, so `SELECT * FROM t` answered
+/// NULL for it while `SELECT id FROM t` answered correctly.
 const ROWID_ALIAS_CASES: &[ParityCase] = &[
     ParityCase {
         name: "star_expands_rowid_alias",
-        sql: "SELECT * FROM t_content",
+        sql: "SELECT * FROM t",
     },
     ParityCase {
         name: "qualified_star_expands_rowid_alias",
-        sql: "SELECT t_content.* FROM t_content",
+        sql: "SELECT t.* FROM t",
     },
     ParityCase {
         name: "named_rowid_alias_agrees_with_star",
-        sql: "SELECT id, c0 FROM t_content",
+        sql: "SELECT id, i FROM t",
     },
 ];
 
@@ -177,7 +173,10 @@ fn star_expansion_acceptance_and_output_match_for_a_rowid_alias_table() {
         skip_no_oracle("star_expansion_acceptance_and_output_match_for_a_rowid_alias_table");
         return;
     }
-    assert_cases_match(&corpus_dir().join("features/fts5.db"), ROWID_ALIAS_CASES);
+    assert_cases_match(
+        &corpus_dir().join("btrees/select_parity.db"),
+        ROWID_ALIAS_CASES,
+    );
 }
 
 fn assert_cases_match(db: &Path, cases: &[ParityCase]) {
@@ -214,9 +213,10 @@ fn three_valued_logic_acceptance_and_output_match_over_null_rows() {
         return;
     }
     // `btrees/table_multipage.db` has no NULL in any column, so every
-    // case above would be vacuous there; `serialtypes/values.db` is the
-    // fixture with NULL rows in both an INTEGER and a TEXT column.
-    assert_cases_match(&corpus_dir().join("serialtypes/values.db"), NULL_CASES);
+    // case above would be vacuous there; `btrees/select_parity.db` is
+    // the fixture built for query semantics, with NULL rows in both an
+    // INTEGER and a TEXT column (#145).
+    assert_cases_match(&corpus_dir().join("btrees/select_parity.db"), NULL_CASES);
 }
 
 #[test]
