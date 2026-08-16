@@ -163,3 +163,43 @@ fn t1_explain_prints_bytecode() {
     assert_eq!(rows[0].opcode, "Init");
     assert_eq!(rows[1].opcode, "Halt");
 }
+
+/// V2 phase 4A — `sqlite-rs query` CLI (#95): the same pipeline as
+/// `t1_single_table_where_matches_oracle`, but through the built binary
+/// rather than as direct library calls — byte-identical to `sqlite3
+/// file "sql"`. Full CLI coverage lives in
+/// `tests/parity/v02.rs` and `tests/corpus/cli_e2e_test.rs`.
+#[test]
+fn t1_cli_query_matches_oracle() {
+    use std::process::Command;
+
+    const CLI: &str = env!("CARGO_BIN_EXE_sqlite-rs");
+
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_tier1_cli_query_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg("CREATE TABLE t(a INTEGER, b INTEGER); INSERT INTO t VALUES (1, 10), (2, 5), (3, 20);")
+        .status()
+        .expect("creating scratch fixture db (requires sqlite3 on PATH)");
+    if !status.success() {
+        eprintln!("skipping t1_cli_query_matches_oracle: no sqlite3 on PATH");
+        return;
+    }
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&path)
+        .arg("SELECT a FROM t WHERE b > 5")
+        .output()
+        .expect("running sqlite-rs query");
+    assert!(
+        output.status.success(),
+        "query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n3\n");
+}

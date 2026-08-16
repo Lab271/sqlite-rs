@@ -1,15 +1,24 @@
-//! `sqlite-rs` CLI: `dump` and `export` subcommands (issue #37, V1 step
-//! 9 — the acceptance gate). Data goes to stdout (`dump`) or disk
-//! (`export`); anything gracefully skipped goes to stderr as a warning.
-//! Dot-commands, a REPL, and `.import` are explicit non-goals (CLI
-//! level 3, a later value block) — see the issue body.
+//! `sqlite-rs` CLI: `dump`, `export`, and `query` subcommands (issues
+//! #37, #95 — the V1 and V2 acceptance gates). Data goes to stdout
+//! (`dump`, `query`) or disk (`export`); anything gracefully skipped
+//! goes to stderr as a warning. Dot-commands, a REPL, and `.import` are
+//! explicit non-goals (CLI level 3, a later value block) — see the
+//! issue bodies. `query`'s own flags (`-csv`, `-explain`) deliberately
+//! use `sqlite3`'s single-dash option style rather than GNU `--long`
+//! flags, matching the interface it stays parity with.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 
-use sqlite_rs::dump::{dump_database, DumpError};
+use sqlite_rs::btree::TableCursor;
+use sqlite_rs::codegen::{compile_select, CodegenError};
+use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value};
-use sqlite_rs::vfs::UnixVfs;
+use sqlite_rs::parser::{parse_select, ParseOutcome};
+use sqlite_rs::schema::read_schema;
+use sqlite_rs::vdbe::{execute_with_db, explain};
+use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -22,7 +31,8 @@ fn main() -> ExitCode {
             Some(path) => run_export(Path::new(&path)),
             None => usage_error("export <file>"),
         },
-        _ => usage_error("<dump|export> <file>"),
+        Some("query") => run_query(args.collect()),
+        _ => usage_error("<dump|export|query> <file>"),
     }
 }
 
@@ -146,9 +156,108 @@ fn degraded_exit_code(clean: bool) -> ExitCode {
     }
 }
 
-fn fatal(path: &Path, e: &DumpError) -> ExitCode {
+fn fatal(path: &Path, e: &impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {}: {e}", path.display());
     ExitCode::FAILURE
+}
+
+/// `query <file> "<SQL>"`: parse -> resolve the `FROM` table's schema ->
+/// compile -> execute -> render, read-only, through the same
+/// `dump::open` (safe-reader locking, WAL-pending visible, hot-journal
+/// refusal) `dump`/`export` use. `-explain` prints the compiled
+/// bytecode (spec 009 Requirement 10) instead of running it; `-csv`
+/// switches row rendering to CSV — matching plain `sqlite3 file "sql"`,
+/// neither mode prints a header row.
+fn run_query(raw_args: Vec<String>) -> ExitCode {
+    let mut csv = false;
+    let mut explain_flag = false;
+    let mut positional = Vec::new();
+    for arg in raw_args {
+        match arg.as_str() {
+            "-csv" => csv = true,
+            "-explain" => explain_flag = true,
+            _ => positional.push(arg),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let (Some(path), Some(sql)) = (positional.next(), positional.next()) else {
+        return usage_error("query [-csv] [-explain] <file> \"<SQL>\"");
+    };
+    let path = Path::new(&path);
+
+    let select = match parse_select(&sql) {
+        ParseOutcome::Accepted(select) => *select,
+        ParseOutcome::Unsupported { message, span } => {
+            return fatal(
+                path,
+                &format!(
+                    "not yet supported (line {}, column {}): {message}",
+                    span.line, span.column
+                ),
+            );
+        }
+        ParseOutcome::Invalid { message, span } => {
+            return fatal(
+                path,
+                &format!(
+                    "syntax error (line {}, column {}): {message}",
+                    span.line, span.column
+                ),
+            );
+        }
+    };
+    let Some(from) = &select.from else {
+        return fatal(path, &CodegenError::NoFromClause);
+    };
+
+    let (header, pager) = match dump::open(&UnixVfs, path) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
+    let source: Rc<dyn PageSource> = Rc::new(pager);
+
+    let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
+        Ok(s) => s,
+        Err(e) => return fatal(path, &e),
+    };
+    let Some(schema) = schemas
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(&from.name))
+    else {
+        return fatal(path, &format!("no such table: {}", from.name));
+    };
+
+    let program = match compile_select(&select, schema) {
+        Ok(p) => p,
+        Err(e) => return fatal(path, &e),
+    };
+
+    if explain_flag {
+        for row in explain(&program) {
+            println!(
+                "{}|{}|{}|{}|{}|{}|{}|{}",
+                row.addr, row.opcode, row.p1, row.p2, row.p3, row.p4, row.p5, row.comment
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let rows = match execute_with_db(&program, source, header) {
+        Ok(r) => r,
+        Err(e) => return fatal(path, &e),
+    };
+
+    for row in &rows {
+        if csv {
+            let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
+            print!("{}{CSV_ROW_TERMINATOR}", rendered.join(","));
+        } else {
+            let rendered: Vec<String> = row.iter().map(format_list_value).collect();
+            println!("{}", rendered.join("|"));
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
