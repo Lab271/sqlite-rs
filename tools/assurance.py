@@ -39,7 +39,11 @@ to this header too):
     1 valid test link scores 1/5, not 100%. Per requirement:
       covered = scenarios with their own valid link
               + min(requirement-level valid links, scenarios still uncovered)
-    A requirement with no scenarios falls back to binary (any valid link).
+              - dead links (see feature 8) — a dead link is a false claim
+                of coverage, worse than no link, so it can drive a
+                requirement's score below 0, not just to 0.
+    A requirement with no scenarios falls back to binary (any valid link),
+    unless it has a dead link, in which case it scores negative too.
 
 5.  Per-scenario Tests links (preferred convention): a `**Tests:**` line
     INSIDE a `#### Scenario:` block backs exactly that scenario.
@@ -56,7 +60,12 @@ to this header too):
 
 8.  Dead-link reporting: every declared link that fails validation (missing
     file or missing symbol) is counted, summarized in the dashboard, and
-    listed per-requirement in --verbose.
+    listed per-requirement in --verbose. Penalized in Coverage (feature 4),
+    not merely excluded — a link that once worked and now dangles is
+    documentation rot, a stronger signal than a requirement that was
+    never linked at all. Dead links on `planned` requirements don't count
+    here (feature 2 excludes planned from all scoring) — a not-yet-written
+    test path on unimplemented work is a forward reference, not rot.
 
 9.  Corpus links: `**Corpus:**` fixture paths are checked for existence and
     reported at the Evidence level.
@@ -206,7 +215,22 @@ def opcode_model():
     return len(implemented & harvested), len(harvested)
 
 
+MAKEFILE_PATH = REPO_ROOT / "Makefile"
 TIERS_DIR = REPO_ROOT / "tests" / "tiers"
+
+
+def mvl_limit_model():
+    """Files exempt from the qualified-subset gate (Makefile MVL_LIMIT_EXCLUDE).
+
+    A style exclusion (no dyn/unsafe/lifetimes ban), not a safety one — the
+    crate is unconditionally #![forbid(unsafe_code)] regardless of this list.
+    """
+    if not MAKEFILE_PATH.exists():
+        return None
+    m = re.search(r"^MVL_LIMIT_EXCLUDE\s*:?=\s*(.+)$", MAKEFILE_PATH.read_text(), re.MULTILINE)
+    if not m:
+        return None
+    return m.group(1).split()
 
 
 def tier_model():
@@ -228,8 +252,17 @@ def tier_model():
 
 
 def report_model():
-    """Print the Model level: plan position (plan.md + Cargo.toml) + grammar model (sqlite.ebnf)."""
+    """Print the Model level: totals only. Returns detail lines for --verbose.
+
+    Plan position (plan.md + Cargo.toml) + grammar/parity/tier/opcode/
+    qualified-subset models. Each model line here is a total; the
+    per-V-block/per-tier/per-file breakdown behind it is returned as
+    detail lines, printed under a separate "Model Detail" section only
+    when --verbose is passed — keeps the default dashboard to one line
+    per model instead of wrapping onto a second line per model.
+    """
     print("-- Model " + "-" * 51)
+    detail = []
     blocks = plan_blocks()
     ver = crate_version()
     if ver:
@@ -253,10 +286,9 @@ def report_model():
     model = grammar_model()
     if model:
         total = sum(model.values())
+        print(f"Grammar model:        {total} rules defined, covers {len(model)}/{len(blocks) or '?'} plan blocks — .openspec/grammar/sqlite.ebnf")
         parts = ", ".join(f"{k}: {v}" for k, v in sorted(model.items()))
-        tagged = ", ".join(sorted(model))
-        print(f"Grammar model:        {total} rules defined ({parts}) — .openspec/grammar/sqlite.ebnf")
-        print(f"                      covers {len(model)}/{len(blocks) or '?'} plan blocks; drift-checked by `make grammar-drift`")
+        detail.append(f"Grammar model:        {parts}; drift-checked by `make grammar-drift`")
         unknown_tags = sorted(set(model) - set(blocks)) if blocks else []
         if unknown_tags:
             print(f"  DRIFT: grammar tags not in plan.md value blocks: {', '.join(unknown_tags)}")
@@ -265,6 +297,9 @@ def report_model():
     parity = parity_model()
     if parity:
         n_gated = len(PARITY_DIMENSIONS)
+        gated_blocks = sum(1 for n in parity.values() if n > 0)
+        denom = len(blocks) or len(parity)
+        print(f"Parity:               {gated_blocks}/{denom} plan blocks gated (of {n_gated} dimensions each) — tests/parity/ (#72)")
         parts = []
         pending = []
         for block in sorted(parity):
@@ -276,16 +311,20 @@ def report_model():
         summary = " · ".join(parts)
         if pending:
             summary += (" · " if summary else "") + f"{pending[0]}+ pending"
-        print(f"Parity:               {summary} — tests/parity/ (#72)")
+        detail.append(f"Parity:               {summary}")
     tiers = tier_model()
     if tiers:
+        active_total = sum(a for a, _ in tiers.values())
+        total_total = sum(t for _, t in tiers.values())
+        print(f"Tier contracts:       {active_total}/{total_total} active — tests/tiers/")
         parts = " · ".join(f"{k} {active}/{total}" for k, (active, total) in sorted(tiers.items()))
-        print(f"Tier contracts:       {parts}")
+        detail.append(f"Tier contracts:       {parts}")
     opcodes = opcode_model()
     if opcodes:
         impl, total = opcodes
         print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
     print()
+    return detail
 
 
 def _validate_link(entry):
@@ -416,20 +455,34 @@ def parse_specs():
 
 
 def covered_scenarios(r):
-    """Number of a requirement's scenarios backed by a valid test link (feature 4).
+    """Net scenarios backed by a valid test link, minus a dead-link penalty (feature 4).
 
     Scenario-level links back their own scenario; requirement-level links are
-    a pool counted against scenarios not already backed directly.
+    a pool counted against scenarios not already backed directly. A dead
+    link (file/symbol validated and found missing — feature 6/7) is worse
+    than no link at all: it's a false claim of coverage, so each one
+    subtracts a full scenario's worth of credit rather than contributing
+    zero. This can drive the net below 0 — deliberately, so a
+    dead-link-heavy requirement scores visibly worse than an honestly
+    uncovered one, not the same as it.
     """
+    dead = len(r["dead_links"])
     if r["scenarios"] == 0:
-        return 0
+        return -dead
     remaining = r["scenarios"] - r["scenarios_backed"]
-    return r["scenarios_backed"] + min(r["req_level_valid"], remaining)
+    return r["scenarios_backed"] + min(r["req_level_valid"], remaining) - dead
 
 
 def scenario_coverage(r):
-    """Fraction of a requirement's falsifiable claims backed by a valid test link."""
+    """Fraction of a requirement's falsifiable claims backed by a valid test link.
+
+    Can be negative when dead links outweigh valid ones (see
+    covered_scenarios) — that's the point, not a bug: it must read as
+    worse than the 0.0 a requirement with no links at all gets.
+    """
     if r["scenarios"] == 0:
+        if r["dead_links"]:
+            return float(covered_scenarios(r))
         return 1.0 if (r["req_level_valid"] + r["scenarios_backed"]) > 0 else 0.0
     return covered_scenarios(r) / r["scenarios"]
 
@@ -488,12 +541,12 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"Requirements:     {total}" + (f" ({planned_count} planned excluded)" if planned_count else ""))
     print(f"Scenarios:        {total_scenarios}")
     print()
-    report_model()
+    model_detail = report_model()
     print("-- Traceability " + "-" * 44)
     print(f"Completeness (S->P):  {impl_exists}/{total} requirements implemented  ({completeness:.0%})")
     print(f"Coverage (E->P):      {backed}/{total_scenarios} scenarios test-backed  ({coverage:.0%}, {direct} per-scenario)")
     if total_dead:
-        print(f"DEAD LINKS:           {total_dead} — spec links to missing file/symbol; fix the spec (see --verbose)")
+        print(f"DEAD LINKS:           {total_dead} — false claims of coverage, penalized below 0 in Coverage above; fix the spec (see --verbose)")
 
     if not traceability_only:
         corpus_total = sum(1 for r in active if r["corpus_files"])
@@ -510,10 +563,20 @@ def report(requirements, verbose=False, traceability_only=False):
 
     print()
     print("-- Verification " + "-" * 44)
-    print("Not measured here — run `make verification` (alias for `make test`)")
+    exclusions = mvl_limit_model()
+    if exclusions:
+        print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (VFS dyn boundary, not unsafe — #80; src/bin is I/O)")
+        model_detail.append("Qualified-subset:")
+        model_detail.extend(f"  {f}" for f in exclusions)
+    print("Not measured here — run `make verification` (alias for `make test`) or `make mvl-limit`")
     print("=" * 60)
 
     if verbose:
+        if model_detail:
+            print()
+            print("-- Model Detail " + "-" * 44)
+            for line in model_detail:
+                print(line)
         print()
         print("  Legend: [impl][tests][corpus]")
         print("    impl:   ✓=exists  ○=linked/missing  P=planned  ✗=not linked")
