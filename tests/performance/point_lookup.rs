@@ -105,7 +105,7 @@ fn point_lookup_scan_ratio_widens_with_table_size() {
     }
 
     let mut ratios = Vec::new();
-    for &row_count in &[2_000u32, 20_000u32] {
+    for &row_count in &[2_000u32, 20_000u32, 200_000u32] {
         let (path, schema) = fixture(row_count, &row_count.to_string());
 
         let scan_program = compile(&schema, "SELECT id, payload FROM t");
@@ -147,16 +147,20 @@ fn point_lookup_scan_ratio_widens_with_table_size() {
         );
     }
 
-    // The scan/seek ratio should not shrink as the table grows 10x —
-    // if anything it should grow, since the scan's cost scales with
-    // row count and the seek's does not. A shrinking ratio would mean
-    // the "fast path" is secretly still paying an O(n) cost somewhere.
-    let (small_rows, small_ratio) = ratios[0];
-    let (big_rows, big_ratio) = ratios[1];
-    assert!(
-        big_ratio >= small_ratio * 0.5,
-        "scan/seek ratio shrank going from {small_rows} rows ({small_ratio:.1}x) to \
-         {big_rows} rows ({big_ratio:.1}x) — expected it to hold steady or widen, since a \
-         real O(log n) seek shouldn't lose ground as the table grows"
-    );
+    // The scan/seek ratio should not shrink as the table grows 10x at a
+    // time — if anything it should grow, since the scan's cost scales
+    // with row count and the seek's does not. A shrinking ratio would
+    // mean the "fast path" is secretly still paying an O(n) cost
+    // somewhere. Checked across every consecutive pair, not just the
+    // endpoints, so a regression at any one fixture size is caught.
+    for pair in ratios.windows(2) {
+        let (small_rows, small_ratio) = pair[0];
+        let (big_rows, big_ratio) = pair[1];
+        assert!(
+            big_ratio >= small_ratio * 0.5,
+            "scan/seek ratio shrank going from {small_rows} rows ({small_ratio:.1}x) to \
+             {big_rows} rows ({big_ratio:.1}x) — expected it to hold steady or widen, since a \
+             real O(log n) seek shouldn't lose ground as the table grows"
+        );
+    }
 }
