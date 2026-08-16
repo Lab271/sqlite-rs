@@ -39,7 +39,11 @@ to this header too):
     1 valid test link scores 1/5, not 100%. Per requirement:
       covered = scenarios with their own valid link
               + min(requirement-level valid links, scenarios still uncovered)
-    A requirement with no scenarios falls back to binary (any valid link).
+              - dead links (see feature 8) — a dead link is a false claim
+                of coverage, worse than no link, so it can drive a
+                requirement's score below 0, not just to 0.
+    A requirement with no scenarios falls back to binary (any valid link),
+    unless it has a dead link, in which case it scores negative too.
 
 5.  Per-scenario Tests links (preferred convention): a `**Tests:**` line
     INSIDE a `#### Scenario:` block backs exactly that scenario.
@@ -56,7 +60,12 @@ to this header too):
 
 8.  Dead-link reporting: every declared link that fails validation (missing
     file or missing symbol) is counted, summarized in the dashboard, and
-    listed per-requirement in --verbose.
+    listed per-requirement in --verbose. Penalized in Coverage (feature 4),
+    not merely excluded — a link that once worked and now dangles is
+    documentation rot, a stronger signal than a requirement that was
+    never linked at all. Dead links on `planned` requirements don't count
+    here (feature 2 excludes planned from all scoring) — a not-yet-written
+    test path on unimplemented work is a forward reference, not rot.
 
 9.  Corpus links: `**Corpus:**` fixture paths are checked for existence and
     reported at the Evidence level.
@@ -446,20 +455,34 @@ def parse_specs():
 
 
 def covered_scenarios(r):
-    """Number of a requirement's scenarios backed by a valid test link (feature 4).
+    """Net scenarios backed by a valid test link, minus a dead-link penalty (feature 4).
 
     Scenario-level links back their own scenario; requirement-level links are
-    a pool counted against scenarios not already backed directly.
+    a pool counted against scenarios not already backed directly. A dead
+    link (file/symbol validated and found missing — feature 6/7) is worse
+    than no link at all: it's a false claim of coverage, so each one
+    subtracts a full scenario's worth of credit rather than contributing
+    zero. This can drive the net below 0 — deliberately, so a
+    dead-link-heavy requirement scores visibly worse than an honestly
+    uncovered one, not the same as it.
     """
+    dead = len(r["dead_links"])
     if r["scenarios"] == 0:
-        return 0
+        return -dead
     remaining = r["scenarios"] - r["scenarios_backed"]
-    return r["scenarios_backed"] + min(r["req_level_valid"], remaining)
+    return r["scenarios_backed"] + min(r["req_level_valid"], remaining) - dead
 
 
 def scenario_coverage(r):
-    """Fraction of a requirement's falsifiable claims backed by a valid test link."""
+    """Fraction of a requirement's falsifiable claims backed by a valid test link.
+
+    Can be negative when dead links outweigh valid ones (see
+    covered_scenarios) — that's the point, not a bug: it must read as
+    worse than the 0.0 a requirement with no links at all gets.
+    """
     if r["scenarios"] == 0:
+        if r["dead_links"]:
+            return float(covered_scenarios(r))
         return 1.0 if (r["req_level_valid"] + r["scenarios_backed"]) > 0 else 0.0
     return covered_scenarios(r) / r["scenarios"]
 
@@ -523,7 +546,7 @@ def report(requirements, verbose=False, traceability_only=False):
     print(f"Completeness (S->P):  {impl_exists}/{total} requirements implemented  ({completeness:.0%})")
     print(f"Coverage (E->P):      {backed}/{total_scenarios} scenarios test-backed  ({coverage:.0%}, {direct} per-scenario)")
     if total_dead:
-        print(f"DEAD LINKS:           {total_dead} — spec links to missing file/symbol; fix the spec (see --verbose)")
+        print(f"DEAD LINKS:           {total_dead} — false claims of coverage, penalized below 0 in Coverage above; fix the spec (see --verbose)")
 
     if not traceability_only:
         corpus_total = sum(1 for r in active if r["corpus_files"])
