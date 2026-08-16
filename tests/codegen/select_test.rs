@@ -388,13 +388,103 @@ fn order_by_collate_nocase_is_case_insensitive() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// #144: an ORDER BY term that is a genuine expression (not an ordinal,
-/// alias, or bare column) is refused rather than silently accepted or
-/// producing a wrong order — the sorter's record payload only carries
-/// raw table columns today.
+/// #155: `ORDER BY <unary expr>` sorts by the computed value, not the
+/// raw column — descending by `a` here since `-a` is ascending exactly
+/// when `a` is descending.
 #[test]
-fn order_by_expression_is_refused() {
-    let (path, schema) = scratch_fixture_labeled("expr_refused");
-    assert!(our_rows(&path, &schema, "SELECT a FROM t ORDER BY -a;").is_none());
+fn order_by_unary_expression_matches_oracle() {
+    let (path, schema) = scratch_fixture_labeled("unary_expr");
+    let rows = our_rows(&path, &schema, "SELECT a FROM t ORDER BY -a;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(3)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(1)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #155: `ORDER BY <binary expr>` over a column.
+#[test]
+fn order_by_binary_expression_matches_oracle() {
+    let (path, schema) = scratch_fixture_labeled("binary_expr");
+    let rows = our_rows(&path, &schema, "SELECT a, b FROM t ORDER BY b - a;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(5)],
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(3), Value::Integer(20)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #155: `ORDER BY <scalar function call>` over a column.
+#[test]
+fn order_by_function_call_matches_oracle() {
+    let (path, schema) = scratch_fixture_labeled("function_expr");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT name FROM t ORDER BY lower(name) DESC;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Text("cc".to_string())],
+            vec![Value::Text("bb".to_string())],
+            vec![Value::Text("aa".to_string())],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #155: an alias whose own result expression is computed (not a bare
+/// column) is still usable as an ORDER BY target, resolving to that
+/// underlying expression rather than being refused. A single computed
+/// result column is used (rather than mixing it with a bare column) to
+/// stay clear of `compile_row_values`'s separate, pre-existing
+/// contiguous-registers limitation on mixed column/expression
+/// projections.
+#[test]
+fn order_by_alias_to_computed_expression_matches_oracle() {
+    let (path, schema) = scratch_fixture_labeled("alias_computed");
+    let rows = our_rows(&path, &schema, "SELECT -a AS neg FROM t ORDER BY neg;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(-3)],
+            vec![Value::Integer(-2)],
+            vec![Value::Integer(-1)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #155: a computed ORDER BY expression composes with LIMIT/OFFSET and
+/// a second, plain-column sort key.
+#[test]
+fn order_by_expression_with_limit_offset_and_second_key() {
+    let (path, schema) = scratch_fixture_labeled("expr_limit_offset");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT a, b FROM t ORDER BY -a, b LIMIT 2 OFFSET 1;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(5)],
+            vec![Value::Integer(1), Value::Integer(10)],
+        ]
+    );
     let _ = std::fs::remove_file(&path);
 }

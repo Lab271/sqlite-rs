@@ -20,6 +20,7 @@ use crate::codegen::expr::{
 };
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Target};
 use crate::parser::ast::{Distinctness, Expr, ExprKind, Literal, ResultColumn, Select};
+use crate::parser::tokenizer::Span;
 use crate::schema::TableSchema;
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
 
@@ -63,12 +64,19 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
     ));
 
     let end_label = em.new_label();
-    let order_by_keys = resolve_order_by(select, schema)?;
+    let order_by_plans = resolve_order_by(select, schema)?;
 
-    if order_by_keys.is_empty() {
+    if order_by_plans.is_empty() {
         compile_direct_scan(&mut em, &mut reg, select, schema, end_label)?;
     } else {
-        compile_sorted_scan(&mut em, &mut reg, select, schema, &order_by_keys, end_label)?;
+        compile_sorted_scan(
+            &mut em,
+            &mut reg,
+            select,
+            schema,
+            &order_by_plans,
+            end_label,
+        )?;
     }
 
     em.place(end_label);
@@ -77,14 +85,32 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
     Ok(em.finish())
 }
 
+/// Where an ORDER BY term's sort key comes from: a raw table column
+/// (known schema index, always present in the sorter's row tuple), or
+/// a genuine expression that must be computed into its own register
+/// and appended to that tuple — its position within the record isn't
+/// known until `compile_sorted_scan` actually allocates registers.
+#[derive(Debug, Clone)]
+enum OrderByTarget {
+    Column(usize),
+    Expr(Expr),
+}
+
+struct OrderByPlan {
+    target: OrderByTarget,
+    descending: bool,
+    collation: Collation,
+    nulls_first: bool,
+}
+
 fn resolve_order_by(
     select: &Select,
     schema: &TableSchema,
-) -> Result<Vec<SortKeyColumn>, CodegenError> {
-    let mut keys = Vec::with_capacity(select.order_by.len());
+) -> Result<Vec<OrderByPlan>, CodegenError> {
+    let mut plans = Vec::with_capacity(select.order_by.len());
     for term in &select.order_by {
         let base_expr = strip_collate(&term.expr);
-        let idx = resolve_order_by_target(base_expr, select, schema)?;
+        let target = resolve_order_by_target(base_expr, select, schema)?;
         let descending = term.desc.unwrap_or(false);
         // No NULLS clause defaults to NULLS FIRST for ASC, NULLS LAST for
         // DESC (SQLite's default, matching this compiler's prior
@@ -92,14 +118,14 @@ fn resolve_order_by(
         let nulls_first = term
             .nulls_last
             .map_or(!descending, |nulls_last| !nulls_last);
-        keys.push(SortKeyColumn {
-            index: idx,
+        plans.push(OrderByPlan {
+            target,
             descending,
             collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
             nulls_first,
         });
     }
-    Ok(keys)
+    Ok(plans)
 }
 
 /// Unwraps `expr COLLATE name` (and surrounding parens) down to the
@@ -112,16 +138,26 @@ fn strip_collate(expr: &Expr) -> &Expr {
     }
 }
 
-/// One result column as seen by ORDER BY ordinal/alias resolution:
-/// the underlying table column it reads (`None` for a computed
-/// expression, which can't yet be a sort key — see the `Unsupported`
-/// case in `resolve_order_by_target`) and its `AS` alias, if any.
-/// `*`/`table.*` expand against `schema` the same way `result_columns`
-/// does, since this compiler is single-table (V2 scope).
+/// One result column as seen by ORDER BY ordinal/alias resolution: its
+/// full expression (so an ordinal/alias resolving to a computed
+/// expression can still become an `OrderByTarget::Expr`) and its `AS`
+/// alias, if any. `*`/`table.*` expand against `schema` the same way
+/// `result_columns` does, since this compiler is single-table (V2
+/// scope).
 struct OrderByEntry {
-    column: Option<String>,
+    expr: Expr,
     alias: Option<String>,
 }
+
+/// A dummy span for expressions synthesized during `*`/`table.*`
+/// expansion — not sourced from any actual token, so never used for
+/// error reporting.
+const SYNTHETIC_SPAN: Span = Span {
+    line: 0,
+    column: 0,
+    offset: 0,
+    len: 0,
+};
 
 fn order_by_entries(select: &Select, schema: &TableSchema) -> Vec<OrderByEntry> {
     let mut out = Vec::new();
@@ -130,37 +166,50 @@ fn order_by_entries(select: &Select, schema: &TableSchema) -> Vec<OrderByEntry> 
             ResultColumn::Star | ResultColumn::TableStar { .. } => {
                 for name in &schema.columns {
                     out.push(OrderByEntry {
-                        column: Some(name.clone()),
+                        expr: Expr {
+                            kind: ExprKind::Column {
+                                table: None,
+                                catalog: None,
+                                name: name.clone(),
+                            },
+                            span: SYNTHETIC_SPAN,
+                        },
                         alias: None,
                     });
                 }
             }
-            ResultColumn::Expr { expr, alias } => {
-                let column = match &expr.kind {
-                    ExprKind::Column {
-                        table: None, name, ..
-                    } => Some(name.clone()),
-                    _ => None,
-                };
-                out.push(OrderByEntry {
-                    column,
-                    alias: alias.clone(),
-                });
-            }
+            ResultColumn::Expr { expr, alias } => out.push(OrderByEntry {
+                expr: expr.clone(),
+                alias: alias.clone(),
+            }),
         }
     }
     out
 }
 
-const UNSUPPORTED_SORT_KEY: &str = "ORDER BY only supports column references, ordinals and \
-    aliases resolving to a column in this V2-scope compiler — a computed sort key would need \
-    the sorter's record payload extended beyond raw table columns";
+/// Resolves a result-column expression to its `OrderByTarget`: a bare
+/// unqualified column becomes a direct schema index (already present
+/// in the sorter's row tuple), anything else becomes a computed
+/// expression that `compile_sorted_scan` appends to that tuple.
+fn order_by_target_for_expr(
+    expr: &Expr,
+    schema: &TableSchema,
+) -> Result<OrderByTarget, CodegenError> {
+    match &expr.kind {
+        ExprKind::Column {
+            table: None, name, ..
+        } => column_index(schema, name)
+            .map(OrderByTarget::Column)
+            .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() }),
+        _ => Ok(OrderByTarget::Expr(expr.clone())),
+    }
+}
 
 fn resolve_order_by_target(
     expr: &Expr,
     select: &Select,
     schema: &TableSchema,
-) -> Result<usize, CodegenError> {
+) -> Result<OrderByTarget, CodegenError> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(n)) => {
             let entries = order_by_entries(select, schema);
@@ -175,13 +224,7 @@ fn resolve_order_by_target(
                         entries.len()
                     ),
                 })?;
-            match &entry.column {
-                Some(name) => column_index(schema, name)
-                    .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() }),
-                None => Err(CodegenError::Unsupported {
-                    reason: UNSUPPORTED_SORT_KEY.to_string(),
-                }),
-            }
+            order_by_target_for_expr(&entry.expr, schema)
         }
         ExprKind::Column {
             table: None, name, ..
@@ -194,23 +237,13 @@ fn resolve_order_by_target(
                 .iter()
                 .find(|e| e.alias.as_deref() == Some(name.as_str()))
             {
-                return match &entry.column {
-                    Some(col_name) => {
-                        column_index(schema, col_name).ok_or_else(|| CodegenError::UnknownColumn {
-                            name: col_name.clone(),
-                        })
-                    }
-                    None => Err(CodegenError::Unsupported {
-                        reason: UNSUPPORTED_SORT_KEY.to_string(),
-                    }),
-                };
+                return order_by_target_for_expr(&entry.expr, schema);
             }
             column_index(schema, name)
+                .map(OrderByTarget::Column)
                 .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })
         }
-        _ => Err(CodegenError::Unsupported {
-            reason: UNSUPPORTED_SORT_KEY.to_string(),
-        }),
+        _ => order_by_target_for_expr(expr, schema),
     }
 }
 
@@ -450,7 +483,7 @@ fn compile_sorted_scan(
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
-    order_by_keys: &[SortKeyColumn],
+    order_by_plans: &[OrderByPlan],
     end_label: Label,
 ) -> Result<(), CodegenError> {
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
@@ -461,18 +494,26 @@ fn compile_sorted_scan(
             0,
         ));
     }
-    em.emit(Instruction::with_p4(
+    // The sort-key descriptor (which register each term reads) isn't
+    // known until pass 1 below actually allocates the computed-expression
+    // registers, so `SorterOpen` is emitted with a placeholder P4 and
+    // patched once that layout is known — it must still precede the scan
+    // loop in program order.
+    let sorter_open_addr = em.emit(Instruction::with_p4(
         Opcode::SorterOpen,
         SORT_CURSOR,
         0,
         0,
-        P4::SortKey(order_by_keys.to_vec()),
+        P4::None,
     ));
 
-    // Pass 1: buffer every matching row's full column tuple into the
+    // Pass 1: buffer every matching row's full column tuple — plus a
+    // trailing register per computed ORDER BY expression — into the
     // sorter, WHERE-filtered but pre-DISTINCT/LIMIT (those apply on
     // the sorted output, matching SQLite's own ORDER BY pipeline
-    // shape).
+    // shape). The trailing expression registers are never read back by
+    // `emit_result_row` (it only ever projects `select.columns`), so
+    // they exist purely as sort keys.
     let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
     let sort_step = em.new_label();
     em.patch_p2(scan_rewind, sort_step);
@@ -493,7 +534,7 @@ fn compile_sorted_scan(
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
         )?;
     }
-    let (first, count) = compile_row_values(
+    let (first, _schema_count) = compile_row_values(
         em,
         reg,
         schema,
@@ -504,6 +545,33 @@ fn compile_sorted_scan(
             .collect::<Vec<_>>(),
         TABLE_CURSOR,
     )?;
+
+    // Compute every genuine-expression sort key into its own register,
+    // appended after the schema-column block. A key's final register
+    // need not be the highest one its expression allocates (e.g. `CASE`
+    // allocates its destination before its branches), so the record's
+    // span is widened to `reg`'s post-compile watermark rather than
+    // trusting the last returned register — any intervening temporary
+    // just becomes an unread extra field.
+    let mut sort_keys = Vec::with_capacity(order_by_plans.len());
+    for plan in order_by_plans {
+        let index = match &plan.target {
+            OrderByTarget::Column(idx) => *idx,
+            OrderByTarget::Expr(expr) => {
+                let r = compile_value(em, reg, schema, TABLE_CURSOR, expr)?;
+                usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+            }
+        };
+        sort_keys.push(SortKeyColumn {
+            index,
+            descending: plan.descending,
+            collation: plan.collation,
+            nulls_first: plan.nulls_first,
+        });
+    }
+    em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
+
+    let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
     let record_reg = reg.alloc();
     em.emit(Instruction::new(
         Opcode::MakeRecord,

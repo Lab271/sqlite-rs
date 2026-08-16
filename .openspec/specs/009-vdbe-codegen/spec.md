@@ -557,16 +557,35 @@ sorter-sourced rows.
   aliases-of-columns both bottom out at a raw table column index — and
   an out-of-range ordinal or an unresolvable alias is rejected the same
   way an unknown bare column name already is
-- GIVEN `SELECT a FROM t ORDER BY -a` (a genuine expression, not an
-  ordinal/alias/bare column)
-- THEN the term is refused with a reason naming the sorter-contract
-  limitation (the sorter's record payload carries only raw table
-  columns, not computed values) rather than silently accepted or
-  answering a wrong order
-
 **Tests:** `tests/codegen/select_test.rs::order_by_ordinal_resolves_result_column`,
-`tests/codegen/select_test.rs::order_by_alias_resolves_result_column`,
-`tests/codegen/select_test.rs::order_by_expression_is_refused`
+`tests/codegen/select_test.rs::order_by_alias_resolves_result_column`
+
+#### Scenario: ORDER BY terms may be genuine expressions, not just columns/ordinals/aliases (#155)
+
+- GIVEN `SELECT a FROM t ORDER BY -a` (a unary expression),
+  `SELECT a, b FROM t ORDER BY b - a` (binary), `SELECT name FROM t
+  ORDER BY lower(name) DESC` (a scalar function call), or
+  `SELECT -a AS neg FROM t ORDER BY neg` (an alias whose own result
+  expression is computed rather than a bare column)
+- THEN `compile_sorted_scan` computes the term into its own register,
+  appended after the raw schema-column block already fed to
+  `MakeRecord`/`SorterInsert` — `SortKeyColumn.index` points at that
+  register's position in the record, resolved once pass 1's codegen
+  has actually allocated registers (the `SorterOpen` `P4::SortKey`
+  descriptor is patched in after the fact rather than computed
+  up-front) — and the sorted output matches the oracle exactly,
+  including in combination with LIMIT/OFFSET and a second, plain
+  sort key
+- The final `ResultRow` projection (`emit_result_row`) is unaffected:
+  it only ever reads `select.columns` from the pseudo-cursor's
+  decoded record, so the trailing sort-key-only registers are never
+  projected
+
+**Tests:** `tests/codegen/select_test.rs::order_by_unary_expression_matches_oracle`,
+`tests/codegen/select_test.rs::order_by_binary_expression_matches_oracle`,
+`tests/codegen/select_test.rs::order_by_function_call_matches_oracle`,
+`tests/codegen/select_test.rs::order_by_alias_to_computed_expression_matches_oracle`,
+`tests/codegen/select_test.rs::order_by_expression_with_limit_offset_and_second_key`
 
 #### Scenario: NULL is comparison-distinct across `=`, DISTINCT, and ORDER BY (#146)
 
