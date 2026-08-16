@@ -66,7 +66,12 @@ to this header too):
 
 11. CI gate: --min X exits 1 if completeness OR coverage is below X.
 
-12. Model level — three sources, cross-checked:
+12. Opcode completeness: VDBE opcodes dispatched in `src/vdbe/exec.rs`
+    vs. the harvested scope in `tools/opcodes-v2.json` (#58/#65). Shown
+    in the Model section once phase 3 (#89/#90/#91) gives it a nonzero
+    denominator to count against.
+
+13. Model level — three sources, cross-checked:
     - Cargo.toml: crate version, mapped to V-block/phase/epic via
       VERSION_MAP (one minor per completed plan phase; released =
       last completed phase, in-flight = next minor)
@@ -104,6 +109,8 @@ PARITY_DIR = REPO_ROOT / "tests" / "parity"
 PARITY_DIMENSIONS = ("acceptance", "output", "schema", "plan")
 CARGO_TOML = REPO_ROOT / "Cargo.toml"
 PLAN_PATH = REPO_ROOT / ".openspec" / "plan.md"
+OPCODES_JSON = REPO_ROOT / "tools" / "opcodes-v2.json"
+VDBE_EXEC = REPO_ROOT / "src" / "vdbe" / "exec.rs"
 
 # Versioning policy (CHANGELOG): one minor per completed plan phase.
 # minor -> (value block, phase, epic). Extend as blocks are planned.
@@ -169,6 +176,34 @@ def parity_model():
                     dims_hit.add(dim)
         blocks[block] = len(dims_hit)
     return blocks
+
+
+def opcode_model():
+    """VDBE opcodes dispatched (`src/vdbe/exec.rs`) vs. harvested scope
+    (`tools/opcodes-v2.json`, #58/#65). Returns (implemented, total) or
+    None if either input is missing.
+
+    Heuristic, same style as parity_model()/tier_model(): an opcode
+    counts as implemented if `dispatch`'s match has a real arm for it,
+    not the `other => Unimplemented` catch-all. `Opcode::ALL`
+    (src/vdbe/program.rs) is checked against this same JSON by
+    tests/vdbe/opcode_completeness_test.rs, so the total here always
+    equals the full frozen set.
+    """
+    if not OPCODES_JSON.exists() or not VDBE_EXEC.exists():
+        return None
+    import json
+
+    harvested = set(json.loads(OPCODES_JSON.read_text())["opcodes"])
+    m = re.search(r"fn dispatch\b.*?\{(.*)\n\}\n", VDBE_EXEC.read_text(), re.DOTALL)
+    if not m:
+        return None
+    implemented = set()
+    for line in m.group(1).splitlines():
+        arm = re.match(r"\s*(\w+)\s*=>", line)
+        if arm and arm.group(1) not in ("other", "_"):
+            implemented.add(arm.group(1))
+    return len(implemented & harvested), len(harvested)
 
 
 TIERS_DIR = REPO_ROOT / "tests" / "tiers"
@@ -246,6 +281,10 @@ def report_model():
     if tiers:
         parts = " · ".join(f"{k} {active}/{total}" for k, (active, total) in sorted(tiers.items()))
         print(f"Tier contracts:       {parts}")
+    opcodes = opcode_model()
+    if opcodes:
+        impl, total = opcodes
+        print(f"Opcode completeness:  {impl}/{total} VDBE opcodes dispatched (tools/opcodes-v2.json, #65)")
     print()
 
 

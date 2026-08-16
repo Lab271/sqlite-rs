@@ -4,6 +4,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.5] - 2026-08-16
+
+### Added
+
+- Wired `tools/opcodes-v2.json` (the oracle-harvested 52-opcode set,
+  #58) into `tools/assurance.py` as a VDBE completeness checklist (#65),
+  now that phase 3A (#89) landed a real dispatch table to count
+  against: an `Opcode completeness:` line in the Model section reports
+  how many opcodes `src/vdbe/exec.rs`'s `dispatch` actually handles
+  versus the harvested total (30/52 as phase 3A lands).
+  `Opcode::ALL` (`src/vdbe/program.rs`) plus
+  `tests/vdbe/opcode_completeness_test.rs` keep the enum and the
+  harvested set from drifting apart silently.
+
 ## [0.6.4] - 2026-08-16
 
 ### Added

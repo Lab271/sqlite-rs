@@ -483,11 +483,19 @@ matching branch's result is computed.
 
 ## Traceability Note
 
-This spec's `**Implementation:**` links are all `(planned)` — no VDBE
-execution code exists yet (`src/vdbe.rs` is presently 18 lines of
-re-exports for spec 008's value-semantics modules only). Per
-`.openspec/README.md`'s dashboard convention, `(planned)` requirements are
-excluded from completeness/coverage scoring until phase 3 tickets
-(#89/#90/#91) land the corresponding modules and flip these links active.
-`tests/opcode_completeness.rs` — see #65 — will assert this spec's opcode
-inventory equals `tools/opcodes-v2.json` exactly once wired.
+Phase 3A (#89) landed the VDBE core: Requirements 1, 2 (register file;
+the cursor-slot table itself is #90), 3, 5 (compare/affinity; cursor-slot
+comparisons stay #90), 6, and 8 have active `**Implementation:**` links.
+Requirements 4 (cursor), 7 (function registry), 9 (sorter), and 10
+(EXPLAIN) stay `(planned)` pending #90/#91; Requirement 11 (expression
+emission) stays `(planned)` pending #91's codegen work. Per
+`.openspec/README.md`'s dashboard convention, `(planned)` requirements
+are excluded from completeness/coverage scoring until their tickets land
+and flip the links active.
+
+`tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
+(`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
+harvested opcode set — the full 52-opcode inventory, independent of how
+many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
+line tracks how many of those 52 are actually dispatched in
+`src/vdbe/exec.rs` (30/52 as phase 3A lands, #65).

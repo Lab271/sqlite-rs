@@ -72,6 +72,128 @@ pub enum Opcode {
     Sort,
 }
 
+impl Opcode {
+    /// All 52 variants, in enum-declaration order — the harvested
+    /// inventory `tests/vdbe/opcode_completeness_test.rs` checks against
+    /// `tools/opcodes-v2.json` (#65). Kept honest by `_exhaustive` below:
+    /// an unmatched new variant fails the build rather than silently
+    /// falling out of this list.
+    pub const ALL: [Opcode; 52] = [
+        Opcode::Init,
+        Opcode::Goto,
+        Opcode::Once,
+        Opcode::BeginSubrtn,
+        Opcode::Return,
+        Opcode::Halt,
+        Opcode::Transaction,
+        Opcode::IfNot,
+        Opcode::IfNotZero,
+        Opcode::IfPos,
+        Opcode::DecrJumpZero,
+        Opcode::IsNull,
+        Opcode::NotNull,
+        Opcode::MustBeInt,
+        Opcode::OffsetLimit,
+        Opcode::OpenRead,
+        Opcode::OpenEphemeral,
+        Opcode::OpenPseudo,
+        Opcode::Rewind,
+        Opcode::Last,
+        Opcode::Next,
+        Opcode::Column,
+        Opcode::Rowid,
+        Opcode::SeekRowid,
+        Opcode::NullRow,
+        Opcode::Sequence,
+        Opcode::Found,
+        Opcode::IdxInsert,
+        Opcode::IdxLE,
+        Opcode::Delete,
+        Opcode::Eq,
+        Opcode::Ge,
+        Opcode::Gt,
+        Opcode::Le,
+        Opcode::Lt,
+        Opcode::RealAffinity,
+        Opcode::Add,
+        Opcode::Subtract,
+        Opcode::Multiply,
+        Opcode::Divide,
+        Opcode::Remainder,
+        Opcode::Function,
+        Opcode::Integer,
+        Opcode::String8,
+        Opcode::MakeRecord,
+        Opcode::ResultRow,
+        Opcode::SorterOpen,
+        Opcode::SorterInsert,
+        Opcode::SorterSort,
+        Opcode::SorterNext,
+        Opcode::SorterData,
+        Opcode::Sort,
+    ];
+}
+
+/// Unused at runtime — its only job is to fail to compile if `Opcode`
+/// gains a variant that `Opcode::ALL` doesn't list.
+#[allow(dead_code)]
+fn _exhaustive(o: Opcode) {
+    match o {
+        Opcode::Init
+        | Opcode::Goto
+        | Opcode::Once
+        | Opcode::BeginSubrtn
+        | Opcode::Return
+        | Opcode::Halt
+        | Opcode::Transaction
+        | Opcode::IfNot
+        | Opcode::IfNotZero
+        | Opcode::IfPos
+        | Opcode::DecrJumpZero
+        | Opcode::IsNull
+        | Opcode::NotNull
+        | Opcode::MustBeInt
+        | Opcode::OffsetLimit
+        | Opcode::OpenRead
+        | Opcode::OpenEphemeral
+        | Opcode::OpenPseudo
+        | Opcode::Rewind
+        | Opcode::Last
+        | Opcode::Next
+        | Opcode::Column
+        | Opcode::Rowid
+        | Opcode::SeekRowid
+        | Opcode::NullRow
+        | Opcode::Sequence
+        | Opcode::Found
+        | Opcode::IdxInsert
+        | Opcode::IdxLE
+        | Opcode::Delete
+        | Opcode::Eq
+        | Opcode::Ge
+        | Opcode::Gt
+        | Opcode::Le
+        | Opcode::Lt
+        | Opcode::RealAffinity
+        | Opcode::Add
+        | Opcode::Subtract
+        | Opcode::Multiply
+        | Opcode::Divide
+        | Opcode::Remainder
+        | Opcode::Function
+        | Opcode::Integer
+        | Opcode::String8
+        | Opcode::MakeRecord
+        | Opcode::ResultRow
+        | Opcode::SorterOpen
+        | Opcode::SorterInsert
+        | Opcode::SorterSort
+        | Opcode::SorterNext
+        | Opcode::SorterData
+        | Opcode::Sort => {}
+    }
+}
+
 /// P4's dynamic type: absent, an integer constant, a string constant
 /// (or function/index descriptor), or a collation-sequence-plus-affinity
 /// descriptor used by the compare opcodes (e.g. `"BINARY-8"`).
