@@ -4,6 +4,26 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.6.2] - 2026-08-16
+
+### Fixed
+
+- **`tests/tiers/tier1.rs`**: flipped the `t1_expression_kernel_affinity_and_collation_vectors`
+  stub, un-ignored since #78 (value-semantics kernel) shipped in 0.6.0 but
+  was never flipped — a tier-stub-flip process gap caught by a parity
+  review. Mirrors the sibling `t1_scalar_functions_match_oracle` pattern: a
+  light direct-API smoke test over `affinity_of`/`apply_affinity`/`compare`/
+  `compare_text`, with full oracle-vector coverage remaining in
+  `expr_vectors_test.rs`. Spend: trivial.
+
+### Docs
+
+- **`CLAUDE.md`**: added an "Epic & phase breakdown conventions" section
+  documenting the `V{N} phase {M}[{letter}]` ticket-naming and
+  one-minor-per-completed-phase versioning pattern already in use on epic
+  #56, so future epics (V3+) follow it consistently instead of
+  re-deriving it each time.
+
 ## [0.6.1] - 2026-08-15
 
 ### Fixed
