@@ -23,3 +23,7 @@ AGENTS.md
 
 # SQLite shared-memory files, created transiently even by read-only opens of WAL-mode databases
 *.db-shm
+
+# Python bytecode from tools/*.py
+__pycache__/
+*.pyc
