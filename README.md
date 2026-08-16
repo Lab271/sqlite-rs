@@ -61,7 +61,7 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.6.3** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0.
+**Version 0.6.4** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0.
 
 All four V1 phases landed: format core (header, record decoder, VFS, pinned-oracle corpus), b-tree cursors incl. WITHOUT ROWID + minimal DDL reader, mid-life reading (pager, WAL frame recovery, safe-reader locking validated against live sqlite3), and the `sqlite-rs dump`/`export` CLI with shell-parity output.
 

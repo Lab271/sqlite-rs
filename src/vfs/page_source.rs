@@ -77,3 +77,41 @@ impl PageSource for VfsPageSource {
         Ok(buf)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::vfs::MemoryVfs;
+    use std::path::Path;
+
+    #[test]
+    fn page_zero_is_rejected() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![0u8; 16]);
+        let source = VfsPageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        assert!(matches!(
+            source.read_page(0),
+            Err(PageError::InvalidPageNumber)
+        ));
+    }
+
+    #[test]
+    fn short_file_reports_short_read() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![0u8; 8]);
+        let source = VfsPageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        match source.read_page(1) {
+            Err(PageError::ShortRead {
+                page_num,
+                expected,
+                got,
+            }) => {
+                assert_eq!(page_num, 1);
+                assert_eq!(expected, 16);
+                assert_eq!(got, 8);
+            }
+            other => panic!("expected ShortRead, got {other:?}"),
+        }
+    }
+}
