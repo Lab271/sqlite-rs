@@ -136,6 +136,22 @@ def crate_version():
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
+def oracle_target():
+    """Pinned sqlite3 version from Cargo.toml's [package.metadata.oracle].
+
+    One value drives the oracle binary, the parse.y the grammar is
+    re-derived from, and the TCL suite the SQL corpus is extracted from;
+    `make version-pin` keeps the sites that cannot read it at run time
+    (oracle.rs's const, CI's env) in agreement.
+    """
+    m = re.search(
+        r'^\[package\.metadata\.oracle\]\s*$.*?^version\s*=\s*"([^"]+)"',
+        CARGO_TOML.read_text(),
+        re.MULTILINE | re.DOTALL,
+    )
+    return m.group(1) if m else None
+
+
 def plan_blocks():
     """Value blocks from plan.md's '## Value Blocks' table: {V-block: description}."""
     if not PLAN_PATH.exists():
@@ -283,6 +299,15 @@ def report_model():
             print(f"Version {vstr} (no VERSION_MAP entry — extend the map)")
     if blocks:
         print(f"Plan:                 {len(blocks)} value blocks (.openspec/plan.md)")
+    target = oracle_target()
+    if target:
+        print(f"Oracle target:        sqlite {target} — pinned in Cargo.toml [package.metadata.oracle]")
+        detail.append(
+            f"Oracle target:        sqlite {target} drives the oracle binary, parse.y and the "
+            "TCL corpus; all pin sites gated by `make version-pin`"
+        )
+    else:
+        print("Oracle target:        [package.metadata.oracle] missing from Cargo.toml")
     model = grammar_model()
     if model:
         total = sum(model.values())
