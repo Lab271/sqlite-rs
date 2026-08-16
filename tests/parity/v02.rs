@@ -46,6 +46,16 @@ const CASES: &[ParityCase] = &[
         name: "distinct",
         sql: "SELECT DISTINCT b FROM t WHERE a <= 2",
     },
+    // #144: ORDER BY ordinals and result-column aliases, not just bare
+    // table-column references.
+    ParityCase {
+        name: "order_by_ordinal",
+        sql: "SELECT a, b FROM t ORDER BY 2 DESC LIMIT 3",
+    },
+    ParityCase {
+        name: "order_by_alias",
+        sql: "SELECT a, b AS x FROM t ORDER BY x DESC LIMIT 3",
+    },
 ];
 
 /// Three-valued logic over a fixture that actually contains NULLs

@@ -495,6 +495,27 @@ sorter-sourced rows.
 
 **Tests:** `src/vdbe/sorter.rs::tests::sort_key_descriptor_drives_multi_column_order`
 
+#### Scenario: ORDER BY terms resolve ordinals and result-column aliases, not just bare columns (#144)
+
+- GIVEN `SELECT a, b FROM t ORDER BY 2 DESC` (an ordinal) and
+  `SELECT a, b AS x FROM t ORDER BY x DESC` (a result-column alias)
+- THEN both resolve to the same underlying table column
+  `resolve_order_by` would use for a bare `ORDER BY b` — no new
+  `SortKeyColumn`/sorter-record shape is needed, since ordinals and
+  aliases-of-columns both bottom out at a raw table column index — and
+  an out-of-range ordinal or an unresolvable alias is rejected the same
+  way an unknown bare column name already is
+- GIVEN `SELECT a FROM t ORDER BY -a` (a genuine expression, not an
+  ordinal/alias/bare column)
+- THEN the term is refused with a reason naming the sorter-contract
+  limitation (the sorter's record payload carries only raw table
+  columns, not computed values) rather than silently accepted or
+  answering a wrong order
+
+**Tests:** `tests/codegen/select_test.rs::order_by_ordinal_resolves_result_column`,
+`tests/codegen/select_test.rs::order_by_alias_resolves_result_column`,
+`tests/codegen/select_test.rs::order_by_expression_is_refused`
+
 ### Requirement 10: EXPLAIN Output Format [MUST]
 
 `EXPLAIN <stmt>` MUST render the compiled program as a table with columns

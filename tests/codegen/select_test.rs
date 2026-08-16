@@ -27,9 +27,14 @@ fn pinned_oracle() -> Option<PathBuf> {
 }
 
 fn scratch_fixture() -> (PathBuf, TableSchema) {
+    scratch_fixture_labeled("default")
+}
+
+fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
     let path = std::env::temp_dir().join(format!(
-        "sqlite_rs_codegen_select_test_{}.db",
-        std::process::id()
+        "sqlite_rs_codegen_select_test_{}_{}.db",
+        std::process::id(),
+        label
     ));
     let _ = std::fs::remove_file(&path);
     let status = Command::new("sqlite3")
@@ -291,5 +296,114 @@ fn order_by_desc_default_places_nulls_last() {
             vec![Value::Null],
         ]
     );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: `ORDER BY <ordinal>` resolves 1-based against the result-column
+/// list, same as `sqlite3`.
+#[test]
+fn order_by_ordinal_resolves_result_column() {
+    let (path, schema) = scratch_fixture_labeled("ordinal");
+    let rows = our_rows(&path, &schema, "SELECT a, b FROM t ORDER BY 2 DESC;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(3), Value::Integer(20)],
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(5)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: an out-of-range ordinal is rejected rather than silently
+/// wrapping or panicking.
+#[test]
+fn order_by_ordinal_out_of_range_is_rejected() {
+    let (path, schema) = scratch_fixture_labeled("ordinal_oor");
+    assert!(our_rows(&path, &schema, "SELECT a, b FROM t ORDER BY 3;").is_none());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: `ORDER BY <alias>` resolves against the result-column alias
+/// before falling back to a table column of the same name.
+#[test]
+fn order_by_alias_resolves_result_column() {
+    let (path, schema) = scratch_fixture_labeled("alias");
+    let rows = our_rows(&path, &schema, "SELECT a, b AS x FROM t ORDER BY x DESC;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(3), Value::Integer(20)],
+            vec![Value::Integer(1), Value::Integer(10)],
+            vec![Value::Integer(2), Value::Integer(5)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: an unknown alias/column name in ORDER BY is still rejected.
+#[test]
+fn order_by_unknown_name_is_rejected() {
+    let (path, schema) = scratch_fixture_labeled("unknown_name");
+    assert!(our_rows(&path, &schema, "SELECT a FROM t ORDER BY nope;").is_none());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: `ORDER BY ... COLLATE NOCASE` is honoured rather than always
+/// comparing under BINARY.
+#[test]
+fn order_by_collate_nocase_is_case_insensitive() {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_collate_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(name TEXT); \
+             INSERT INTO t VALUES ('bb'), ('AA'), ('cc');",
+        )
+        .status()
+        .expect("creating collate fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["name".to_string()],
+        column_types: vec!["TEXT".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+    };
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT name FROM t ORDER BY name COLLATE NOCASE;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Text("AA".to_string())],
+            vec![Value::Text("bb".to_string())],
+            vec![Value::Text("cc".to_string())],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #144: an ORDER BY term that is a genuine expression (not an ordinal,
+/// alias, or bare column) is refused rather than silently accepted or
+/// producing a wrong order — the sorter's record payload only carries
+/// raw table columns today.
+#[test]
+fn order_by_expression_is_refused() {
+    let (path, schema) = scratch_fixture_labeled("expr_refused");
+    assert!(our_rows(&path, &schema, "SELECT a FROM t ORDER BY -a;").is_none());
     let _ = std::fs::remove_file(&path);
 }

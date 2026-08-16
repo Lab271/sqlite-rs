@@ -6,6 +6,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-08-16
+
+### Added
+
+- `ORDER BY` resolves 1-based ordinals (`ORDER BY 2`) and result-column
+  aliases (`ORDER BY x`), not just bare table-column references (#144).
+  Aliases take precedence over table columns, matching SQLite.
+  `ORDER BY ... COLLATE name` now reads the actual collation instead of
+  always comparing under BINARY. Both resolve to the same underlying
+  table-column index a bare column reference already used, so no
+  sorter/`SortKeyColumn` change was needed. Genuine expression sort keys
+  (`ORDER BY -i`, `ORDER BY lower(s)`) still refuse — extending the
+  sorter's record payload for computed values is tracked separately
+  (#155).
+
 ## [0.7.4] - 2026-08-16
 
 ### Fixed
