@@ -11,12 +11,13 @@ on:
       - "**.md"
 
 env:
-  # Must match `ORACLE_VERSION` in tests/corpus/oracle.rs and the pin in
-  # tools/gen_fixtures.sh. The oracle diffs skip green when no sqlite3 of
-  # exactly this version is found, so an unpinned runner would turn the
-  # corpus job into theatre rather than a gate.
-  SQLITE_ORACLE_VERSION: "3.53.3"
-  SQLITE_ORACLE_TARBALL: "sqlite-autoconf-3530300"
+  # Must match Cargo.toml's [package.metadata.oracle] version — the single
+  # source of truth — as must SQLITE_ORACLE_TARBALL's encoded form. Both are
+  # enforced by `make version-pin`. The oracle diffs skip green when no
+  # sqlite3 of exactly this version is found, so an unpinned runner would turn
+  # the corpus job into theatre rather than a gate.
+  SQLITE_ORACLE_VERSION: "3.53.4"
+  SQLITE_ORACLE_TARBALL: "sqlite-autoconf-3530400"
 
 jobs:
   gate:
@@ -66,6 +67,7 @@ jobs:
           fi
           echo "oracle: $ORACLE ($found, non-codec)"
 
+      - run: make version-pin
       - run: make test
       - run: make lint
       - run: make deny

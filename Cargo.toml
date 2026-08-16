@@ -63,13 +63,22 @@ path = "tests/proptest/record_proptest.rs"
 [dev-dependencies]
 proptest = "1"
 
-# Single source of truth for the pinned oracle sqlite3 version. Currently
-# read only by tools/harvest_opcodes.py; tools/gen_fixtures.sh and
-# tests/corpus/oracle.rs still carry their own "3.53.3" literal (kept in
-# sync by hand) — unifying those onto this value is a follow-up, out of
-# scope for the opcode-harvest spike (#58) this was added for.
+# Single source of truth for the pinned sqlite3 version — the oracle binary,
+# the parse.y the grammar is re-derived from, and the TCL suite the SQL corpus
+# is extracted from all track this one value.
+#
+# Read directly by tools/harvest_opcodes.py, tools/grammar_drift.py,
+# tools/extract_sql_corpus.py and tools/gen_fixtures.sh. The sites that cannot
+# read it at run time — tests/corpus/oracle.rs (a `const`) and CI's
+# SQLITE_ORACLE_VERSION — are held to it by the `make version-pin` gate, so
+# they cannot drift silently.
+#
+# Bumping this is a deliberate, reviewed event (spec 004 Requirement 1): it
+# invalidates committed fixtures, tools/opcodes-v2.json and the grammar's
+# parse.y line citations. Bump, then re-run `make fixtures opcodes sql-corpus
+# grammar-drift test-corpus`.
 [package.metadata.oracle]
-version = "3.53.3"
+version = "3.53.4"
 
 [lints.clippy]
 unwrap_used = "deny"

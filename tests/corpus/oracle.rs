@@ -14,7 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const ORACLE_VERSION: &str = "3.53.3";
+/// Must equal Cargo.toml's `[package.metadata.oracle] version` — a
+/// `const` cannot read it at run time, so `make version-pin` enforces
+/// the agreement.
+pub const ORACLE_VERSION: &str = "3.53.4";
 
 pub fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/fixtures")
@@ -36,7 +39,7 @@ pub fn support_dir() -> PathBuf {
 /// `PATH` is whatever the OS ships — on macOS that is `/usr/bin/sqlite3`,
 /// an Apple build that `gen_fixtures.sh` explicitly refuses (it is
 /// codec-enabled) and whose `-csv` mode terminates rows with `\n` where
-/// upstream 3.53.3 uses `\r\n`. Diffing against it silently passed a real
+/// upstream 3.53.4 uses `\r\n`. Diffing against it silently passed a real
 /// line-ending bug in this crate's CSV output for the entire life of
 /// `dump_oracle_test.rs`. An oracle that isn't the pinned oracle isn't an
 /// oracle.

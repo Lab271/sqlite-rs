@@ -11,11 +11,24 @@
 # uses the codec-enabled system binary, since it's the only reliable way to
 # produce a structurally valid reserved_space=12 database.
 set -euo pipefail
-FIXTURES_DIR="${FIXTURES_DIR:-$(dirname "$0")/../tests/corpus/fixtures}"
+
+# Resolved before the `cd` below, so a relative $0 still finds Cargo.toml.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Read from Cargo.toml's [package.metadata.oracle] — the one place the sqlite3
+# pin is declared. Kept as plain sed so this script needs no python3.
+ORACLE_VERSION="$(
+  sed -n '/^\[package\.metadata\.oracle\]/,/^\[lints/p' "$REPO_ROOT/Cargo.toml" \
+    | sed -n 's/^version *= *"\([^"]*\)".*/\1/p'
+)"
+[ -n "$ORACLE_VERSION" ] || {
+  echo "error: could not read [package.metadata.oracle] version from Cargo.toml" >&2
+  exit 1
+}
+
+FIXTURES_DIR="${FIXTURES_DIR:-$REPO_ROOT/tests/corpus/fixtures}"
 mkdir -p "$FIXTURES_DIR"
 cd "$FIXTURES_DIR"
-
-ORACLE_VERSION="3.53.3"
 CODEC_SQLITE3="${CODEC_SQLITE3:-/usr/bin/sqlite3}"
 
 find_oracle() {

@@ -59,6 +59,7 @@ import argparse
 import re
 import sys
 import tarfile
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -73,9 +74,11 @@ SQLLOGICTEST_URL = (
     f"https://codeload.github.com/gregrahn/sqllogictest/tar.gz/{SQLLOGICTEST_SHA}"
 )
 
-# Matches Cargo.toml [package.metadata.oracle] so extracted SQL lines up with
-# the sqlite3 the corpus labels are validated against.
-SQLITE_VERSION = "3.53.3"
+# Read from Cargo.toml's [package.metadata.oracle] — the one place the sqlite3
+# pin is declared — so extracted SQL lines up with the sqlite3 the corpus
+# labels are validated against.
+CARGO_TOML = REPO_ROOT / "Cargo.toml"
+SQLITE_VERSION = tomllib.loads(CARGO_TOML.read_text())["package"]["metadata"]["oracle"]["version"]
 SQLITE_URL = (
     f"https://codeload.github.com/sqlite/sqlite/tar.gz/refs/tags/version-{SQLITE_VERSION}"
 )

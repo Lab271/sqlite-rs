@@ -45,13 +45,17 @@ Usage:
 import argparse
 import re
 import sys
+import tomllib
 import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 EBNF_PATH = REPO_ROOT / ".openspec" / "grammar" / "sqlite.ebnf"
 
-SQLITE_VERSION = "3.53.4"
+# Pinned version comes from Cargo.toml's [package.metadata.oracle] — the one
+# place the sqlite3 pin is declared (see the comment there before bumping it).
+CARGO_TOML = REPO_ROOT / "Cargo.toml"
+SQLITE_VERSION = tomllib.loads(CARGO_TOML.read_text())["package"]["metadata"]["oracle"]["version"]
 PARSE_Y_URL = (
     f"https://raw.githubusercontent.com/sqlite/sqlite/version-{SQLITE_VERSION}/src/parse.y"
 )

@@ -91,6 +91,9 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
 
+version-pin: ## Version gate: every sqlite3 pin site agrees with Cargo.toml's [package.metadata.oracle]
+	python3 tools/version_pin.py --strict
+
 mod-files: ## Module-layout gate: no legacy foo/mod.rs files under src/ (#73; use foo.rs instead)
 	@hits=$$(find src -name 'mod.rs'); \
 	if [ -n "$$hits" ]; then \
