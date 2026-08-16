@@ -85,7 +85,7 @@ impl<P: PageSource> TableCursor<P> {
     pub fn first(&mut self) -> Result<Option<TableRow>, BtreeError> {
         self.stack.clear();
         self.pages_visited = 0;
-        self.push_page(self.root_page)?;
+        self.push_page(self.root_page, false)?;
         self.advance()
     }
 
@@ -95,6 +95,25 @@ impl<P: PageSource> TableCursor<P> {
     #[allow(clippy::should_implement_trait)] // deliberate cursor API (first/next/seek), not std::iter::Iterator
     pub fn next(&mut self) -> Result<Option<TableRow>, BtreeError> {
         self.advance()
+    }
+
+    /// Positions the cursor at the last row (highest rowid) and returns
+    /// it, or `None` if the table is empty. Resets any prior traversal
+    /// position. Descends the rightmost child at each interior page
+    /// (highest-key subtree), then the highest-index cell of the leaf.
+    pub fn last(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.stack.clear();
+        self.pages_visited = 0;
+        self.push_page(self.root_page, true)?;
+        self.advance_rev()
+    }
+
+    /// Steps backward to the previous row (in descending rowid order),
+    /// or `None` once exhausted. Call [`Self::last`] first; a cursor
+    /// positioned via `first`/`next` cannot be walked backward with
+    /// `prev` — the two directions maintain independent stack state.
+    pub fn prev(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.advance_rev()
     }
 
     /// Looks up the row with exactly `target_rowid`, independent of the
@@ -197,7 +216,13 @@ impl<P: PageSource> TableCursor<P> {
             .map_err(|source| BtreeError::PageSource { page_num, source })
     }
 
-    fn push_page(&mut self, page_num: u32) -> Result<(), BtreeError> {
+    /// Pushes `page_num` onto the traversal stack. `reverse` selects the
+    /// initial `next_cell` cursor: `0` for forward traversal (ascending
+    /// cell index), `num_cells` for backward traversal (so
+    /// [`Self::advance_rev`] decrements into range before reading) —
+    /// see that method's doc for how the two directions interpret
+    /// `next_cell`/`rightmost_done` differently.
+    fn push_page(&mut self, page_num: u32, reverse: bool) -> Result<(), BtreeError> {
         let page = self.read_page(page_num)?;
         let header_start = page1_header_start(page_num);
         let page_type = read_page_type(&page, header_start, page_num)?;
@@ -228,7 +253,7 @@ impl<P: PageSource> TableCursor<P> {
             is_interior,
             num_cells,
             cell_ptr_base,
-            next_cell: 0,
+            next_cell: if reverse { num_cells } else { 0 },
             rightmost,
             rightmost_done: !is_interior,
             page,
@@ -269,10 +294,61 @@ impl<P: PageSource> TableCursor<P> {
             if next_cell < num_cells {
                 self.stack[top].next_cell = self.stack[top].next_cell.saturating_add(1);
                 let child = self.read_interior_child(top, next_cell)?;
-                self.push_page(child)?;
+                self.push_page(child, false)?;
             } else if !rightmost_done {
                 self.stack[top].rightmost_done = true;
-                self.push_page(rightmost)?;
+                self.push_page(rightmost, false)?;
+            } else {
+                self.stack.pop();
+            }
+        }
+    }
+
+    /// The mirror-image of [`Self::advance`]: walks in descending rowid
+    /// order. At an interior page, the rightmost child (highest-key
+    /// subtree) is descended first, then cells in descending index down
+    /// to `0` — the opposite of `advance`'s ascending-index,
+    /// rightmost-last order, matching the fact that cell `i`'s child
+    /// covers keys strictly between cell `i-1`'s key and cell `i`'s key
+    /// while the rightmost pointer covers keys past the last cell. At a
+    /// leaf, cells are visited from `num_cells - 1` down to `0`.
+    /// `next_cell` here counts the number of not-yet-visited cells
+    /// remaining (from the low end), so `0` means fully exhausted in
+    /// both interior and leaf frames — the same terminal condition
+    /// `advance`'s ascending counter reaches from the other direction.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
+    )]
+    fn advance_rev(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        loop {
+            let top = match self.stack.len() {
+                0 => return Ok(None),
+                n => n.saturating_sub(1),
+            };
+            let (is_interior, next_cell, rightmost, rightmost_done) = {
+                let f = &self.stack[top];
+                (f.is_interior, f.next_cell, f.rightmost, f.rightmost_done)
+            };
+
+            if !is_interior {
+                if next_cell == 0 {
+                    self.stack.pop();
+                    continue;
+                }
+                let idx = next_cell.saturating_sub(1);
+                self.stack[top].next_cell = idx;
+                return self.decode_leaf_cell(top, idx).map(Some);
+            }
+
+            if !rightmost_done {
+                self.stack[top].rightmost_done = true;
+                self.push_page(rightmost, true)?;
+            } else if next_cell > 0 {
+                let idx = next_cell.saturating_sub(1);
+                self.stack[top].next_cell = idx;
+                let child = self.read_interior_child(top, idx)?;
+                self.push_page(child, true)?;
             } else {
                 self.stack.pop();
             }
@@ -629,6 +705,59 @@ mod tests {
         let last = decode_record(&rows[2999].payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&last[0]), 3000);
         assert_eq!(text(&last[1]), "row number 3000");
+    }
+
+    #[test]
+    fn table_single_page_last_returns_the_only_row() {
+        let mut cursor = open_cursor("table_single_page.db");
+        let row = cursor.last().unwrap().unwrap();
+        assert_eq!(row.rowid, 1);
+        assert!(cursor.prev().unwrap().is_none());
+    }
+
+    #[test]
+    fn table_multipage_last_and_prev_walk_descending_rowid_order() {
+        let mut cursor = open_cursor("table_multipage.db");
+        let mut rows = Vec::new();
+        let mut row = cursor.last().unwrap();
+        while let Some(r) = row {
+            rows.push(r);
+            row = cursor.prev().unwrap();
+        }
+        assert_eq!(rows.len(), 3000);
+
+        // Descending rowid order, 3000..=1, no gaps or duplicates.
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(r.rowid, (3000 - i) as i64);
+        }
+
+        let first = decode_record(&rows[0].payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(int(&first[0]), 3000);
+        assert_eq!(text(&first[1]), "row number 3000");
+
+        let last = decode_record(&rows[2999].payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(int(&last[0]), 1);
+        assert_eq!(text(&last[1]), "row number 1");
+    }
+
+    #[test]
+    fn table_multipage_last_matches_full_scans_final_row() {
+        // Cross-check: last()'s single row must equal the tail of a
+        // full forward scan — independent verification that reverse
+        // traversal lands on the same rightmost leaf cell forward
+        // traversal reaches last.
+        let mut forward = open_cursor("table_multipage.db");
+        let mut row = forward.first().unwrap();
+        let mut final_forward_row = None;
+        while let Some(r) = row {
+            final_forward_row = Some(r.clone());
+            row = forward.next().unwrap();
+        }
+
+        let mut backward = open_cursor("table_multipage.db");
+        let last_row = backward.last().unwrap().unwrap();
+
+        assert_eq!(Some(last_row), final_forward_row);
     }
 
     #[test]
