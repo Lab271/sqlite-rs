@@ -19,9 +19,11 @@ use crate::codegen::expr::{
     collation_of, column_index, compile_cond, compile_value, emit_column_read,
 };
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Target};
-use crate::parser::ast::{Distinctness, Expr, ExprKind, Literal, ResultColumn, Select};
+use crate::parser::ast::{
+    BinaryOp, Distinctness, Expr, ExprKind, Literal, ParamKind, ResultColumn, Select,
+};
 use crate::parser::tokenizer::Span;
-use crate::schema::TableSchema;
+use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -426,6 +428,118 @@ fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: Label) {
     }
 }
 
+/// The two sides of a top-level `=` expression, or `None` for any other
+/// shape. Used by [`try_compile_rowid_seek`] to recognize `WHERE rowid =
+/// <int literal>` / `WHERE rowid = ?` (#137).
+///
+/// Single input reference, so lifetime elision ties both tuple elements
+/// to it without an explicit `<'a>` annotation — the qualified subset
+/// (`make mvl-limit`) forbids explicit lifetimes, and a helper taking
+/// both `schema` and `expr` by reference while returning a borrow of
+/// `expr` alone would need one. The caller also needs `schema` (to pick
+/// the non-rowid side via [`is_rowid_reference`]), so that step happens
+/// in [`try_compile_rowid_seek`] itself, which already holds both.
+fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let ExprKind::Binary {
+        op: BinaryOp::Eq,
+        lhs,
+        rhs,
+    } = &expr.kind
+    else {
+        return None;
+    };
+    Some((lhs, rhs))
+}
+
+fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
+    let ExprKind::Column { name, .. } = &expr.kind else {
+        return false;
+    };
+    if name.eq_ignore_ascii_case("rowid")
+        || name.eq_ignore_ascii_case("_rowid_")
+        || name.eq_ignore_ascii_case("oid")
+    {
+        return true;
+    }
+    rowid_alias_column(schema)
+        .and_then(|idx| schema.columns.get(idx))
+        .is_some_and(|col| col.eq_ignore_ascii_case(name))
+}
+
+/// Emits `Integer`/`Variable` + `SeekRowid` in place of the
+/// `Rewind`/`Next` scan loop when `select`'s `WHERE` clause is a single
+/// top-level equality between a rowid reference (the `rowid`/`_rowid_`/
+/// `oid` keywords, or the table's actual `INTEGER PRIMARY KEY` alias
+/// column) and an integer literal or bind parameter — O(log n) point
+/// lookup instead of O(n) full scan (#137). Returns `Ok(true)` when the
+/// fast path was taken; `Ok(false)` leaves `em`/`reg` untouched so the
+/// caller falls back to the ordinary scan. Deliberately narrow —
+/// secondary-index columns, ranges, and compound conditions (`AND`/`OR`)
+/// all fall through to the ordinary scan and stay in V4 per the issue's
+/// bounded scope.
+fn try_compile_rowid_seek(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    end_label: Label,
+) -> Result<bool, CodegenError> {
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        // A single-row result is already distinct — but keeping this
+        // path free of the ephemeral-index bookkeeping means it can
+        // stay a straight-line seek. Not worth special-casing; DISTINCT
+        // falls back to the ordinary scan.
+        return Ok(false);
+    }
+    let Some(where_expr) = &select.where_clause else {
+        return Ok(false);
+    };
+    let Some((lhs, rhs)) = top_level_equality_operands(where_expr) else {
+        return Ok(false);
+    };
+    let operand = if is_rowid_reference(schema, lhs) {
+        rhs
+    } else if is_rowid_reference(schema, rhs) {
+        lhs
+    } else {
+        return Ok(false);
+    };
+    // Bounded to the issue's in-scope shapes: an integer literal, or a
+    // bare/numbered bind parameter. Anything else (a string literal
+    // needing numeric-affinity coercion, a sub-expression, a named
+    // parameter) falls back to the ordinary scan rather than risk
+    // miscompiling a case this fast path wasn't built to handle.
+    let is_supported_operand = matches!(
+        &operand.kind,
+        ExprKind::Literal(Literal::Integer(_))
+            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+    );
+    if !is_supported_operand {
+        return Ok(false);
+    }
+
+    let limit = compile_limit_setup(em, reg, schema, select)?;
+    let value_reg = compile_value(em, reg, schema, TABLE_CURSOR, operand)?;
+    let seek_addr = em.emit(Instruction::new(
+        Opcode::SeekRowid,
+        TABLE_CURSOR,
+        0,
+        value_reg,
+    ));
+    em.patch_p2(seek_addr, end_label);
+
+    let row_skip = em.new_label();
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    emit_result_row(em, reg, select, schema, TABLE_CURSOR)?;
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+    em.place(row_skip);
+    Ok(true)
+}
+
 fn compile_direct_scan(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -433,6 +547,9 @@ fn compile_direct_scan(
     schema: &TableSchema,
     end_label: Label,
 ) -> Result<(), CodegenError> {
+    if try_compile_rowid_seek(em, reg, select, schema, end_label)? {
+        return Ok(());
+    }
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         em.emit(Instruction::new(
             Opcode::OpenEphemeral,

@@ -1,13 +1,15 @@
 //! Instruction format and the linear bytecode `Program` (spec 009,
 //! Requirement 1). `Opcode` enumerates the full frozen V2 opcode set
-//! (`tools/opcodes-v2.json`, 64 opcodes, oracle 3.53.4, #87/#139/#142) —
+//! (`tools/opcodes-v2.json`, 65 opcodes, oracle 3.53.4, #87/#139/#142/#137) —
 //! every variant listed here, whether or not `src/vdbe/exec.rs`
 //! implements it yet, so the enum stays the single source of truth for
-//! "in scope for V2" across #89/#90/#91.
+//! "in scope for V2" across #89/#90/#91. `Variable` was added by #137
+//! (bound-parameter point lookups) — the harvest now includes a
+//! `WHERE id = ?1` query.
 
 use crate::vdbe::Collation;
 
-/// The 64 V2 opcodes, grouped by category to match
+/// The 65 V2 opcodes, grouped by category to match
 /// `tools/opcodes-v2.json`'s taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
@@ -75,6 +77,7 @@ pub enum Opcode {
     Blob,
     Null,
     String8,
+    Variable,
     MakeRecord,
     ResultRow,
     // sorter
@@ -87,12 +90,12 @@ pub enum Opcode {
 }
 
 impl Opcode {
-    /// All 54 variants, in enum-declaration order — the harvested
+    /// All 65 variants, in enum-declaration order — the harvested
     /// inventory `tests/vdbe/opcode_completeness_test.rs` checks against
     /// `tools/opcodes-v2.json` (#65). Kept honest by `_exhaustive` below:
     /// an unmatched new variant fails the build rather than silently
     /// falling out of this list.
-    pub const ALL: [Opcode; 64] = [
+    pub const ALL: [Opcode; 65] = [
         Opcode::Init,
         Opcode::Goto,
         Opcode::Once,
@@ -149,6 +152,7 @@ impl Opcode {
         Opcode::Blob,
         Opcode::Null,
         Opcode::String8,
+        Opcode::Variable,
         Opcode::MakeRecord,
         Opcode::ResultRow,
         Opcode::SorterOpen,
@@ -221,6 +225,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Blob
         | Opcode::Null
         | Opcode::String8
+        | Opcode::Variable
         | Opcode::MakeRecord
         | Opcode::ResultRow
         | Opcode::SorterOpen

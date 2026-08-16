@@ -6,6 +6,25 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-08-16
+
+### Added
+
+- Codegen pattern-matches `WHERE rowid = <int literal>` / `WHERE rowid =
+  ?` (or `?NNN`) — recognized via the `rowid`/`_rowid_`/`oid` keywords or
+  the table's actual `INTEGER PRIMARY KEY` alias column — and emits
+  `Integer`/`Variable` + `SeekRowid` directly on the table cursor instead
+  of the `Rewind`/`Next` full-table-scan loop: an O(log n) point lookup
+  instead of an O(n) scan (#137). Making `WHERE rowid = ?` actually
+  correct (not just compile) required reopening the frozen V2 opcode set
+  to add `Variable` (re-harvested from the pinned oracle) plus a minimal
+  bind-parameter API — `Vm::bind_params`, `execute_with_params`/
+  `execute_with_db_and_params` — see `.openspec/adr/0015-variable-opcode-reopens-frozen-set.md`.
+- `tests/performance/point_lookup.rs`: a quick, dependency-free wall-clock
+  demonstration of the O(n)→O(log n) fix (`make test-point-lookup-perf`),
+  plus a small `tests/performance/Makefile` to run individual
+  test/bench scenarios standalone.
+
 ## [0.7.7] - 2026-08-16
 
 ### Added

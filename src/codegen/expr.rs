@@ -9,7 +9,7 @@
 use crate::codegen::{
     p4_coll_seq, CodegenError, CondTargets, Emitter, Label, NullTarget, RegAlloc, Target,
 };
-use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, UnaryOp};
+use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, ParamKind, UnaryOp};
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{affinity_of, comparison_affinity, Affinity, Collation, Instruction, Opcode, P4};
 
@@ -747,10 +747,27 @@ pub(crate) fn compile_value(
             Ok(r)
         }
 
-        // Bound parameter values aren't supplied by this ticket's
-        // compile-only entry point (no bind-value API yet) — compiles
-        // to NULL (known simplification).
-        ExprKind::Param(_) => Ok(reg.alloc()),
+        // `?` and `?NNN` compile to `Variable`, reading whatever the
+        // caller bound via `Vm::bind_params`/`execute_with_params`
+        // (#137). Named forms (`:name`/`@name`/`$name`) aren't wired to
+        // an index yet — out of #137's bounded scope — so they still
+        // compile to an always-NULL register (known simplification,
+        // same as before).
+        ExprKind::Param(kind) => {
+            let r = reg.alloc();
+            let index = match kind {
+                ParamKind::Anonymous => Some(reg.anonymous_param()),
+                ParamKind::Numbered(n) => Some(reg.numbered_param(*n)),
+                ParamKind::Colon(_) | ParamKind::At(_) | ParamKind::Dollar(_) => None,
+            };
+            if let Some(index) = index {
+                let p1 = i32::try_from(index).map_err(|_| CodegenError::Unsupported {
+                    reason: format!("parameter index {index} is out of range"),
+                })?;
+                em.emit(Instruction::new(Opcode::Variable, p1, r, 0));
+            }
+            Ok(r)
+        }
 
         ExprKind::Column { name, .. } => {
             let idx = column_index(schema, name)

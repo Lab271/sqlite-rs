@@ -191,6 +191,10 @@ impl Emitter {
 #[derive(Debug, Default)]
 pub(crate) struct RegAlloc {
     next: i32,
+    /// Next bind-parameter index to hand out for a bare `?`
+    /// (`ParamKind::Anonymous`) — 1-based, matching SQLite's
+    /// `sqlite3_bind_*` convention and `Opcode::Variable`'s `P1`.
+    next_param: u32,
 }
 
 impl RegAlloc {
@@ -210,6 +214,21 @@ impl RegAlloc {
     /// own return value, e.g. `CASE` allocates its destination first).
     pub(crate) fn peek(&self) -> i32 {
         self.next
+    }
+
+    /// Assigns register-independent parameter index for a bare `?`,
+    /// incrementing past any `?NNN` index already claimed via
+    /// [`RegAlloc::numbered_param`].
+    pub(crate) fn anonymous_param(&mut self) -> u32 {
+        self.next_param = self.next_param.saturating_add(1);
+        self.next_param
+    }
+
+    /// Claims an explicit `?NNN` parameter index, advancing
+    /// `next_param` past it so a later bare `?` doesn't collide.
+    pub(crate) fn numbered_param(&mut self, n: u32) -> u32 {
+        self.next_param = self.next_param.max(n);
+        n
     }
 }
 

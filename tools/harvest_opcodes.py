@@ -53,6 +53,7 @@ QUERIES = [
     "SELECT * FROM products WHERE price > 10",
     "SELECT * FROM products WHERE price >= 10 AND qty < 50",
     "SELECT * FROM products WHERE id = 2",
+    "SELECT * FROM products WHERE id = ?1",
     "SELECT * FROM products WHERE id <> 2",
     "SELECT * FROM products WHERE note IS NULL",
     "SELECT * FROM products WHERE note IS NOT NULL",

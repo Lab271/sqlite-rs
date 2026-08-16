@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -74,6 +74,9 @@ sqllogictest: ## Run the sqllogictest slice against a pinned real sqlite3, refre
 
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3
+
+test-point-lookup-perf: ## Quick wall-clock demo that WHERE rowid = <const> seeks instead of scanning (#137)
+	cargo test --locked --test point_lookup_perf -- --nocapture
 
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
