@@ -41,7 +41,13 @@ pub fn begin_subrtn() -> Result<Step, ExecError> {
 pub fn r#return(vm: &Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let addr = vm.register(instr.p1)?;
     match addr {
-        Value::Integer(i) => Ok(Step::Jump(to_pc(*i as i32))),
+        Value::Integer(i) => match i32::try_from(*i) {
+            Ok(pc) => Ok(Step::Jump(to_pc(pc))),
+            Err(_) => Err(ExecError::MalformedInstruction {
+                opcode: "Return",
+                reason: format!("return address {i} does not fit in a PC"),
+            }),
+        },
         other => Err(ExecError::TypeMismatch {
             opcode: "Return",
             found: value_kind(other),
@@ -137,10 +143,17 @@ fn try_to_integer(v: &Value) -> Option<i64> {
     match v {
         Value::Integer(i) => Some(*i),
         #[allow(clippy::cast_possible_truncation)]
-        Value::Real(r) if r.fract() == 0.0 && r.is_finite() => Some(*r as i64),
+        Value::Real(r) if r.fract() == 0.0 && r.is_finite() && in_i64_range(*r) => Some(*r as i64),
         Value::Text(s) => s.trim().parse::<i64>().ok(),
         _ => None,
     }
+}
+
+/// Whether `r` falls within `i64`'s representable range — guards the
+/// `as i64` cast above, which otherwise saturates (rather than erroring)
+/// on an integral-but-out-of-range REAL like `1e300`.
+fn in_i64_range(r: f64) -> bool {
+    r >= i64::MIN as f64 && r < i64::MAX as f64
 }
 
 /// `OffsetLimit`: computes a combined row-budget counter from a LIMIT
@@ -278,6 +291,29 @@ mod tests {
         assert_eq!(once(&mut vm, 3, &instr).unwrap(), Step::Next);
         assert_eq!(once(&mut vm, 3, &instr).unwrap(), Step::Jump(10));
         assert_eq!(once(&mut vm, 3, &instr).unwrap(), Step::Jump(10));
+    }
+
+    #[test]
+    fn must_be_int_rejects_out_of_range_integral_real() {
+        let mut vm = vm_with(vec![Value::Real(1e300)]);
+        let instr = Instruction::new(Opcode::MustBeInt, 0, 0, 0);
+        assert!(matches!(
+            must_be_int(&mut vm, &instr),
+            Err(ExecError::MustBeInt)
+        ));
+    }
+
+    #[test]
+    fn return_rejects_address_that_does_not_fit_in_a_pc() {
+        let vm = vm_with(vec![Value::Integer(i64::MAX)]);
+        let instr = Instruction::new(Opcode::Return, 0, 0, 0);
+        assert!(matches!(
+            r#return(&vm, &instr),
+            Err(ExecError::MalformedInstruction {
+                opcode: "Return",
+                ..
+            })
+        ));
     }
 
     #[test]
