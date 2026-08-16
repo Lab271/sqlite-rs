@@ -1,5 +1,5 @@
 -- Extracted by tools/extract_sql_corpus.py from the vendored SQLite
--- TCL suite subset (version 3.53.3) under tests/corpus/sql/vendor/tcl/.
+-- TCL suite subset (version 3.53.4) under tests/corpus/sql/vendor/tcl/.
 -- Do not edit by hand; run `make sql-corpus` to regenerate (#70).
 INSERT INTO objlist SELECT type, name, tbl_name FROM temp.sqlite_master WHERE NAME!='objlist'
 INSERT INTO objlist SELECT type, name, tbl_name FROM sqlite_master WHERE NAME!='objlist'
