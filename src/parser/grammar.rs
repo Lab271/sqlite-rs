@@ -199,6 +199,9 @@ impl Parser {
         if self.at_kw(Keyword::WITH) {
             return self.unsupported("WITH / CTEs not yet supported");
         }
+        if self.at_kw(Keyword::VALUES) {
+            return self.unsupported("bare VALUES not yet supported");
+        }
         let start = self.expect_kw(Keyword::SELECT)?;
 
         let distinct = if self.eat_kw(Keyword::DISTINCT) {
@@ -222,6 +225,9 @@ impl Parser {
 
         if self.at_kw(Keyword::GROUP) {
             return self.unsupported("GROUP BY not yet supported");
+        }
+        if self.at_kw(Keyword::HAVING) {
+            return self.unsupported("HAVING not yet supported");
         }
         if self.at_kw(Keyword::WINDOW) {
             return self.unsupported("WINDOW clause not yet supported");
@@ -308,7 +314,14 @@ impl Parser {
     }
 
     fn table_ref(&mut self) -> PResult<TableRef> {
+        if matches!(self.peek().kind, TokenKind::LParen) {
+            return self
+                .unsupported("table-valued functions / subqueries in FROM not yet supported");
+        }
         let (name, start) = self.identifier()?;
+        if matches!(self.peek().kind, TokenKind::Dot) {
+            return self.unsupported("schema-qualified table names not yet supported");
+        }
         let alias = self.opt_alias()?;
         let end = alias.is_some();
         let span = if end {
@@ -329,10 +342,16 @@ impl Parser {
             || self.at_kw(Keyword::FULL)
             || self.at_kw(Keyword::INNER)
             || self.at_kw(Keyword::CROSS)
+            || self.at_kw(Keyword::OUTER)
             || self.at_kw(Keyword::INDEXED)
             || matches!(self.peek().kind, TokenKind::Comma)
         {
             return self.unsupported("JOIN / multi-table FROM not yet supported");
+        }
+        if self.at_kw(Keyword::NOT)
+            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::INDEXED))
+        {
+            return self.unsupported("NOT INDEXED not yet supported");
         }
         if matches!(self.peek().kind, TokenKind::LParen) {
             return self
@@ -540,6 +559,9 @@ impl Parser {
     }
 
     fn in_tail(&mut self, lhs: Expr, negated: bool) -> PResult<Expr> {
+        if !matches!(self.peek().kind, TokenKind::LParen) {
+            return self.unsupported("IN <table-name> not yet supported");
+        }
         self.expect_punct(TokenKind::LParen, "'(' after IN")?;
         if self.at_kw(Keyword::SELECT) {
             return self.unsupported("IN (subquery) not yet supported");
@@ -649,11 +671,22 @@ impl Parser {
     }
 
     fn concat_expr(&mut self) -> PResult<Expr> {
-        let mut lhs = self.collate_expr()?;
+        let mut lhs = self.arrow_expr()?;
         while matches!(self.peek().kind, TokenKind::Concat) {
             self.advance();
-            let rhs = self.collate_expr()?;
+            let rhs = self.arrow_expr()?;
             lhs = bin(BinaryOp::Concat, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    /// `->` / `->>` (JSON extract operators, V11) are recognized here so
+    /// they're reported `Unsupported` rather than falling through to a
+    /// generic "unexpected trailing token" `Invalid`.
+    fn arrow_expr(&mut self) -> PResult<Expr> {
+        let lhs = self.collate_expr()?;
+        if matches!(self.peek().kind, TokenKind::Arrow | TokenKind::ArrowArrow) {
+            return self.unsupported("-> / ->> operators not yet supported");
         }
         Ok(lhs)
     }
