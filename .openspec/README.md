@@ -45,6 +45,7 @@ sqlite-rs follows SQLite's layered architecture. Each layer has one job and pres
 | [004](specs/004-corpus/spec.md) | Corpus & Oracle | Pinned oracle, fixture families, diff harness | 0 | Draft — active (#10) |
 | [005](specs/005-assurance/spec.md) | Assurance | Four-pillar assurance stack, harness taxonomy, no-panic totality claim | All | Draft — active (#25, #26) |
 | [008](specs/008-value-semantics/spec.md) | Value Semantics | Affinity, comparison, collation, NULL rules | 2 | Draft — active (#77) |
+| [009](specs/009-vdbe-codegen/spec.md) | VDBE Codegen | Instruction format, register model, per-opcode semantics, EXPLAIN, expression emission | 3 | Draft (planned) — opened by #88 |
 
 ## Grammar
 
