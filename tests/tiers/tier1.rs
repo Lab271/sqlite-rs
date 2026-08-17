@@ -26,10 +26,37 @@ fn t1_tokenizer_roundtrip_never_panics() {
     }
 }
 
+/// V2 phase 1 SELECT-core parser (#61): single-table SELECT is
+/// accepted, unsupported constructs (JOIN) are distinguished from
+/// genuine syntax errors, per the three-way [`ParseOutcome`] contract
+/// (spec 002-parser Requirement 4).
 #[test]
-#[ignore = "V2 phase 1 SELECT-core parser landed (#61); acceptance/rejection vectors pending (#69 follow-up)"]
 fn t1_select_core_accepts_and_rejects() {
-    unimplemented!()
+    use sqlite_rs::parser::error::ParseOutcome;
+    use sqlite_rs::parser::parse_select;
+
+    for accepted in [
+        "SELECT * FROM t",
+        "SELECT a, b FROM t WHERE a = 1",
+        "SELECT a FROM t ORDER BY a LIMIT 1",
+    ] {
+        assert!(
+            matches!(parse_select(accepted), ParseOutcome::Accepted(_)),
+            "expected Accepted for {accepted:?}"
+        );
+    }
+
+    assert!(matches!(
+        parse_select("SELECT * FROM t JOIN u ON t.a = u.a"),
+        ParseOutcome::Unsupported { .. }
+    ));
+
+    for invalid in ["SELECT FROM", "SELECT * WHERE", "not sql at all"] {
+        assert!(
+            matches!(parse_select(invalid), ParseOutcome::Invalid { .. }),
+            "expected Invalid for {invalid:?}"
+        );
+    }
 }
 
 /// V2 phase 2 — value-semantics kernel (#78): affinity derivation and
