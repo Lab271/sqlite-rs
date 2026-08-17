@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest loc lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -86,6 +86,15 @@ verification: test ## Verification level of the assurance case (alias for `make 
 # Everything here is a pass/fail check intended to block a merge. Keep them
 # fast and hermetic: the PR gate is only useful if it is cheap enough that
 # nobody is tempted to skip it.
+
+loc: ## Print lines-of-code stats for src/ vs tests/, separately (requires tokei)
+	@command -v tokei >/dev/null 2>&1 || { \
+	  echo "error: tokei not found. install: brew install tokei (or cargo install tokei)"; \
+	  exit 1; }
+	@echo "--- src/ (implementation) ---"
+	@tokei src
+	@echo "--- tests/ (test code) ---"
+	@tokei tests
 
 lint: ## Run clippy and check formatting
 	# Deliberately `--lib --bins --tests --examples`, not `--all-targets`:
