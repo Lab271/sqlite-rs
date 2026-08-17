@@ -322,4 +322,37 @@ mod tests {
         let header = DatabaseHeader::parse(&bytes).unwrap();
         assert_eq!(header.journal_mode(), JournalMode::Wal);
     }
+
+    #[test]
+    fn mismatched_journal_version_bytes_are_legacy_not_wal() {
+        // Only one of write_version/read_version is 2 here — pins the `&&`
+        // in journal_mode() against a mutation to `||`, which would
+        // wrongly report Wal as soon as either byte is 2.
+        let mut bytes = fixture("pagesizes", "reserved_bytes_0.db");
+        bytes[18] = 2;
+        bytes[19] = 1;
+        let header = DatabaseHeader::parse(&bytes).unwrap();
+        assert_eq!(header.journal_mode(), JournalMode::Legacy);
+    }
+
+    #[test]
+    fn page_size_below_512_but_power_of_two_is_rejected() {
+        // 256 is a power of two but below the 512 floor — pins the `||` in
+        // parse()'s page-size check against a mutation to `&&`, which
+        // would wrongly accept this since is_power_of_two() alone is true.
+        let mut bytes = fixture("pagesizes", "page_size_512.db");
+        bytes[16..18].copy_from_slice(&256u16.to_be_bytes());
+        let err = DatabaseHeader::parse(&bytes).unwrap_err();
+        assert_eq!(err, HeaderError::InvalidPageSize { raw: 256 });
+    }
+
+    #[test]
+    fn page_size_above_512_but_not_a_power_of_two_is_rejected() {
+        // 600 clears the 512 floor but isn't a power of two — the other
+        // half of the `||` boundary above.
+        let mut bytes = fixture("pagesizes", "page_size_512.db");
+        bytes[16..18].copy_from_slice(&600u16.to_be_bytes());
+        let err = DatabaseHeader::parse(&bytes).unwrap_err();
+        assert_eq!(err, HeaderError::InvalidPageSize { raw: 600 });
+    }
 }
