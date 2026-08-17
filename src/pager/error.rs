@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use super::freelist::FreelistError;
 use super::wal::WalError;
 use crate::vfs::{PageError, VfsError};
 
@@ -24,4 +25,7 @@ pub enum PagerError {
 
     #[error(transparent)]
     Vfs(#[from] VfsError),
+
+    #[error(transparent)]
+    Freelist(#[from] FreelistError),
 }

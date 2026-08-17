@@ -26,9 +26,11 @@
 //! there is no bug for it to fix; see #45 for when that changes.
 
 mod error;
+pub mod freelist;
 pub mod wal;
 
 pub use error::PagerError;
+pub use freelist::TrunkPage;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,6 +75,46 @@ pub struct Pager {
     /// unflushed write is visible to a subsequent read through the same
     /// `Pager`.
     dirty: HashMap<u32, Vec<u8>>,
+    /// The page size this database was opened with (#167) — needed by
+    /// [`Pager::allocate_page`] to size a freshly-extended page and by
+    /// [`Pager::deallocate_page`] to compute a trunk page's leaf capacity,
+    /// without re-deriving it from `source` on every call.
+    page_size: u32,
+}
+
+/// Byte offsets of the three header fields ([`crate::header::DatabaseHeader`])
+/// that freelist allocate/deallocate mutate: page count (bytes 28-31),
+/// freelist trunk page (32-35), freelist page count (36-39). Patched
+/// in-place on page 1's raw buffer rather than round-tripping through a
+/// full header serializer, since no such serializer exists yet (#167).
+const PAGE_COUNT_OFFSET: usize = 28;
+const FREELIST_TRUNK_PAGE_OFFSET: usize = 32;
+const FREELIST_PAGE_COUNT_OFFSET: usize = 36;
+
+fn read_be_u32(buf: &[u8], offset: usize) -> Result<u32, freelist::FreelistError> {
+    let end = offset.saturating_add(4);
+    let bytes: [u8; 4] = buf
+        .get(offset..end)
+        .ok_or(freelist::FreelistError::PageTooShort {
+            offset,
+            len: buf.len(),
+        })?
+        .try_into()
+        .map_err(|_| freelist::FreelistError::PageTooShort {
+            offset,
+            len: buf.len(),
+        })?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn write_be_u32(buf: &mut [u8], offset: usize, value: u32) -> Result<(), freelist::FreelistError> {
+    let end = offset.saturating_add(4);
+    let len = buf.len();
+    let slice = buf
+        .get_mut(offset..end)
+        .ok_or(freelist::FreelistError::PageTooShort { offset, len })?;
+    slice.copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 impl Pager {
@@ -109,6 +151,7 @@ impl Pager {
             source,
             wal_pages,
             dirty: HashMap::new(),
+            page_size,
         })
     }
 
@@ -141,6 +184,95 @@ impl Pager {
         }
         self.source.sync()?;
         self.dirty.clear();
+        Ok(())
+    }
+
+    /// Allocates a page: pops one off the freelist if it's non-empty,
+    /// otherwise extends the database by one page. Returns the allocated
+    /// page's (1-based) number. Updates the freelist trunk/count fields
+    /// (and, when extending, the page-count field) on page 1 in the same
+    /// call, so a subsequent `flush` persists both the allocation and the
+    /// header bookkeeping together.
+    pub fn allocate_page(&mut self) -> Result<u32, PagerError> {
+        let header = self.read_page(1)?;
+        let page_count = read_be_u32(&header, PAGE_COUNT_OFFSET)?;
+        let freelist_trunk_page = read_be_u32(&header, FREELIST_TRUNK_PAGE_OFFSET)?;
+        let freelist_page_count = read_be_u32(&header, FREELIST_PAGE_COUNT_OFFSET)?;
+
+        if freelist_trunk_page == 0 {
+            let new_page_num = page_count.saturating_add(1);
+            self.dirty
+                .insert(new_page_num, vec![0u8; self.page_size as usize]);
+            let page1 = self.get_page_mut(1)?;
+            write_be_u32(page1, PAGE_COUNT_OFFSET, new_page_num)?;
+            return Ok(new_page_num);
+        }
+
+        let trunk_buf = self.read_page(freelist_trunk_page)?;
+        let mut trunk = TrunkPage::parse(&trunk_buf)?;
+
+        let (allocated, new_trunk_page) = if let Some(leaf) = trunk.leaves.pop() {
+            let trunk_buf = self.get_page_mut(freelist_trunk_page)?;
+            trunk.write(trunk_buf)?;
+            (leaf, freelist_trunk_page)
+        } else {
+            (freelist_trunk_page, trunk.next_trunk)
+        };
+
+        let page1 = self.get_page_mut(1)?;
+        write_be_u32(page1, FREELIST_TRUNK_PAGE_OFFSET, new_trunk_page)?;
+        write_be_u32(
+            page1,
+            FREELIST_PAGE_COUNT_OFFSET,
+            freelist_page_count.saturating_sub(1),
+        )?;
+        Ok(allocated)
+    }
+
+    /// Returns `page_num` to the freelist: appended to the current trunk
+    /// page's leaf array if it has room, otherwise `page_num` itself
+    /// becomes the new trunk page (pointing at the old one). Updates the
+    /// freelist trunk/count fields on page 1 in the same call.
+    pub fn deallocate_page(&mut self, page_num: u32) -> Result<(), PagerError> {
+        let header = self.read_page(1)?;
+        let freelist_trunk_page = read_be_u32(&header, FREELIST_TRUNK_PAGE_OFFSET)?;
+        let freelist_page_count = read_be_u32(&header, FREELIST_PAGE_COUNT_OFFSET)?;
+
+        let max_leaves = freelist::max_leaves_per_trunk(self.page_size) as usize;
+        let new_trunk_page = if freelist_trunk_page != 0 {
+            let trunk_buf = self.read_page(freelist_trunk_page)?;
+            let mut trunk = TrunkPage::parse(&trunk_buf)?;
+            if trunk.leaves.len() < max_leaves {
+                trunk.leaves.push(page_num);
+                let trunk_buf = self.get_page_mut(freelist_trunk_page)?;
+                trunk.write(trunk_buf)?;
+                freelist_trunk_page
+            } else {
+                let new_trunk = TrunkPage {
+                    next_trunk: freelist_trunk_page,
+                    leaves: vec![],
+                };
+                let buf = self.get_page_mut(page_num)?;
+                new_trunk.write(buf)?;
+                page_num
+            }
+        } else {
+            let new_trunk = TrunkPage {
+                next_trunk: 0,
+                leaves: vec![],
+            };
+            let buf = self.get_page_mut(page_num)?;
+            new_trunk.write(buf)?;
+            page_num
+        };
+
+        let page1 = self.get_page_mut(1)?;
+        write_be_u32(page1, FREELIST_TRUNK_PAGE_OFFSET, new_trunk_page)?;
+        write_be_u32(
+            page1,
+            FREELIST_PAGE_COUNT_OFFSET,
+            freelist_page_count.saturating_add(1),
+        )?;
         Ok(())
     }
 }
@@ -394,6 +526,140 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
         pager.flush().unwrap();
         assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512]);
+    }
+
+    /// A one-page database (empty freelist) allocates by extending the
+    /// file, bumping the header's page-count field.
+    #[test]
+    fn allocate_with_empty_freelist_extends_file() {
+        let mut vfs = MemoryVfs::new();
+        let mut header = vec![0u8; 512];
+        write_be_u32(&mut header, PAGE_COUNT_OFFSET, 1).unwrap();
+        vfs.insert("/test.db", header);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        let allocated = pager.allocate_page().unwrap();
+        assert_eq!(allocated, 2);
+        let new_header = pager.read_page(1).unwrap();
+        assert_eq!(read_be_u32(&new_header, PAGE_COUNT_OFFSET).unwrap(), 2);
+        assert_eq!(pager.read_page(2).unwrap(), vec![0u8; 512]);
+    }
+
+    /// Deallocating a page with no existing freelist makes it the sole
+    /// trunk page; allocating again pops that same page straight back
+    /// off, without touching the page-count field.
+    #[test]
+    fn deallocate_then_allocate_round_trips_single_page() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![0u8; 512 * 3];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 3).unwrap();
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        pager.deallocate_page(3).unwrap();
+        let after_dealloc = pager.read_page(1).unwrap();
+        assert_eq!(
+            read_be_u32(&after_dealloc, FREELIST_TRUNK_PAGE_OFFSET).unwrap(),
+            3
+        );
+        assert_eq!(
+            read_be_u32(&after_dealloc, FREELIST_PAGE_COUNT_OFFSET).unwrap(),
+            1
+        );
+
+        let allocated = pager.allocate_page().unwrap();
+        assert_eq!(allocated, 3);
+        let after_alloc = pager.read_page(1).unwrap();
+        assert_eq!(
+            read_be_u32(&after_alloc, FREELIST_TRUNK_PAGE_OFFSET).unwrap(),
+            0
+        );
+        assert_eq!(
+            read_be_u32(&after_alloc, FREELIST_PAGE_COUNT_OFFSET).unwrap(),
+            0
+        );
+        // Page count untouched — this allocation came from the freelist,
+        // not from extending the file.
+        assert_eq!(read_be_u32(&after_alloc, PAGE_COUNT_OFFSET).unwrap(), 3);
+    }
+
+    /// A second deallocated page joins the existing trunk's leaf array
+    /// instead of becoming a new trunk, and allocation pops leaves before
+    /// ever consuming the trunk page itself.
+    #[test]
+    fn deallocate_appends_to_existing_trunk_leaves() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![0u8; 512 * 4];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 4).unwrap();
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        pager.deallocate_page(3).unwrap();
+        pager.deallocate_page(4).unwrap();
+        let after_dealloc = pager.read_page(1).unwrap();
+        assert_eq!(
+            read_be_u32(&after_dealloc, FREELIST_TRUNK_PAGE_OFFSET).unwrap(),
+            3
+        );
+        assert_eq!(
+            read_be_u32(&after_dealloc, FREELIST_PAGE_COUNT_OFFSET).unwrap(),
+            2
+        );
+        let trunk = TrunkPage::parse(&pager.read_page(3).unwrap()).unwrap();
+        assert_eq!(trunk.leaves, vec![4]);
+
+        // Leaf pops first...
+        assert_eq!(pager.allocate_page().unwrap(), 4);
+        // ...then the trunk page itself, once its leaf array is empty.
+        assert_eq!(pager.allocate_page().unwrap(), 3);
+        let after_alloc = pager.read_page(1).unwrap();
+        assert_eq!(
+            read_be_u32(&after_alloc, FREELIST_TRUNK_PAGE_OFFSET).unwrap(),
+            0
+        );
+        assert_eq!(
+            read_be_u32(&after_alloc, FREELIST_PAGE_COUNT_OFFSET).unwrap(),
+            0
+        );
+    }
+
+    /// Once a trunk page's leaf array is full, the next deallocated page
+    /// becomes a new trunk pointing at the old one, chaining trunks
+    /// instead of overflowing the array.
+    #[test]
+    fn deallocate_overflows_into_new_trunk_when_full() {
+        // Pre-fill trunk page 3 at exactly `max_leaves_per_trunk(512)`
+        // capacity, so the next deallocation must overflow into a new
+        // trunk rather than requiring hundreds of individual calls here.
+        let page_size = 512u32;
+        let max_leaves = freelist::max_leaves_per_trunk(page_size);
+        let full_trunk = TrunkPage {
+            next_trunk: 0,
+            leaves: (100..100 + max_leaves).collect(),
+        };
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![0u8; page_size as usize * 4];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 4).unwrap();
+        write_be_u32(&mut contents, FREELIST_TRUNK_PAGE_OFFSET, 3).unwrap();
+        write_be_u32(&mut contents, FREELIST_PAGE_COUNT_OFFSET, max_leaves).unwrap();
+        let trunk_start = page_size as usize * 2;
+        full_trunk
+            .write(&mut contents[trunk_start..trunk_start + page_size as usize])
+            .unwrap();
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        pager.deallocate_page(4).unwrap();
+
+        let after = pager.read_page(1).unwrap();
+        assert_eq!(read_be_u32(&after, FREELIST_TRUNK_PAGE_OFFSET).unwrap(), 4);
+        assert_eq!(
+            read_be_u32(&after, FREELIST_PAGE_COUNT_OFFSET).unwrap(),
+            max_leaves + 1
+        );
+        let new_trunk = TrunkPage::parse(&pager.read_page(4).unwrap()).unwrap();
+        assert_eq!(new_trunk.next_trunk, 3);
+        assert!(new_trunk.leaves.is_empty());
     }
 
     #[test]
