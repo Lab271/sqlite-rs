@@ -1130,4 +1130,43 @@ mod tests {
         }
         bytes
     }
+
+    #[test]
+    fn local_payload_size_min_local_uses_integer_division_not_modulo() {
+        // usable_size=512 gives min_local=39 (correct, via `/255`) vs 167
+        // (if `/255` were mutated to `%255`). payload_len=5150 is chosen so
+        // the two min_local values land the `(payload_len - min_local) %
+        // denom` remainder on opposite sides of a denom (508) multiple,
+        // making the two paths diverge to entirely different results (70
+        // vs 167) instead of coincidentally agreeing.
+        assert_eq!(local_payload_size(512, 5150), 70);
+    }
+
+    #[test]
+    fn reassemble_payload_accepts_exactly_max_payload_len() {
+        let source = FakePageSource {
+            pages: HashMap::new(),
+        };
+        let err = reassemble_payload(&source, 512, 2, &[], MAX_PAYLOAD_LEN).unwrap_err();
+        assert!(!matches!(err, BtreeError::PayloadTooLarge { .. }));
+    }
+
+    #[test]
+    fn require_interior_header_rejects_page_one_byte_short() {
+        let page = vec![0u8; 11];
+        let err = require_interior_header(&page, 0, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::PageTooShort {
+                page_num: 2,
+                len: 11
+            }
+        ));
+    }
+
+    #[test]
+    fn require_interior_header_accepts_page_exactly_twelve_bytes() {
+        let page = vec![0u8; 12];
+        assert!(require_interior_header(&page, 0, 2).is_ok());
+    }
 }
