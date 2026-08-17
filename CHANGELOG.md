@@ -8,6 +8,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Freelist management — allocate/deallocate pages (#167), V3 phase 1
+  (epic #161). `Pager::allocate_page` pops a page off the freelist (or
+  extends the file when it's empty); `Pager::deallocate_page` pushes a
+  page onto the freelist, appending to the current trunk page's leaf
+  array or chaining a new trunk once it's full. New
+  `src/pager/freelist.rs::TrunkPage` parses/writes freelist trunk pages,
+  never panicking on a truncated/corrupt trunk. An allocate/deallocate
+  round trip still opens and `PRAGMA integrity_check`s cleanly in stock
+  `sqlite3` (spec 007-pager Requirement 5).
+
 - Pager write path — dirty page tracking + flush (#166), V3 phase 1
   (epic #161). `Pager::get_page_mut`/`Pager::flush` on top of a new
   `Vfs::open_write`/`VfsFile::write_at`/`sync` surface (implemented for
