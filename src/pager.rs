@@ -213,6 +213,21 @@ mod tests {
         assert!(Pager::open(&vfs, &path, 512).is_ok());
     }
 
+    #[test]
+    fn wal_file_exactly_at_header_len_is_parsed_not_skipped_as_too_short() {
+        // A `-wal` file of exactly `wal::HEADER_LEN` (32) bytes must be
+        // handed to WalHeader::parse, not treated as "too short to hold a
+        // header" — pins read_wal_pages's two `size < HEADER_LEN` checks
+        // against mutation to `==`/`<=`, which would wrongly skip this
+        // length instead of parsing it. All-zero bytes make an invalid
+        // magic, so a real parse attempt surfaces as PagerError::Wal
+        // rather than the Ok(empty-overlay) that skipping would produce.
+        let (mut vfs, path) = db_with_journal(None);
+        vfs.insert("/test.db-wal", vec![0u8; 32]);
+        let result = Pager::open(&vfs, &path, 512);
+        assert!(matches!(result, Err(PagerError::Wal { .. })));
+    }
+
     /// 001-architecture Req-4's "Reader takes a SHARED lock before
     /// serving pages" scenario: a live `Pager` must hold the journal-mode
     /// SHARED lock (blocking a concurrent EXCLUSIVE lock attempt from
