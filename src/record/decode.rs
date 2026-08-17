@@ -420,6 +420,17 @@ mod tests {
     }
 
     #[test]
+    fn header_len_exactly_equal_to_its_own_varint_len_is_a_valid_empty_record() {
+        // header_len == n (the varint's own byte count) is the boundary
+        // case: a record whose header is nothing but the header-length
+        // varint itself, declaring zero columns. Pins `header_len < n`
+        // against mutation to `<=`, which would wrongly reject this as
+        // HeaderTooShort.
+        let payload = vec![0x01]; // header_len = 1, encoded in 1 byte
+        assert_eq!(decode_record(&payload, TextEncoding::Utf8), Ok(vec![]));
+    }
+
+    #[test]
     fn header_shorter_than_its_own_varint_errors() {
         // A header-length varint encoded with redundant continuation bytes
         // can claim a `header_len` smaller than the varint's own byte count.
