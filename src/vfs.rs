@@ -21,7 +21,7 @@ pub(crate) mod test_lock_probe;
 mod unix;
 
 pub use memory::MemoryVfs;
-pub use page_source::{PageError, PageSource, VfsPageSource};
+pub use page_source::{PageError, PageSource, VfsPageSource, WritablePageSource};
 pub use unix::UnixVfs;
 
 use std::path::{Path, PathBuf};
@@ -50,6 +50,14 @@ pub type Result<T> = std::result::Result<T, VfsError>;
 pub trait Vfs {
     /// Opens `path` for reading.
     fn open_read(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
+
+    /// Opens `path` for reading and writing (#166 pager write path). The
+    /// file must already exist — creating new database files is out of
+    /// scope here. Callers that only ever read a page (e.g. b-tree
+    /// scans through [`VfsPageSource`]) keep using [`Vfs::open_read`] so a
+    /// genuinely read-only filesystem is never asked for write access it
+    /// doesn't need.
+    fn open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
 
     /// Whether `path` exists — used to detect sibling `-wal` / `-journal`
     /// files.
@@ -94,6 +102,13 @@ pub trait VfsFile {
     /// (`tests/spike/005_locking_interop/findings.md`). Released when the
     /// returned guard is dropped.
     fn lock_shared(&self) -> Result<FileLock>;
+
+    /// Writes `buf` at `offset`, extending the file if `offset + buf.len()`
+    /// is past the current end (#166 pager write path).
+    fn write_at(&self, buf: &[u8], offset: u64) -> Result<()>;
+
+    /// Flushes any buffered writes to durable storage.
+    fn sync(&self) -> Result<()>;
 }
 
 /// A held file lock, released when dropped. Opaque on purpose: it hides
@@ -156,11 +171,27 @@ mod tests {
         drop(file.lock_shared().unwrap());
     }
 
+    /// A write through [`Vfs::open_write`] must be visible to a fresh
+    /// [`Vfs::open_read`] handle on the same path — the contract every
+    /// backend's write path must satisfy.
+    fn run_write_contract(vfs: impl Vfs, path: &Path) {
+        let write_file = vfs.open_write(path).unwrap();
+        write_file.write_at(b"WXYZ", 2).unwrap();
+        write_file.sync().unwrap();
+
+        let read_file = vfs.open_read(path).unwrap();
+        let mut buf = vec![0u8; 6];
+        read_file.read_at(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"heWXYZ");
+    }
+
     #[test]
     fn memory_vfs_contract() {
         let mut vfs = MemoryVfs::new();
         let contents = b"hello sqlite-rs vfs contract".to_vec();
         vfs.insert("/present.db", contents.clone());
+        vfs.insert("/writable.db", contents.clone());
+        run_write_contract(vfs.clone(), Path::new("/writable.db"));
         run_contract(
             vfs,
             Path::new("/present.db"),
@@ -198,6 +229,9 @@ mod tests {
         let absent = dir.join("absent.db");
         let contents = b"hello sqlite-rs vfs contract".to_vec();
         std::fs::write(&present, &contents).unwrap();
+        let writable = dir.join("writable.db");
+        std::fs::write(&writable, &contents).unwrap();
+        run_write_contract(UnixVfs, &writable);
 
         run_contract(UnixVfs, &present, &absent, &contents);
 

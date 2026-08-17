@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+
+- Pager write path — dirty page tracking + flush (#166), V3 phase 1
+  (epic #161). `Pager::get_page_mut`/`Pager::flush` on top of a new
+  `Vfs::open_write`/`VfsFile::write_at`/`sync` surface (implemented for
+  both `UnixVfs` and `MemoryVfs`). `Pager` now holds a single read-write
+  file handle instead of opening a second fd, avoiding the documented
+  `close()`-drops-all-`fcntl`-locks hazard. A page flushed through the
+  new write path still opens and `PRAGMA integrity_check`s cleanly in
+  stock `sqlite3` (spec 007-pager Requirement 4).
+
 ## [0.8.0] - 2026-08-16
 
 ### Added

@@ -33,7 +33,7 @@ pub use error::PagerError;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::vfs::{companion_path, FileLock, PageError, PageSource, Vfs, VfsPageSource};
+use crate::vfs::{companion_path, FileLock, PageError, PageSource, Vfs, WritablePageSource};
 
 /// The 8-byte magic that opens a valid rollback-journal header (SQLite
 /// file-format reference, "The Rollback Journal"). A `-journal` file with
@@ -65,8 +65,14 @@ pub struct Pager {
     /// ordering.
     #[allow(dead_code, reason = "held only for its Drop side effect")]
     wal_lock: Option<FileLock>,
-    source: VfsPageSource,
+    source: WritablePageSource,
     wal_pages: HashMap<u32, Vec<u8>>,
+    /// Pages fetched via [`Pager::get_page_mut`] since the last
+    /// [`Pager::flush`], keyed by page number (#166). Also consulted by
+    /// [`Pager::read_page`] ahead of `wal_pages`/`source` so an
+    /// unflushed write is visible to a subsequent read through the same
+    /// `Pager`.
+    dirty: HashMap<u32, Vec<u8>>,
 }
 
 impl Pager {
@@ -95,15 +101,61 @@ impl Pager {
         let wal_lock = vfs.claim_wal_read_lock(path)?;
         let wal_pages = read_wal_pages(vfs, path, page_size)?;
 
-        let source = VfsPageSource::open(vfs, path, page_size)?;
+        let source = WritablePageSource::open(vfs, path, page_size)?;
         let lock = source.lock_shared()?;
         Ok(Pager {
             lock,
             wal_lock,
             source,
             wal_pages,
+            dirty: HashMap::new(),
         })
     }
+
+    /// Returns a mutable buffer for page `page_num` (1-based), reading it
+    /// first if it isn't already dirty. Mutations are visible to
+    /// subsequent [`PageSource::read_page`] calls on this same `Pager`
+    /// immediately, but only reach disk once [`Pager::flush`] runs.
+    pub fn get_page_mut(&mut self, page_num: u32) -> Result<&mut Vec<u8>, PagerError> {
+        match self.dirty.entry(page_num) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let page = read_page(&self.wal_pages, &self.source, page_num)?;
+                Ok(entry.insert(page))
+            }
+        }
+    }
+
+    /// Writes every dirty page back to the underlying file, in ascending
+    /// page-number order, then `fsync`s and clears the dirty set. Ascending
+    /// order isn't a correctness requirement of the plain rollback-journal
+    /// path here (no partial-flush recovery exists yet in this pager — see
+    /// #172), just a deterministic, easy-to-reason-about default.
+    pub fn flush(&mut self) -> Result<(), PagerError> {
+        let mut page_nums: Vec<u32> = self.dirty.keys().copied().collect();
+        page_nums.sort_unstable();
+        for page_num in page_nums {
+            if let Some(bytes) = self.dirty.get(&page_num) {
+                self.source.write_page(page_num, bytes)?;
+            }
+        }
+        self.source.sync()?;
+        self.dirty.clear();
+        Ok(())
+    }
+}
+
+/// Shared by [`Pager::read_page`] and [`Pager::get_page_mut`]: WAL overlay
+/// first, then the underlying file.
+fn read_page(
+    wal_pages: &HashMap<u32, Vec<u8>>,
+    source: &WritablePageSource,
+    page_num: u32,
+) -> Result<Vec<u8>, PageError> {
+    if let Some(page) = wal_pages.get(&page_num) {
+        return Ok(page.clone());
+    }
+    source.read_page(page_num)
 }
 
 /// Reads and merges committed WAL frames from `path`'s adjacent `-wal`
@@ -152,10 +204,10 @@ fn read_wal_pages<V: Vfs>(
 
 impl PageSource for Pager {
     fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
-        if let Some(page) = self.wal_pages.get(&page_num) {
+        if let Some(page) = self.dirty.get(&page_num) {
             return Ok(page.clone());
         }
-        self.source.read_page(page_num)
+        read_page(&self.wal_pages, &self.source, page_num)
     }
 }
 
@@ -304,6 +356,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 007-pager write-path Requirement 4/5's core roundtrip: a page
+    /// mutated via `get_page_mut` reads back the new bytes immediately
+    /// (before flush), and is still readable identically after `flush`
+    /// clears the dirty set — from both `Pager::read_page` and a fresh
+    /// `Pager::open` over the same underlying file.
+    #[test]
+    fn get_page_mut_then_flush_roundtrips() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        let page = pager.get_page_mut(2).unwrap();
+        page.fill(9u8);
+        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        // Untouched page is unaffected.
+        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512]);
+
+        pager.flush().unwrap();
+
+        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+
+        let reopened = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(reopened.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(reopened.read_page(1).unwrap(), vec![1u8; 512]);
+    }
+
+    #[test]
+    fn flush_with_no_dirty_pages_is_a_no_op() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![7u8; 512]);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.flush().unwrap();
+        assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512]);
     }
 
     #[test]
