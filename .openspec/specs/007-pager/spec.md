@@ -156,3 +156,47 @@ Writing to the underlying file requires a read-write file handle. Rather than op
 - THEN a fresh `Vfs::open_read` handle on the same path reads back the new bytes — true for both `UnixVfs` and `MemoryVfs`
 
 **Tests:** `src/vfs.rs::tests::memory_vfs_contract`, `src/vfs.rs::tests::unix_vfs_contract`
+
+### Requirement 5: Freelist Allocate/Deallocate [MUST]
+
+Tier 2 WRITE CORE (V3 phase 1, epic #161, #167), built on top of Requirement 4's dirty-page-tracking/flush primitives. `Pager::allocate_page` MUST return a free page number: popping one off the freelist (a leaf page number from the current trunk page's leaf array, or the trunk page itself once its leaf array is empty, promoting the trunk's own next-trunk pointer) when the freelist is non-empty, or extending the database by one page (incrementing the header's page-count field) when it is empty. `Pager::deallocate_page` MUST return a page to the freelist: appended to the current trunk page's leaf array if it has room (`(page_size - 8) / 4` entries), or made the new trunk page itself (pointing at the old trunk) once the current trunk is full. Both operations MUST update the header's freelist-trunk-page and freelist-page-count fields (bytes 32-35 and 36-39) on page 1 in the same call, via `Pager::get_page_mut`, so the bookkeeping is flushed atomically with the allocation/deallocation on the next `Pager::flush`.
+
+Refs: 003/Req-2, 007/Req-4.
+
+**Implementation:** `src/pager.rs::Pager::allocate_page`, `src/pager.rs::Pager::deallocate_page`, `src/pager/freelist.rs::TrunkPage`
+
+**Tests:** inline `#[cfg(test)]` in `src/pager.rs` and `src/pager/freelist.rs`
+
+**Corpus:** `tests/corpus/pager_write_test.rs`
+
+#### Scenario: Allocation extends the file when the freelist is empty
+
+- GIVEN a `Pager` over a database with an empty freelist
+- WHEN `allocate_page` is called
+- THEN it returns `page_count + 1` and the header's page-count field is incremented; no freelist field changes
+
+**Tests:** `src/pager.rs::tests::allocate_with_empty_freelist_extends_file`
+
+#### Scenario: Deallocate then allocate round-trips a single page
+
+- GIVEN a `Pager` over a database with an empty freelist
+- WHEN a page is deallocated (becoming the sole trunk page) and then allocated again
+- THEN the same page number is returned, and the header's freelist-trunk-page and freelist-page-count fields return to their original (empty) values
+
+**Tests:** `src/pager.rs::tests::deallocate_then_allocate_round_trips_single_page`
+
+#### Scenario: Trunk leaves fill before a new trunk is chained
+
+- GIVEN a `Pager` whose freelist has one trunk page with room for more leaves
+- WHEN additional pages are deallocated
+- THEN they append to the existing trunk's leaf array, and `allocate_page` pops leaves before ever consuming the trunk page itself; once a trunk is full, the next deallocation chains a new trunk page pointing at the old one
+
+**Tests:** `src/pager.rs::tests::deallocate_appends_to_existing_trunk_leaves`, `src/pager.rs::tests::deallocate_overflows_into_new_trunk_when_full`
+
+#### Scenario: Allocate/deallocate round trip still integrity-checks in stock `sqlite3`
+
+- GIVEN a database created by stock `sqlite3` with one table and one row
+- WHEN a page is allocated (extending the file), flushed, then deallocated (returned to the freelist), and flushed again
+- THEN stock `sqlite3` still opens the file, `PRAGMA integrity_check` reports `ok`, `PRAGMA freelist_count` reports `1`, and the original row reads back unchanged
+
+**Tests:** `tests/corpus/pager_write_test.rs::allocate_then_deallocate_page_still_integrity_checks_in_stock_sqlite3`
