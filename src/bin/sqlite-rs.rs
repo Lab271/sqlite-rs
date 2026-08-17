@@ -33,7 +33,11 @@ fn main() -> ExitCode {
             None => usage_error("export <file>"),
         },
         Some("query") => run_query(args.collect()),
-        _ => usage_error("<dump|export|query> <file>"),
+        Some("tables") => match args.next() {
+            Some(path) => run_tables(Path::new(&path)),
+            None => usage_error("tables <file>"),
+        },
+        _ => usage_error("<dump|export|query|tables> <file>"),
     }
 }
 
@@ -160,6 +164,36 @@ fn degraded_exit_code(clean: bool) -> ExitCode {
 fn fatal(path: &Path, e: &impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {}: {e}", path.display());
     ExitCode::FAILURE
+}
+
+/// `tables <file>`: list table names from sqlite_master, sorted
+/// alphabetically, excluding internal `sqlite_%` tables. Simple precursor
+/// to full `.tables [PATTERN]` REPL support (see #177). Note: views not
+/// yet included (requires schema extension).
+fn run_tables(path: &Path) -> ExitCode {
+    let (header, pager) = match dump::open(&UnixVfs, path) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
+    let source: Rc<dyn PageSource> = Rc::new(pager);
+
+    let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
+        Ok(s) => s,
+        Err(e) => return fatal(path, &e),
+    };
+
+    let mut names: Vec<&str> = schemas
+        .iter()
+        .filter(|s| !s.name.starts_with("sqlite_"))
+        .map(|s| s.name.as_str())
+        .collect();
+    names.sort_unstable();
+
+    for name in names {
+        println!("{name}");
+    }
+    ExitCode::SUCCESS
 }
 
 /// `query <file> "<SQL>"`: parse -> resolve the `FROM` table's schema ->
