@@ -120,3 +120,39 @@ For a WAL-mode database with a non-empty, sub-header-length-or-larger `-wal` fil
 - THEN `WalHeader::parse` and `committed_pages` return errors or empty results, never panic (fuzz target)
 
 **Tests:** `src/pager/wal.rs::tests::too_short_is_err_not_panic`, `src/pager/wal.rs::tests::bad_magic_is_err`, `src/pager/wal.rs::tests::corrupted_header_checksum_is_err`, `src/pager/wal.rs::tests::garbage_input_never_panics`, `tests/fuzz/fuzz_targets/wal_frames.rs`
+
+### Requirement 4: Dirty Page Tracking and Flush [MUST]
+
+Unlike Requirements 1-3, this requirement is **Tier 2 WRITE CORE** (V3 phase 1, epic #161, #166) — the pager's first write-path capability, added on top of the read-only Requirements 1-3 above without changing their behavior. `Pager::get_page_mut` MUST return a mutable buffer for a page, transparently reading it first (through the same WAL-overlay-then-file precedence `read_page` already uses) the first time it's requested since the last flush, and caching it as dirty. `Pager::read_page` MUST consult this dirty cache ahead of the WAL overlay, so a page mutated via `get_page_mut` reads back its new bytes immediately through the same `Pager`, even before `flush` runs. `Pager::flush` MUST write every dirty page back to the underlying file (in ascending page-number order — a deterministic default, not a correctness requirement of this requirement alone, since no partial-flush recovery exists in this pager yet; see #172), `fsync` it, and clear the dirty set.
+
+Writing to the underlying file requires a read-write file handle. Rather than open a second file descriptor to the same path alongside the existing read-only one — which would trip the documented "`close()` drops all `fcntl` locks held on that inode, regardless of which fd acquired them" hazard (this spec's Requirement 1 doc, #45) before #45's per-inode fd-cache exists to guard against it — `Pager::open` now acquires its single file handle via the new `Vfs::open_write`/`VfsFile::write_at`/`VfsFile::sync` surface (`WritablePageSource`, `src/vfs/page_source.rs`) instead of `Vfs::open_read`. Every other read-only `PageSource` consumer (`VfsPageSource` itself, used directly by non-`Pager` cursors) is unaffected: it keeps using `Vfs::open_read`, never asking a genuinely read-only filesystem for write access it doesn't need.
+
+**Implementation:** `src/pager.rs::Pager::get_page_mut`, `src/pager.rs::Pager::flush`, `src/vfs/page_source.rs::WritablePageSource`
+
+**Tests:** inline `#[cfg(test)]` in `src/pager.rs` and `src/vfs.rs`
+
+**Corpus:** `tests/corpus/pager_write_test.rs` (shells out to a real, writable `sqlite3`-created fixture rather than a committed corpus file, since this requirement's whole point is writing)
+
+#### Scenario: A mutated page reads back immediately, and again after flush
+
+- GIVEN an open `Pager` over a two-page database
+- WHEN `get_page_mut(2)` is called and its returned buffer is overwritten, then `read_page(2)` is called before `flush`, then again after `flush`
+- THEN both reads return the new bytes, the untouched page 1 is unaffected, and a freshly-opened `Pager` over the same file also sees the new bytes on page 2 and the original bytes on page 1
+
+**Tests:** `src/pager.rs::tests::get_page_mut_then_flush_roundtrips`, `src/pager.rs::tests::flush_with_no_dirty_pages_is_a_no_op`
+
+#### Scenario: A flushed page still opens in stock `sqlite3`
+
+- GIVEN a database created by stock `sqlite3` with one table and one row
+- WHEN a page is fetched via `get_page_mut`, written back unchanged, and flushed
+- THEN stock `sqlite3` still opens the file, `PRAGMA integrity_check` reports `ok`, and the original row reads back unchanged — the compatibility proof this whole epic (#161) is gated on
+
+**Tests:** `tests/corpus/pager_write_test.rs::flushed_page_still_opens_and_integrity_checks_in_stock_sqlite3`
+
+#### Scenario: Both VFS backends satisfy the write contract
+
+- GIVEN a file opened via `Vfs::open_write`
+- WHEN bytes are written at an offset and synced
+- THEN a fresh `Vfs::open_read` handle on the same path reads back the new bytes — true for both `UnixVfs` and `MemoryVfs`
+
+**Tests:** `src/vfs.rs::tests::memory_vfs_contract`, `src/vfs.rs::tests::unix_vfs_contract`

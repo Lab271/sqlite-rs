@@ -21,6 +21,18 @@ impl Vfs for UnixVfs {
         }))
     }
 
+    fn open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|source| to_vfs_error(path, source))?;
+        Ok(Box::new(UnixVfsFile {
+            file,
+            path: path.to_path_buf(),
+        }))
+    }
+
     fn exists(&self, path: &Path) -> Result<bool> {
         path.try_exists()
             .map_err(|source| to_vfs_error(path, source))
@@ -57,6 +69,18 @@ impl VfsFile for UnixVfsFile {
         lock::lock_shared(&self.file)
             .map(|guard| FileLock(Box::new(guard)))
             .map_err(|source| to_lock_error(&self.path, source))
+    }
+
+    fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+        self.file
+            .write_all_at(buf, offset)
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
+    fn sync(&self) -> Result<()> {
+        self.file
+            .sync_data()
+            .map_err(|source| to_vfs_error(&self.path, source))
     }
 }
 

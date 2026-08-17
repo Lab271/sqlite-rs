@@ -23,8 +23,40 @@ pub enum PageError {
         got: usize,
     },
 
+    #[error("wrong buffer length writing page {page_num}: expected {expected} bytes, got {got}")]
+    WrongLength {
+        page_num: u32,
+        expected: usize,
+        got: usize,
+    },
+
     #[error(transparent)]
     Vfs(#[from] VfsError),
+}
+
+/// Reads page `page_num` from `file`, shared between [`VfsPageSource`] and
+/// [`WritablePageSource`].
+fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Vec<u8>, PageError> {
+    if page_num == 0 {
+        return Err(PageError::InvalidPageNumber);
+    }
+    let mut buf = vec![0u8; page_size as usize];
+    // page_num >= 1 here (checked above) and page_size is a validated
+    // power of two in [512, 65536] (header.rs), so this product stays
+    // far below u64::MAX; saturating_* just avoids asserting that by
+    // inspection.
+    let offset = (page_num as u64)
+        .saturating_sub(1)
+        .saturating_mul(page_size as u64);
+    let n = file.read_at(&mut buf, offset)?;
+    if n != buf.len() {
+        return Err(PageError::ShortRead {
+            page_num,
+            expected: buf.len(),
+            got: n,
+        });
+    }
+    Ok(buf)
 }
 
 /// A source of whole database pages, numbered from 1.
@@ -55,26 +87,66 @@ impl VfsPageSource {
 
 impl PageSource for VfsPageSource {
     fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        read_page_at(self.file.as_ref(), self.page_size, page_num)
+    }
+}
+
+/// A [`PageSource`] backed by a read-write [`VfsFile`] opened through
+/// [`Vfs::open_write`], adding [`WritablePageSource::write_page`] and
+/// [`WritablePageSource::sync`] on top of the same single file handle used
+/// for reads (#166 pager write path). Using one handle for both directions
+/// — rather than a second fd opened alongside a read-only [`VfsPageSource`]
+/// — sidesteps the documented "`close()` drops all `fcntl` locks on the
+/// inode" trap (`src/pager.rs`'s module doc, #45): [`Pager`](crate::pager::Pager)
+/// never opens a second fd to the same path, so there is nothing whose drop
+/// could silently release a lock acquired through this one.
+pub struct WritablePageSource {
+    file: Box<dyn VfsFile>,
+    page_size: u32,
+}
+
+impl WritablePageSource {
+    pub fn open(vfs: &dyn Vfs, path: &Path, page_size: u32) -> Result<Self, VfsError> {
+        let file = vfs.open_write(path)?;
+        Ok(WritablePageSource { file, page_size })
+    }
+
+    /// Acquires a SHARED lock on the underlying file — see
+    /// [`VfsFile::lock_shared`].
+    pub fn lock_shared(&self) -> Result<FileLock, VfsError> {
+        self.file.lock_shared()
+    }
+
+    /// Writes exactly `page_size` bytes of `bytes` as page `page_num`
+    /// (1-based). `page_num == 0` or a wrong-length buffer is `Err`.
+    pub fn write_page(&self, page_num: u32, bytes: &[u8]) -> Result<(), PageError> {
         if page_num == 0 {
             return Err(PageError::InvalidPageNumber);
         }
-        let mut buf = vec![0u8; self.page_size as usize];
-        // page_num >= 1 here (checked above) and page_size is a validated
-        // power of two in [512, 65536] (header.rs), so this product stays
-        // far below u64::MAX; saturating_* just avoids asserting that by
-        // inspection.
+        if bytes.len() != self.page_size as usize {
+            return Err(PageError::WrongLength {
+                page_num,
+                expected: self.page_size as usize,
+                got: bytes.len(),
+            });
+        }
         let offset = (page_num as u64)
             .saturating_sub(1)
             .saturating_mul(self.page_size as u64);
-        let n = self.file.read_at(&mut buf, offset)?;
-        if n != buf.len() {
-            return Err(PageError::ShortRead {
-                page_num,
-                expected: buf.len(),
-                got: n,
-            });
-        }
-        Ok(buf)
+        self.file.write_at(bytes, offset)?;
+        Ok(())
+    }
+
+    /// Flushes all writes made via [`WritablePageSource::write_page`] to
+    /// durable storage.
+    pub fn sync(&self) -> Result<(), VfsError> {
+        self.file.sync()
+    }
+}
+
+impl PageSource for WritablePageSource {
+    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        read_page_at(self.file.as_ref(), self.page_size, page_num)
     }
 }
 

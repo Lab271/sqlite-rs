@@ -21,6 +21,7 @@ mod expr_vectors_test;
 mod families_test;
 mod harness_test;
 mod oracle_test;
+mod pager_write_test;
 mod parser_oracle_test;
 mod regen_test;
 mod schema_test;
