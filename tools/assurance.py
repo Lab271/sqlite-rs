@@ -129,6 +129,8 @@ VERSION_MAP = {
     3: ("V1", 3, "#5"),  4: ("V1", 4, "#5"),
     5: ("V2", 1, "#56"), 6: ("V2", 2, "#56"),
     7: ("V2", 3, "#56"), 8: ("V2", 4, "#56"),
+    9: ("V3", 1, "#161"),  10: ("V3", 2, "#161"),
+    11: ("V3", 3, "#161"), 12: ("V3", 4, "#161"),
 }
 
 
@@ -226,9 +228,13 @@ def opcode_model():
         return None
     implemented = set()
     for line in m.group(1).splitlines():
-        arm = re.match(r"\s*(\w+)\s*=>", line)
-        if arm and arm.group(1) not in ("other", "_"):
-            implemented.add(arm.group(1))
+        arm = re.match(r"\s*([\w\s|]+?)\s*=>", line)
+        if not arm:
+            continue
+        for name in arm.group(1).split("|"):
+            name = name.strip()
+            if name and name not in ("other", "_"):
+                implemented.add(name)
     return len(implemented & harvested), len(harvested)
 
 

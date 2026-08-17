@@ -321,8 +321,6 @@ Each layer MUST communicate only through its defined interface. No layer SHALL r
 
 **Implementation:** `src/lib.rs` (planned)
 
-**Tests:** `tests/architecture_test.rs` (planned)
-
 #### Scenario: B-tree does not know SQL
 
 - GIVEN a B-tree cursor positioned on a row
@@ -377,7 +375,7 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 
 **Implementation:** `src/lib.rs` (planned)
 
-**Tests:** `tests/corpus/tier0_test.rs` (planned)
+**Tests:** `tests/tiers/tier0.rs::t0_feature_bearing_files_are_raw_row_readable`
 
 #### Scenario: Read a WITHOUT ROWID table
 

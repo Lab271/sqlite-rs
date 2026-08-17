@@ -69,8 +69,8 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.7.8** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0.
+**Version 0.8.0** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0, V2 = 0.5.0–0.8.0.
 
 All four V1 phases landed: format core (header, record decoder, VFS, pinned-oracle corpus), b-tree cursors incl. WITHOUT ROWID + minimal DDL reader, mid-life reading (pager, WAL frame recovery, safe-reader locking validated against live sqlite3), and the `sqlite-rs dump`/`export` CLI with shell-parity output.
 
-Remaining for V1 close: mutation-testing run + epic #5 exit gates. Next block: V2 — single-table SELECT.
+All four V2 phases landed: tokenizer + SELECT-core parser, the value-semantics kernel (affinity, comparison, collation) and scalar function core, the VDBE interpreter with full control/cursor/compare/arithmetic/result/sorter opcode dispatch, and the `sqlite-rs query` CLI validated against a sqllogictest single-table slice. Epic #56 closed at 0.8.0. Next block: V3 — full CRUD (write path).

@@ -6,6 +6,31 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-16
+
+### Added
+
+- V2 exit gate (#97): closes epic #56 — V2, single-table queries (Tier 1
+  QUERY CORE), is fully shipped across all four phases (tokenizer +
+  SELECT-core parser, value-semantics kernel + scalar function core,
+  VDBE interpreter, `sqlite-rs query` CLI).
+- `tests/tiers/tier1.rs::t1_select_core_accepts_and_rejects` — the last
+  Tier 1 stub, flipped live: accept/reject vectors for the SELECT-core
+  parser's three-way `ParseOutcome` contract (spec 002-parser
+  Requirement 4). Tier 1 is now 7/7 active, no ignores.
+
+### Fixed
+
+- `tools/assurance.py`'s opcode-completeness scan missed dispatch arms
+  combining multiple opcodes (`SorterSort | Sort => ...`), undercounting
+  `Sort`/`SorterSort` as unimplemented. Opcode completeness now
+  correctly reads 64/64 against the frozen inventory (#65/#87) — both
+  opcodes were already dispatched.
+- `.openspec/specs/001-architecture/spec.md`: removed a stale
+  `(planned)` dead link on Requirement 1 (a real test link already
+  covers the scenario) and repointed Requirement 4's dead link to the
+  actual tier0 test (`tests/tiers/tier0.rs::t0_feature_bearing_files_are_raw_row_readable`).
+
 ## [0.7.8] - 2026-08-16
 
 ### Added
