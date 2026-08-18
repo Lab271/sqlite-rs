@@ -17,7 +17,9 @@ use crate::btree::{BtreeError, IndexCursor, IndexRow, TableCursor, TableRow};
 use crate::header::{DatabaseHeader, HeaderError, HEADER_LEN};
 use crate::pager::{Pager, PagerError};
 use crate::record::{decode_record, RecordError, TextEncoding, Value};
-use crate::schema::{column_defs, read_schema, rowid_alias_column, DdlError, TableSchema};
+use crate::schema::{
+    column_defs, column_type, read_schema, rowid_alias_column, DdlError, TableSchema,
+};
 use crate::vfs::{PageSource, Vfs, VfsError};
 
 #[derive(Debug, Error)]
@@ -124,11 +126,7 @@ fn real_affinity_columns(schema: &TableSchema) -> Vec<bool> {
     column_defs(schema)
         .iter()
         .map(|def| {
-            let upper = def.to_ascii_uppercase();
-            let declared_type = upper
-                .split_once(char::is_whitespace)
-                .map(|(_, rest)| rest)
-                .unwrap_or("");
+            let declared_type = column_type(def).to_ascii_uppercase();
             declared_type.contains("REAL")
                 || declared_type.contains("FLOA")
                 || declared_type.contains("DOUB")
@@ -244,12 +242,11 @@ mod tests {
         assert_eq!(real_affinity_columns(&s), vec![true, true, true, false]);
     }
 
-    // Known-fragile cases: `column_defs`/`rowid_alias_column`/
-    // `real_affinity_columns` re-derive column info from raw DDL text
-    // with naive splitting rather than the structured parser in
-    // `src/schema/ddl_reader.rs`. These tests document current (not
-    // necessarily correct) behavior so a future fix has a baseline —
-    // see PR #49 review discussion.
+    // Regression cases for `column_defs`/`rowid_alias_column`/
+    // `real_affinity_columns` re-deriving column info from raw DDL text:
+    // quote/comment-aware splitting (#135) and declared-type-token
+    // matching (#181) keep these from false-positiving on constraint or
+    // string-literal text — see PR #49 review discussion.
 
     #[test]
     fn comma_inside_string_literal_default_does_not_missplit_columns() {
@@ -264,16 +261,16 @@ mod tests {
     }
 
     #[test]
-    fn known_fragile_constraint_text_can_false_positive_on_affinity_keywords() {
+    fn constraint_text_mentioning_affinity_keywords_is_not_a_false_positive() {
         // A CHECK constraint mentioning "FLOAT" as a string, not a type,
-        // still makes `real_affinity_columns` treat the column as REAL —
-        // because it substring-matches the whole remainder after the
-        // column name, not just the declared-type token.
+        // must not make `real_affinity_columns` treat the column as
+        // REAL — it matches only the declared-type token (via
+        // `column_type`), not the whole column-definition remainder.
         let s = schema("CREATE TABLE t (a TEXT CHECK(a != 'FLOAT'))");
         assert_eq!(
             real_affinity_columns(&s),
-            vec![true],
-            "constraint text mentioning FLOAT was wrongly detected as REAL affinity"
+            vec![false],
+            "constraint text mentioning FLOAT must not be detected as REAL affinity"
         );
     }
 
