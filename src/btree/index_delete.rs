@@ -42,7 +42,7 @@ use super::index::{
     compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
     IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
 };
-use super::{page1_header_start, read_page_type, BtreeError};
+use super::{page1_header_start, read_page_type, BtreeError, MAX_PAGES_VISITED};
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{TextEncoding, Value};
@@ -107,7 +107,7 @@ fn delete_via_predecessor_swap(
     entry_child: u32,
     encoding: TextEncoding,
 ) -> Result<(), BtreeError> {
-    match extract_max_entry(pager, usable_size, entry_child, encoding)? {
+    match extract_max_entry(pager, usable_size, entry_child, encoding, 0)? {
         Some(predecessor_bytes) => {
             let header_start = page1_header_start(interior_page);
             let buf = pager.get_page_mut(interior_page)?.clone();
@@ -150,12 +150,27 @@ fn delete_via_predecessor_swap(
 /// (rather than just leaving emptied ones in place), because an
 /// interior page's own last entry may need to become the new `rightmost`
 /// once its previous `rightmost` subtree is confirmed drained.
+///
+/// Whenever this function determines that the subtree rooted at
+/// `page_num` is itself fully drained (returning `Ok(None)`), it has
+/// already deallocated every descendant page of `page_num` — never just
+/// the immediate child — so a caller that sees `None` only needs to
+/// deallocate `page_num` itself, not walk its subtree. `depth` guards
+/// against a corrupted/cyclic `rightmost` chain causing unbounded
+/// recursion, mirroring [`descend_index_tree`]'s `MAX_PAGES_VISITED`
+/// convention.
 fn extract_max_entry(
     pager: &mut Pager,
     usable_size: u32,
     page_num: u32,
     encoding: TextEncoding,
+    depth: usize,
 ) -> Result<Option<Vec<u8>>, BtreeError> {
+    if depth > MAX_PAGES_VISITED {
+        return Err(BtreeError::TraversalTooLong {
+            max: MAX_PAGES_VISITED,
+        });
+    }
     let header_start = page1_header_start(page_num);
     let buf = pager.get_page_mut(page_num)?.clone();
     let page_type = read_page_type(&buf, header_start, page_num)?;
@@ -181,18 +196,32 @@ fn extract_max_entry(
     let (mut entries, rightmost) =
         collect_index_interior_entries(pager, &buf, header_start, page_num, usable_size, encoding)?;
 
-    if let Some(max_bytes) = extract_max_entry(pager, usable_size, rightmost, encoding)? {
+    if let Some(max_bytes) = extract_max_entry(
+        pager,
+        usable_size,
+        rightmost,
+        encoding,
+        depth.saturating_add(1),
+    )? {
         // `rightmost`'s subtree had the maximum; it already rewrote
         // whichever page(s) it touched. This page's own shape (entries,
         // rightmost) is unaffected.
         return Ok(Some(max_bytes));
     }
 
-    // `rightmost`'s subtree is fully drained (confirmed empty, safe to
-    // deallocate). This page's own last entry — if it has one — is the
-    // true maximum; its child becomes the new `rightmost` so the (still
-    // possibly live) data under it stays reachable.
+    // `rightmost`'s subtree is fully drained — the recursive call above
+    // has already deallocated every page in it. This page's own last
+    // entry — if it has one — is the true maximum; its child becomes the
+    // new `rightmost` so the (still possibly live) data under it stays
+    // reachable.
     let Some((child, _, max_bytes)) = entries.pop() else {
+        // This page's own entries are empty too, so `page_num` itself is
+        // now fully drained. `rightmost` was already confirmed drained
+        // above (and its own descendants already freed by the recursive
+        // call) but never itself deallocated — do that now, since our
+        // caller sees only `None` and has no other way to learn that
+        // `rightmost` still needs freeing.
+        pager.deallocate_page(rightmost)?;
         return Ok(None);
     };
     pager.deallocate_page(rightmost)?;
@@ -241,7 +270,7 @@ fn remove_entry_by_child(
 mod tests {
     use super::*;
     use crate::btree::index_insert::insert_entry;
-    use crate::vfs::MemoryVfs;
+    use crate::vfs::{MemoryVfs, PageSource};
     use std::path::Path;
 
     fn minimal_index_db(page_size: u32) -> (MemoryVfs, DatabaseHeader) {
@@ -371,5 +400,91 @@ mod tests {
 
         let mut cursor = crate::btree::IndexCursor::new(pager, header.usable_page_size(), 1);
         assert!(cursor.first().unwrap().is_none());
+    }
+
+    /// Walks every page number reachable from `page_num` (an index b-tree
+    /// root/subtree): itself, plus (for an interior page) every entry's
+    /// child and `rightmost`, recursively.
+    fn reachable_pages(pager: &Pager, page_num: u32, encoding: TextEncoding, out: &mut Vec<u32>) {
+        out.push(page_num);
+        let header_start = page1_header_start(page_num);
+        let buf = pager.read_page(page_num).unwrap();
+        let page_type = read_page_type(&buf, header_start, page_num).unwrap();
+        if page_type != INTERIOR_INDEX {
+            return;
+        }
+        let (entries, rightmost) = collect_index_interior_entries(
+            pager,
+            &buf,
+            header_start,
+            page_num,
+            buf.len() as u32,
+            encoding,
+        )
+        .unwrap();
+        for (child, _, _) in &entries {
+            reachable_pages(pager, *child, encoding, out);
+        }
+        reachable_pages(pager, rightmost, encoding, out);
+    }
+
+    /// Walks the freelist trunk chain (page 1's header fields), returning
+    /// every page number currently on it (trunks and leaves alike).
+    fn freelist_pages(pager: &Pager) -> Vec<u32> {
+        let page1 = pager.read_page(1).unwrap();
+        let mut trunk = u32::from_be_bytes([page1[32], page1[33], page1[34], page1[35]]);
+        let mut out = Vec::new();
+        while trunk != 0 {
+            out.push(trunk);
+            let buf = pager.read_page(trunk).unwrap();
+            let parsed = crate::pager::freelist::TrunkPage::parse(&buf).unwrap();
+            out.extend(&parsed.leaves);
+            trunk = parsed.next_trunk;
+        }
+        out
+    }
+
+    #[test]
+    fn deleting_all_entries_orphans_no_page() {
+        // Regression guard for the `extract_max_entry` fix: a predecessor
+        // swap that drains a subtree more than one level deep (interior ->
+        // interior -> leaf) must deallocate every page in that subtree,
+        // not just the immediate child — otherwise a deeper emptied page
+        // becomes unreachable garbage (neither reachable from the root
+        // nor on the freelist) instead of landing on the freelist. Every
+        // page in the file must be either reachable from the root or on
+        // the freelist — nothing left in neither set.
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let n = 30i64;
+        let keys: Vec<Vec<Value>> = (1..=n)
+            .map(|i| vec![Value::Text(format!("{filler}-{i:04}")), Value::Integer(i)])
+            .collect();
+        for k in &keys {
+            insert_entry(&mut pager, &header, 1, k, TextEncoding::Utf8).unwrap();
+        }
+        for k in &keys {
+            delete_entry(&mut pager, &header, 1, k, TextEncoding::Utf8).unwrap();
+        }
+
+        let raw = pager.get_page_mut(1).unwrap().clone();
+        let total_pages = u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
+
+        let mut reachable = Vec::new();
+        reachable_pages(&pager, 1, TextEncoding::Utf8, &mut reachable);
+        let freed = freelist_pages(&pager);
+
+        let mut accounted: Vec<u32> = reachable.into_iter().chain(freed).collect();
+        accounted.sort_unstable();
+        accounted.dedup();
+        let all_pages: Vec<u32> = (1..=total_pages).collect();
+        assert_eq!(
+            accounted, all_pages,
+            "every page must be either reachable from the root or on the freelist — \
+             a page missing from both is orphaned"
+        );
     }
 }
