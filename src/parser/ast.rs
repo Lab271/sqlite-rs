@@ -12,6 +12,24 @@
 use super::tokenizer::Span;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Update {
+    pub or_action: Option<ConflictAction>,
+    pub table: String,
+    pub assignments: Vec<Assignment>,
+    pub where_clause: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    /// One column for `col = expr`; the tuple form
+    /// `(col1, col2) = (expr1, expr2)` is expanded into one [`Assignment`]
+    /// per column, each carrying its paired expr from the RHS list.
+    pub columns: Vec<String>,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Select {
     pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,

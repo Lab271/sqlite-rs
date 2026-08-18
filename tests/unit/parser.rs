@@ -10,13 +10,106 @@
 )]
 
 use sqlite_rs::parser::ast::*;
-use sqlite_rs::parser::{parse_select, ParseOutcome};
+use sqlite_rs::parser::{parse_select, parse_update, ParseOutcome};
 
 fn accept(src: &str) -> Select {
     match parse_select(src) {
         ParseOutcome::Accepted(select) => *select,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
+}
+
+fn accept_update(src: &str) -> Update {
+    match parse_update(src) {
+        ParseOutcome::Accepted(update) => *update,
+        other => panic!("expected accept for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_update(src: &str) -> String {
+    match parse_update(src) {
+        ParseOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_update(src: &str) -> String {
+    match parse_update(src) {
+        ParseOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
+/// Issue #190: basic `UPDATE ... SET ... WHERE ...`.
+#[test]
+fn test_accept_update_basic() {
+    let update = accept_update("UPDATE t1 SET x=1 WHERE x>0");
+    assert_eq!(update.table, "t1");
+    assert_eq!(update.or_action, None);
+    assert_eq!(update.assignments.len(), 1);
+    assert_eq!(update.assignments[0].columns, vec!["x".to_string()]);
+    assert!(update.where_clause.is_some());
+}
+
+/// Issue #190: multiple assignments, no WHERE.
+#[test]
+fn test_accept_update_multiple_assignments_no_where() {
+    let update = accept_update("UPDATE t1 SET x=3, x=4, x=5");
+    assert_eq!(update.assignments.len(), 3);
+    assert!(update.where_clause.is_none());
+}
+
+/// Issue #190: `UPDATE OR REPLACE`/`OR IGNORE` conflict actions.
+#[test]
+fn test_accept_update_or_conflict_actions() {
+    let update = accept_update("UPDATE OR IGNORE t1 SET a=1000");
+    assert_eq!(update.or_action, Some(ConflictAction::Ignore));
+
+    let update = accept_update("UPDATE OR REPLACE t1 SET a=1001");
+    assert_eq!(update.or_action, Some(ConflictAction::Replace));
+
+    let update = accept_update("UPDATE OR ROLLBACK t1 SET a=1");
+    assert_eq!(update.or_action, Some(ConflictAction::Rollback));
+
+    let update = accept_update("UPDATE OR ABORT t1 SET a=1");
+    assert_eq!(update.or_action, Some(ConflictAction::Abort));
+
+    let update = accept_update("UPDATE OR FAIL t1 SET a=1");
+    assert_eq!(update.or_action, Some(ConflictAction::Fail));
+}
+
+/// Issue #190: tuple SET form expands to one Assignment per column.
+#[test]
+fn test_accept_update_tuple_set_form() {
+    let update = accept_update("UPDATE t1 SET (x, y) = (1, 2)");
+    assert_eq!(update.assignments.len(), 2);
+    assert_eq!(update.assignments[0].columns, vec!["x".to_string()]);
+    assert_eq!(update.assignments[1].columns, vec!["y".to_string()]);
+}
+
+/// Issue #190: tuple SET form with mismatched arity is a syntax error.
+#[test]
+fn test_reject_update_tuple_set_arity_mismatch() {
+    invalid_update("UPDATE t1 SET (x, y) = (1, 2, 3)");
+}
+
+/// Issue #190: tuple SET form with a subquery RHS is not yet supported.
+#[test]
+fn test_reject_update_tuple_set_subquery_rhs_unsupported() {
+    unsupported_update("UPDATE t1 SET (x, y) = (SELECT a, b FROM t)");
+}
+
+/// Issue #190: WHERE reuses the existing expr parser, including subqueries
+/// that the V2 expr grammar doesn't support yet.
+#[test]
+fn test_reject_update_where_subquery_unsupported() {
+    unsupported_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
+}
+
+/// Issue #190: missing SET keyword is a syntax error.
+#[test]
+fn test_reject_update_missing_set() {
+    invalid_update("UPDATE t1 x=1");
 }
 
 fn unsupported(src: &str) -> String {

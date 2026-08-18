@@ -8,6 +8,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Parser: UPDATE statement (#190), V3 phase 2 (epic #161). `parse_update`
+  accepts `UPDATE [OR REPLACE/IGNORE/ABORT/ROLLBACK/FAIL] table SET
+  col=expr, ... [WHERE ...]`, including the tuple SET form
+  `(col1, col2) = (expr1, expr2)` (expanded into one `Assignment` per
+  column; mismatched arity is a syntax error, a subquery RHS is
+  unsupported), mirroring `parse_insert`/`parse_delete`'s three-way
+  accept/unsupported/invalid outcome contract (spec 002-parser). New
+  `Update`/`Assignment` AST nodes reuse the existing expr parser for SET
+  values and WHERE and the existing `ConflictAction` enum; `update-stmt`
+  grammar entry in `.openspec/grammar/sqlite.ebnf` extended to cover the
+  conflict-action clause and tuple-assignment form.
 - Parser: DELETE statement (#191), V3 phase 2 (epic #161). `parse_delete`
   accepts `DELETE FROM table [WHERE ...]` (no LIMIT/ORDER BY — deferred),
   mirroring `parse_insert`'s three-way accept/unsupported/invalid outcome
