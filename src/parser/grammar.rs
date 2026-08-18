@@ -529,7 +529,8 @@ impl Parser {
     }
 
     fn opt_column_constraint(&mut self) -> PResult<Option<ColumnConstraint>> {
-        if self.eat_kw(Keyword::CONSTRAINT) {
+        let named = self.eat_kw(Keyword::CONSTRAINT);
+        if named {
             self.identifier()?;
         }
         if self.eat_kw(Keyword::NOT) {
@@ -581,6 +582,9 @@ impl Parser {
             || (self.at_kw(Keyword::AS) && matches!(self.peek_at(1).kind, TokenKind::LParen))
         {
             return self.unsupported("GENERATED ALWAYS AS not yet supported");
+        }
+        if named {
+            return self.invalid("expected column constraint after CONSTRAINT name");
         }
         Ok(None)
     }

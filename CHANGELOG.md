@@ -8,6 +8,34 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 No changes yet.
 
+## [0.10.1] - 2026-08-18
+
+Fixes from `/review` of V3 phase 2 (#188/#190/#191/#192/#193): a parser
+bug and an untrusted-input handling gap, plus minor diagnostics/doc
+cleanup.
+
+### Fixed
+
+- `opt_column_constraint()` (DDL column-constraint parsing, #192) silently
+  dropped `CONSTRAINT <name>` when no recognized constraint keyword
+  followed — e.g. `CREATE TABLE t (a INTEGER CONSTRAINT foo)` was accepted
+  with the constraint text discarded. Now rejected as `Invalid`, matching
+  `table_constraint()`'s existing behavior.
+- `find_master_rootpage()` (`src/btree/master.rs`, #193) cast an `i64`
+  rootpage read from a `sqlite_master` row directly to `u32` with no
+  validation — a corrupted or malicious `.db` file could store an
+  out-of-range/negative rootpage and get silently mapped to a different
+  page. Now rejected via a new `BtreeError::InvalidRootPage`.
+- `delete_master_row` fabricated `BtreeError::RowidNotFound { rowid: 0 }`
+  on a by-name lookup miss, discarding the actual name. Replaced with a
+  dedicated `BtreeError::MasterEntryNotFound { name }`.
+
+### Changed
+
+- Documented `bump_schema_cookie`'s `wrapping_add` as deliberate parity
+  with stock SQLite's own cookie wraparound.
+- Added a tripwire comment on the `PageSource for &T` blanket impl.
+
 ## [0.10.0] - 2026-08-18
 
 V3 phase 2 (epic #161) complete: write-path parser (INSERT/UPDATE/DELETE,

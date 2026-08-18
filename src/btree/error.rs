@@ -74,6 +74,12 @@ pub enum BtreeError {
     #[error("cannot delete index key: no such entry")]
     KeyNotFound,
 
+    #[error("sqlite_master entry {name:?} has out-of-range rootpage {rootpage}")]
+    InvalidRootPage { name: String, rootpage: i64 },
+
+    #[error("cannot delete sqlite_master entry {name:?}: no such entry")]
+    MasterEntryNotFound { name: String },
+
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
 }

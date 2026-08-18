@@ -250,6 +250,11 @@ fn test_invalid_create_table_missing_paren() {
 }
 
 #[test]
+fn test_invalid_create_table_dangling_column_constraint_name() {
+    invalid_table("CREATE TABLE t (a INTEGER CONSTRAINT foo)");
+}
+
+#[test]
 fn test_printer_roundtrip_create_table() {
     let t = accept_table(
         "CREATE TABLE IF NOT EXISTS t (a INTEGER PRIMARY KEY, b TEXT NOT NULL DEFAULT 'x', CHECK (a > 0)) STRICT",

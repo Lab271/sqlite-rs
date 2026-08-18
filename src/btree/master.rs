@@ -46,6 +46,9 @@ fn read_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
 /// Increments the schema cookie in the database header and writes it
 /// back, returning the new value. Every schema-mutating statement (CREATE
 /// TABLE/INDEX, DROP TABLE/INDEX) calls this once.
+///
+/// Wraps on overflow rather than saturating, matching stock SQLite's own
+/// `u32` schema-cookie wraparound behavior.
 pub fn bump_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
     let new_cookie = read_schema_cookie(pager)?.wrapping_add(1);
     let page1 = pager.get_page_mut(SQLITE_MASTER_ROOT_PAGE)?;
@@ -140,7 +143,7 @@ pub fn insert_master_row(
 
 /// Deletes the `sqlite_master` row named `name` (`DROP TABLE`/`DROP
 /// INDEX`). Does not bump the schema cookie — see [`insert_master_row`].
-/// Returns `Err(BtreeError::RowidNotFound)` if no such row exists.
+/// Returns `Err(BtreeError::MasterEntryNotFound)` if no such row exists.
 pub fn delete_master_row(
     pager: &mut Pager,
     header: &DatabaseHeader,
@@ -154,7 +157,9 @@ pub fn delete_master_row(
         name,
         header.text_encoding,
     )?
-    .ok_or(BtreeError::RowidNotFound { rowid: 0 })?;
+    .ok_or_else(|| BtreeError::MasterEntryNotFound {
+        name: name.to_string(),
+    })?;
     super::delete_row(pager, header, SQLITE_MASTER_ROOT_PAGE, rowid)
 }
 
@@ -209,7 +214,17 @@ fn find_master_rootpage(
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(rp))) = (values.get(1), values.get(3)) {
             if n == name {
-                return Ok(Some(*rp as u32));
+                let rootpage = u32::try_from(*rp).map_err(|_| BtreeError::InvalidRootPage {
+                    name: name.to_string(),
+                    rootpage: *rp,
+                })?;
+                if rootpage == 0 {
+                    return Err(BtreeError::InvalidRootPage {
+                        name: name.to_string(),
+                        rootpage: *rp,
+                    });
+                }
+                return Ok(Some(rootpage));
             }
         }
         row = cursor.next()?;
@@ -297,6 +312,33 @@ mod tests {
     }
 
     #[test]
+    fn find_master_rootpage_rejects_out_of_range_rootpage() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        // Craft a sqlite_master row with a negative rootpage — something a
+        // stock MasterEntry (rootpage: u32) can never produce, but a
+        // corrupted/malicious .db file can.
+        let values = [
+            Value::Text("table".to_string()),
+            Value::Text("evil".to_string()),
+            Value::Text("evil".to_string()),
+            Value::Integer(-1),
+            Value::Text(String::new()),
+        ];
+        let payload = encode_record(&values, header.text_encoding);
+        super::super::insert_row(&mut pager, &header, SQLITE_MASTER_ROOT_PAGE, 1, &payload)
+            .unwrap();
+
+        let err = find_master_rootpage(&mut pager, &header, "evil").unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::InvalidRootPage { rootpage: -1, .. }
+        ));
+    }
+
+    #[test]
     fn schema_cookie_increments_and_persists() {
         let page_size = 512u32;
         let (vfs, header) = minimal_db(page_size);
@@ -348,7 +390,7 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
 
         let err = delete_master_row(&mut pager, &header, "nope").unwrap_err();
-        assert!(matches!(err, BtreeError::RowidNotFound { .. }));
+        assert!(matches!(err, BtreeError::MasterEntryNotFound { .. }));
     }
 
     #[test]

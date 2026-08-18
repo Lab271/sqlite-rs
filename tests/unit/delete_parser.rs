@@ -68,3 +68,11 @@ fn test_invalid_delete_missing_table() {
 fn test_invalid_delete_trailing_garbage() {
     invalid("DELETE FROM t WHERE a > 1 EXTRA");
 }
+
+#[test]
+fn test_invalid_delete_limit_not_yet_supported() {
+    // LIMIT/ORDER BY on DELETE are out of scope for this ticket (see
+    // CHANGELOG) and rejected as trailing garbage, not as `Unsupported` —
+    // this locks in that documented scope decision.
+    invalid("DELETE FROM t LIMIT 1");
+}
