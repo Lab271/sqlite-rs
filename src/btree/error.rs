@@ -65,6 +65,9 @@ pub enum BtreeError {
     #[error("interior page {page_num} has no routing entry for child page {child}")]
     MissingChildRoute { page_num: u32, child: u32 },
 
+    #[error("cannot delete rowid {rowid}: no such row")]
+    RowidNotFound { rowid: i64 },
+
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
 }

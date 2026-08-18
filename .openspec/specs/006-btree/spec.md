@@ -276,3 +276,77 @@ Because a table's root page number is fixed (referenced by its `sqlite_master` e
 - THEN `PRAGMA integrity_check` MUST pass and every row's overflowing payload MUST read back byte-identical
 
 **Tests:** `tests/corpus/btree_insert_test.rs::insert_with_overflow_payload_combined_with_a_split`
+
+### Requirement 12: Leaf Cell Delete [MUST]
+
+The system MUST delete the row with a given rowid from a table b-tree leaf page: locating the cell by rowid, removing it from the cell-pointer array, and rewriting the page's remaining cells (in order) and cell count. Deleting a rowid that doesn't exist in the tree MUST return `Err`, leaving the tree unchanged.
+
+**Implementation:** `src/btree/delete.rs::delete_row`
+
+#### Scenario: Deleting a missing rowid errors without mutating the tree
+
+- GIVEN a table b-tree that does not contain rowid `R`
+- WHEN `delete_row` is called with rowid `R`
+- THEN it MUST return `Err(BtreeError::RowidNotFound)`, leaving the page unchanged
+
+**Tests:** `src/btree/delete.rs::tests::deleting_a_missing_rowid_errors`
+
+#### Scenario: Deleting one row out of several leaves the rest intact
+
+- GIVEN a leaf holding more than one row
+- WHEN one row's rowid is deleted
+- THEN the remaining rows MUST stay in ascending rowid order, unchanged
+
+**Tests:** `src/btree/delete.rs::tests::deleting_one_of_two_rows_keeps_the_other`, `tests/corpus/btree_delete_test.rs::delete_single_row_from_a_two_row_leaf`
+
+#### Scenario: Bulk delete stays oracle-identical at scale
+
+- GIVEN 1000 rows inserted, then every other rowid deleted one at a time
+- WHEN the file is reopened by stock `sqlite3`
+- THEN `PRAGMA integrity_check` MUST pass and every surviving row MUST read back identically, in rowid order
+
+**Tests:** `tests/corpus/btree_delete_test.rs::bulk_delete_every_other_row_out_of_1000`
+
+### Requirement 13: Page Merge/Collapse on Underflow [MUST]
+
+When a delete leaves a non-root page with zero cells, the system MUST remove that page's routing entry from its parent (redirecting the parent's `rightmost` pointer if the emptied page was the parent's rightmost child) and deallocate the emptied page via the pager's freelist (Requirement per spec 007/freelist). This is a documented simplification of SQLite's proactive half-full-threshold sibling redistribution: pages are only collapsed once completely empty, not proactively rebalanced while still holding rows — sufficient for structural validity (`PRAGMA integrity_check`) and for freed pages to be reused by a later insert, without porting the exact 3-sibling balance algorithm.
+
+**Implementation:** `src/btree/delete.rs::collapse_into_ancestors`
+
+#### Scenario: Deleting the only row in the root leaves an empty root leaf
+
+- GIVEN a table with exactly one row, at a root page that is itself a leaf
+- WHEN that row is deleted
+- THEN the root page MUST remain a valid, empty leaf page (the root can never be deallocated)
+
+**Tests:** `src/btree/delete.rs::tests::deleting_the_only_row_leaves_an_empty_root_leaf`
+
+#### Scenario: Page merge triggers correctly when a non-root leaf empties
+
+- GIVEN a table b-tree with more than one leaf page (a prior split), all rows in one leaf deleted
+- WHEN the last row in that leaf is deleted
+- THEN the leaf MUST be removed from its parent's routing entries and deallocated, and stock `sqlite3` MUST still pass `PRAGMA integrity_check`
+
+**Tests:** `tests/corpus/btree_delete_test.rs::delete_triggers_page_collapse_across_a_split_boundary`
+
+### Requirement 14: Underflow Cascading to Root [MUST]
+
+When collapsing a page leaves its own parent with zero routing entries (just a `rightmost` pointer), the system MUST cascade the collapse up the ancestor chain. If the cascade reaches the root itself, the system MUST relocate the sole remaining child's content (leaf or interior, verbatim) into the fixed root page in place, then deallocate the now-vacated child page — mirroring `insert.rs::root_split` in reverse.
+
+**Implementation:** `src/btree/delete.rs::collapse_into_ancestors`, `src/btree/delete.rs::collapse_root`
+
+#### Scenario: Delete-all cascades every level back to a single empty leaf root
+
+- GIVEN enough rows inserted to force at least one leaf split, then every row deleted
+- WHEN the last row is deleted
+- THEN the tree MUST cascade-collapse back to a single empty leaf at the root page, and stock `sqlite3` MUST report zero rows and pass `PRAGMA integrity_check`
+
+**Tests:** `tests/corpus/btree_delete_test.rs::delete_all_rows_leaves_an_empty_table`
+
+#### Scenario: Round-trip insert → delete → insert reuses freed pages
+
+- GIVEN rows inserted (forcing a split), then all deleted, then the same rows reinserted
+- WHEN the reinsert completes
+- THEN the file's page count MUST NOT grow past what the first insert pass produced (freed pages are reused via the freelist), and stock `sqlite3` MUST pass `PRAGMA integrity_check`
+
+**Tests:** `tests/corpus/btree_delete_test.rs::round_trip_insert_delete_insert_reuses_freed_pages`
