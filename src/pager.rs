@@ -27,6 +27,7 @@
 
 mod error;
 pub mod freelist;
+pub mod journal;
 pub mod wal;
 
 pub use error::PagerError;

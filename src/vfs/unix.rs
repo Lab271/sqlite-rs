@@ -43,6 +43,7 @@ impl Vfs for UnixVfs {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
             .map_err(|source| to_vfs_error(path, source))?;
         Ok(Box::new(UnixVfsFile {
