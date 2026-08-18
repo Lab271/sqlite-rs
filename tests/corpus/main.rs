@@ -14,6 +14,7 @@
 mod harness;
 mod oracle;
 
+mod btree_insert_test;
 mod btree_test;
 mod cli_e2e_test;
 mod dump_oracle_test;
