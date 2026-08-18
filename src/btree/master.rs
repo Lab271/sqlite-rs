@@ -46,6 +46,9 @@ fn read_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
 /// Increments the schema cookie in the database header and writes it
 /// back, returning the new value. Every schema-mutating statement (CREATE
 /// TABLE/INDEX, DROP TABLE/INDEX) calls this once.
+///
+/// Wraps on overflow rather than saturating, matching stock SQLite's own
+/// `u32` schema-cookie wraparound behavior.
 pub fn bump_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
     let new_cookie = read_schema_cookie(pager)?.wrapping_add(1);
     let page1 = pager.get_page_mut(SQLITE_MASTER_ROOT_PAGE)?;
@@ -140,7 +143,7 @@ pub fn insert_master_row(
 
 /// Deletes the `sqlite_master` row named `name` (`DROP TABLE`/`DROP
 /// INDEX`). Does not bump the schema cookie — see [`insert_master_row`].
-/// Returns `Err(BtreeError::RowidNotFound)` if no such row exists.
+/// Returns `Err(BtreeError::MasterEntryNotFound)` if no such row exists.
 pub fn delete_master_row(
     pager: &mut Pager,
     header: &DatabaseHeader,
@@ -154,7 +157,9 @@ pub fn delete_master_row(
         name,
         header.text_encoding,
     )?
-    .ok_or(BtreeError::RowidNotFound { rowid: 0 })?;
+    .ok_or_else(|| BtreeError::MasterEntryNotFound {
+        name: name.to_string(),
+    })?;
     super::delete_row(pager, header, SQLITE_MASTER_ROOT_PAGE, rowid)
 }
 
@@ -382,7 +387,7 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
 
         let err = delete_master_row(&mut pager, &header, "nope").unwrap_err();
-        assert!(matches!(err, BtreeError::RowidNotFound { .. }));
+        assert!(matches!(err, BtreeError::MasterEntryNotFound { .. }));
     }
 
     #[test]
