@@ -80,6 +80,10 @@ path = "tests/proptest/semantics_proptest.rs"
 name = "record_proptest"
 path = "tests/proptest/record_proptest.rs"
 
+[[test]]
+name = "btree_proptest"
+path = "tests/proptest/btree_proptest.rs"
+
 [dev-dependencies]
 proptest = "1"
 criterion = "0.5"
