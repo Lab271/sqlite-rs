@@ -332,7 +332,10 @@ mod tests {
             .unwrap();
 
         let err = find_master_rootpage(&mut pager, &header, "evil").unwrap_err();
-        assert!(matches!(err, BtreeError::InvalidRootPage { rootpage: -1, .. }));
+        assert!(matches!(
+            err,
+            BtreeError::InvalidRootPage { rootpage: -1, .. }
+        ));
     }
 
     #[test]
