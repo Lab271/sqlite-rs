@@ -58,7 +58,10 @@ pub struct DumpResult {
 /// needs the same open path (e.g. re-opening per table, since [`Pager`]
 /// isn't [`Clone`] and this crate's own tests establish "open fresh per
 /// cursor" as the pattern — see `src/pager/mod.rs`'s fixture tests).
-pub fn open<V: Vfs>(vfs: &V, path: &Path) -> Result<(DatabaseHeader, Pager), DumpError> {
+pub fn open<V: Vfs + Clone + 'static>(
+    vfs: &V,
+    path: &Path,
+) -> Result<(DatabaseHeader, Pager), DumpError> {
     let file = vfs.open_read(path)?;
     let mut header_buf = [0u8; HEADER_LEN];
     file.read_at(&mut header_buf, 0)?;
@@ -68,7 +71,10 @@ pub fn open<V: Vfs>(vfs: &V, path: &Path) -> Result<(DatabaseHeader, Pager), Dum
 }
 
 /// Reads every table's schema and rows out of the database at `path`.
-pub fn dump_database<V: Vfs>(vfs: &V, path: &Path) -> Result<DumpResult, DumpError> {
+pub fn dump_database<V: Vfs + Clone + 'static>(
+    vfs: &V,
+    path: &Path,
+) -> Result<DumpResult, DumpError> {
     let (header, pager) = open(vfs, path)?;
     let mut schema_cursor = TableCursor::new(pager, &header, 1);
     let schemas = read_schema(&mut schema_cursor, header.text_encoding)?;

@@ -34,9 +34,10 @@ pub use error::PagerError;
 pub use freelist::TrunkPage;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::vfs::{companion_path, FileLock, PageError, PageSource, Vfs, WritablePageSource};
+use journal::{JournalError, JournalWriter};
 
 /// The 8-byte magic that opens a valid rollback-journal header (SQLite
 /// file-format reference, "The Rollback Journal"). A `-journal` file with
@@ -81,6 +82,14 @@ pub struct Pager {
     /// [`Pager::deallocate_page`] to compute a trunk page's leaf capacity,
     /// without re-deriving it from `source` on every call.
     page_size: u32,
+    /// Its own `Clone` of the `Vfs` `open` was called with (#172) — needed
+    /// to create/delete the `-journal` companion file, since
+    /// [`WritablePageSource`] only exposes the one file handle it was
+    /// opened with. Both concrete `Vfs` impls (`UnixVfs`, `MemoryVfs`) are
+    /// cheap to clone (a marker struct / an `Arc`-backed table).
+    vfs: Box<dyn Vfs>,
+    /// The `-journal` companion path, precomputed once in `open`.
+    journal_path: PathBuf,
 }
 
 /// Byte offsets of the three header fields ([`crate::header::DatabaseHeader`])
@@ -119,21 +128,28 @@ fn write_be_u32(buf: &mut [u8], offset: usize, value: u32) -> Result<(), freelis
 }
 
 impl Pager {
-    /// Opens `path` (page size `page_size`) through `vfs`. Returns
-    /// [`PagerError::HotJournal`] if an adjacent `-journal` file has a
-    /// valid rollback-journal header, or [`PagerError::Wal`] if an
-    /// adjacent non-empty `-wal` file's header is malformed or declares a
-    /// page size that doesn't match `page_size`.
-    pub fn open<V: Vfs>(vfs: &V, path: &Path, page_size: u32) -> Result<Self, PagerError> {
+    /// Opens `path` (page size `page_size`) through `vfs`. If an adjacent
+    /// `-journal` file has a valid rollback-journal header (a hot
+    /// journal — a prior writer never committed or crashed mid-commit),
+    /// its pages are replayed into the main file and the journal deleted
+    /// (`recover_hot_journal`, #172) before opening proceeds — rather
+    /// than V1's original refuse-and-explain (`PagerError::HotJournal`
+    /// still exists for a journal whose own header/records don't parse,
+    /// which recovery can't safely act on). Returns [`PagerError::Wal`]
+    /// if an adjacent non-empty `-wal` file's header is malformed or
+    /// declares a page size that doesn't match `page_size`.
+    pub fn open<V: Vfs + Clone + 'static>(
+        vfs: &V,
+        path: &Path,
+        page_size: u32,
+    ) -> Result<Self, PagerError> {
         let journal_path = companion_path(path, "-journal");
         if vfs.exists(&journal_path)? {
             let journal = vfs.open_read(&journal_path)?;
             let mut magic = [0u8; JOURNAL_MAGIC.len()];
             let n = journal.read_at(&mut magic, 0)?;
             if n == JOURNAL_MAGIC.len() && magic == JOURNAL_MAGIC {
-                return Err(PagerError::HotJournal {
-                    path: journal_path.display().to_string(),
-                });
+                recover_hot_journal(vfs, &journal_path, path)?;
             }
         }
 
@@ -153,6 +169,8 @@ impl Pager {
             wal_pages,
             dirty: HashMap::new(),
             page_size,
+            vfs: Box::new(vfs.clone()),
+            journal_path,
         })
     }
 
@@ -170,20 +188,60 @@ impl Pager {
         }
     }
 
-    /// Writes every dirty page back to the underlying file, in ascending
-    /// page-number order, then `fsync`s and clears the dirty set. Ascending
-    /// order isn't a correctness requirement of the plain rollback-journal
-    /// path here (no partial-flush recovery exists yet in this pager — see
-    /// #172), just a deterministic, easy-to-reason-about default.
+    /// Commits every dirty page: writes a rollback journal recording the
+    /// on-disk pre-image of each page that existed before this
+    /// transaction (statement atomicity, #172), syncs it, writes the
+    /// dirty pages to the main file in ascending page-number order,
+    /// syncs that, then deletes the journal (DELETE mode). Pages beyond
+    /// the pre-transaction page count (freshly allocated by
+    /// [`Pager::allocate_page`]) are never journaled — a crash before
+    /// commit leaves them unreferenced by anything on disk, and
+    /// `recover_hot_journal`'s truncate-to-`initial_page_count` step
+    /// drops them.
     pub fn flush(&mut self) -> Result<(), PagerError> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
         let mut page_nums: Vec<u32> = self.dirty.keys().copied().collect();
         page_nums.sort_unstable();
+
+        let initial_page_count = read_be_u32(&self.source.read_page(1)?, PAGE_COUNT_OFFSET)?;
+        let to_journal: Vec<u32> = page_nums
+            .iter()
+            .copied()
+            .filter(|&n| n <= initial_page_count)
+            .collect();
+
+        if !to_journal.is_empty() {
+            let writer = JournalWriter::create(
+                self.vfs.as_ref(),
+                &self.journal_path,
+                self.page_size,
+                self.page_size,
+                initial_page_count,
+                to_journal.len() as u32,
+                random_nonce(),
+            )
+            .map_err(journal_to_pager_error)?;
+            for (index, &page_num) in to_journal.iter().enumerate() {
+                let original = self.source.read_page(page_num)?;
+                writer
+                    .write_record(index as u32, page_num, &original)
+                    .map_err(journal_to_pager_error)?;
+            }
+            writer.sync().map_err(journal_to_pager_error)?;
+        }
+
         for page_num in page_nums {
             if let Some(bytes) = self.dirty.get(&page_num) {
                 self.source.write_page(page_num, bytes)?;
             }
         }
         self.source.sync()?;
+
+        if !to_journal.is_empty() {
+            self.vfs.delete(&self.journal_path)?;
+        }
         self.dirty.clear();
         Ok(())
     }
@@ -276,6 +334,55 @@ impl Pager {
         )?;
         Ok(())
     }
+}
+
+fn journal_to_pager_error(err: JournalError) -> PagerError {
+    match err {
+        JournalError::Vfs(source) => PagerError::Vfs(source),
+        other => PagerError::Journal(other),
+    }
+}
+
+/// A checksum salt, not a security-sensitive secret — SQLite's own
+/// `cksumInit` just needs to differ across journal generations so a
+/// stale record from an unrelated journal doesn't validate. Nanosecond
+/// clock jitter XORed with the process id is unpredictable enough for
+/// that without pulling in a `rand` dependency this crate doesn't
+/// otherwise need.
+fn random_nonce() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    nanos ^ std::process::id()
+}
+
+/// Replays a hot journal's pages into `path`'s main file and deletes the
+/// journal (#172). Called from [`Pager::open`] once the journal's header
+/// magic is confirmed valid; a journal whose header/records don't parse
+/// surfaces as [`PagerError::Journal`] rather than being silently
+/// ignored, since that's a corrupt-journal condition distinct from "no
+/// hot journal at all".
+fn recover_hot_journal<V: Vfs>(
+    vfs: &V,
+    journal_path: &Path,
+    db_path: &Path,
+) -> Result<(), PagerError> {
+    let journal_file = vfs.open_read(journal_path)?;
+    let size = journal_file.size()?;
+    let mut journal_bytes = vec![0u8; size as usize];
+    let n = journal_file.read_at(&mut journal_bytes, 0)?;
+    journal_bytes.truncate(n);
+
+    let db_file = vfs.open_write(db_path)?;
+    let recovered =
+        journal::recover(&journal_bytes, db_file.as_ref()).map_err(journal_to_pager_error)?;
+    db_file.truncate(
+        (recovered.initial_page_count as u64).saturating_mul(recovered.page_size as u64),
+    )?;
+    db_file.sync()?;
+    vfs.delete(journal_path)?;
+    Ok(())
 }
 
 /// Shared by [`Pager::read_page`] and [`Pager::get_page_mut`]: WAL overlay
@@ -373,11 +480,73 @@ mod tests {
         assert!(Pager::open(&vfs, &path, 512).is_ok());
     }
 
+    /// A hot journal whose header doesn't actually parse (just the bare
+    /// 8-byte magic, no fields) can't be safely recovered — surfaces as
+    /// [`PagerError::Journal`] rather than being silently ignored.
     #[test]
-    fn hot_journal_is_refused() {
+    fn hot_journal_with_unparseable_header_is_an_error() {
         let (vfs, path) = db_with_journal(Some(&JOURNAL_MAGIC));
         let result = Pager::open(&vfs, &path, 512);
-        assert!(matches!(result, Err(PagerError::HotJournal { .. })));
+        assert!(matches!(result, Err(PagerError::Journal(_))));
+    }
+
+    /// A well-formed hot journal recording no page changes (n_rec = 0,
+    /// e.g. a transaction that opened but never wrote anything before
+    /// crashing) recovers as a no-op: `open` succeeds and the main file
+    /// is unchanged.
+    #[test]
+    fn hot_journal_with_zero_records_recovers_as_noop() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![7u8; 512]);
+        let header = journal::JournalHeader {
+            n_rec: 0,
+            nonce: 42,
+            initial_page_count: 1,
+            sector_size: 512,
+            page_size: 512,
+        }
+        .serialize(JOURNAL_MAGIC);
+        let mut journal_bytes = vec![0u8; 512];
+        journal_bytes[..journal::JOURNAL_HEADER_LEN].copy_from_slice(&header);
+        vfs.insert("/test.db-journal", journal_bytes);
+
+        let pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512]);
+        assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
+    }
+
+    /// A crash mid-write: the main file already holds a corrupted page,
+    /// and a well-formed journal records its original content. `open`
+    /// must restore it before serving any page, and delete the journal.
+    #[test]
+    fn hot_journal_with_one_record_restores_original_page_and_deletes_journal() {
+        let mut vfs = MemoryVfs::new();
+        let page_size = 512u32;
+        let mut db = vec![7u8; page_size as usize];
+        db.extend(vec![0xFFu8; page_size as usize]); // corrupted page 2
+        vfs.insert("/test.db", db);
+
+        let original_page_2 = vec![0xAAu8; page_size as usize];
+        let nonce = 42;
+        let header = journal::JournalHeader {
+            n_rec: 1,
+            nonce,
+            initial_page_count: 2,
+            sector_size: page_size,
+            page_size,
+        }
+        .serialize(JOURNAL_MAGIC);
+        let mut journal_bytes = vec![0u8; page_size as usize];
+        journal_bytes[..journal::JOURNAL_HEADER_LEN].copy_from_slice(&header);
+        journal_bytes.extend_from_slice(&2u32.to_be_bytes());
+        journal_bytes.extend_from_slice(&original_page_2);
+        journal_bytes
+            .extend_from_slice(&journal::page_checksum(nonce, &original_page_2).to_be_bytes());
+        vfs.insert("/test.db-journal", journal_bytes);
+
+        let pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        assert_eq!(pager.read_page(2).unwrap(), original_page_2);
+        assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
     }
 
     #[test]
@@ -697,18 +866,44 @@ mod tests {
             }
         }
 
-        /// 001-architecture Req-4's "Hot journal is never ignored" scenario:
-        /// the fixture's main file already has ~1999 uncommitted, spilled
-        /// rows written into it (see tools/gen_fixtures.sh) — a reader that
-        /// ignored the journal would see that wrong state. `Pager::open`
-        /// must refuse before any page is read.
+        /// 001-architecture Req-4's "Hot journal is never ignored" scenario,
+        /// upgraded by #172 from refuse-and-explain to actual recovery: the
+        /// fixture's main file already has ~1999 uncommitted, spilled rows
+        /// written into it (see tools/gen_fixtures.sh) and a *real*
+        /// `sqlite3`-written journal recording their pre-images. `Pager::open`
+        /// must replay that journal — proving interop with a stock `sqlite3`
+        /// journal, not just our own — leaving only the one row genuinely
+        /// committed before the transaction started.
+        ///
+        /// Copies the fixture pair into a scratch temp dir first: recovery
+        /// mutates the main file and deletes the journal in place, and the
+        /// checked-in fixture under `tests/corpus/fixtures/` must stay
+        /// byte-identical for every other test that reads it.
         #[test]
-        fn hot_journal_fixture_is_refused() {
-            let vfs = UnixVfs;
-            let path = Path::new("tests/corpus/fixtures/journalstates/hot_journal.db");
-            let header = header_of(&vfs, path);
-            let result = Pager::open(&vfs, path, header.page_size);
-            assert!(matches!(result, Err(PagerError::HotJournal { .. })));
+        fn hot_journal_fixture_recovers_committed_state() {
+            let dir = std::env::temp_dir().join(format!(
+                "sqlite-rs-hot-journal-recovery-test-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db_path = dir.join("hot_journal.db");
+            std::fs::copy(
+                "tests/corpus/fixtures/journalstates/hot_journal.db",
+                &db_path,
+            )
+            .unwrap();
+            std::fs::copy(
+                "tests/corpus/fixtures/journalstates/hot_journal.db-journal",
+                dir.join("hot_journal.db-journal"),
+            )
+            .unwrap();
+
+            let rows = read_table_t_at(&db_path);
+
+            assert_eq!(rows, vec![(1, "committed-before".to_string())]);
+            assert!(!dir.join("hot_journal.db-journal").exists());
+
+            std::fs::remove_dir_all(&dir).unwrap();
         }
 
         /// "Zero behavior change on at-rest fixtures": the same assertions
@@ -767,11 +962,15 @@ mod tests {
         /// discovering `t`'s root page via `read_schema` (never
         /// hardcoded) and merging any pending WAL frames through `Pager`.
         fn read_table_t(name: &str) -> Vec<(i64, String)> {
-            let vfs = UnixVfs;
             let path = Path::new("tests/corpus/fixtures/journalstates").join(name);
-            let header = header_of(&vfs, &path);
+            read_table_t_at(&path)
+        }
 
-            let schema_pager = Pager::open(&vfs, &path, header.page_size).unwrap();
+        fn read_table_t_at(path: &Path) -> Vec<(i64, String)> {
+            let vfs = UnixVfs;
+            let header = header_of(&vfs, path);
+
+            let schema_pager = Pager::open(&vfs, path, header.page_size).unwrap();
             let mut schema_cursor = TableCursor::new(schema_pager, &header, 1);
             let schemas = read_schema(&mut schema_cursor, header.text_encoding).unwrap();
             let t = schemas
@@ -779,7 +978,7 @@ mod tests {
                 .find(|s| s.name == "t")
                 .expect("table t in sqlite_master");
 
-            let pager = Pager::open(&vfs, &path, header.page_size).unwrap();
+            let pager = Pager::open(&vfs, path, header.page_size).unwrap();
             let mut cursor = TableCursor::new(pager, &header, t.root_page);
             let mut rows = Vec::new();
             let mut row = cursor.first().unwrap();

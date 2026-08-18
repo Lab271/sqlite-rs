@@ -1,15 +1,18 @@
 //! Requirement 4 scenarios: every fixture reports a real outcome (not
-//! the old "always Skipped" stub) — the `invalid` family and the
-//! hot-journal fixture are expected failures, everything else must
-//! decode cleanly.
+//! the old "always Skipped" stub) — the `invalid` family is expected
+//! failures, everything else must decode cleanly.
 
 use crate::harness::{discover_fixtures, read_fixture, FixtureOutcome};
 
-/// Fixtures outside the `invalid` family that are still expected to
-/// fail to open — by design, not by gap. Currently just the hot rollback
-/// journal fixture (opening it at all would risk serving pre-rollback
-/// pages as committed data).
-fn expected_to_fail(path: &std::path::Path) -> bool {
+/// `journalstates/hot_journal.db` is deliberately excluded from this
+/// generic sweep, not just given a different expected outcome: opening
+/// it now recovers a hot journal in place (#172) — replaying its pages
+/// into the main file and deleting the journal — which would mutate the
+/// checked-in fixture on every test run. Its own dedicated coverage
+/// (`tests/tiers/tier0.rs::t0_hot_journal_recovers_committed_state`,
+/// `src/pager.rs`'s `hot_journal_fixture_recovers_committed_state`) works
+/// against a scratch-temp-dir copy instead.
+fn is_hot_journal_fixture(path: &std::path::Path) -> bool {
     path.file_name().and_then(|n| n.to_str()) == Some("hot_journal.db")
 }
 
@@ -21,13 +24,12 @@ fn every_fixture_reports_a_real_outcome() {
         "no fixtures found — run `make fixtures`"
     );
 
-    for path in &fixtures {
-        let in_invalid_family = path
+    for path in fixtures.iter().filter(|p| !is_hot_journal_fixture(p)) {
+        let should_fail = path
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             == Some("invalid");
-        let should_fail = in_invalid_family || expected_to_fail(path);
 
         match read_fixture(path) {
             FixtureOutcome::Dumped { tables, warnings } => {

@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use super::{FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 
+type FileTable = Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Vec<u8>>>>>>;
+
 /// An in-memory [`Vfs`] backed by a path -> bytes map. Lets tests exercise
 /// `Vfs`-consuming code without touching the real filesystem. The map
 /// itself is `Arc<Mutex<..>>`-shared (not just each file's contents) so
@@ -17,7 +19,7 @@ use super::{FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 /// `open_read` on the original, matching a real filesystem's semantics.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryVfs {
-    files: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Vec<u8>>>>>>,
+    files: FileTable,
 }
 
 impl MemoryVfs {

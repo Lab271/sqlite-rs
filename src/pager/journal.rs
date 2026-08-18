@@ -45,9 +45,7 @@ pub enum JournalError {
 /// `4 + page_size + 4`: big-endian page number, the page's content, then
 /// its [`page_checksum`].
 fn record_len(page_size: u32) -> usize {
-    4usize
-        .saturating_add(page_size as usize)
-        .saturating_add(4)
+    4usize.saturating_add(page_size as usize).saturating_add(4)
 }
 
 /// A parsed/serialized rollback-journal header. See the module doc for the
@@ -196,9 +194,8 @@ impl JournalWriter {
         page_num: u32,
         original: &[u8],
     ) -> Result<(), JournalError> {
-        let offset = (self.sector_size as u64).saturating_add(
-            (index as u64).saturating_mul(record_len(self.page_size) as u64),
-        );
+        let offset = (self.sector_size as u64)
+            .saturating_add((index as u64).saturating_mul(record_len(self.page_size) as u64));
         let mut buf = Vec::with_capacity(record_len(self.page_size));
         buf.extend_from_slice(&page_num.to_be_bytes());
         buf.extend_from_slice(original);
@@ -248,8 +245,7 @@ pub fn recover(
         let Some(record) = journal_bytes.get(offset..offset.saturating_add(record_len)) else {
             break;
         };
-        let Some(page_num_bytes) = record.get(..4).and_then(|s| <[u8; 4]>::try_from(s).ok())
-        else {
+        let Some(page_num_bytes) = record.get(..4).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
             break;
         };
         let page_num = u32::from_be_bytes(page_num_bytes);
@@ -378,9 +374,7 @@ mod tests {
         assert_eq!(recovered.page_size, page_size);
 
         let mut restored = vec![0u8; page_size as usize];
-        db_file
-            .read_at(&mut restored, page_size as u64)
-            .unwrap();
+        db_file.read_at(&mut restored, page_size as u64).unwrap();
         assert_eq!(restored, original_page_2);
     }
 
@@ -410,9 +404,7 @@ mod tests {
         let mut bogus = vec![0u8; 4 + page_size as usize + 4];
         bogus[..4].copy_from_slice(&1u32.to_be_bytes());
         let journal_file = vfs.open_write(Path::new("/x.db-journal")).unwrap();
-        journal_file
-            .write_at(&bogus, page_size as u64)
-            .unwrap();
+        journal_file.write_at(&bogus, page_size as u64).unwrap();
         drop(writer);
 
         let journal_file = vfs.open_read(Path::new("/x.db-journal")).unwrap();

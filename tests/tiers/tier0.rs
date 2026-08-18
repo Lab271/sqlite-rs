@@ -30,9 +30,8 @@ mod oracle;
 
 use harness::{discover_fixtures, FAMILIES};
 use oracle::{oracle_csv_output, oracle_list_output, pinned_oracle, skip_no_oracle};
-use sqlite_rs::dump::{dump_database, DumpError};
+use sqlite_rs::dump::dump_database;
 use sqlite_rs::format::{format_csv_value, format_list_value};
-use sqlite_rs::pager::PagerError;
 use sqlite_rs::record::Value;
 use sqlite_rs::vfs::UnixVfs;
 use std::path::Path;
@@ -88,7 +87,7 @@ fn t0_any_feature_bearing_file_dumps_all_rows() {
                 == Some(*family)
         }) {
             if path.file_name().and_then(|n| n.to_str()) == Some("hot_journal.db") {
-                continue; // covered by t0_hot_journal_is_refused below
+                continue; // covered by t0_hot_journal_recovers_committed_state below
             }
             let result = dump_database(&UnixVfs, &path)
                 .unwrap_or_else(|e| panic!("dumping {}: {e}", path.display()));
@@ -175,18 +174,37 @@ fn t0_invalid_input_never_panics() {
     );
 }
 
-/// A hot rollback journal must be refused, never silently ignored in
-/// favour of the main file's uncommitted, spilled pages.
+/// A hot rollback journal must never be silently ignored in favour of the
+/// main file's uncommitted, spilled pages — V1's refuse-and-explain was
+/// upgraded by #172 to actual recovery, so the committed-before state
+/// (not an error) is what a reader now sees.
+///
+/// Copies the fixture pair into a scratch temp dir first: recovery
+/// mutates the main file and deletes the journal in place, and the
+/// checked-in fixture under `tests/corpus/fixtures/` must stay
+/// byte-identical for every other test that reads it.
 #[test]
-fn t0_hot_journal_is_refused() {
-    let path = journalstates_fixture("hot_journal.db");
-    let result = dump_database(&UnixVfs, &path);
-    let is_hot_journal_err = matches!(result, Err(DumpError::Pager(PagerError::HotJournal { .. })));
-    assert!(
-        is_hot_journal_err,
-        "expected HotJournal error dumping {}",
-        path.display()
+fn t0_hot_journal_recovers_committed_state() {
+    let dir = std::env::temp_dir().join(format!(
+        "sqlite-rs-tier0-hot-journal-recovery-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("hot_journal.db");
+    std::fs::copy(journalstates_fixture("hot_journal.db"), &db_path).unwrap();
+    std::fs::copy(
+        journalstates_fixture("hot_journal.db-journal"),
+        dir.join("hot_journal.db-journal"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        dump_t_rows(&db_path),
+        vec![(1, "committed-before".to_string())]
     );
+    assert!(!dir.join("hot_journal.db-journal").exists());
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Uncheckpointed WAL frames must be visible, merged over the main
