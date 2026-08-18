@@ -17,6 +17,10 @@ name = "lock_probe"
 path = "tests/helpers/lock_probe.rs"
 
 [[test]]
+name = "unit_layer_isolation"
+path = "tests/unit/layer_isolation.rs"
+
+[[test]]
 name = "unit_header"
 path = "tests/unit/header.rs"
 
