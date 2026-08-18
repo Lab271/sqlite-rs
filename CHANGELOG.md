@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Fixed
+
+- Overflow chain pages leaked on b-tree row delete (#173), V3 phase 1
+  (epic #161). `delete_row` (#169) freed emptied leaf/interior pages but
+  never freed the overflow pages a deleted cell's payload had spilled
+  into (#168) — those pages were orphaned instead of returning to the
+  freelist (#167). `src/btree/delete.rs` now reads the removed cell's
+  first overflow pointer and walks/deallocates the whole chain, with the
+  same revisited-page cycle guard the read-side `reassemble_payload`
+  uses. #173 was re-scoped to this narrower gap once investigation found
+  the insert-side overflow-chain write was already delivered by #168.
+
 ### Added
 
 - Table b-tree delete — cell delete + page merge/rebalance (#169), V3
