@@ -307,6 +307,14 @@ The system MUST delete the row with a given rowid from a table b-tree leaf page:
 
 **Tests:** `tests/corpus/btree_delete_test.rs::bulk_delete_every_other_row_out_of_1000`
 
+#### Scenario: Deleting a row with an overflow payload frees its overflow chain
+
+- GIVEN a row whose payload spilled into one or more overflow pages (Requirement 2)
+- WHEN that row is deleted
+- THEN every page in its overflow chain MUST be deallocated via the pager's freelist (Requirement per spec 007/freelist), and a later insert MUST reuse that freed space rather than growing the file
+
+**Tests:** `tests/corpus/btree_delete_test.rs::deleting_a_row_with_an_overflow_payload_frees_its_overflow_pages`
+
 ### Requirement 13: Page Merge/Collapse on Underflow [MUST]
 
 When a delete leaves a non-root page with zero cells, the system MUST remove that page's routing entry from its parent (redirecting the parent's `rightmost` pointer if the emptied page was the parent's rightmost child) and deallocate the emptied page via the pager's freelist (Requirement per spec 007/freelist). This is a documented simplification of SQLite's proactive half-full-threshold sibling redistribution: pages are only collapsed once completely empty, not proactively rebalanced while still holding rows — sufficient for structural validity (`PRAGMA integrity_check`) and for freed pages to be reused by a later insert, without porting the exact 3-sibling balance algorithm.

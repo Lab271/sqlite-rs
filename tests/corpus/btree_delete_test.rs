@@ -94,6 +94,13 @@ fn row_payload(b: &str) -> Vec<u8> {
     )
 }
 
+fn row_payload_blob(len: usize) -> Vec<u8> {
+    encode_record(
+        &[Value::Null, Value::Blob(vec![0xab; len])],
+        TextEncoding::Utf8,
+    )
+}
+
 fn insert_rows(pager: &mut Pager, header: &DatabaseHeader, root: u32, rows: &[(i64, String)]) {
     for (rowid, b) in rows {
         insert_row(pager, header, root, *rowid, &row_payload(b)).unwrap();
@@ -316,6 +323,64 @@ fn round_trip_insert_delete_insert_reuses_freed_pages() {
 
     assert_integrity_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "80");
+
+    std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn deleting_a_row_with_an_overflow_payload_frees_its_overflow_pages() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("deleting_a_row_with_an_overflow_payload_frees_its_overflow_pages");
+        return;
+    };
+
+    let db = scratch_db("overflow_delete");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b blob);",
+    );
+
+    let vfs = UnixVfs;
+    let page_size = page_size_of(&vfs, &db);
+    let header = read_header(&vfs, &db, page_size);
+    let root = root_page_of(&vfs, &db, &header, "t");
+
+    // A 10KB blob is far larger than any page-size-derived local-payload
+    // max, so this row spills into a multi-page overflow chain (#173).
+    let blob = row_payload_blob(10_000);
+
+    let page_count_after_insert;
+    {
+        let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
+        insert_row(&mut pager, &header, root, 1, &blob).unwrap();
+        insert_row(&mut pager, &header, root, 2, &row_payload("kept")).unwrap();
+        pager.flush().unwrap();
+
+        delete_row(&mut pager, &header, root, 1).unwrap();
+        pager.flush().unwrap();
+        let raw = pager.read_page(1).unwrap();
+        page_count_after_insert = u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
+    }
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "1");
+    assert_eq!(oracle_select(&oracle, &db, "select a from t;"), "2");
+
+    // Re-inserting a same-sized overflow row must reuse the freelist pages
+    // the deleted row's overflow chain returned rather than growing the
+    // file — the acceptance criterion this test exists to cover.
+    {
+        let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
+        insert_row(&mut pager, &header, root, 3, &blob).unwrap();
+        pager.flush().unwrap();
+        let raw = pager.read_page(1).unwrap();
+        let page_count_after_reinsert = u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
+        assert_eq!(page_count_after_reinsert, page_count_after_insert);
+    }
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "2");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
 }
