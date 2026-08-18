@@ -8,6 +8,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Table b-tree delete — cell delete + page merge/rebalance (#169), V3
+  phase 1 (epic #161). New `src/btree/delete.rs::delete_row`: locates a
+  cell by rowid and removes it via the shared page-rebuild helpers
+  (promoted from `insert.rs` to `src/btree.rs` so both write paths reuse
+  them). Underflow policy is a documented simplification of SQLite's
+  proactive half-full-threshold sibling redistribution: a page collapses
+  into its parent only once completely empty, cascading up the ancestor
+  chain and, if it reaches the root, relocating the sole remaining
+  child's content into the fixed root page (the reverse of
+  `insert.rs::root_split`). Emptied pages are returned to the freelist
+  (#167). Verified against stock `sqlite3` for single-row delete, delete-
+  all (tree collapses to an empty leaf root), bulk delete of 1000 rows,
+  a collapse across a leaf-split boundary, and an insert→delete→insert
+  round trip that reuses freed pages (spec 006-btree Requirements 12-14).
+
 - Table b-tree insert — cell insert + page split (#168), V3 phase 1
   (epic #161). New `src/btree/insert.rs`: rowid-ordered leaf cell insert
   (encoding rowid varint + payload + overflow chain, reusing

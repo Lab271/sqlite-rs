@@ -16,14 +16,13 @@
 //! reserve_bytes` fixture is supported.
 
 use super::{
-    cell_ptr_offset, decode_cell_head, local_payload_size, page1_header_start, read_cell_pointer,
-    read_num_cells, read_page_type, read_u32, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
-    MAX_PAGES_VISITED,
+    build_interior_cell, collect_interior_entries, collect_leaf_cells, find_leaf_page,
+    local_payload_size, page1_header_start, put, read_page_type, write_interior_page,
+    write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
-use crate::record::{decode_varint, encode_varint};
-use crate::vfs::PageSource;
+use crate::record::encode_varint;
 
 /// Inserts one row `(rowid, payload)` into the table b-tree rooted at
 /// `root_page`, splitting leaves/interior pages (and the root itself) as
@@ -108,50 +107,6 @@ fn write_overflow_chain(
         put(buf, 4, chunk, page_num)?;
     }
     Ok(page_nums.first().copied().unwrap_or(0))
-}
-
-/// Descends from `page_num` (a table b-tree root or subtree) to the leaf
-/// that should hold `rowid`, returning the ancestor interior page numbers
-/// (root-to-parent order) and the target leaf page number.
-fn find_leaf_page(
-    pager: &mut Pager,
-    mut page_num: u32,
-    rowid: i64,
-) -> Result<(Vec<u32>, u32), BtreeError> {
-    let mut ancestors = Vec::new();
-    let mut visited = 0usize;
-    loop {
-        visited = visited.saturating_add(1);
-        if visited > MAX_PAGES_VISITED {
-            return Err(BtreeError::TraversalTooLong {
-                max: MAX_PAGES_VISITED,
-            });
-        }
-        let page = pager
-            .read_page(page_num)
-            .map_err(|source| BtreeError::PageSource { page_num, source })?;
-        let header_start = page1_header_start(page_num);
-        let page_type = read_page_type(&page, header_start, page_num)?;
-        if page_type == LEAF_TABLE {
-            return Ok((ancestors, page_num));
-        } else if page_type == INTERIOR_TABLE {
-            let (entries, rightmost) = collect_interior_entries(&page, header_start, page_num)?;
-            ancestors.push(page_num);
-            let mut next = rightmost;
-            for (child, key) in &entries {
-                if rowid <= *key {
-                    next = *child;
-                    break;
-                }
-            }
-            page_num = next;
-        } else {
-            return Err(BtreeError::UnexpectedPageType {
-                page_num,
-                page_type,
-            });
-        }
-    }
 }
 
 /// Inserts `cell` (already encoded, for `rowid`) into leaf page
@@ -403,188 +358,6 @@ fn root_split(
     let buf = pager.get_page_mut(root_page)?;
     write_interior_page(buf, header_start_root, root_page, &[cell], new_right)?;
     Ok(())
-}
-
-/// Reads every cell of a leaf page in on-disk (rowid-ascending) order,
-/// returning each cell's rowid alongside its raw, verbatim cell bytes (so
-/// splits/rebuilds can move cells without re-encoding payloads or
-/// re-walking overflow chains).
-fn collect_leaf_cells(
-    buf: &[u8],
-    header_start: usize,
-    page_num: u32,
-    usable_size: u32,
-) -> Result<Vec<(i64, Vec<u8>)>, BtreeError> {
-    let num_cells = read_num_cells(buf, header_start, page_num)?;
-    let ptr_base = header_start.saturating_add(8);
-    let mut out = Vec::with_capacity(num_cells);
-    for i in 0..num_cells {
-        let ptr_off = cell_ptr_offset(ptr_base, i);
-        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
-        let (rowid, payload_len, tail_start) = decode_cell_head(buf, cell_start, page_num)?;
-        let local_size = local_payload_size(usable_size, payload_len) as usize;
-        let has_overflow = (local_size as u64) < payload_len;
-        let cell_end = tail_start
-            .saturating_add(local_size)
-            .saturating_add(if has_overflow { 4 } else { 0 });
-        let cell_bytes = buf
-            .get(cell_start..cell_end)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?
-            .to_vec();
-        out.push((rowid, cell_bytes));
-    }
-    Ok(out)
-}
-
-/// Reads every cell of an interior page, returning `(child_page, key)`
-/// pairs in on-disk order plus the rightmost pointer.
-fn collect_interior_entries(
-    buf: &[u8],
-    header_start: usize,
-    page_num: u32,
-) -> Result<(Vec<(u32, i64)>, u32), BtreeError> {
-    let num_cells = read_num_cells(buf, header_start, page_num)?;
-    let ptr_base = header_start.saturating_add(12);
-    let mut out = Vec::with_capacity(num_cells);
-    for i in 0..num_cells {
-        let ptr_off = cell_ptr_offset(ptr_base, i);
-        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
-        let child = read_u32(buf, cell_start, page_num)?;
-        let rest = buf
-            .get(cell_start.saturating_add(4)..)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let (key, _) = decode_varint(rest)
-            .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
-        out.push((child, key as i64));
-    }
-    let rightmost = read_u32(buf, header_start.saturating_add(8), page_num)?;
-    Ok((out, rightmost))
-}
-
-/// Builds an interior table-b-tree cell: 4-byte left-child page number +
-/// key (rowid) varint.
-fn build_interior_cell(child: u32, key: i64) -> Vec<u8> {
-    let mut cell = child.to_be_bytes().to_vec();
-    cell.extend(encode_varint(key as u64));
-    cell
-}
-
-/// Writes `bytes` at `offset` in `buf`, or panics via an internal
-/// invariant violation turned into a page-too-short error — every call
-/// site here writes into a page-sized buffer at an offset this module
-/// itself just computed from that same buffer's length, so failure here
-/// means a bug in the offset math, not bad input.
-fn put(buf: &mut [u8], offset: usize, bytes: &[u8], page_num: u32) -> Result<(), BtreeError> {
-    let end = offset.saturating_add(bytes.len());
-    let len = buf.len();
-    let slice = buf
-        .get_mut(offset..end)
-        .ok_or(BtreeError::PageTooShort { page_num, len })?;
-    slice.copy_from_slice(bytes);
-    Ok(())
-}
-
-fn put_u8(buf: &mut [u8], offset: usize, value: u8, page_num: u32) -> Result<(), BtreeError> {
-    put(buf, offset, &[value], page_num)
-}
-
-/// Rebuilds `buf` in place as a leaf table b-tree page holding exactly
-/// `cells`, in order. Every mutation in this module goes through this (or
-/// [`write_interior_page`]) rather than patching bytes incrementally — see
-/// the module doc's "fully rebuilds" simplification note.
-fn write_leaf_page(
-    buf: &mut [u8],
-    header_start: usize,
-    page_num: u32,
-    cells: &[Vec<u8>],
-) -> Result<(), BtreeError> {
-    write_page_common(buf, header_start, page_num, LEAF_TABLE, 8, cells)
-}
-
-/// As [`write_leaf_page`], but for an interior page — writes the
-/// rightmost-child pointer (header bytes 8-11) after the common layout.
-fn write_interior_page(
-    buf: &mut [u8],
-    header_start: usize,
-    page_num: u32,
-    cells: &[Vec<u8>],
-    rightmost: u32,
-) -> Result<(), BtreeError> {
-    write_page_common(buf, header_start, page_num, INTERIOR_TABLE, 12, cells)?;
-    put(
-        buf,
-        header_start.saturating_add(8),
-        &rightmost.to_be_bytes(),
-        page_num,
-    )
-}
-
-fn write_page_common(
-    buf: &mut [u8],
-    header_start: usize,
-    page_num: u32,
-    page_type: u8,
-    header_len: usize,
-    cells: &[Vec<u8>],
-) -> Result<(), BtreeError> {
-    // Only the b-tree page portion is cleared — for page 1, bytes
-    // 0..header_start hold the 100-byte file header, which must survive
-    // every leaf/interior rewrite of that page's b-tree content.
-    let len = buf.len();
-    buf.get_mut(header_start..)
-        .ok_or(BtreeError::PageTooShort { page_num, len })?
-        .fill(0);
-    put_u8(buf, header_start, page_type, page_num)?;
-    // bytes header_start+1..+3 (first freeblock) stay 0 — see module doc.
-    let ptr_base = header_start.saturating_add(header_len);
-    let num_cells = cells.len();
-
-    let mut content_end = buf.len();
-    let mut ptr_offsets = Vec::with_capacity(num_cells);
-    for cell in cells.iter().rev() {
-        content_end = content_end.saturating_sub(cell.len());
-        put(buf, content_end, cell, page_num)?;
-        ptr_offsets.push(content_end);
-    }
-    ptr_offsets.reverse();
-
-    for (i, off) in ptr_offsets.iter().enumerate() {
-        let p = ptr_base.saturating_add(i.saturating_mul(2));
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "off is always < page_len (<=65536), fits a u16 once the 65536-as-0 case below is applied"
-        )]
-        let v = if *off >= 65536 { 0u16 } else { *off as u16 };
-        put(buf, p, &v.to_be_bytes(), page_num)?;
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "num_cells is a page's cell count, always <= u16::MAX by file-format construction"
-    )]
-    let num_cells_u16 = num_cells as u16;
-    put(
-        buf,
-        header_start.saturating_add(3),
-        &num_cells_u16.to_be_bytes(),
-        page_num,
-    )?;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "content_end is always < page_len (<=65536), fits a u16 once the 65536-as-0 case below is applied"
-    )]
-    let content_start_v: u16 = if content_end >= 65536 {
-        0
-    } else {
-        content_end as u16
-    };
-    put(
-        buf,
-        header_start.saturating_add(5),
-        &content_start_v.to_be_bytes(),
-        page_num,
-    )?;
-    put_u8(buf, header_start.saturating_add(7), 0, page_num)
 }
 
 #[cfg(test)]
