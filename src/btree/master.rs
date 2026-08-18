@@ -63,12 +63,12 @@ pub fn bump_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
 /// One `sqlite_master` (or `sqlite_sequence`) row's column values, in the
 /// schema's fixed column order: `type, name, tbl_name, rootpage, sql`.
 #[derive(Debug, Clone)]
-pub struct MasterEntry<'a> {
-    pub kind: &'a str,
-    pub name: &'a str,
-    pub tbl_name: &'a str,
+pub struct MasterEntry {
+    pub kind: String,
+    pub name: String,
+    pub tbl_name: String,
     pub rootpage: u32,
-    pub sql: &'a str,
+    pub sql: String,
 }
 
 /// Scans the table b-tree rooted at `root_page` and returns the highest
@@ -128,11 +128,11 @@ pub fn insert_master_row(
         .unwrap_or(0)
         .saturating_add(1);
     let values = [
-        Value::Text(entry.kind.to_string()),
-        Value::Text(entry.name.to_string()),
-        Value::Text(entry.tbl_name.to_string()),
+        Value::Text(entry.kind.clone()),
+        Value::Text(entry.name.clone()),
+        Value::Text(entry.tbl_name.clone()),
         Value::Integer(entry.rootpage as i64),
-        Value::Text(entry.sql.to_string()),
+        Value::Text(entry.sql.clone()),
     ];
     let payload = encode_record(&values, header.text_encoding);
     super::insert_row(pager, header, SQLITE_MASTER_ROOT_PAGE, next_rowid, &payload)
@@ -184,11 +184,11 @@ pub fn ensure_sqlite_sequence_table(
         pager,
         header,
         &MasterEntry {
-            kind: "table",
-            name: "sqlite_sequence",
-            tbl_name: "sqlite_sequence",
+            kind: "table".to_string(),
+            name: "sqlite_sequence".to_string(),
+            tbl_name: "sqlite_sequence".to_string(),
             rootpage: root_page,
-            sql: SQLITE_SEQUENCE_SQL,
+            sql: SQLITE_SEQUENCE_SQL.to_string(),
         },
     )?;
     bump_schema_cookie(pager)?;
@@ -321,11 +321,11 @@ mod tests {
             &mut pager,
             &header,
             &MasterEntry {
-                kind: "table",
-                name: "t",
-                tbl_name: "t",
+                kind: "table".to_string(),
+                name: "t".to_string(),
+                tbl_name: "t".to_string(),
                 rootpage: 2,
-                sql: "CREATE TABLE t(a INTEGER, b TEXT)",
+                sql: "CREATE TABLE t(a INTEGER, b TEXT)".to_string(),
             },
         )
         .unwrap();
