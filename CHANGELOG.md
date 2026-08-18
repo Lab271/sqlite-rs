@@ -23,6 +23,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   `.openspec/grammar/sqlite.ebnf` extended to cover the conflict-action
   clause and SELECT-source alternative.
 
+## [0.9.2] - 2026-08-18
+
+### Fixed
+
+- `tests/tiers/tier0.rs`: `t0_wal_pending_rows_visible` and
+  `t0_any_feature_bearing_file_dumps_all_rows` both read directly from
+  the shared, committed `tests/corpus/fixtures/journalstates/` WAL
+  fixtures, unlike `t0_hot_journal_recovers_committed_state`, which
+  already copies its fixture to a scratch dir first. Since tests in one
+  binary run concurrently, and the pinned-oracle shell-out in the
+  "any feature bearing file" test creates a real `-shm` file when
+  `sqlite3` connects to a WAL db, a sibling thread's `dump_database`
+  could observe that `-shm` mid-creation and reject it as too short —
+  seen once on main CI after #191 merged (unrelated to that PR's
+  content, not reproducible locally). Both tests now copy their
+  fixture (and `-wal`/`-journal` companion) into an isolated temp dir
+  via a new `IsolatedFixture` helper, matching the hot-journal test's
+  existing isolation convention. Test-only change, no `src/` impact.
+
+Spend: small.
+
 ## [0.9.1] - 2026-08-18
 
 ### Fixed
