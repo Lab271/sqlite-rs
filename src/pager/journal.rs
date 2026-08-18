@@ -18,7 +18,11 @@
 //! Each page record is `4 + page_size + 4` bytes: big-endian page number,
 //! the page's original content, then [`page_checksum`] of that content.
 
+use std::path::Path;
+
 use thiserror::Error;
+
+use crate::vfs::{Vfs, VfsError, VfsFile};
 
 pub const JOURNAL_HEADER_LEN: usize = 28;
 
@@ -27,24 +31,23 @@ pub enum JournalError {
     #[error("journal header too short: expected at least {JOURNAL_HEADER_LEN} bytes, got {0}")]
     HeaderTooShort(usize),
 
-    #[error("journal header magic mismatch")]
-    BadMagic,
-
-    #[error(
-        "journal record {index} checksum mismatch: expected {expected:#010x}, computed {computed:#010x}"
-    )]
-    ChecksumMismatch {
-        index: u32,
-        expected: u32,
-        computed: u32,
-    },
-
     #[error("journal record {index} truncated: expected {expected} bytes, got {got}")]
     RecordTruncated {
         index: u32,
         expected: usize,
         got: usize,
     },
+
+    #[error(transparent)]
+    Vfs(#[from] VfsError),
+}
+
+/// `4 + page_size + 4`: big-endian page number, the page's content, then
+/// its [`page_checksum`].
+fn record_len(page_size: u32) -> usize {
+    4usize
+        .saturating_add(page_size as usize)
+        .saturating_add(4)
 }
 
 /// A parsed/serialized rollback-journal header. See the module doc for the
@@ -128,6 +131,157 @@ pub fn page_checksum(nonce: u32, page: &[u8]) -> u32 {
     cksum
 }
 
+/// Writes a rollback journal's header and page records — the whole
+/// commit protocol is: create, write every record, `sync`, then write
+/// the dirty pages to the main file, `sync` that, then
+/// [`crate::vfs::Vfs::delete`] the journal (DELETE mode, #172).
+///
+/// The exact number of records is known upfront (`Pager::flush` computes
+/// the full set of pages needing a pre-image before calling
+/// [`JournalWriter::create`]), so unlike SQLite's own incremental writer
+/// there's no need to write a placeholder `n_rec` and patch it in later.
+pub struct JournalWriter {
+    file: Box<dyn VfsFile>,
+    page_size: u32,
+    sector_size: u32,
+    nonce: u32,
+}
+
+impl JournalWriter {
+    /// Creates (or reopens, if a stale journal file is somehow still
+    /// there) the `-journal` file at `path` and writes its header,
+    /// zero-padded out to `sector_size` bytes.
+    pub fn create(
+        vfs: &dyn Vfs,
+        path: &Path,
+        page_size: u32,
+        sector_size: u32,
+        initial_page_count: u32,
+        n_rec: u32,
+        nonce: u32,
+    ) -> Result<Self, JournalError> {
+        let file = vfs.create_or_open_write(path)?;
+        let header = JournalHeader {
+            n_rec,
+            nonce,
+            initial_page_count,
+            sector_size,
+            page_size,
+        };
+        let mut region = vec![0u8; sector_size as usize];
+        let header_bytes = header.serialize(crate::pager::JOURNAL_MAGIC);
+        region
+            .get_mut(..JOURNAL_HEADER_LEN)
+            .ok_or(JournalError::HeaderTooShort(sector_size as usize))?
+            .copy_from_slice(&header_bytes);
+        file.write_at(&region, 0)?;
+        Ok(JournalWriter {
+            file,
+            page_size,
+            sector_size,
+            nonce,
+        })
+    }
+
+    /// Writes `original`'s content (page `page_num`'s pre-image) as
+    /// record `index` (0-based) — callers write records `0..n_rec` in
+    /// order, matching the `n_rec` passed to [`JournalWriter::create`].
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "offset arithmetic is all saturating_add/saturating_mul"
+    )]
+    pub fn write_record(
+        &self,
+        index: u32,
+        page_num: u32,
+        original: &[u8],
+    ) -> Result<(), JournalError> {
+        let offset = (self.sector_size as u64).saturating_add(
+            (index as u64).saturating_mul(record_len(self.page_size) as u64),
+        );
+        let mut buf = Vec::with_capacity(record_len(self.page_size));
+        buf.extend_from_slice(&page_num.to_be_bytes());
+        buf.extend_from_slice(original);
+        buf.extend_from_slice(&page_checksum(self.nonce, original).to_be_bytes());
+        self.file.write_at(&buf, offset)?;
+        Ok(())
+    }
+
+    /// Flushes every write made via [`JournalWriter::write_record`] to
+    /// durable storage — must complete before any dirty page is written
+    /// to the main file (`Pager::flush`'s ordering).
+    pub fn sync(&self) -> Result<(), JournalError> {
+        self.file.sync()?;
+        Ok(())
+    }
+}
+
+/// What [`recover`] restored — [`crate::pager::recover_hot_journal`] uses
+/// this to truncate the main file back to its pre-transaction size.
+pub struct RecoveredJournal {
+    pub initial_page_count: u32,
+    pub page_size: u32,
+}
+
+/// Applies every checksum-valid record from `journal_bytes` (the full
+/// contents of a `-journal` file already confirmed to start with the
+/// magic) to `db_file`, in order — SQLite's hot-journal rollback
+/// (`pager.c`'s `pager_playback`). Stops at (and does not apply) the
+/// first record whose checksum doesn't match `nonce`, or that runs past
+/// the end of `journal_bytes`: leniency for the case where the crash
+/// that left this journal hot also interrupted the journal's own last
+/// write.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "all offset arithmetic is saturating_add/saturating_mul/saturating_sub"
+)]
+pub fn recover(
+    journal_bytes: &[u8],
+    db_file: &dyn VfsFile,
+) -> Result<RecoveredJournal, JournalError> {
+    let header = JournalHeader::parse(journal_bytes)?;
+    let record_len = record_len(header.page_size);
+    let region_start = header.sector_size as usize;
+
+    for index in 0..header.n_rec {
+        let offset = region_start.saturating_add((index as usize).saturating_mul(record_len));
+        let Some(record) = journal_bytes.get(offset..offset.saturating_add(record_len)) else {
+            break;
+        };
+        let Some(page_num_bytes) = record.get(..4).and_then(|s| <[u8; 4]>::try_from(s).ok())
+        else {
+            break;
+        };
+        let page_num = u32::from_be_bytes(page_num_bytes);
+
+        let Some(page_data) = record.get(4..4usize.saturating_add(header.page_size as usize))
+        else {
+            break;
+        };
+        let Some(checksum_bytes) = record
+            .get(4usize.saturating_add(header.page_size as usize)..)
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        else {
+            break;
+        };
+        let checksum = u32::from_be_bytes(checksum_bytes);
+
+        if page_checksum(header.nonce, page_data) != checksum {
+            break;
+        }
+
+        let page_offset = (page_num as u64)
+            .saturating_sub(1)
+            .saturating_mul(header.page_size as u64);
+        db_file.write_at(page_data, page_offset)?;
+    }
+
+    Ok(RecoveredJournal {
+        initial_page_count: header.initial_page_count,
+        page_size: header.page_size,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -178,5 +332,99 @@ mod tests {
     fn checksum_of_short_page_below_200_bytes_is_just_the_nonce() {
         let page = vec![0xffu8; 100];
         assert_eq!(page_checksum(42, &page), 42);
+    }
+
+    #[test]
+    fn writer_then_recover_restores_original_pages() {
+        use crate::vfs::MemoryVfs;
+        use std::path::Path;
+
+        let mut vfs = MemoryVfs::new();
+        let page_size = 512u32;
+        // Main db: two pages, page 2 already "corrupted" by an
+        // in-progress write whose pre-image (all 0xAA) is what recovery
+        // must restore.
+        let mut db = vec![0u8; page_size as usize];
+        db.extend(vec![0xAAu8; page_size as usize]);
+        vfs.insert("/test.db", db);
+
+        let original_page_2 = vec![0xAAu8; page_size as usize];
+        let writer = JournalWriter::create(
+            &vfs,
+            Path::new("/test.db-journal"),
+            page_size,
+            page_size,
+            2,
+            1,
+            0x1234,
+        )
+        .unwrap();
+        writer.write_record(0, 2, &original_page_2).unwrap();
+        writer.sync().unwrap();
+
+        // Simulate the crash: the main file now holds garbage in page 2.
+        let db_file = vfs.open_write(Path::new("/test.db")).unwrap();
+        db_file
+            .write_at(&vec![0xFFu8; page_size as usize], page_size as u64)
+            .unwrap();
+
+        let journal_file = vfs.open_read(Path::new("/test.db-journal")).unwrap();
+        let size = journal_file.size().unwrap();
+        let mut journal_bytes = vec![0u8; size as usize];
+        journal_file.read_at(&mut journal_bytes, 0).unwrap();
+
+        let recovered = recover(&journal_bytes, db_file.as_ref()).unwrap();
+        assert_eq!(recovered.initial_page_count, 2);
+        assert_eq!(recovered.page_size, page_size);
+
+        let mut restored = vec![0u8; page_size as usize];
+        db_file
+            .read_at(&mut restored, page_size as u64)
+            .unwrap();
+        assert_eq!(restored, original_page_2);
+    }
+
+    #[test]
+    fn recover_stops_at_first_bad_checksum() {
+        use crate::vfs::MemoryVfs;
+        use std::path::Path;
+
+        let vfs = MemoryVfs::new();
+        let page_size = 512u32;
+        vfs.create_or_open_write(Path::new("/x.db")).unwrap();
+        let db_file = vfs.open_write(Path::new("/x.db")).unwrap();
+        db_file.write_at(&[0u8; 512], 0).unwrap();
+
+        let writer = JournalWriter::create(
+            &vfs,
+            Path::new("/x.db-journal"),
+            page_size,
+            page_size,
+            1,
+            1,
+            7,
+        )
+        .unwrap();
+        // A record whose checksum won't match (garbage page content
+        // written directly, bypassing write_record's checksum).
+        let mut bogus = vec![0u8; 4 + page_size as usize + 4];
+        bogus[..4].copy_from_slice(&1u32.to_be_bytes());
+        let journal_file = vfs.open_write(Path::new("/x.db-journal")).unwrap();
+        journal_file
+            .write_at(&bogus, page_size as u64)
+            .unwrap();
+        drop(writer);
+
+        let journal_file = vfs.open_read(Path::new("/x.db-journal")).unwrap();
+        let size = journal_file.size().unwrap();
+        let mut journal_bytes = vec![0u8; size as usize];
+        journal_file.read_at(&mut journal_bytes, 0).unwrap();
+
+        // No panic, no page written — just an early stop.
+        let recovered = recover(&journal_bytes, db_file.as_ref()).unwrap();
+        assert_eq!(recovered.initial_page_count, 1);
+        let mut untouched = vec![0xFFu8; page_size as usize];
+        db_file.read_at(&mut untouched, 0).unwrap();
+        assert_eq!(untouched, vec![0u8; page_size as usize]);
     }
 }
