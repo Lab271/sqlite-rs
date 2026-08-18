@@ -8,6 +8,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Schema cookie + `sqlite_master`/`sqlite_sequence` write maintenance
+  (#193), V3 phase 2 (epic #161). New `src/btree/master.rs`:
+  `bump_schema_cookie` patches the schema cookie (header bytes 40-43) in
+  place, following the offset-patch precedent `pager.rs` uses for
+  page-count/freelist fields (#167's documented "no header serializer
+  yet" gap); `insert_master_row`/`delete_master_row` write/remove
+  `sqlite_master` rows for CREATE/DROP TABLE/INDEX via the existing
+  `insert_row`/`delete_row` b-tree primitives; `ensure_sqlite_sequence_table`
+  auto-creates `sqlite_sequence` on first use and `update_sequence` tracks
+  each table's max rowid (monotonic — never decreases). These are write
+  primitives only; wiring them into actual statement execution is VDBE
+  write-opcode scope (#194). Also adds a blanket `impl<T: PageSource>
+  PageSource for &T` (`src/vfs/page_source.rs`) so a `TableCursor` can
+  scan a table through a shared `&Pager` reference while the same
+  `Pager` is later borrowed mutably for a write.
+
 - Parser: CREATE/DROP TABLE, CREATE/DROP INDEX (#192), V3 phase 2 (epic
   #161). `parse_create_table`/`parse_create_index`/`parse_drop_table`/
   `parse_drop_index` accept `CREATE TABLE [IF NOT EXISTS] name (columns,

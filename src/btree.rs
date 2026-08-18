@@ -22,6 +22,7 @@ mod index;
 mod index_delete;
 mod index_insert;
 mod insert;
+mod master;
 
 pub use delete::delete_row;
 pub use error::BtreeError;
@@ -29,6 +30,10 @@ pub use index::{IndexCursor, IndexRow};
 pub use index_delete::delete_entry;
 pub use index_insert::insert_entry;
 pub use insert::insert_row;
+pub use master::{
+    bump_schema_cookie, delete_master_row, ensure_sqlite_sequence_table, insert_master_row,
+    update_sequence, MasterEntry, SQLITE_MASTER_ROOT_PAGE,
+};
 
 use crate::header::DatabaseHeader;
 use crate::record::{decode_varint, encode_varint};

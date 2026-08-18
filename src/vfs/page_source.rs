@@ -160,6 +160,16 @@ impl PageSource for std::rc::Rc<dyn PageSource> {
     }
 }
 
+/// Lets a `TableCursor` borrow a page source by shared reference instead
+/// of consuming it — needed by schema write helpers (`src/btree/master.rs`,
+/// #193) that scan a table (e.g. `sqlite_master`) through `&Pager` while
+/// still holding the same `Pager` for a later mutable write.
+impl<T: PageSource + ?Sized> PageSource for &T {
+    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        (**self).read_page(page_num)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
