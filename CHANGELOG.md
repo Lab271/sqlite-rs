@@ -8,6 +8,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Parser: CREATE/DROP TABLE, CREATE/DROP INDEX (#192), V3 phase 2 (epic
+  #161). `parse_create_table`/`parse_create_index`/`parse_drop_table`/
+  `parse_drop_index` accept `CREATE TABLE [IF NOT EXISTS] name (columns,
+  table-constraints) [WITHOUT ROWID | STRICT]`, `CREATE [UNIQUE] INDEX
+  [IF NOT EXISTS] name ON table (indexed-columns) [WHERE ...]` (partial
+  index), and the two `DROP` forms, mirroring the existing three-way
+  accept/unsupported/invalid outcome contract. Column/table constraints
+  cover NOT NULL, PRIMARY KEY [ASC|DESC] [AUTOINCREMENT], UNIQUE,
+  DEFAULT, CHECK, COLLATE, and named `CONSTRAINT`s; `REFERENCES`/
+  `FOREIGN KEY` are parsed then reported `Unsupported` (deferred to V8).
+  New `CreateTable`/`ColumnDef`/`ColumnConstraint`/`TableConstraint`/
+  `IndexedColumn`/`CreateIndex`/`DropTable`/`DropIndex` AST nodes and
+  printer round-trip support; grammar's V3 DDL stub filled in with real
+  detail (`indexed-column`, `COLLATE` constraint, `CONSTRAINT` prefix).
+  Verified against `tests/corpus/sql/ddl/*.sql`: 464/517 CREATE TABLE and
+  148/149 CREATE INDEX statements accepted.
 - Parser: UPDATE statement (#190), V3 phase 2 (epic #161). `parse_update`
   accepts `UPDATE [OR REPLACE/IGNORE/ABORT/ROLLBACK/FAIL] table SET
   col=expr, ... [WHERE ...]`, including the tuple SET form

@@ -418,6 +418,14 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 **Tests:** `tests/corpus/sql_corpus_test.rs::valid_in_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::valid_out_of_subset_statements_parse_in_real_sqlite`, `tests/corpus/sql_corpus_test.rs::invalid_statements_are_rejected_by_real_sqlite`
 
+#### Scenario: Accept CREATE/DROP TABLE and CREATE/DROP INDEX
+
+- GIVEN `CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT NOT NULL DEFAULT 'x', CHECK (a > 0)) STRICT`, `DROP TABLE IF EXISTS t`, `CREATE UNIQUE INDEX IF NOT EXISTS i ON t (a, b DESC) WHERE a > 0`, and `DROP INDEX IF EXISTS i`
+- WHEN parsed
+- THEN parse succeeds with `CreateTable`/`DropTable`/`CreateIndex`/`DropIndex` AST; `REFERENCES`/`FOREIGN KEY` (deferred to V8), `CREATE VIRTUAL TABLE`, `CREATE TEMP TABLE`, and `ON CONFLICT` resolution clauses are `Unsupported`, not `Invalid`
+
+**Tests:** `tests/unit/ddl_parser.rs::test_accept_create_table_basic`, `tests/unit/ddl_parser.rs::test_accept_create_index_basic`, `tests/unit/ddl_parser.rs::test_accept_drop_table`, `tests/unit/ddl_parser.rs::test_accept_drop_index`, `tests/unit/ddl_parser.rs::test_unsupported_create_table_references`
+
 #### Extraction process (#70)
 
 The hand-curated corpus above is complemented by SQL extracted from the two
@@ -489,6 +497,14 @@ The AST MUST represent all SQLite SQL constructs without loss of information.
 - THEN AST MUST represent grouping (not just operator precedence)
 
 **Tests:** `tests/unit/parser.rs::test_preserve_parens_for_precedence`, `tests/unit/parser.rs::test_roundtrip_fixpoint`
+
+#### Scenario: CREATE/DROP TABLE/INDEX round-trip
+
+- GIVEN a parsed `CreateTable`, `CreateIndex`, `DropTable`, or `DropIndex`
+- WHEN printed via `Display` and reparsed
+- THEN the reparsed AST MUST equal the original
+
+**Tests:** `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_table`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_table_without_rowid`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_index`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_drop_table`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_drop_index`
 
 ### Requirement 4: Error Messages [SHOULD]
 

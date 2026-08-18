@@ -5,7 +5,7 @@
 //! (e.g. `JOIN`) from "actually malformed" — otherwise a not-yet-built
 //! feature reads identically to a typo.
 
-use super::ast::{Delete, Insert, Select, Update};
+use super::ast::{CreateIndex, CreateTable, Delete, DropIndex, DropTable, Insert, Select, Update};
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
@@ -132,5 +132,133 @@ pub fn parse_update(src: &str) -> ParseOutcome<Update> {
             ParseOutcome::Unsupported { message, span }
         }
         Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for CREATE TABLE (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateTableOutcome {
+    Accepted(Box<CreateTable>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single CREATE TABLE statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V3 block). Never panics — any input
+/// produces one of the three [`CreateTableOutcome`] variants.
+pub fn parse_create_table(src: &str) -> CreateTableOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_create_table_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => CreateTableOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                CreateTableOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => {
+                CreateTableOutcome::Invalid { message, span }
+            }
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            CreateTableOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => CreateTableOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for CREATE INDEX (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateIndexOutcome {
+    Accepted(Box<CreateIndex>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single CREATE INDEX statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V3 block). Never panics — any input
+/// produces one of the three [`CreateIndexOutcome`] variants.
+pub fn parse_create_index(src: &str) -> CreateIndexOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_create_index_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => CreateIndexOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                CreateIndexOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => {
+                CreateIndexOutcome::Invalid { message, span }
+            }
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            CreateIndexOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => CreateIndexOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for DROP TABLE (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DropTableOutcome {
+    Accepted(Box<DropTable>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single DROP TABLE statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V3 block). Never panics — any input
+/// produces one of the three [`DropTableOutcome`] variants.
+pub fn parse_drop_table(src: &str) -> DropTableOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_drop_table_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => DropTableOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                DropTableOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => {
+                DropTableOutcome::Invalid { message, span }
+            }
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            DropTableOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => DropTableOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for DROP INDEX (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DropIndexOutcome {
+    Accepted(Box<DropIndex>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single DROP INDEX statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V3 block). Never panics — any input
+/// produces one of the three [`DropIndexOutcome`] variants.
+pub fn parse_drop_index(src: &str) -> DropIndexOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_drop_index_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => DropIndexOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                DropIndexOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => {
+                DropIndexOutcome::Invalid { message, span }
+            }
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            DropIndexOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => DropIndexOutcome::Invalid { message, span },
     }
 }

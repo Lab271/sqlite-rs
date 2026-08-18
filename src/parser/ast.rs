@@ -1,9 +1,11 @@
-//! AST for the V2 SELECT-core slice (spec 002-parser Requirements 2-4).
+//! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
+//! 002-parser Requirements 2-4).
 //!
-//! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`-tagged rules:
-//! single-FROM SELECT, WHERE, ORDER BY, LIMIT/OFFSET, and the V2 expression
-//! grammar. No CREATE TABLE/INSERT/UPDATE/DELETE (V3) and no GROUP BY/HAVING/
-//! joins/subqueries (V4) productions exist here at all.
+//! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`-tagged
+//! rules: single-FROM SELECT, WHERE, ORDER BY, LIMIT/OFFSET, the V2
+//! expression grammar, INSERT/UPDATE/DELETE, and CREATE/DROP TABLE/INDEX.
+//! No GROUP BY/HAVING/joins/subqueries/FOREIGN KEY/REFERENCES (V4/V8)
+//! productions exist here at all.
 //!
 //! Every node carries a [`Span`] (Requirement 3: "AST completeness") and
 //! parenthesized expressions are preserved explicitly via `ExprKind::Paren`
@@ -218,6 +220,89 @@ pub enum InsertSource {
 pub struct Delete {
     pub table: String,
     pub where_clause: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTable {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub columns: Vec<ColumnDef>,
+    pub constraints: Vec<TableConstraint>,
+    pub without_rowid: bool,
+    pub strict: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub type_name: Option<String>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnConstraint {
+    NotNull,
+    PrimaryKey {
+        /// `None` = no ASC/DESC given, `Some(true)` = DESC.
+        desc: Option<bool>,
+        autoincrement: bool,
+    },
+    Unique,
+    Default(DefaultValue),
+    Check(Expr),
+    Collate(String),
+}
+
+/// `DEFAULT` accepts either a bare literal or a parenthesized expression
+/// (never a bare non-literal expression) — kept as separate variants so
+/// the printer knows which form reparses correctly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefaultValue {
+    Literal(Expr),
+    Paren(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableConstraint {
+    PrimaryKey(Vec<IndexedColumn>),
+    Unique(Vec<IndexedColumn>),
+    Check(Expr),
+}
+
+/// An indexed-column: an expression (bare column ref, `COLLATE`-qualified,
+/// or a general expression for functional indexes), plus optional
+/// ASC/DESC. Shared by `CREATE INDEX` and `PRIMARY KEY`/`UNIQUE` table
+/// constraints — unlike [`OrderingTerm`], NULLS FIRST/LAST doesn't apply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedColumn {
+    pub expr: Expr,
+    pub desc: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    pub unique: bool,
+    pub if_not_exists: bool,
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<IndexedColumn>,
+    pub where_clause: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTable {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndex {
+    pub if_exists: bool,
+    pub name: String,
     pub span: Span,
 }
 
