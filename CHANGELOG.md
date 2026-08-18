@@ -18,6 +18,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   no-split, single-split, cascading/root-split, 1000-row bulk insert,
   and overflow+split scenarios (spec 006-btree Requirements 8-11).
 
+- Statement-level journaling — rollback journal for atomicity (#172), V3
+  phase 1 (epic #161), DELETE mode only (TRUNCATE/PERSIST deferred).
+  `Pager::flush` now journals the pre-transaction content of every page
+  it's about to overwrite before writing to the main file, syncing the
+  journal first; `Pager::open` replays a detected hot journal into the
+  main file (truncating back to its pre-transaction page count) instead
+  of refusing to open. New `src/pager/journal.rs` mirrors stock SQLite's
+  `pager.c` header layout and `pager_cksum` byte-for-byte, proven both
+  directions: a real `sqlite3`-written hot journal recovers through our
+  `Pager::open` (`tests/tiers/tier0.rs`), and a journal we write recovers
+  through a real `sqlite3` (`tests/corpus/journal_interop_test.rs`).
+  Un-ignores `tests/tiers/tier2.rs`'s `t2_statement_atomicity` and
+  `t2_journal_transactions_commit_and_rollback` (spec 007-pager
+  Requirement 6, ADR-0016). Spend: ~2x the initial estimate — recovery
+  correctness (real sqlite3 interop, byte-for-byte checksum format, and
+  making sure recovery tests never mutate checked-in fixtures) took more
+  iteration than the write-path plumbing alone.
+
 - Freelist management — allocate/deallocate pages (#167), V3 phase 1
   (epic #161). `Pager::allocate_page` pops a page off the freelist (or
   extends the file when it's empty); `Pager::deallocate_page` pushes a

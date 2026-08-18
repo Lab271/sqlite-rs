@@ -38,6 +38,28 @@ impl Vfs for UnixVfs {
             .map_err(|source| to_vfs_error(path, source))
     }
 
+    fn create_or_open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|source| to_vfs_error(path, source))?;
+        Ok(Box::new(UnixVfsFile {
+            file,
+            path: path.to_path_buf(),
+        }))
+    }
+
+    fn delete(&self, path: &Path) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(to_vfs_error(path, source)),
+        }
+    }
+
     fn claim_wal_read_lock(&self, path: &Path) -> Result<Option<FileLock>> {
         let shm_path = companion_path(path, "-shm");
         shm::claim_wal_read_lock(&shm_path)
@@ -74,6 +96,12 @@ impl VfsFile for UnixVfsFile {
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
         self.file
             .write_all_at(buf, offset)
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
+    fn truncate(&self, len: u64) -> Result<()> {
+        self.file
+            .set_len(len)
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 

@@ -413,7 +413,7 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs opens it read-only
 - THEN it MUST NOT serve pre-rollback pages as committed data — it either applies recovery semantics or refuses with a clear error
 
-**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_is_refused`
+**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_recovers_committed_state`
 
 #### Scenario: Reader takes a SHARED lock before serving pages
 

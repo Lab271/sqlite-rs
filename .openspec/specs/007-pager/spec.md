@@ -21,7 +21,7 @@ Locking is out of scope for both requirements below. Spike 005 (#8, closed) vali
 
 ### Requirement 1: Hot-Journal Detection [MUST]
 
-The system MUST refuse to open a database that has an adjacent `-journal` file with a valid rollback-journal header, rather than risk serving pre-rollback (uncommitted) pages as committed data. A `-journal` file that exists but does not start with the rollback-journal magic (e.g. zeroed by `PRAGMA journal_mode=PERSIST`'s post-commit reset, or too short to hold a full header) is not hot and MUST NOT block opening.
+The system MUST detect (never silently ignore) a database that has an adjacent `-journal` file with a valid rollback-journal header, rather than risk serving pre-rollback (uncommitted) pages as committed data. A `-journal` file that exists but does not start with the rollback-journal magic (e.g. zeroed by `PRAGMA journal_mode=PERSIST`'s post-commit reset, or too short to hold a full header) is not hot and MUST NOT block opening. V1 responded to a detected hot journal by refusing to open (`PagerError::HotJournal`); Requirement 6 (#172) upgrades this to actual recovery — `PagerError::HotJournal` is retained only as the "no `-journal` companion" precondition this requirement establishes, not as `open`'s outcome once a hot journal is found.
 
 **Implementation:** `src/pager.rs::Pager::open`
 
@@ -29,13 +29,13 @@ The system MUST refuse to open a database that has an adjacent `-journal` file w
 
 **Corpus:** `tests/corpus/fixtures/journalstates/`
 
-#### Scenario: Hot journal refuses to open
+#### Scenario: Hot journal is detected and never silently ignored
 
 - GIVEN `journalstates/hot_journal.db` and its adjacent `hot_journal.db-journal` (a rollback-journal writer that spilled uncommitted pages into the main file before being interrupted — see `tools/gen_fixtures.sh`)
 - WHEN `Pager::open` is called
-- THEN it returns `PagerError::HotJournal`, before any page is read
+- THEN the journal's magic is recognized as hot before any page is read, and Requirement 6's recovery runs rather than the main file's spilled pages being served as committed data
 
-**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_is_refused`
+**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_recovers_committed_state`
 
 #### Scenario: Cold or absent journal opens cleanly
 
@@ -200,3 +200,55 @@ Refs: 003/Req-2, 007/Req-4.
 - THEN stock `sqlite3` still opens the file, `PRAGMA integrity_check` reports `ok`, `PRAGMA freelist_count` reports `1`, and the original row reads back unchanged
 
 **Tests:** `tests/corpus/pager_write_test.rs::allocate_then_deallocate_page_still_integrity_checks_in_stock_sqlite3`
+
+### Requirement 6: Rollback Journal Write Path, Commit, and Recovery [MUST]
+
+Tier 2 WRITE CORE (V3 phase 1, epic #161, #172), built on top of Requirement 4's dirty-page-tracking/flush primitives and Requirement 1's hot-journal detection. `Pager::flush` MUST, before overwriting any page that existed prior to the current transaction (page number `<=` the page count recorded on disk at the start of `flush`), write that page's pre-transaction content as a checksummed record into a `-journal` companion file (DELETE mode only — TRUNCATE/PERSIST/MEMORY are out of scope), `fsync` the journal, then write and `fsync` the dirty pages to the main file, then delete the journal. Pages beyond the pre-transaction page count (freshly allocated by `Pager::allocate_page` within the same transaction) are never journaled: a crash before commit leaves them referenced by nothing, and recovery's truncate-to-pre-transaction-page-count step drops them. `Pager::open` MUST, on detecting a hot journal (Requirement 1), replay every checksum-valid record from it into the main file, truncate the main file back to the journal's recorded pre-transaction page count, `fsync`, and delete the journal, before proceeding with the rest of `open`. The on-disk journal header and per-page checksum algorithm MUST match stock SQLite's `pager.c` byte-for-byte (28-byte header, `pager_cksum`'s every-200-bytes sampling) so a journal either implementation writes is recoverable by the other.
+
+Refs: 001/Req-4, 007/Req-1, 007/Req-4.
+
+**Implementation:** `src/pager.rs::Pager::flush`, `src/pager.rs::recover_hot_journal`, `src/pager/journal.rs`
+
+**Tests:** inline `#[cfg(test)]` in `src/pager.rs` and `src/pager/journal.rs`
+
+**Corpus:** `tests/corpus/fixtures/journalstates/hot_journal.db`, `tests/corpus/journal_interop_test.rs`
+
+#### Scenario: A committed transaction leaves no journal behind
+
+- GIVEN an open `Pager` with dirty pages
+- WHEN `flush` is called
+- THEN the main file reflects every dirty page, and the `-journal` file (if one was created) no longer exists afterward
+
+**Tests:** `tests/tiers/tier2.rs::t2_journal_transactions_commit_and_rollback`, `src/pager.rs::tests::get_page_mut_then_flush_roundtrips`
+
+#### Scenario: A statement that never reaches flush leaves the database unchanged
+
+- GIVEN an open `Pager` with a page mutated via `get_page_mut`
+- WHEN the `Pager` is dropped without calling `flush`
+- THEN a freshly-opened `Pager` over the same file sees the original, pre-mutation content
+
+**Tests:** `tests/tiers/tier2.rs::t2_statement_atomicity`
+
+#### Scenario: A crash between journal-sync and main-file-sync rolls back on next open
+
+- GIVEN a main file with a torn write to a page, and an adjacent well-formed `-journal` recording that page's pre-transaction content
+- WHEN `Pager::open` is called
+- THEN the torn page is restored to its pre-transaction content, and the journal is deleted before `open` returns
+
+**Tests:** `tests/tiers/tier2.rs::t2_journal_transactions_commit_and_rollback`, `src/pager.rs::tests::hot_journal_with_one_record_restores_original_page_and_deletes_journal`, `src/pager/journal.rs::tests::writer_then_recover_restores_original_pages`
+
+#### Scenario: A real sqlite3-written hot journal recovers through our Pager
+
+- GIVEN `journalstates/hot_journal.db` and its adjacent `hot_journal.db-journal` — a real `sqlite3` rollback-journal writer that spilled ~1999 uncommitted rows into the main file before being interrupted
+- WHEN `Pager::open` is called (against a scratch copy — recovery mutates the main file and deletes the journal in place)
+- THEN only the one row genuinely committed before the transaction is visible, and the journal is gone
+
+**Tests:** `src/pager.rs::tests::fixtures::hot_journal_fixture_recovers_committed_state`, `tests/tiers/tier0.rs::t0_hot_journal_recovers_committed_state`
+
+#### Scenario: A journal we write recovers through a real sqlite3
+
+- GIVEN a database created by stock `sqlite3`, and a `-journal` file written via `JournalWriter` recording a page's pre-transaction content, with that page then torn in the main file (simulating a crash mid-flush)
+- WHEN a real `sqlite3` opens the database
+- THEN it transparently rolls back to the pre-transaction content and deletes the journal, with no explicit recovery command needed
+
+**Tests:** `tests/corpus/journal_interop_test.rs::our_journal_recovers_through_stock_sqlite3`
