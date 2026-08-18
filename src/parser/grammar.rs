@@ -389,6 +389,399 @@ impl Parser {
         }])
     }
 
+    // ---- DDL: CREATE/DROP TABLE, CREATE/DROP INDEX -----------------------
+
+    fn opt_if_not_exists(&mut self) -> PResult<bool> {
+        if self.eat_kw(Keyword::IF) {
+            self.expect_kw(Keyword::NOT)?;
+            self.expect_kw(Keyword::EXISTS)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn opt_if_exists(&mut self) -> PResult<bool> {
+        if self.eat_kw(Keyword::IF) {
+            self.expect_kw(Keyword::EXISTS)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// SQLite treats `ROWID`/`STRICT` as contextual keywords (unreserved
+    /// words, not `Keyword` tokens) — matched case-insensitively against a
+    /// bare identifier.
+    fn eat_contextual_kw(&mut self, word: &str) -> bool {
+        if matches!(&self.peek().kind, TokenKind::Identifier(id) if id.eq_ignore_ascii_case(word)) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Bails with `Unsupported` (schema-qualified names not yet supported)
+    /// if a `.` follows, mirroring `table_ref`'s existing behavior.
+    fn check_no_schema_qualifier(&mut self) -> PResult<()> {
+        if matches!(self.peek().kind, TokenKind::Dot) {
+            return self.unsupported("schema-qualified names not yet supported");
+        }
+        Ok(())
+    }
+
+    /// Bails with `Unsupported` if an `ON CONFLICT` resolution clause
+    /// follows — real SQLite allows one after NOT NULL/PRIMARY KEY/UNIQUE,
+    /// but representing it isn't in this ticket's scope.
+    fn check_no_conflict_clause(&mut self) -> PResult<()> {
+        if self.at_kw(Keyword::ON)
+            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::CONFLICT))
+        {
+            return self.unsupported("ON CONFLICT resolution clause not yet supported");
+        }
+        Ok(())
+    }
+
+    pub(super) fn parse_create_table_stmt(&mut self) -> PResult<CreateTable> {
+        let start = self.expect_kw(Keyword::CREATE)?;
+        if self.at_kw(Keyword::TEMP) || self.at_kw(Keyword::TEMPORARY) {
+            return self.unsupported("CREATE TEMP/TEMPORARY TABLE not yet supported");
+        }
+        if self.at_kw(Keyword::VIRTUAL) {
+            return self.unsupported("CREATE VIRTUAL TABLE not yet supported");
+        }
+        self.expect_kw(Keyword::TABLE)?;
+        let if_not_exists = self.opt_if_not_exists()?;
+        let (name, _) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        if self.at_kw(Keyword::AS) {
+            return self.unsupported("CREATE TABLE ... AS select-stmt not yet supported");
+        }
+        self.expect_punct(TokenKind::LParen, "'(' after table name")?;
+
+        let mut columns = vec![self.column_def()?];
+        let mut constraints = Vec::new();
+        while self.eat_punct(&TokenKind::Comma) {
+            if self.at_table_constraint_start() {
+                constraints.push(self.table_constraint()?);
+                while self.eat_punct(&TokenKind::Comma) {
+                    constraints.push(self.table_constraint()?);
+                }
+                break;
+            }
+            columns.push(self.column_def()?);
+        }
+        let mut end = self.expect_punct(TokenKind::RParen, "')' to close column list")?;
+
+        let mut without_rowid = false;
+        let mut strict = false;
+        if self.eat_kw(Keyword::WITHOUT) {
+            if !self.eat_contextual_kw("ROWID") {
+                return self.invalid("expected ROWID after WITHOUT");
+            }
+            end = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map_or(end, |t| t.span);
+            without_rowid = true;
+        } else if matches!(&self.peek().kind, TokenKind::Identifier(id) if id.eq_ignore_ascii_case("STRICT"))
+        {
+            end = self.advance().span;
+            strict = true;
+        }
+
+        Ok(CreateTable {
+            if_not_exists,
+            name,
+            columns,
+            constraints,
+            without_rowid,
+            strict,
+            span: join_span(start, end),
+        })
+    }
+
+    fn at_table_constraint_start(&self) -> bool {
+        self.at_kw(Keyword::CONSTRAINT)
+            || self.at_kw(Keyword::PRIMARY)
+            || self.at_kw(Keyword::UNIQUE)
+            || self.at_kw(Keyword::CHECK)
+            || self.at_kw(Keyword::FOREIGN)
+    }
+
+    fn column_def(&mut self) -> PResult<ColumnDef> {
+        let (name, _) = self.identifier()?;
+        let type_name = if matches!(self.peek().kind, TokenKind::Identifier(_)) {
+            Some(self.type_name()?)
+        } else {
+            None
+        };
+        let mut constraints = Vec::new();
+        while let Some(c) = self.opt_column_constraint()? {
+            constraints.push(c);
+        }
+        Ok(ColumnDef {
+            name,
+            type_name,
+            constraints,
+        })
+    }
+
+    fn opt_column_constraint(&mut self) -> PResult<Option<ColumnConstraint>> {
+        if self.eat_kw(Keyword::CONSTRAINT) {
+            self.identifier()?;
+        }
+        if self.eat_kw(Keyword::NOT) {
+            self.expect_punct(TokenKind::Null, "NULL")?;
+            self.check_no_conflict_clause()?;
+            return Ok(Some(ColumnConstraint::NotNull));
+        }
+        if matches!(self.peek().kind, TokenKind::Null) {
+            return self.unsupported("bare NULL column constraint not yet supported");
+        }
+        if self.eat_kw(Keyword::PRIMARY) {
+            self.expect_kw(Keyword::KEY)?;
+            let desc = if self.eat_kw(Keyword::ASC) {
+                Some(false)
+            } else if self.eat_kw(Keyword::DESC) {
+                Some(true)
+            } else {
+                None
+            };
+            self.check_no_conflict_clause()?;
+            let autoincrement = self.eat_kw(Keyword::AUTOINCREMENT);
+            return Ok(Some(ColumnConstraint::PrimaryKey {
+                desc,
+                autoincrement,
+            }));
+        }
+        if self.eat_kw(Keyword::UNIQUE) {
+            self.check_no_conflict_clause()?;
+            return Ok(Some(ColumnConstraint::Unique));
+        }
+        if self.eat_kw(Keyword::CHECK) {
+            self.expect_punct(TokenKind::LParen, "'(' after CHECK")?;
+            let expr = self.expr()?;
+            self.expect_punct(TokenKind::RParen, "')' to close CHECK")?;
+            return Ok(Some(ColumnConstraint::Check(expr)));
+        }
+        if self.eat_kw(Keyword::DEFAULT) {
+            return Ok(Some(ColumnConstraint::Default(self.default_value()?)));
+        }
+        if self.eat_kw(Keyword::COLLATE) {
+            let (name, _) = self.identifier()?;
+            return Ok(Some(ColumnConstraint::Collate(name)));
+        }
+        if self.at_kw(Keyword::REFERENCES) {
+            return self
+                .unsupported("REFERENCES (foreign key) column constraint not yet supported");
+        }
+        if self.at_kw(Keyword::GENERATED)
+            || (self.at_kw(Keyword::AS) && matches!(self.peek_at(1).kind, TokenKind::LParen))
+        {
+            return self.unsupported("GENERATED ALWAYS AS not yet supported");
+        }
+        Ok(None)
+    }
+
+    fn default_value(&mut self) -> PResult<DefaultValue> {
+        if self.eat_punct(&TokenKind::LParen) {
+            let expr = self.expr()?;
+            self.expect_punct(TokenKind::RParen, "')' to close DEFAULT expression")?;
+            return Ok(DefaultValue::Paren(expr));
+        }
+        if matches!(self.peek().kind, TokenKind::Plus | TokenKind::Minus) {
+            let op = if matches!(self.peek().kind, TokenKind::Minus) {
+                UnaryOp::Minus
+            } else {
+                UnaryOp::Plus
+            };
+            let start = self.advance().span;
+            let inner = self.literal_value()?;
+            let span = join_span(start, inner.span);
+            return Ok(DefaultValue::Literal(Expr {
+                kind: ExprKind::Unary {
+                    op,
+                    expr: Box::new(inner),
+                },
+                span,
+            }));
+        }
+        Ok(DefaultValue::Literal(self.literal_value()?))
+    }
+
+    /// `literal-value` only (no columns, params, or general expressions) —
+    /// the bare (non-parenthesized) form `DEFAULT` accepts.
+    fn literal_value(&mut self) -> PResult<Expr> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Integer(v) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::Integer(v)),
+                    span: tok.span,
+                })
+            }
+            TokenKind::Float(v) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::Float(v)),
+                    span: tok.span,
+                })
+            }
+            TokenKind::String(s) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::Str(s)),
+                    span: tok.span,
+                })
+            }
+            TokenKind::Blob(b) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::Blob(b)),
+                    span: tok.span,
+                })
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::Null),
+                    span: tok.span,
+                })
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::True),
+                    span: tok.span,
+                })
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::False),
+                    span: tok.span,
+                })
+            }
+            TokenKind::Keyword(Keyword::CURRENT_TIME)
+            | TokenKind::Keyword(Keyword::CURRENT_DATE)
+            | TokenKind::Keyword(Keyword::CURRENT_TIMESTAMP) => {
+                self.unsupported("CURRENT_TIME/CURRENT_DATE/CURRENT_TIMESTAMP not yet supported")
+            }
+            _ => self.invalid("expected literal value after DEFAULT"),
+        }
+    }
+
+    fn table_constraint(&mut self) -> PResult<TableConstraint> {
+        if self.eat_kw(Keyword::CONSTRAINT) {
+            self.identifier()?;
+        }
+        if self.eat_kw(Keyword::PRIMARY) {
+            self.expect_kw(Keyword::KEY)?;
+            let cols = self.indexed_column_list()?;
+            self.check_no_conflict_clause()?;
+            return Ok(TableConstraint::PrimaryKey(cols));
+        }
+        if self.eat_kw(Keyword::UNIQUE) {
+            let cols = self.indexed_column_list()?;
+            self.check_no_conflict_clause()?;
+            return Ok(TableConstraint::Unique(cols));
+        }
+        if self.eat_kw(Keyword::CHECK) {
+            self.expect_punct(TokenKind::LParen, "'(' after CHECK")?;
+            let expr = self.expr()?;
+            self.expect_punct(TokenKind::RParen, "')' to close CHECK")?;
+            return Ok(TableConstraint::Check(expr));
+        }
+        if self.at_kw(Keyword::FOREIGN) {
+            return self.unsupported("FOREIGN KEY table constraint not yet supported");
+        }
+        self.invalid("expected PRIMARY KEY, UNIQUE, CHECK, or FOREIGN KEY table constraint")
+    }
+
+    fn indexed_column_list(&mut self) -> PResult<Vec<IndexedColumn>> {
+        self.expect_punct(TokenKind::LParen, "'(' after PRIMARY KEY/UNIQUE")?;
+        let mut cols = vec![self.indexed_column()?];
+        while self.eat_punct(&TokenKind::Comma) {
+            cols.push(self.indexed_column()?);
+        }
+        self.expect_punct(TokenKind::RParen, "')' to close column list")?;
+        Ok(cols)
+    }
+
+    fn indexed_column(&mut self) -> PResult<IndexedColumn> {
+        let expr = self.expr()?;
+        let desc = if self.eat_kw(Keyword::ASC) {
+            Some(false)
+        } else if self.eat_kw(Keyword::DESC) {
+            Some(true)
+        } else {
+            None
+        };
+        Ok(IndexedColumn { expr, desc })
+    }
+
+    pub(super) fn parse_create_index_stmt(&mut self) -> PResult<CreateIndex> {
+        let start = self.expect_kw(Keyword::CREATE)?;
+        let unique = self.eat_kw(Keyword::UNIQUE);
+        self.expect_kw(Keyword::INDEX)?;
+        let if_not_exists = self.opt_if_not_exists()?;
+        let (name, _) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        self.expect_kw(Keyword::ON)?;
+        let (table, _) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        let columns = self.indexed_column_list()?;
+        let mut end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map_or(start, |t| t.span);
+        let where_clause = if self.eat_kw(Keyword::WHERE) {
+            let expr = self.expr()?;
+            end = expr.span;
+            Some(expr)
+        } else {
+            None
+        };
+        Ok(CreateIndex {
+            unique,
+            if_not_exists,
+            name,
+            table,
+            columns,
+            where_clause,
+            span: join_span(start, end),
+        })
+    }
+
+    pub(super) fn parse_drop_table_stmt(&mut self) -> PResult<DropTable> {
+        let start = self.expect_kw(Keyword::DROP)?;
+        self.expect_kw(Keyword::TABLE)?;
+        let if_exists = self.opt_if_exists()?;
+        let (name, end) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        Ok(DropTable {
+            if_exists,
+            name,
+            span: join_span(start, end),
+        })
+    }
+
+    pub(super) fn parse_drop_index_stmt(&mut self) -> PResult<DropIndex> {
+        let start = self.expect_kw(Keyword::DROP)?;
+        self.expect_kw(Keyword::INDEX)?;
+        let if_exists = self.opt_if_exists()?;
+        let (name, end) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        Ok(DropIndex {
+            if_exists,
+            name,
+            span: join_span(start, end),
+        })
+    }
+
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
         if self.at_kw(Keyword::WITH) {
             return self.unsupported("WITH / CTEs not yet supported");

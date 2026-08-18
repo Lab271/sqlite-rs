@@ -170,9 +170,10 @@ delete-stmt     ::= "DELETE" "FROM" table-name [ "WHERE" expr ] ;         (* V3 
 
 create-table-stmt ::= "CREATE" "TABLE" [ "IF" "NOT" "EXISTS" ] table-name
                        "(" column-def { "," column-def } [ "," table-constraint { "," table-constraint } ] ")"
-                       [ "WITHOUT" "ROWID" | "STRICT" ] ;                 (* V3 [parse.y:207-247]; WITHOUT ROWID/STRICT *write* V10 *)
+                       [ "WITHOUT" "ROWID" | "STRICT" ] ;                 (* V3 [parse.y:207-247] *)
 
-column-def      ::= column-name [ type-name ] { column-constraint } ;     (* V3 [parse.y:253 columnname, :389-424 ccons] *)
+column-def      ::= column-name [ type-name ] { [ "CONSTRAINT" identifier ] column-constraint } ;
+                                                                           (* V3 [parse.y:253 columnname, :389-424 ccons] *)
 
 type-name       ::= identifier { identifier } [ "(" NUMBER [ "," NUMBER ] ")" ] ;  (* V3 [parse.y:356 typename] *)
 
@@ -180,14 +181,22 @@ column-constraint ::= "NOT" "NULL"                                        (* V3 
                     | "PRIMARY" "KEY" [ "ASC" | "DESC" ] [ "AUTOINCREMENT" ]  (* V3 [parse.y:392 ccons] *)
                     | "UNIQUE"                                            (* V3 *)
                     | "DEFAULT" ( literal-value | "(" expr ")" )          (* V3 *)
-                    | "CHECK" "(" expr ")" ;                              (* V3; FK REFERENCES V8; GENERATED V10 *)
+                    | "CHECK" "(" expr ")"                                (* V3 *)
+                    | "COLLATE" collation-name ;                         (* V3; FK REFERENCES V8; GENERATED V10;
+                                                                             ON CONFLICT resolution after NOT NULL/
+                                                                             PRIMARY KEY/UNIQUE not yet supported *)
 
-table-constraint ::= "PRIMARY" "KEY" "(" column-name { "," column-name } ")"
-                   | "UNIQUE" "(" column-name { "," column-name } ")"
-                   | "CHECK" "(" expr ")" ;                               (* V3; FOREIGN KEY V8 *)
+table-constraint ::= [ "CONSTRAINT" identifier ]
+                     ( "PRIMARY" "KEY" "(" indexed-column { "," indexed-column } ")"
+                     | "UNIQUE" "(" indexed-column { "," indexed-column } ")"
+                     | "CHECK" "(" expr ")" ) ;                           (* V3; FOREIGN KEY V8 *)
+
+indexed-column  ::= expr [ "ASC" | "DESC" ] ;                             (* V3 [parse.y sortlist];
+                                                                             expr already covers optional COLLATE
+                                                                             via collate-expr; no NULLS FIRST/LAST *)
 
 create-index-stmt ::= "CREATE" [ "UNIQUE" ] "INDEX" [ "IF" "NOT" "EXISTS" ] identifier
-                       "ON" table-name "(" ordering-term { "," ordering-term } ")"
+                       "ON" table-name "(" indexed-column { "," indexed-column } ")"
                        [ "WHERE" expr ] ;                                 (* V3 [parse.y cmd ::= CREATE uniqueflag INDEX]; partial-index WHERE V4 planner *)
 
 drop-stmt       ::= "DROP" ( "TABLE" | "INDEX" ) [ "IF" "EXISTS" ] identifier ;  (* V3 [parse.y cmd ::= DROP TABLE ifexists fullname] *)

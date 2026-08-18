@@ -317,6 +317,161 @@ impl fmt::Display for Delete {
     }
 }
 
+impl fmt::Display for CreateTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CREATE TABLE ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{} (", self.name)?;
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{col}")?;
+        }
+        for constraint in &self.constraints {
+            write!(f, ", {constraint}")?;
+        }
+        write!(f, ")")?;
+        if self.without_rowid {
+            write!(f, " WITHOUT ROWID")?;
+        } else if self.strict {
+            write!(f, " STRICT")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ColumnDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(type_name) = &self.type_name {
+            write!(f, " {type_name}")?;
+        }
+        for constraint in &self.constraints {
+            write!(f, " {constraint}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ColumnConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ColumnConstraint::NotNull => write!(f, "NOT NULL"),
+            ColumnConstraint::PrimaryKey {
+                desc,
+                autoincrement,
+            } => {
+                write!(f, "PRIMARY KEY")?;
+                match desc {
+                    Some(false) => write!(f, " ASC")?,
+                    Some(true) => write!(f, " DESC")?,
+                    None => {}
+                }
+                if *autoincrement {
+                    write!(f, " AUTOINCREMENT")?;
+                }
+                Ok(())
+            }
+            ColumnConstraint::Unique => write!(f, "UNIQUE"),
+            ColumnConstraint::Default(value) => write!(f, "DEFAULT {value}"),
+            ColumnConstraint::Check(expr) => write!(f, "CHECK ({expr})"),
+            ColumnConstraint::Collate(name) => write!(f, "COLLATE {name}"),
+        }
+    }
+}
+
+impl fmt::Display for DefaultValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DefaultValue::Literal(expr) => write!(f, "{expr}"),
+            DefaultValue::Paren(expr) => write!(f, "({expr})"),
+        }
+    }
+}
+
+impl fmt::Display for TableConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TableConstraint::PrimaryKey(cols) => {
+                write!(f, "PRIMARY KEY (")?;
+                write_indexed_columns(f, cols)?;
+                write!(f, ")")
+            }
+            TableConstraint::Unique(cols) => {
+                write!(f, "UNIQUE (")?;
+                write_indexed_columns(f, cols)?;
+                write!(f, ")")
+            }
+            TableConstraint::Check(expr) => write!(f, "CHECK ({expr})"),
+        }
+    }
+}
+
+fn write_indexed_columns(f: &mut fmt::Formatter<'_>, cols: &[IndexedColumn]) -> fmt::Result {
+    for (i, col) in cols.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{col}")?;
+    }
+    Ok(())
+}
+
+impl fmt::Display for IndexedColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.expr)?;
+        match self.desc {
+            Some(false) => write!(f, " ASC")?,
+            Some(true) => write!(f, " DESC")?,
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for CreateIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CREATE ")?;
+        if self.unique {
+            write!(f, "UNIQUE ")?;
+        }
+        write!(f, "INDEX ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{} ON {} (", self.name, self.table)?;
+        write_indexed_columns(f, &self.columns)?;
+        write!(f, ")")?;
+        if let Some(where_clause) = &self.where_clause {
+            write!(f, " WHERE {where_clause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for DropTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DROP TABLE ")?;
+        if self.if_exists {
+            write!(f, "IF EXISTS ")?;
+        }
+        write!(f, "{}", self.name)
+    }
+}
+
+impl fmt::Display for DropIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DROP INDEX ")?;
+        if self.if_exists {
+            write!(f, "IF EXISTS ")?;
+        }
+        write!(f, "{}", self.name)
+    }
+}
+
 impl fmt::Display for ParamKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
