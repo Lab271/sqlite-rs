@@ -1,8 +1,20 @@
-# SQLite Landscape: Rust Rewrites
+# SQLite Landscape: Rust Ecosystem
 
 **Updated:** 2026-08-18
 
-## The Two Rust SQLite Rewrites
+## Three Categories
+
+The "Rust + SQLite" space divides into three distinct categories:
+
+1. **Clean-room SQLite-compatible rewrites** — byte-compatible file format + SQL dialect
+2. **Rust-native embedded databases** — compete with SQLite but own format/dialect
+3. **Rust interfaces to actual SQLite** — bindings to the C library
+
+sqlite-rs is in category 1, alongside Turso.
+
+---
+
+## Category 1: SQLite-Compatible Rewrites
 
 | | **Turso Database** | **sqlite-rs** |
 |---|---|---|
@@ -51,12 +63,74 @@
 
 **Opportunity:** Be "the boring safe one." While Turso chases features, sqlite-rs can be the implementation regulators trust.
 
+---
+
+## Category 2: Rust-Native Embedded Databases
+
+These compete with SQLite's niche but don't aim for compatibility:
+
+| Project | Type | Notes |
+|---------|------|-------|
+| **redb** | Key-value, ACID | "LMDB in Rust" — pure Rust, embedded, transactions |
+| **sled** | Key-value | Older, less actively developed |
+| **GlueSQL** | SQL engine | Pluggable backends, runs in-browser |
+| **native_db** | Typed storage | Rust-native typed embedded storage |
+| **fjall** | LSM-based | Log-structured merge tree |
+| **LanceDB** | Vector DB | AI workloads, not relational |
+| **Stoolap** | SQL, MVCC | SQLite-*like* not compatible, Volcano architecture (0.2 Jan 2026) |
+| **SQLRite** | SQL + Vector | Learning project, MVCC, HNSW indexing, multi-language SDKs |
+
+**Note:** Stoolap and SQLRite are SQLite-*like* (embedded SQL, single file) but not file-format compatible.
+
+---
+
+## Category 3: Rust Interfaces to SQLite
+
+Mature ecosystem for using real SQLite from Rust:
+
+| Crate | Type | Notes |
+|-------|------|-------|
+| **rusqlite** | Lightweight wrapper | The standard choice |
+| **SQLx** | Async SQL toolkit | Compile-time checked queries |
+| **Diesel** | ORM | Compile-time SQL checking |
+| **SeaORM** | Async ORM | Dynamic, async-first |
+| **turso crate** | Turso client | Near drop-in for rusqlite |
+
+---
+
+## Not Rust (Common Confusion)
+
+| Project | Language | Notes |
+|---------|----------|-------|
+| **libSQL** | C | Turso's production fork of SQLite |
+| **DuckDB** | C++ | Analytics, different niche |
+| **rqlite** | Go | Distributed SQLite |
+
+---
+
+## sqlite-rs Position
+
+**Category:** 1 (clean-room compatible rewrite)
+
+**Unique angle:** The only rewrite focused on *certification and safety* rather than *performance and features*.
+
+| Need | → Use |
+|------|-------|
+| SQLite file compatibility today | rusqlite |
+| SQLite compatibility + concurrent writes (when stable) | Turso |
+| SQLite compatibility + certification evidence | sqlite-rs |
+| Small embedded ACID in pure Rust (no SQL compat needed) | redb |
+
+---
+
 ## Links
 
 - Turso: https://turso.tech/
 - Turso Database repo: https://github.com/tursodatabase/turso
 - libSQL: https://github.com/tursodatabase/libsql
 - sqlite-rs: https://github.com/iheitlager/sqlite-rs
+- redb: https://github.com/cberner/redb
+- GlueSQL: https://github.com/gluesql/gluesql
 
 ## Related
 
