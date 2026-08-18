@@ -91,7 +91,10 @@ fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
 /// as the rowid-alias column (stored as NULL, per the rowid-alias
 /// convention `src/btree.rs` documents on the read side).
 fn row_payload(b: &str) -> Vec<u8> {
-    encode_record(&[Value::Null, Value::Text(b.to_string())], TextEncoding::Utf8)
+    encode_record(
+        &[Value::Null, Value::Text(b.to_string())],
+        TextEncoding::Utf8,
+    )
 }
 
 /// Inserts `(rowid, b)` for every row into `t`'s root, flushing after each
@@ -111,7 +114,11 @@ fn insert_single_row_no_split() {
     };
 
     let db = scratch_db("no_split");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);
@@ -137,7 +144,11 @@ fn insert_forces_a_leaf_split() {
     };
 
     let db = scratch_db("leaf_split");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);
@@ -177,7 +188,11 @@ fn insert_forces_cascading_splits_and_a_root_split() {
     };
 
     let db = scratch_db("root_split");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);
@@ -196,7 +211,10 @@ fn insert_forces_cascading_splits_and_a_root_split() {
     }
 
     assert_integrity_ok(&oracle, &db);
-    assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "2000");
+    assert_eq!(
+        oracle_select(&oracle, &db, "select count(*) from t;"),
+        "2000"
+    );
     assert_eq!(
         oracle_select(&oracle, &db, "select b from t where a = 1;"),
         format!("{filler}-1")
@@ -221,7 +239,11 @@ fn bulk_insert_1000_rows_is_oracle_identical() {
     };
 
     let db = scratch_db("bulk_1000");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);
@@ -236,7 +258,10 @@ fn bulk_insert_1000_rows_is_oracle_identical() {
     }
 
     assert_integrity_ok(&oracle, &db);
-    assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "1000");
+    assert_eq!(
+        oracle_select(&oracle, &db, "select count(*) from t;"),
+        "1000"
+    );
     assert_eq!(
         oracle_select(&oracle, &db, "select sum(a) from t;"),
         (1..=1000i64).sum::<i64>().to_string()
@@ -247,7 +272,10 @@ fn bulk_insert_1000_rows_is_oracle_identical() {
         .map(|(a, b)| format!("{a}|{b}"))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(oracle_select(&oracle, &db, "select a, b from t order by a;"), expected);
+    assert_eq!(
+        oracle_select(&oracle, &db, "select a, b from t order by a;"),
+        expected
+    );
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
 }
@@ -260,7 +288,11 @@ fn insert_with_overflow_payload_combined_with_a_split() {
     };
 
     let db = scratch_db("overflow_split");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);
@@ -306,7 +338,11 @@ fn insert_into_page_one_root_preserves_the_file_header_across_a_split() {
     };
 
     let db = scratch_db("page1_root");
-    seed(&oracle, &db, "create table t(a integer primary key, b text);");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text);",
+    );
 
     let vfs = UnixVfs;
     let page_size = page_size_of(&vfs, &db);

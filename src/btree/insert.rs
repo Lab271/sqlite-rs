@@ -42,7 +42,14 @@ pub fn insert_row(
     let (ancestors, leaf_page) = find_leaf_page(pager, root_page, rowid)?;
     let page_len = pager.get_page_mut(leaf_page)?.len();
     insert_into_leaf(
-        pager, usable_size, page_len, leaf_page, root_page, &ancestors, rowid, cell,
+        pager,
+        usable_size,
+        page_len,
+        leaf_page,
+        root_page,
+        &ancestors,
+        rowid,
+        cell,
     )
 }
 
@@ -72,7 +79,11 @@ fn encode_leaf_cell(
 /// next-page-number + chunk bytes, 0 terminates), mirroring
 /// `reassemble_payload`'s read-side chain format in reverse. Returns the
 /// first overflow page number.
-fn write_overflow_chain(pager: &mut Pager, usable_size: u32, data: &[u8]) -> Result<u32, BtreeError> {
+fn write_overflow_chain(
+    pager: &mut Pager,
+    usable_size: u32,
+    data: &[u8],
+) -> Result<u32, BtreeError> {
     let available = usable_size.saturating_sub(4).max(1) as usize;
     let mut chunks: Vec<&[u8]> = Vec::new();
     let mut rest = data;
@@ -89,9 +100,9 @@ fn write_overflow_chain(pager: &mut Pager, usable_size: u32, data: &[u8]) -> Res
     }
     for (i, chunk) in chunks.iter().enumerate() {
         let next = page_nums.get(i.saturating_add(1)).copied().unwrap_or(0);
-        let page_num = *page_nums
-            .get(i)
-            .ok_or(BtreeError::Internal("overflow chain page index out of bounds"))?;
+        let page_num = *page_nums.get(i).ok_or(BtreeError::Internal(
+            "overflow chain page index out of bounds",
+        ))?;
         let buf = pager.get_page_mut(page_num)?;
         put(buf, 0, &next.to_be_bytes(), page_num)?;
         put(buf, 4, chunk, page_num)?;
@@ -102,7 +113,11 @@ fn write_overflow_chain(pager: &mut Pager, usable_size: u32, data: &[u8]) -> Res
 /// Descends from `page_num` (a table b-tree root or subtree) to the leaf
 /// that should hold `rowid`, returning the ancestor interior page numbers
 /// (root-to-parent order) and the target leaf page number.
-fn find_leaf_page(pager: &mut Pager, mut page_num: u32, rowid: i64) -> Result<(Vec<u32>, u32), BtreeError> {
+fn find_leaf_page(
+    pager: &mut Pager,
+    mut page_num: u32,
+    rowid: i64,
+) -> Result<(Vec<u32>, u32), BtreeError> {
     let mut ancestors = Vec::new();
     let mut visited = 0usize;
     loop {
@@ -112,10 +127,9 @@ fn find_leaf_page(pager: &mut Pager, mut page_num: u32, rowid: i64) -> Result<(V
                 max: MAX_PAGES_VISITED,
             });
         }
-        let page = pager.read_page(page_num).map_err(|source| BtreeError::PageSource {
-            page_num,
-            source,
-        })?;
+        let page = pager
+            .read_page(page_num)
+            .map_err(|source| BtreeError::PageSource { page_num, source })?;
         let header_start = page1_header_start(page_num);
         let page_type = read_page_type(&page, header_start, page_num)?;
         if page_type == LEAF_TABLE {
@@ -132,7 +146,10 @@ fn find_leaf_page(pager: &mut Pager, mut page_num: u32, rowid: i64) -> Result<(V
             }
             page_num = next;
         } else {
-            return Err(BtreeError::UnexpectedPageType { page_num, page_type });
+            return Err(BtreeError::UnexpectedPageType {
+                page_num,
+                page_type,
+            });
         }
     }
 }
@@ -193,7 +210,9 @@ fn insert_into_leaf(
     let left = cells;
     let divider = left
         .last()
-        .ok_or(BtreeError::Internal("left half of a split leaf must not be empty"))?
+        .ok_or(BtreeError::Internal(
+            "left half of a split leaf must not be empty",
+        ))?
         .0;
 
     {
@@ -216,7 +235,14 @@ fn insert_into_leaf(
     }
 
     insert_into_parent(
-        pager, usable_size, page_len, ancestors, root_page, leaf_page, right_page, divider,
+        pager,
+        usable_size,
+        page_len,
+        ancestors,
+        root_page,
+        leaf_page,
+        right_page,
+        divider,
     )
 }
 
@@ -248,7 +274,9 @@ fn insert_into_parent(
             entries.insert(idx, (old_page, divider));
             let successor = entries
                 .get_mut(idx.saturating_add(1))
-                .ok_or(BtreeError::Internal("split successor entry must exist right after insertion"))?;
+                .ok_or(BtreeError::Internal(
+                    "split successor entry must exist right after insertion",
+                ))?;
             successor.0 = new_page;
         }
         None if rightmost == old_page => {
@@ -283,15 +311,17 @@ fn insert_into_parent(
     // without being duplicated in either child.
     let n = entries.len();
     let mid = n / 2;
-    let (promoted_child, promoted_key) = *entries
-        .get(mid)
-        .ok_or(BtreeError::Internal("median entry index out of bounds during interior split"))?;
-    let left_entries = entries
-        .get(..mid)
-        .ok_or(BtreeError::Internal("left interior split range out of bounds"))?;
+    let (promoted_child, promoted_key) = *entries.get(mid).ok_or(BtreeError::Internal(
+        "median entry index out of bounds during interior split",
+    ))?;
+    let left_entries = entries.get(..mid).ok_or(BtreeError::Internal(
+        "left interior split range out of bounds",
+    ))?;
     let right_entries = entries
         .get(mid.saturating_add(1)..)
-        .ok_or(BtreeError::Internal("right interior split range out of bounds"))?;
+        .ok_or(BtreeError::Internal(
+            "right interior split range out of bounds",
+        ))?;
 
     let right_page_num = pager.allocate_page()?;
     {
@@ -352,7 +382,8 @@ fn root_split(
             )?;
         }
         INTERIOR_TABLE => {
-            let (entries, rightmost) = collect_interior_entries(&content, header_start_root, root_page)?;
+            let (entries, rightmost) =
+                collect_interior_entries(&content, header_start_root, root_page)?;
             let cells: Vec<Vec<u8>> = entries
                 .iter()
                 .map(|(child, key)| build_interior_cell(*child, *key))
@@ -422,8 +453,8 @@ fn collect_interior_entries(
         let rest = buf
             .get(cell_start.saturating_add(4)..)
             .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let (key, _) =
-            decode_varint(rest).map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
+        let (key, _) = decode_varint(rest)
+            .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
         out.push((child, key as i64));
     }
     let rightmost = read_u32(buf, header_start.saturating_add(8), page_num)?;
@@ -461,7 +492,12 @@ fn put_u8(buf: &mut [u8], offset: usize, value: u8, page_num: u32) -> Result<(),
 /// `cells`, in order. Every mutation in this module goes through this (or
 /// [`write_interior_page`]) rather than patching bytes incrementally — see
 /// the module doc's "fully rebuilds" simplification note.
-fn write_leaf_page(buf: &mut [u8], header_start: usize, page_num: u32, cells: &[Vec<u8>]) -> Result<(), BtreeError> {
+fn write_leaf_page(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    cells: &[Vec<u8>],
+) -> Result<(), BtreeError> {
     write_page_common(buf, header_start, page_num, LEAF_TABLE, 8, cells)
 }
 
@@ -475,7 +511,12 @@ fn write_interior_page(
     rightmost: u32,
 ) -> Result<(), BtreeError> {
     write_page_common(buf, header_start, page_num, INTERIOR_TABLE, 12, cells)?;
-    put(buf, header_start.saturating_add(8), &rightmost.to_be_bytes(), page_num)
+    put(
+        buf,
+        header_start.saturating_add(8),
+        &rightmost.to_be_bytes(),
+        page_num,
+    )
 }
 
 fn write_page_common(
