@@ -36,7 +36,9 @@ pub use freelist::TrunkPage;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::vfs::{companion_path, FileLock, PageError, PageSource, Vfs, WritablePageSource};
+use crate::vfs::{
+    companion_path, AnyVfs, FileLock, PageError, PageSource, Vfs, WritablePageSource,
+};
 use journal::{JournalError, JournalWriter};
 
 /// The 8-byte magic that opens a valid rollback-journal header (SQLite
@@ -86,8 +88,11 @@ pub struct Pager {
     /// to create/delete the `-journal` companion file, since
     /// [`WritablePageSource`] only exposes the one file handle it was
     /// opened with. Both concrete `Vfs` impls (`UnixVfs`, `MemoryVfs`) are
-    /// cheap to clone (a marker struct / an `Arc`-backed table).
-    vfs: Box<dyn Vfs>,
+    /// cheap to clone (a marker struct / an `Arc`-backed table). Wrapped in
+    /// [`AnyVfs`] rather than a bare `Box<dyn Vfs>` field so this file
+    /// never has to write `dyn` itself — `src/pager/` is not exempt from
+    /// the `mvl-limit` qualified-subset gate (this module's doc comment).
+    vfs: AnyVfs,
     /// The `-journal` companion path, precomputed once in `open`.
     journal_path: PathBuf,
 }
@@ -169,7 +174,7 @@ impl Pager {
             wal_pages,
             dirty: HashMap::new(),
             page_size,
-            vfs: Box::new(vfs.clone()),
+            vfs: AnyVfs::new(vfs.clone()),
             journal_path,
         })
     }
@@ -214,7 +219,7 @@ impl Pager {
 
         if !to_journal.is_empty() {
             let writer = JournalWriter::create(
-                self.vfs.as_ref(),
+                &self.vfs,
                 &self.journal_path,
                 self.page_size,
                 self.page_size,
@@ -374,9 +379,8 @@ fn recover_hot_journal<V: Vfs>(
     let n = journal_file.read_at(&mut journal_bytes, 0)?;
     journal_bytes.truncate(n);
 
-    let db_file = vfs.open_write(db_path)?;
-    let recovered =
-        journal::recover(&journal_bytes, db_file.as_ref()).map_err(journal_to_pager_error)?;
+    let db_file: crate::vfs::AnyVfsFile = vfs.open_write(db_path)?.into();
+    let recovered = journal::recover(&journal_bytes, &db_file).map_err(journal_to_pager_error)?;
     db_file.truncate(
         (recovered.initial_page_count as u64).saturating_mul(recovered.page_size as u64),
     )?;

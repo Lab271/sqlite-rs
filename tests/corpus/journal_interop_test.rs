@@ -18,7 +18,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlite_rs::pager::journal::JournalWriter;
-use sqlite_rs::vfs::{PageSource, UnixVfs, Vfs, WritablePageSource};
+use sqlite_rs::vfs::{AnyVfs, PageSource, UnixVfs, Vfs, WritablePageSource};
 
 use crate::oracle::{pinned_oracle, skip_no_oracle};
 
@@ -72,7 +72,7 @@ fn our_journal_recovers_through_stock_sqlite3() {
         db.file_name().unwrap().to_str().unwrap()
     ));
     let writer = JournalWriter::create(
-        &vfs,
+        &AnyVfs::new(vfs),
         &journal_path,
         page_size,
         page_size,

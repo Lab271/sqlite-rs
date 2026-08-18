@@ -22,7 +22,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::vfs::{Vfs, VfsError, VfsFile};
+use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
 pub const JOURNAL_HEADER_LEN: usize = 28;
 
@@ -139,7 +139,7 @@ pub fn page_checksum(nonce: u32, page: &[u8]) -> u32 {
 /// [`JournalWriter::create`]), so unlike SQLite's own incremental writer
 /// there's no need to write a placeholder `n_rec` and patch it in later.
 pub struct JournalWriter {
-    file: Box<dyn VfsFile>,
+    file: AnyVfsFile,
     page_size: u32,
     sector_size: u32,
     nonce: u32,
@@ -150,7 +150,7 @@ impl JournalWriter {
     /// there) the `-journal` file at `path` and writes its header,
     /// zero-padded out to `sector_size` bytes.
     pub fn create(
-        vfs: &dyn Vfs,
+        vfs: &AnyVfs,
         path: &Path,
         page_size: u32,
         sector_size: u32,
@@ -234,7 +234,7 @@ pub struct RecoveredJournal {
 )]
 pub fn recover(
     journal_bytes: &[u8],
-    db_file: &dyn VfsFile,
+    db_file: &AnyVfsFile,
 ) -> Result<RecoveredJournal, JournalError> {
     let header = JournalHeader::parse(journal_bytes)?;
     let record_len = record_len(header.page_size);
@@ -332,17 +332,18 @@ mod tests {
 
     #[test]
     fn writer_then_recover_restores_original_pages() {
-        use crate::vfs::MemoryVfs;
+        use crate::vfs::{AnyVfs, MemoryVfs};
         use std::path::Path;
 
-        let mut vfs = MemoryVfs::new();
+        let mut memory = MemoryVfs::new();
         let page_size = 512u32;
         // Main db: two pages, page 2 already "corrupted" by an
         // in-progress write whose pre-image (all 0xAA) is what recovery
         // must restore.
         let mut db = vec![0u8; page_size as usize];
         db.extend(vec![0xAAu8; page_size as usize]);
-        vfs.insert("/test.db", db);
+        memory.insert("/test.db", db);
+        let vfs = AnyVfs::new(memory);
 
         let original_page_2 = vec![0xAAu8; page_size as usize];
         let writer = JournalWriter::create(
@@ -369,7 +370,7 @@ mod tests {
         let mut journal_bytes = vec![0u8; size as usize];
         journal_file.read_at(&mut journal_bytes, 0).unwrap();
 
-        let recovered = recover(&journal_bytes, db_file.as_ref()).unwrap();
+        let recovered = recover(&journal_bytes, &db_file).unwrap();
         assert_eq!(recovered.initial_page_count, 2);
         assert_eq!(recovered.page_size, page_size);
 
@@ -380,10 +381,10 @@ mod tests {
 
     #[test]
     fn recover_stops_at_first_bad_checksum() {
-        use crate::vfs::MemoryVfs;
+        use crate::vfs::{AnyVfs, MemoryVfs};
         use std::path::Path;
 
-        let vfs = MemoryVfs::new();
+        let vfs = AnyVfs::new(MemoryVfs::new());
         let page_size = 512u32;
         vfs.create_or_open_write(Path::new("/x.db")).unwrap();
         let db_file = vfs.open_write(Path::new("/x.db")).unwrap();
@@ -413,7 +414,7 @@ mod tests {
         journal_file.read_at(&mut journal_bytes, 0).unwrap();
 
         // No panic, no page written — just an early stop.
-        let recovered = recover(&journal_bytes, db_file.as_ref()).unwrap();
+        let recovered = recover(&journal_bytes, &db_file).unwrap();
         assert_eq!(recovered.initial_page_count, 1);
         let mut untouched = vec![0xFFu8; page_size as usize];
         db_file.read_at(&mut untouched, 0).unwrap();

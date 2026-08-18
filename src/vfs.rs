@@ -126,6 +126,75 @@ pub trait VfsFile {
     fn sync(&self) -> Result<()>;
 }
 
+/// A boxed [`VfsFile`], for callers outside `src/vfs/` that need to hold
+/// a file handle across several calls without naming `dyn` themselves —
+/// same pattern as [`FileLock`] below, one trait earlier. The
+/// rollback-journal write path (#172, `src/pager.rs`/`src/pager/journal.rs`)
+/// is the motivating caller: it opens a `-journal`/main-file handle once
+/// and writes to it across several method calls.
+pub struct AnyVfsFile(Box<dyn VfsFile>);
+
+impl From<Box<dyn VfsFile>> for AnyVfsFile {
+    fn from(file: Box<dyn VfsFile>) -> Self {
+        AnyVfsFile(file)
+    }
+}
+
+impl AnyVfsFile {
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
+        self.0.read_at(buf, offset)
+    }
+
+    pub fn size(&self) -> Result<u64> {
+        self.0.size()
+    }
+
+    pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+        self.0.write_at(buf, offset)
+    }
+
+    pub fn truncate(&self, len: u64) -> Result<()> {
+        self.0.truncate(len)
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        self.0.sync()
+    }
+}
+
+/// A boxed [`Vfs`], for a long-lived struct outside `src/vfs/` that needs
+/// to hold "the `Vfs` it was opened with" without itself naming `dyn` or
+/// becoming generic over `V: Vfs` (`Pager`, #172 — it creates/deletes the
+/// `-journal` companion file from methods called well after `open`
+/// returns, once the original `&V` borrow is long gone).
+pub struct AnyVfs(Box<dyn Vfs>);
+
+impl AnyVfs {
+    pub fn new<V: Vfs + 'static>(vfs: V) -> Self {
+        AnyVfs(Box::new(vfs))
+    }
+
+    pub fn exists(&self, path: &Path) -> Result<bool> {
+        self.0.exists(path)
+    }
+
+    pub fn open_read(&self, path: &Path) -> Result<AnyVfsFile> {
+        self.0.open_read(path).map(AnyVfsFile::from)
+    }
+
+    pub fn open_write(&self, path: &Path) -> Result<AnyVfsFile> {
+        self.0.open_write(path).map(AnyVfsFile::from)
+    }
+
+    pub fn create_or_open_write(&self, path: &Path) -> Result<AnyVfsFile> {
+        self.0.create_or_open_write(path).map(AnyVfsFile::from)
+    }
+
+    pub fn delete(&self, path: &Path) -> Result<()> {
+        self.0.delete(path)
+    }
+}
+
 /// A held file lock, released when dropped. Opaque on purpose: it hides
 /// `dyn SharedLockGuard` behind a concrete type so callers outside
 /// `src/vfs/` (e.g. [`crate::pager::Pager`]) never need to write `dyn`
