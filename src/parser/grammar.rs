@@ -302,6 +302,93 @@ impl Parser {
         Ok(list)
     }
 
+    /// `update-stmt` (grammar V3 block): `UPDATE [OR conflict-action]
+    /// table-name SET assignment { "," assignment } [ WHERE expr ]`, where
+    /// `assignment` is either `column-name "=" expr` or the tuple form
+    /// `"(" column-name { "," column-name } ")" "=" "(" expr-list ")"`.
+    pub(super) fn parse_update_stmt(&mut self) -> PResult<Update> {
+        let start = self.expect_kw(Keyword::UPDATE)?;
+
+        let or_action = if self.eat_kw(Keyword::OR) {
+            Some(self.conflict_action()?)
+        } else {
+            None
+        };
+
+        let (table, _) = self.identifier()?;
+
+        self.expect_kw(Keyword::SET)?;
+
+        let mut assignments = self.assignment()?;
+        while self.eat_punct(&TokenKind::Comma) {
+            assignments.extend(self.assignment()?);
+        }
+
+        let where_clause = if self.eat_kw(Keyword::WHERE) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map_or(start, |t| t.span);
+        Ok(Update {
+            or_action,
+            table,
+            assignments,
+            where_clause,
+            span: join_span(start, end),
+        })
+    }
+
+    /// One assignment "slot": `column-name "=" expr` (yields one
+    /// [`Assignment`]), or the tuple form
+    /// `"(" column-name { "," column-name } ")" "=" "(" expr-list ")"`,
+    /// which requires a matching-arity parenthesized RHS expr-list (a
+    /// scalar-subquery RHS is not yet supported) and expands into one
+    /// [`Assignment`] per column, each paired with its RHS expr.
+    fn assignment(&mut self) -> PResult<Vec<Assignment>> {
+        if matches!(self.peek().kind, TokenKind::LParen) {
+            self.advance();
+            let mut columns = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                columns.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')' to close column list")?;
+            self.expect_punct(TokenKind::Eq, "'=' in tuple assignment")?;
+            if !matches!(self.peek().kind, TokenKind::LParen) {
+                return self.unsupported("tuple assignment RHS must be a parenthesized expr-list");
+            }
+            self.advance();
+            if self.at_kw(Keyword::SELECT) {
+                return self.unsupported("tuple assignment RHS subquery not yet supported");
+            }
+            let values = self.expr_list()?;
+            self.expect_punct(TokenKind::RParen, "')' to close tuple assignment")?;
+            if values.len() != columns.len() {
+                return self.invalid("tuple assignment column/value count mismatch");
+            }
+            return Ok(columns
+                .into_iter()
+                .zip(values)
+                .map(|(name, value)| Assignment {
+                    columns: vec![name],
+                    value,
+                })
+                .collect());
+        }
+
+        let (name, _) = self.identifier()?;
+        self.expect_punct(TokenKind::Eq, "'=' in assignment")?;
+        let value = self.expr()?;
+        Ok(vec![Assignment {
+            columns: vec![name],
+            value,
+        }])
+    }
+
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
         if self.at_kw(Keyword::WITH) {
             return self.unsupported("WITH / CTEs not yet supported");

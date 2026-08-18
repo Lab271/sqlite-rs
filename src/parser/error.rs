@@ -5,14 +5,14 @@
 //! (e.g. `JOIN`) from "actually malformed" — otherwise a not-yet-built
 //! feature reads identically to a typo.
 
-use super::ast::{Delete, Insert, Select};
+use super::ast::{Delete, Insert, Select, Update};
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ParseOutcome {
-    /// Parsed successfully into a [`Select`].
-    Accepted(Box<Select>),
+pub enum ParseOutcome<T> {
+    /// Parsed successfully into a `T` (e.g. [`Select`], [`Update`]).
+    Accepted(Box<T>),
     /// Syntactically-recognized SQL this parser doesn't implement yet
     /// (joins, subqueries, compound selects, ...). `span` points at the
     /// token that triggered the unsupported construct.
@@ -36,7 +36,7 @@ pub(super) type PResult<T> = Result<T, ParseFail>;
 /// Parses a single SELECT statement (spec 002-parser Requirements 2-4;
 /// grammar `.openspec/grammar/sqlite.ebnf` V2 block). Never panics —
 /// any input produces one of the three [`ParseOutcome`] variants.
-pub fn parse_select(src: &str) -> ParseOutcome {
+pub fn parse_select(src: &str) -> ParseOutcome<Select> {
     let tokens = Tokenizer::tokenize(src);
     let mut parser = Parser::new(tokens);
     match parser.parse_select_stmt() {
@@ -111,5 +111,26 @@ pub fn parse_delete(src: &str) -> DeleteOutcome {
             DeleteOutcome::Unsupported { message, span }
         }
         Err(ParseFail::Invalid { message, span }) => DeleteOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single UPDATE statement (spec 002-parser V3 slice; grammar
+/// `.openspec/grammar/sqlite.ebnf` `update-stmt`). Never panics — any
+/// input produces one of the three [`ParseOutcome`] variants.
+pub fn parse_update(src: &str) -> ParseOutcome<Update> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_update_stmt() {
+        Ok(update) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(update)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
     }
 }

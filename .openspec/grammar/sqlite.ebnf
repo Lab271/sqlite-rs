@@ -156,9 +156,13 @@ insert-stmt     ::= "INSERT" [ "OR" conflict-action ] "INTO" table-name
 
 conflict-action ::= "REPLACE" | "IGNORE" | "ABORT" | "ROLLBACK" | "FAIL" ; (* V3 [parse.y:492 orconf, :493 resolvetype] *)
 
-update-stmt     ::= "UPDATE" table-name "SET" column-name "=" expr
-                     { "," column-name "=" expr }
+update-stmt     ::= "UPDATE" [ "OR" conflict-action ] table-name
+                     "SET" set-assignment { "," set-assignment }
                      [ "WHERE" expr ] ;                                   (* V3 [parse.y:1014 cmd, :1065 setlist] *)
+
+set-assignment  ::= column-name "=" expr
+                  | "(" column-name { "," column-name } ")" "=" "(" expr-list ")" ;
+                                                                           (* V3 [parse.y:1065 setlist, :1073 nm] *)
 
 delete-stmt     ::= "DELETE" "FROM" table-name [ "WHERE" expr ] ;         (* V3 [parse.y:978 cmd, :1002 where_opt] *)
 

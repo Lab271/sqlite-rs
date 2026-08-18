@@ -14,7 +14,7 @@
 //!   say "syntax error" verbatim, but its exit code must be non-zero).
 
 use crate::oracle::{pinned_oracle, skip_no_oracle};
-use sqlite_rs::parser::{parse_select, ParseOutcome};
+use sqlite_rs::parser::{parse_select, parse_update, ParseOutcome};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -76,9 +76,34 @@ const CASES: &[(&str, Outcome)] = &[
     ("SELECT CASE a END FROM t", Outcome::Invalid),
 ];
 
-fn scratch_db() -> PathBuf {
+/// Issue #190 UPDATE cases (oracle validated against scratch table `t`).
+const UPDATE_CASES: &[(&str, Outcome)] = &[
+    ("UPDATE t SET a=1", Outcome::Accept),
+    ("UPDATE t SET a=1 WHERE b>0", Outcome::Accept),
+    ("UPDATE t SET a=1, b=2, c=3", Outcome::Accept),
+    ("UPDATE OR IGNORE t SET a=1000", Outcome::Accept),
+    ("UPDATE OR REPLACE t SET a=1001", Outcome::Accept),
+    ("UPDATE OR ROLLBACK t SET a=1", Outcome::Accept),
+    ("UPDATE OR ABORT t SET a=1", Outcome::Accept),
+    ("UPDATE OR FAIL t SET a=1", Outcome::Accept),
+    ("UPDATE t SET (a, b) = (1, 2)", Outcome::Accept),
+    ("UPDATE t SET a=(SELECT x FROM u)", Outcome::Unsupported),
+    (
+        "UPDATE t SET a=1 WHERE b IN (SELECT x FROM u)",
+        Outcome::Unsupported,
+    ),
+    (
+        "UPDATE t SET (a, b) = (SELECT x, x FROM u)",
+        Outcome::Unsupported,
+    ),
+    ("UPDATE t SET a=", Outcome::Invalid),
+    ("UPDATE t a=1", Outcome::Invalid),
+    ("UPDATE t SET (a, b) = (1, 2, 3)", Outcome::Invalid),
+];
+
+fn scratch_db(suffix: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "sqlite_rs_parser_oracle_test_{}.db",
+        "sqlite_rs_parser_oracle_test_{}_{suffix}.db",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
@@ -102,17 +127,65 @@ fn oracle_accepts(oracle: &std::path::Path, db: &std::path::Path, sql: &str) -> 
         .success()
 }
 
+/// Like `oracle_accepts`, but without `-readonly` — UPDATE needs to
+/// actually write, unlike the read-only SELECT parity check above.
+fn oracle_accepts_write(oracle: &std::path::Path, db: &std::path::Path, sql: &str) -> bool {
+    Command::new(oracle)
+        .arg(db)
+        .arg(sql)
+        .output()
+        .expect("invoking sqlite3 oracle")
+        .status
+        .success()
+}
+
 #[test]
 fn parser_matches_oracle_three_way_outcome() {
     let Some(oracle) = pinned_oracle() else {
         skip_no_oracle("parser_matches_oracle_three_way_outcome");
         return;
     };
-    let db = scratch_db();
+    let db = scratch_db("select");
 
     for (sql, expected) in CASES {
         let ours = parse_select(sql);
         let oracle_ok = oracle_accepts(&oracle, &db, sql);
+
+        match (expected, &ours) {
+            (Outcome::Accept, ParseOutcome::Accepted(_)) => {
+                assert!(oracle_ok, "oracle rejected an accept-case: {sql:?}");
+            }
+            (Outcome::Unsupported, ParseOutcome::Unsupported { .. }) => {
+                assert!(
+                    oracle_ok,
+                    "oracle rejected an unsupported-but-should-be-valid case: {sql:?}"
+                );
+            }
+            (Outcome::Invalid, ParseOutcome::Invalid { .. }) => {
+                assert!(!oracle_ok, "oracle accepted an invalid case: {sql:?}");
+            }
+            (_, outcome) => {
+                panic!("outcome mismatch for {sql:?}: got {outcome:?}");
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&db);
+}
+
+/// Issue #190: UPDATE three-way parity against the same oracle/scratch-db
+/// convention as `parser_matches_oracle_three_way_outcome`.
+#[test]
+fn parser_matches_oracle_three_way_outcome_update() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("parser_matches_oracle_three_way_outcome_update");
+        return;
+    };
+    let db = scratch_db("update");
+
+    for (sql, expected) in UPDATE_CASES {
+        let ours = parse_update(sql);
+        let oracle_ok = oracle_accepts_write(&oracle, &db, sql);
 
         match (expected, &ours) {
             (Outcome::Accept, ParseOutcome::Accepted(_)) => {
