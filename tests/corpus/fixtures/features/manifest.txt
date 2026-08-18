@@ -5,3 +5,5 @@ fts5.db, rtree.db — virtual tables via FTS5 and R-Tree modules.
 strict_generated.db — a STRICT table with a GENERATED ALWAYS ... STORED
 column. All raw-row readable per Tier 0 (spec 001 Requirement 4) without
 needing query-level support for the extension.
+multitable.db — four tables (customers, orders, products, order_items)
+plus one index. For testing `tables` command and multi-table scenarios.

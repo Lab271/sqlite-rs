@@ -552,6 +552,7 @@ fn usage_errors_exit_two() {
         vec!["nonsense", "x.db"],
         vec!["query"],
         vec!["query", "x.db"],
+        vec!["tables"],
     ] {
         let output = Command::new(CLI)
             .args(&args)
@@ -564,4 +565,33 @@ fn usage_errors_exit_two() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// `tables` command lists table names from sqlite_master, sorted
+/// alphabetically, excluding sqlite_% internal tables.
+#[test]
+fn tables_lists_all_tables_sorted() {
+    let fixture = crate::oracle::corpus_dir().join("features/multitable.db");
+    if !fixture.exists() {
+        eprintln!("skipping: {} not present", fixture.display());
+        return;
+    }
+    let dir = scratch_dir("tables");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = run_cli("tables", &db);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "tables failed: {stderr}");
+    assert!(stderr.is_empty(), "stderr should be empty; got: {stderr}");
+
+    let tables: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        tables,
+        vec!["customers", "order_items", "orders", "products"],
+        "expected four tables in alphabetical order"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
