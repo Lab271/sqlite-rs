@@ -4,6 +4,30 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.9.1] - 2026-08-18
+
+### Fixed
+
+- Index b-tree delete: `extract_max_entry` (`src/btree/index_delete.rs`)
+  permanently orphaned pages whenever a predecessor swap drained a
+  subtree more than one level deep (interior → interior → leaf) — only
+  the outermost page was ever deallocated, leaving deeper already-empty
+  pages unreachable and never returned to the freelist. Fixed by
+  deallocating a subtree's pages bottom-up as each level confirms it's
+  fully drained; added a depth guard (mirroring
+  `descend_index_tree`'s `MAX_PAGES_VISITED` convention) since the
+  recursion previously had none. Found during `/review` of #189
+  (V3 phase 1 exit gate).
+- Index b-tree insert: `insert_entry` (`src/btree/index_insert.rs`)
+  allocated overflow pages for a large key's payload *before* checking
+  for a duplicate key, leaking that overflow chain on every rejected
+  duplicate insert. The duplicate check (both the interior-match and
+  leaf-level cases) now runs before any overflow allocation.
+
+Spend: small — both fixes and their regression tests together were well
+under a "small" ticket's budget; found and fixed in the same session as
+the `/review` that surfaced them.
+
 ## [0.9.0] - 2026-08-18
 
 ### Added

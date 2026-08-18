@@ -42,8 +42,6 @@ pub fn insert_entry(
     encoding: TextEncoding,
 ) -> Result<(), BtreeError> {
     let usable_size = header.usable_page_size();
-    let payload = encode_record(key, encoding);
-    let cell = encode_index_cell(pager, usable_size, &payload)?;
     let (ancestors, leaf_page) =
         match descend_index_tree(pager, root_page, usable_size, key, encoding)? {
             IndexDescent::Leaf {
@@ -52,6 +50,12 @@ pub fn insert_entry(
             } => (ancestors, leaf_page),
             IndexDescent::InteriorMatch { .. } => return Err(BtreeError::DuplicateKey),
         };
+    // The duplicate-key check above (and the leaf-level one inside
+    // `insert_into_index_leaf`) must run before any overflow pages are
+    // allocated for this entry's payload — encoding the cell eagerly here
+    // would leak an overflow chain on every rejected duplicate insert
+    // whose key doesn't fit locally.
+    let payload = encode_record(key, encoding);
     let page_len = pager.get_page_mut(leaf_page)?.len();
     insert_into_index_leaf(
         pager,
@@ -61,7 +65,7 @@ pub fn insert_entry(
         root_page,
         &ancestors,
         key,
-        cell,
+        &payload,
         encoding,
     )
 }
@@ -136,7 +140,7 @@ fn insert_into_index_leaf(
     root_page: u32,
     ancestors: &[u32],
     key: &[Value],
-    cell: Vec<u8>,
+    payload: &[u8],
     encoding: TextEncoding,
 ) -> Result<(), BtreeError> {
     let header_start = page1_header_start(leaf_page);
@@ -155,6 +159,8 @@ fn insert_into_index_leaf(
             std::cmp::Ordering::Greater => {}
         }
     }
+    // No duplicate found — safe to allocate overflow pages (if any) now.
+    let cell = encode_index_cell(pager, usable_size, payload)?;
     cells.insert(insert_pos, (key.to_vec(), cell));
 
     let total_bytes: usize = cells.iter().map(|(_, c)| c.len()).sum();
@@ -453,6 +459,36 @@ mod tests {
         let err =
             insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap_err();
         assert!(matches!(err, BtreeError::DuplicateKey));
+    }
+
+    #[test]
+    fn rejected_duplicate_with_overflow_payload_does_not_leak_pages() {
+        // Regression guard: a duplicate-key insert whose payload spills to
+        // an overflow chain must not allocate that chain before the
+        // duplicate check runs — otherwise every rejected retry leaks
+        // pages permanently (the file only grows, never reclaimed short
+        // of VACUUM).
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let big = vec![Value::Text("x".repeat(2000)), Value::Integer(1)];
+        insert_entry(&mut pager, &header, 1, &big, TextEncoding::Utf8).unwrap();
+
+        let raw = pager.get_page_mut(1).unwrap().clone();
+        let page_count_after_first_insert =
+            u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
+
+        let err = insert_entry(&mut pager, &header, 1, &big, TextEncoding::Utf8).unwrap_err();
+        assert!(matches!(err, BtreeError::DuplicateKey));
+
+        let raw = pager.get_page_mut(1).unwrap().clone();
+        let page_count_after_rejected_dup =
+            u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
+        assert_eq!(
+            page_count_after_rejected_dup, page_count_after_first_insert,
+            "a rejected duplicate insert must not allocate any new pages"
+        );
     }
 
     #[test]
