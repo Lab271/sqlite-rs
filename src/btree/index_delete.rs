@@ -1,0 +1,375 @@
+//! Index b-tree delete (write path): entry delete plus underflow
+//! handling. Mirrors `delete.rs` (table delete) in spirit but not in
+//! mechanism — `index_insert.rs`'s module doc explains why: index b-tree
+//! interior cells carry a full entry (its own value), not just a routing
+//! key, so a delete target may be found sitting at interior level rather
+//! than in a leaf, and removing a routing entry can never be conflated
+//! with discarding whatever value that entry itself carries.
+//!
+//! **Underflow policy.** An emptied leaf (or an interior page that drains
+//! to zero of its own entries) is simply **left in place** — 0 cells is a
+//! structurally valid page, still correctly reachable via its parent's
+//! existing child/rightmost pointer, so no entry ever needs adjusting
+//! just because a child became empty. This is a deliberate simplification
+//! of SQLite's proactive sibling-redistributing `balance()` (see
+//! `delete.rs`'s module doc for the same philosophy applied to tables):
+//! it trades away freelist reuse of drained pages for a much simpler,
+//! harder-to-get-wrong implementation. The one case that DOES need
+//! structural surgery is covered by [`extract_max_entry`] below.
+//!
+//! **Interior-match deletion (predecessor swap).** When
+//! [`super::index::descend_index_tree`] reports
+//! [`IndexDescent::InteriorMatch`] (the target key IS an interior page's
+//! own entry), the entry can't simply be dropped — its child pointer is
+//! load-bearing (routes to the subtree of lesser keys) and, separately,
+//! *other* interior entries along the way to a replacement each carry
+//! their own live value that must never be discarded as a side effect of
+//! removing routing. [`extract_max_entry`] recursively finds and
+//! physically removes the maximum entry of `entry_child`'s subtree (its
+//! in-order predecessor), correctly falling back to an interior page's
+//! own last entry (rather than erroring) when that page's `rightmost`
+//! subtree turns out to already be fully drained — the entry it pops in
+//! that fallback is handled by promoting its own child to the new
+//! `rightmost`, never dropping the live data that child still holds. If
+//! `entry_child`'s entire subtree is drained (no predecessor at all —
+//! everything in it was already deleted earlier), the matched entry is
+//! removed outright instead of swapped.
+
+use std::cmp::Ordering;
+
+use super::index::{
+    build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
+    compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
+    IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
+};
+use super::{page1_header_start, read_page_type, BtreeError};
+use crate::header::DatabaseHeader;
+use crate::pager::Pager;
+use crate::record::{TextEncoding, Value};
+
+/// Deletes the entry with exactly `key` (via [`compare_keys`]) from the
+/// index b-tree rooted at `root_page`. Returns `Err(BtreeError::KeyNotFound)`
+/// if no such entry exists, leaving the tree unchanged. See the module
+/// doc for how a target found at interior level (not just in a leaf) is
+/// handled.
+pub fn delete_entry(
+    pager: &mut Pager,
+    header: &DatabaseHeader,
+    root_page: u32,
+    key: &[Value],
+    encoding: TextEncoding,
+) -> Result<(), BtreeError> {
+    let usable_size = header.usable_page_size();
+    match descend_index_tree(pager, root_page, usable_size, key, encoding)? {
+        IndexDescent::Leaf { leaf_page, .. } => {
+            delete_from_leaf(pager, usable_size, leaf_page, key, encoding)
+        }
+        IndexDescent::InteriorMatch {
+            interior_page,
+            entry_child,
+        } => delete_via_predecessor_swap(pager, usable_size, interior_page, entry_child, encoding),
+    }
+}
+
+/// Removes the cell matching `key` from `leaf_page` (an ordinary
+/// leaf-level delete — `key` was found to genuinely live there). Writes
+/// the leaf with whatever cells remain, even zero — see the module doc's
+/// underflow policy.
+fn delete_from_leaf(
+    pager: &mut Pager,
+    usable_size: u32,
+    leaf_page: u32,
+    key: &[Value],
+    encoding: TextEncoding,
+) -> Result<(), BtreeError> {
+    let header_start = page1_header_start(leaf_page);
+    let buf = pager.get_page_mut(leaf_page)?.clone();
+    let mut cells =
+        collect_index_leaf_cells(pager, &buf, header_start, leaf_page, usable_size, encoding)?;
+
+    let pos = cells
+        .iter()
+        .position(|(existing_key, _)| compare_keys(existing_key, key) == Ordering::Equal)
+        .ok_or(BtreeError::KeyNotFound)?;
+    cells.remove(pos);
+
+    let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
+    let buf = pager.get_page_mut(leaf_page)?;
+    write_index_leaf_page(buf, header_start, leaf_page, &remaining)
+}
+
+/// Handles a delete target found at interior level — see the module doc
+/// for the predecessor-swap algorithm.
+fn delete_via_predecessor_swap(
+    pager: &mut Pager,
+    usable_size: u32,
+    interior_page: u32,
+    entry_child: u32,
+    encoding: TextEncoding,
+) -> Result<(), BtreeError> {
+    match extract_max_entry(pager, usable_size, entry_child, encoding)? {
+        Some(predecessor_bytes) => {
+            let header_start = page1_header_start(interior_page);
+            let buf = pager.get_page_mut(interior_page)?.clone();
+            let (mut entries, rightmost) = collect_index_interior_entries(
+                pager,
+                &buf,
+                header_start,
+                interior_page,
+                usable_size,
+                encoding,
+            )?;
+            let entry = entries
+                .iter_mut()
+                .find(|(child, _, _)| *child == entry_child)
+                .ok_or(BtreeError::Internal(
+                    "entry_child's routing entry must still exist in interior_page",
+                ))?;
+            entry.2 = predecessor_bytes;
+            let cell_bytes: Vec<Vec<u8>> = entries
+                .iter()
+                .map(|(child, _, value_bytes)| build_index_interior_cell(*child, value_bytes))
+                .collect();
+            let buf = pager.get_page_mut(interior_page)?;
+            write_index_interior_page(buf, header_start, interior_page, &cell_bytes, rightmost)
+        }
+        None => {
+            // `entry_child`'s entire subtree is drained (nothing left to
+            // swap in) — the matched entry is deleted outright, since
+            // there is nothing left to preserve.
+            pager.deallocate_page(entry_child)?;
+            remove_entry_by_child(pager, usable_size, interior_page, entry_child, encoding)
+        }
+    }
+}
+
+/// Recursively finds and physically removes the maximum entry within the
+/// subtree rooted at `page_num`, returning its raw cell bytes — or `None`
+/// if that subtree holds no entries at all. See the module doc: this is
+/// the one operation in this module that must actively restructure pages
+/// (rather than just leaving emptied ones in place), because an
+/// interior page's own last entry may need to become the new `rightmost`
+/// once its previous `rightmost` subtree is confirmed drained.
+fn extract_max_entry(
+    pager: &mut Pager,
+    usable_size: u32,
+    page_num: u32,
+    encoding: TextEncoding,
+) -> Result<Option<Vec<u8>>, BtreeError> {
+    let header_start = page1_header_start(page_num);
+    let buf = pager.get_page_mut(page_num)?.clone();
+    let page_type = read_page_type(&buf, header_start, page_num)?;
+
+    if page_type == LEAF_INDEX {
+        let mut cells =
+            collect_index_leaf_cells(pager, &buf, header_start, page_num, usable_size, encoding)?;
+        let Some((_, max_bytes)) = cells.pop() else {
+            return Ok(None);
+        };
+        let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
+        let buf = pager.get_page_mut(page_num)?;
+        write_index_leaf_page(buf, header_start, page_num, &remaining)?;
+        return Ok(Some(max_bytes));
+    }
+    if page_type != INTERIOR_INDEX {
+        return Err(BtreeError::UnexpectedPageType {
+            page_num,
+            page_type,
+        });
+    }
+
+    let (mut entries, rightmost) =
+        collect_index_interior_entries(pager, &buf, header_start, page_num, usable_size, encoding)?;
+
+    if let Some(max_bytes) = extract_max_entry(pager, usable_size, rightmost, encoding)? {
+        // `rightmost`'s subtree had the maximum; it already rewrote
+        // whichever page(s) it touched. This page's own shape (entries,
+        // rightmost) is unaffected.
+        return Ok(Some(max_bytes));
+    }
+
+    // `rightmost`'s subtree is fully drained (confirmed empty, safe to
+    // deallocate). This page's own last entry — if it has one — is the
+    // true maximum; its child becomes the new `rightmost` so the (still
+    // possibly live) data under it stays reachable.
+    let Some((child, _, max_bytes)) = entries.pop() else {
+        return Ok(None);
+    };
+    pager.deallocate_page(rightmost)?;
+    let cell_bytes: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(c, _, value_bytes)| build_index_interior_cell(*c, value_bytes))
+        .collect();
+    let buf = pager.get_page_mut(page_num)?;
+    write_index_interior_page(buf, header_start, page_num, &cell_bytes, child)?;
+    Ok(Some(max_bytes))
+}
+
+/// Removes the entry whose child is `child_to_remove` from `page_num`,
+/// leaving `rightmost` and every other entry untouched (even if this
+/// leaves `page_num` with zero entries — see the module doc's underflow
+/// policy).
+fn remove_entry_by_child(
+    pager: &mut Pager,
+    usable_size: u32,
+    page_num: u32,
+    child_to_remove: u32,
+    encoding: TextEncoding,
+) -> Result<(), BtreeError> {
+    let header_start = page1_header_start(page_num);
+    let buf = pager.get_page_mut(page_num)?.clone();
+    let (mut entries, rightmost) =
+        collect_index_interior_entries(pager, &buf, header_start, page_num, usable_size, encoding)?;
+    let idx = entries
+        .iter()
+        .position(|(child, _, _)| *child == child_to_remove)
+        .ok_or(BtreeError::MissingChildRoute {
+            page_num,
+            child: child_to_remove,
+        })?;
+    entries.remove(idx);
+    let cell_bytes: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(c, _, value_bytes)| build_index_interior_cell(*c, value_bytes))
+        .collect();
+    let buf = pager.get_page_mut(page_num)?;
+    write_index_interior_page(buf, header_start, page_num, &cell_bytes, rightmost)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::btree::index_insert::insert_entry;
+    use crate::vfs::MemoryVfs;
+    use std::path::Path;
+
+    fn minimal_index_db(page_size: u32) -> (MemoryVfs, DatabaseHeader) {
+        let mut page1 = vec![0u8; page_size as usize];
+        page1[0..16].copy_from_slice(b"SQLite format 3\0");
+        page1[16..18].copy_from_slice(&(page_size as u16).to_be_bytes());
+        page1[18] = 1;
+        page1[19] = 1;
+        page1[28..32].copy_from_slice(&1u32.to_be_bytes());
+        page1[56..60].copy_from_slice(&1u32.to_be_bytes());
+        write_index_leaf_page(&mut page1, 100, 1, &[]).unwrap();
+
+        let mut header_bytes = [0u8; 100];
+        header_bytes.copy_from_slice(&page1[..100]);
+        let header = DatabaseHeader::parse(&header_bytes).unwrap();
+
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", page1);
+        (vfs, header)
+    }
+
+    fn key(a: &str, rowid: i64) -> Vec<Value> {
+        vec![Value::Text(a.to_string()), Value::Integer(rowid)]
+    }
+
+    #[test]
+    fn deleting_a_missing_key_errors() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+        let err =
+            delete_entry(&mut pager, &header, 1, &key("b", 2), TextEncoding::Utf8).unwrap_err();
+        assert!(matches!(err, BtreeError::KeyNotFound));
+    }
+
+    #[test]
+    fn deleting_the_only_entry_leaves_an_empty_root_leaf() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+        delete_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let page_type = read_page_type(&buf, header_start, 1).unwrap();
+        assert_eq!(page_type, LEAF_INDEX);
+        let cells = collect_index_leaf_cells(
+            &pager,
+            &buf,
+            header_start,
+            1,
+            header.usable_page_size(),
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn deleting_one_of_two_entries_keeps_the_other() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+        insert_entry(&mut pager, &header, 1, &key("b", 2), TextEncoding::Utf8).unwrap();
+        delete_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let cells = collect_index_leaf_cells(
+            &pager,
+            &buf,
+            header_start,
+            1,
+            header.usable_page_size(),
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].0, key("b", 2));
+    }
+
+    #[test]
+    fn minimal_two_entry_split_then_delete_promoted_key() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let k0 = vec![Value::Text(format!("{filler}-0001")), Value::Integer(1)];
+        let k1 = vec![Value::Text(format!("{filler}-0002")), Value::Integer(2)];
+        insert_entry(&mut pager, &header, 1, &k0, TextEncoding::Utf8).unwrap();
+        insert_entry(&mut pager, &header, 1, &k1, TextEncoding::Utf8).unwrap();
+        delete_entry(&mut pager, &header, 1, &k1, TextEncoding::Utf8).unwrap();
+    }
+
+    #[test]
+    fn split_then_delete_all_including_promoted_interior_entries() {
+        // Small pages + ~200-byte keys force splits (and therefore
+        // entries promoted to interior level) well before 30 entries —
+        // regression guard for the interior-match predecessor swap:
+        // deleting every entry, in ascending order, must never error and
+        // must leave the tree fully empty (per the read-side cursor).
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let n = 30i64;
+        let keys: Vec<Vec<Value>> = (1..=n)
+            .map(|i| vec![Value::Text(format!("{filler}-{i:04}")), Value::Integer(i)])
+            .collect();
+        for k in &keys {
+            insert_entry(&mut pager, &header, 1, k, TextEncoding::Utf8).unwrap();
+        }
+        for (idx, k) in keys.iter().enumerate() {
+            let r = delete_entry(&mut pager, &header, 1, k, TextEncoding::Utf8);
+            if let Err(e) = r {
+                panic!("delete failed at idx {idx}: {:?}", e);
+            }
+        }
+
+        let mut cursor = crate::btree::IndexCursor::new(pager, header.usable_page_size(), 1);
+        assert!(cursor.first().unwrap().is_none());
+    }
+}

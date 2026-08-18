@@ -22,14 +22,24 @@
 use std::cmp::Ordering;
 
 use super::{
-    cell_ptr_offset, page1_header_start, read_cell_pointer, read_num_cells, read_page_type,
-    read_u32, reassemble_payload, require_interior_header, BtreeError, MAX_PAGES_VISITED,
+    cell_ptr_offset, local_payload_size, page1_header_start, read_cell_pointer, read_num_cells,
+    read_page_type, read_u32, reassemble_payload, require_interior_header, write_page_common,
+    BtreeError, MAX_PAGES_VISITED,
 };
+use crate::pager::Pager;
 use crate::record::{decode_record, decode_varint, TextEncoding, Value};
 use crate::vfs::PageSource;
 
-const LEAF_INDEX: u8 = 0x0a;
-const INTERIOR_INDEX: u8 = 0x02;
+pub(super) const LEAF_INDEX: u8 = 0x0a;
+pub(super) const INTERIOR_INDEX: u8 = 0x02;
+
+/// A decoded index leaf entry: its key (for ordering) alongside its raw,
+/// verbatim cell bytes. Used by the index insert/delete write paths.
+pub(super) type IndexLeafCell = (Vec<Value>, Vec<u8>);
+
+/// A decoded index interior entry: `(child_page, decoded_key,
+/// raw_value_cell_bytes)`. Used by the index insert/delete write paths.
+pub(super) type IndexInteriorEntry = (u32, Vec<Value>, Vec<u8>);
 
 /// One decoded index b-tree entry: the raw key-record payload (after
 /// overflow-chain reassembly). For an ordinary secondary index the
@@ -272,7 +282,11 @@ impl<P: PageSource> IndexCursor<P> {
     }
 }
 
-fn decode_payload_len(
+/// Decodes an index cell's payload-length varint at `offset`, returning
+/// `(payload_len, tail_start)`. Shared by the index insert/delete write
+/// paths (leaf cells decode at `cell_start`; interior cells at
+/// `cell_start + 4`, past the left-child pointer).
+pub(super) fn decode_payload_len(
     page: &[u8],
     offset: usize,
     page_num: u32,
@@ -288,7 +302,7 @@ fn decode_payload_len(
 
 /// SQLite's Tier 0 (BINARY collation) type ordering: NULL < numeric <
 /// text < blob.
-fn value_rank(v: &Value) -> u8 {
+pub(super) fn value_rank(v: &Value) -> u8 {
     match v {
         Value::Null => 0,
         Value::Integer(_) | Value::Real(_) => 1,
@@ -297,7 +311,7 @@ fn value_rank(v: &Value) -> u8 {
     }
 }
 
-fn compare_values(a: &Value, b: &Value) -> Ordering {
+pub(super) fn compare_values(a: &Value, b: &Value) -> Ordering {
     let (ra, rb) = (value_rank(a), value_rank(b));
     if ra != rb {
         return ra.cmp(&rb);
@@ -319,7 +333,8 @@ fn compare_values(a: &Value, b: &Value) -> Ordering {
 }
 
 /// Lexicographic key comparison over a (possibly composite) index key.
-fn compare_keys(a: &[Value], b: &[Value]) -> Ordering {
+/// Shared by the index insert/delete write paths.
+pub(super) fn compare_keys(a: &[Value], b: &[Value]) -> Ordering {
     for (x, y) in a.iter().zip(b.iter()) {
         let c = compare_values(x, y);
         if c != Ordering::Equal {
@@ -327,6 +342,230 @@ fn compare_keys(a: &[Value], b: &[Value]) -> Ordering {
         }
     }
     a.len().cmp(&b.len())
+}
+
+/// Reads every entry of an index leaf page in on-disk (key-ascending)
+/// order, returning each entry's decoded key (for ordering) alongside its
+/// raw, verbatim cell bytes: a payload-length varint, local payload
+/// bytes, and an optional 4-byte overflow pointer — no leading rowid
+/// varint, unlike a table leaf cell. Shared by the index insert/delete
+/// write paths.
+pub(super) fn collect_index_leaf_cells(
+    source: &Pager,
+    buf: &[u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    encoding: TextEncoding,
+) -> Result<Vec<IndexLeafCell>, BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(8);
+    let mut out = Vec::with_capacity(num_cells);
+    for i in 0..num_cells {
+        let ptr_off = cell_ptr_offset(ptr_base, i);
+        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
+        let (key, cell_bytes) =
+            decode_value_cell(source, buf, cell_start, page_num, usable_size, encoding)?;
+        out.push((key, cell_bytes));
+    }
+    Ok(out)
+}
+
+/// Reads every entry of an index interior page, returning `(child_page,
+/// decoded_key, raw_value_cell_bytes)` triples in on-disk order plus the
+/// rightmost pointer. Each interior cell is a 4-byte left-child pointer
+/// followed by the same payload-length-varint + payload shape as a leaf
+/// cell. Shared by the index insert/delete write paths.
+pub(super) fn collect_index_interior_entries(
+    source: &Pager,
+    buf: &[u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    encoding: TextEncoding,
+) -> Result<(Vec<IndexInteriorEntry>, u32), BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(12);
+    let mut out = Vec::with_capacity(num_cells);
+    for i in 0..num_cells {
+        let ptr_off = cell_ptr_offset(ptr_base, i);
+        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
+        let child = read_u32(buf, cell_start, page_num)?;
+        let value_start = cell_start.saturating_add(4);
+        let (key, cell_bytes) =
+            decode_value_cell(source, buf, value_start, page_num, usable_size, encoding)?;
+        out.push((child, key, cell_bytes));
+    }
+    let rightmost = read_u32(buf, header_start.saturating_add(8), page_num)?;
+    Ok((out, rightmost))
+}
+
+/// Decodes the payload-length-varint + payload "value cell" shape shared
+/// by index leaf cells and (past their 4-byte child pointer) index
+/// interior cells: returns the decoded key (for ordering) and the raw,
+/// verbatim cell bytes (varint + local bytes + optional overflow
+/// pointer), starting at `value_start`.
+fn decode_value_cell(
+    source: &Pager,
+    buf: &[u8],
+    value_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    encoding: TextEncoding,
+) -> Result<(Vec<Value>, Vec<u8>), BtreeError> {
+    let (payload_len, tail_start) = decode_payload_len(buf, value_start, page_num)?;
+    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let has_overflow = (local_size as u64) < payload_len;
+    let cell_end = tail_start
+        .saturating_add(local_size)
+        .saturating_add(if has_overflow { 4 } else { 0 });
+    let cell_bytes = buf
+        .get(value_start..cell_end)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?
+        .to_vec();
+    let tail = buf
+        .get(tail_start..)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?;
+    let payload = reassemble_payload(source, usable_size, page_num, tail, payload_len)?;
+    let key = decode_record(&payload, encoding)?;
+    Ok((key, cell_bytes))
+}
+
+/// Builds an index interior cell: 4-byte left-child page number followed
+/// by `value_cell_bytes` verbatim (the same payload-length-varint +
+/// payload shape as a leaf cell — index interior cells carry a full
+/// entry, not just a routing key, per the module doc). Shared by the
+/// index insert/delete write paths.
+pub(super) fn build_index_interior_cell(child: u32, value_cell_bytes: &[u8]) -> Vec<u8> {
+    let mut cell = child.to_be_bytes().to_vec();
+    cell.extend_from_slice(value_cell_bytes);
+    cell
+}
+
+/// Where [`descend_index_tree`] landed: either an ordinary leaf (the
+/// common case), or an exact key match found on an interior page along
+/// the way. The latter matters because index b-tree interior cells carry
+/// a full entry, not just a routing key (per the module doc) — an entry
+/// promoted to interior level during a split is invisible to a
+/// leaf-only descent, silently missing both insert's duplicate-key check
+/// and delete's lookup.
+pub(super) enum IndexDescent {
+    Leaf {
+        ancestors: Vec<u32>,
+        leaf_page: u32,
+    },
+    InteriorMatch {
+        interior_page: u32,
+        entry_child: u32,
+    },
+}
+
+/// Descends from `page_num` (an index b-tree root or subtree) looking for
+/// `key`. Returns [`IndexDescent::InteriorMatch`] the moment an interior
+/// page's own entry compares exactly equal to `key` (via
+/// [`compare_keys`]); otherwise routes into the first entry whose own key
+/// is greater than `key` (or the rightmost child if none is) and
+/// continues, finally returning [`IndexDescent::Leaf`] once a leaf page
+/// is reached. Shared by the index insert/delete write paths — insert
+/// uses an `InteriorMatch` to reject a duplicate key that was promoted to
+/// interior level by an earlier split; delete uses it to trigger a
+/// predecessor-swap (see `index_delete.rs`).
+pub(super) fn descend_index_tree(
+    pager: &Pager,
+    mut page_num: u32,
+    usable_size: u32,
+    key: &[Value],
+    encoding: TextEncoding,
+) -> Result<IndexDescent, BtreeError> {
+    let mut ancestors = Vec::new();
+    let mut visited = 0usize;
+    loop {
+        visited = visited.saturating_add(1);
+        if visited > MAX_PAGES_VISITED {
+            return Err(BtreeError::TraversalTooLong {
+                max: MAX_PAGES_VISITED,
+            });
+        }
+        let page = pager
+            .read_page(page_num)
+            .map_err(|source| BtreeError::PageSource { page_num, source })?;
+        let header_start = page1_header_start(page_num);
+        let page_type = read_page_type(&page, header_start, page_num)?;
+        if page_type == LEAF_INDEX {
+            return Ok(IndexDescent::Leaf {
+                ancestors,
+                leaf_page: page_num,
+            });
+        } else if page_type == INTERIOR_INDEX {
+            let (entries, rightmost) = collect_index_interior_entries(
+                pager,
+                &page,
+                header_start,
+                page_num,
+                usable_size,
+                encoding,
+            )?;
+            if let Some(entry_index) = entries
+                .iter()
+                .position(|(_, entry_key, _)| compare_keys(key, entry_key) == Ordering::Equal)
+            {
+                return Ok(IndexDescent::InteriorMatch {
+                    interior_page: page_num,
+                    entry_child: entries
+                        .get(entry_index)
+                        .ok_or(BtreeError::Internal(
+                            "entry_index must be in bounds: it was just found via .position()",
+                        ))?
+                        .0,
+                });
+            }
+            ancestors.push(page_num);
+            let mut next = rightmost;
+            for (child, entry_key, _) in &entries {
+                if compare_keys(key, entry_key) == Ordering::Less {
+                    next = *child;
+                    break;
+                }
+            }
+            page_num = next;
+        } else {
+            return Err(BtreeError::UnexpectedPageType {
+                page_num,
+                page_type,
+            });
+        }
+    }
+}
+
+/// Rebuilds `buf` in place as an index leaf page holding exactly `cells`,
+/// in order. Shared by the index insert/delete write paths — see
+/// `insert.rs`'s module doc for the "every page mutation fully rebuilds
+/// the page" simplification this shares with the table write path.
+pub(super) fn write_index_leaf_page(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    cells: &[Vec<u8>],
+) -> Result<(), BtreeError> {
+    write_page_common(buf, header_start, page_num, LEAF_INDEX, 8, cells)
+}
+
+/// As [`write_index_leaf_page`], but for an interior page — writes the
+/// rightmost-child pointer (header bytes 8-11) after the common layout.
+pub(super) fn write_index_interior_page(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    cells: &[Vec<u8>],
+    rightmost: u32,
+) -> Result<(), BtreeError> {
+    write_page_common(buf, header_start, page_num, INTERIOR_INDEX, 12, cells)?;
+    super::put(
+        buf,
+        header_start.saturating_add(8),
+        &rightmost.to_be_bytes(),
+        page_num,
+    )
 }
 
 #[cfg(test)]

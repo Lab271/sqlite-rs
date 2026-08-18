@@ -15,6 +15,7 @@ mod harness;
 mod oracle;
 
 mod btree_delete_test;
+mod btree_index_insert_delete_test;
 mod btree_insert_test;
 mod btree_test;
 mod cli_e2e_test;

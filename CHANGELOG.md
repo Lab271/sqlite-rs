@@ -20,6 +20,41 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Index b-tree insert/delete — same ops for index b-trees, including
+  WITHOUT ROWID tables (#171), V3 phase 1 (epic #161). New
+  `src/btree/index_insert.rs::insert_entry` and
+  `src/btree/index_delete.rs::delete_entry` mirror the table write path
+  (#168/#169) in shape but not mechanism: index interior cells carry a
+  full entry (not just a routing key), so an index leaf split promotes
+  its median entry into the parent (removing it from both halves, unlike
+  a table leaf split's copy-and-keep divider), and a delete target found
+  at interior level requires a predecessor swap
+  (`delete_via_predecessor_swap`/`extract_max_entry`) rather than a
+  plain routing-entry removal, to avoid discarding the live value that
+  entry itself carries. `descend_index_tree` (shared by both write
+  paths) checks for an exact key match at every interior level while
+  descending, not just at the final leaf — needed because a duplicate or
+  delete target may have been promoted to interior level by an earlier
+  split. Verified against stock `sqlite3` for single-entry insert,
+  bulk insert of 500 entries (forcing splits), delete-all, WITHOUT ROWID
+  insert/delete, and duplicate-key rejection (spec 006-btree
+  Requirements 15-17).
+- Fix (found while implementing the above): `delete.rs`'s (table,
+  #169) and `index_delete.rs`'s underflow cascade both had a latent bug
+  where an interior page draining to zero routing entries recursed into
+  `collapse_into_ancestors` as if the page itself had "emptied" —
+  silently orphaning its own still-live `rightmost` subtree (the
+  grandparent's handling of "child died" repoints/removes its reference
+  to the collapsing page, with nothing carrying `rightmost` forward).
+  Both now `splice_child` the surviving `rightmost` directly into the
+  collapsing page's own slot in its parent instead of cascading further.
+  Not confirmed reachable by the table write path's actual test
+  parameters (an exhaustive single-delete probe over 60 rows found no
+  repro there), but the index write path hit it immediately once
+  interior-level values needed preserving — applying the same
+  correction to both, plus a table-side regression test
+  (`deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree`).
+
 - Table b-tree delete — cell delete + page merge/rebalance (#169), V3
   phase 1 (epic #161). New `src/btree/delete.rs::delete_row`: locates a
   cell by rowid and removes it via the shared page-rebuild helpers
