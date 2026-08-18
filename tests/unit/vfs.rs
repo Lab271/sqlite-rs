@@ -56,6 +56,45 @@ fn companion_file_detection_from_public_api() {
     );
 }
 
+/// #172 rollback journal: `create_or_open_write` must create a missing
+/// file (not error like `open_write`), and a clone of the `Vfs` handle
+/// must see it too — `Pager` stores its own `Clone` of the `Vfs` it was
+/// opened with to create/delete the `-journal` file after `open` returns.
+#[test]
+fn create_or_open_write_creates_missing_file_visible_to_clone() {
+    let vfs = MemoryVfs::new();
+    let path = Path::new("/new.db-journal");
+    assert!(!vfs.exists(path).unwrap());
+
+    let clone = vfs.clone();
+    let file = clone.create_or_open_write(path).unwrap();
+    file.write_at(b"header", 0).unwrap();
+
+    assert!(vfs.exists(path).unwrap());
+    let reopened = vfs.open_read(path).unwrap();
+    let mut buf = [0u8; 6];
+    reopened.read_at(&mut buf, 0).unwrap();
+    assert_eq!(&buf, b"header");
+}
+
+/// `delete` removes the file, and is a no-op (not an error) when the file
+/// is already absent — matching `std::fs::remove_file`'s `NotFound` case
+/// being folded into `Ok(())` for the real `UnixVfs` backend too, since
+/// commit's journal-delete step must not fail if the journal was already
+/// cleaned up by a previous, partially-completed commit.
+#[test]
+fn delete_removes_file_and_is_a_noop_when_absent() {
+    let mut vfs = MemoryVfs::new();
+    vfs.insert("/test.db-journal", b"stale journal".to_vec());
+    let path = Path::new("/test.db-journal");
+
+    vfs.delete(path).unwrap();
+    assert!(!vfs.exists(path).unwrap());
+
+    // Deleting again (already absent) is still Ok.
+    vfs.delete(path).unwrap();
+}
+
 #[test]
 fn vfs_error_variants_are_matchable() {
     let vfs = MemoryVfs::new();

@@ -7,13 +7,17 @@ use std::sync::{Arc, Mutex};
 use super::{FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 
 /// An in-memory [`Vfs`] backed by a path -> bytes map. Lets tests exercise
-/// `Vfs`-consuming code without touching the real filesystem. Contents are
-/// `Arc<Mutex<..>>`-shared so a write through [`Vfs::open_write`] is visible
-/// to any other handle on the same path, matching a real file's semantics
-/// (#166 pager write path).
+/// `Vfs`-consuming code without touching the real filesystem. The map
+/// itself is `Arc<Mutex<..>>`-shared (not just each file's contents) so
+/// that a [`Pager`](crate::pager::Pager), which stores its own `Clone` of
+/// the `Vfs` it was opened with (#172 rollback journal — needed to create/
+/// delete the `-journal` companion file after `open` returns), sees the
+/// same file table as the original handle: a journal file created via
+/// [`Vfs::create_or_open_write`] on the clone is visible to `exists`/
+/// `open_read` on the original, matching a real filesystem's semantics.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryVfs {
-    files: HashMap<PathBuf, Arc<Mutex<Vec<u8>>>>,
+    files: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Vec<u8>>>>>>,
 }
 
 impl MemoryVfs {
@@ -23,17 +27,18 @@ impl MemoryVfs {
 
     /// Registers a file's contents under `path`.
     pub fn insert(&mut self, path: impl Into<PathBuf>, contents: Vec<u8>) {
-        self.files
-            .insert(path.into(), Arc::new(Mutex::new(contents)));
+        let mut files = match self.files.lock() {
+            Ok(files) => files,
+            Err(_) => return,
+        };
+        files.insert(path.into(), Arc::new(Mutex::new(contents)));
     }
 
     fn handle(&self, path: &Path) -> Result<Arc<Mutex<Vec<u8>>>> {
-        self.files
-            .get(path)
-            .cloned()
-            .ok_or_else(|| VfsError::NotFound {
-                path: path.display().to_string(),
-            })
+        let files = self.files.lock().map_err(|_| poisoned(path))?;
+        files.get(path).cloned().ok_or_else(|| VfsError::NotFound {
+            path: path.display().to_string(),
+        })
     }
 }
 
@@ -47,14 +52,32 @@ impl Vfs for MemoryVfs {
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
-        Ok(self.files.contains_key(path))
+        let files = self.files.lock().map_err(|_| poisoned(path))?;
+        Ok(files.contains_key(path))
+    }
+
+    fn create_or_open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
+        let handle = {
+            let mut files = self.files.lock().map_err(|_| poisoned(path))?;
+            files
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+                .clone()
+        };
+        Ok(Box::new(MemoryVfsFile(handle)))
+    }
+
+    fn delete(&self, path: &Path) -> Result<()> {
+        let mut files = self.files.lock().map_err(|_| poisoned(path))?;
+        files.remove(path);
+        Ok(())
     }
 }
 
 struct MemoryVfsFile(Arc<Mutex<Vec<u8>>>);
 
-/// The in-memory backend's `Mutex` is only ever contended within a single
-/// test process and never crosses a panic boundary while held, so a
+/// The in-memory backend's `Mutex`es are only ever contended within a
+/// single test process and never cross a panic boundary while held, so a
 /// poisoned lock here indicates a bug in the test itself, not a condition
 /// production code needs to recover from — surfaced as an ordinary I/O
 /// error rather than a panic (`clippy::unwrap_used`/`panic` stay denied).

@@ -63,6 +63,15 @@ pub trait Vfs {
     /// files.
     fn exists(&self, path: &Path) -> Result<bool>;
 
+    /// Opens `path` for reading and writing, creating it (empty) first if
+    /// it doesn't already exist — used to create the `-journal` companion
+    /// file on a transaction's first write (#172 rollback journal).
+    fn create_or_open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
+
+    /// Removes `path` if it exists; a no-op (not an error) if it doesn't —
+    /// used to delete the `-journal` file on commit (#172, DELETE mode).
+    fn delete(&self, path: &Path) -> Result<()>;
+
     /// Claims a WAL reader-mark slot on `path`'s `-shm` companion file (if
     /// one exists) so a live checkpointer backs off rather than
     /// backfilling/truncating WAL frames this reader depends on (#45).
