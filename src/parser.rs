@@ -9,4 +9,4 @@ pub mod grammar;
 pub mod printer;
 pub mod tokenizer;
 
-pub use error::{parse_select, ParseOutcome};
+pub use error::{parse_insert, parse_select, InsertOutcome, ParseOutcome};

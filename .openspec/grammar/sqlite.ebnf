@@ -148,9 +148,13 @@ expr-list       ::= expr { "," expr } ;                                   (* V2 
  * (upsert/RETURNING are V9).
  *)
 
-insert-stmt     ::= "INSERT" "INTO" table-name [ "(" column-name { "," column-name } ")" ]
+insert-stmt     ::= "INSERT" [ "OR" conflict-action ] "INTO" table-name
+                     [ "(" column-name { "," column-name } ")" ]
                      ( "VALUES" "(" expr-list ")" { "," "(" expr-list ")" }
+                     | select-stmt
                      | "DEFAULT" "VALUES" ) ;                             (* V3 [parse.y:1082 cmd, :1114 insert_cmd, :1122 idlist_opt] *)
+
+conflict-action ::= "REPLACE" | "IGNORE" | "ABORT" | "ROLLBACK" | "FAIL" ; (* V3 [parse.y:492 orconf, :493 resolvetype] *)
 
 update-stmt     ::= "UPDATE" table-name "SET" column-name "=" expr
                      { "," column-name "=" expr }

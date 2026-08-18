@@ -4,6 +4,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+### Added
+
+- Parser: INSERT statement — VALUES + SELECT forms (#188), V3 phase 2
+  (epic #161). `parse_insert` accepts `INSERT [OR REPLACE/IGNORE/ABORT/
+  ROLLBACK/FAIL] INTO table [(cols)] (VALUES (...), ... | SELECT ... |
+  DEFAULT VALUES)`, mirroring the existing SELECT recursive-descent
+  parser and its three-way accept/unsupported/invalid outcome contract
+  (spec 002-parser). New `Insert`/`InsertSource`/`ConflictAction` AST
+  nodes and printer round-trip support; `insert-stmt` grammar entry in
+  `.openspec/grammar/sqlite.ebnf` extended to cover the conflict-action
+  clause and SELECT-source alternative.
+
 ## [0.9.1] - 2026-08-18
 
 ### Fixed
