@@ -19,11 +19,15 @@
 mod delete;
 mod error;
 mod index;
+mod index_delete;
+mod index_insert;
 mod insert;
 
 pub use delete::delete_row;
 pub use error::BtreeError;
 pub use index::{IndexCursor, IndexRow};
+pub use index_delete::delete_entry;
+pub use index_insert::insert_entry;
 pub use insert::insert_row;
 
 use crate::header::DatabaseHeader;
@@ -697,7 +701,7 @@ pub(super) fn write_interior_page(
     )
 }
 
-fn write_page_common(
+pub(super) fn write_page_common(
     buf: &mut [u8],
     header_start: usize,
     page_num: u32,

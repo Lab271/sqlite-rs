@@ -164,15 +164,64 @@ fn collapse_into_ancestors(
     }
 
     // The parent now has zero routing entries — its only remaining child
-    // is `rightmost`. It no longer earns its own page: collapse it away.
+    // is `rightmost`, which may still hold real, live rows (it's
+    // unrelated to whichever entry/child just emptied). It no longer
+    // earns its own page — but recursing into `collapse_into_ancestors`
+    // again here (treating `parent_page` itself as "emptied") would
+    // silently drop `rightmost`'s entire subtree: the grandparent's
+    // handling of "child `parent_page` emptied" removes/repoints its
+    // reference to `parent_page`, with nothing to carry `rightmost`
+    // forward. The correct operation is a splice: replace whichever
+    // reference pointed at `parent_page` in ITS OWN parent with
+    // `rightmost` directly, leaving the grandparent's entry count (and
+    // every key) otherwise unchanged — never a further collapse cascade.
     if parent_page == root_page {
         return collapse_root(pager, usable_size, root_page, rightmost);
     }
 
-    let buf = pager.get_page_mut(parent_page)?;
-    write_interior_page(buf, header_start, parent_page, &[], rightmost)?;
     pager.deallocate_page(parent_page)?;
-    collapse_into_ancestors(pager, usable_size, root_page, rest, parent_page)
+    splice_child(pager, rest, parent_page, rightmost)
+}
+
+/// Replaces every reference to `old_child` in its immediate parent (the
+/// last entry in `ancestors`) with `new_child`, leaving that parent's
+/// entry count (and every key) otherwise unchanged. See
+/// `collapse_into_ancestors`'s doc for why this — not a further collapse
+/// cascade — is the correct response to an interior page draining to a
+/// single surviving child.
+fn splice_child(
+    pager: &mut Pager,
+    ancestors: &[u32],
+    old_child: u32,
+    new_child: u32,
+) -> Result<(), BtreeError> {
+    let Some((&parent_page, _)) = ancestors.split_last() else {
+        return Err(BtreeError::Internal(
+            "splice_child called with no ancestors — old_child's parent must always exist here (it's never the root)",
+        ));
+    };
+
+    let header_start = page1_header_start(parent_page);
+    let buf = pager.get_page_mut(parent_page)?.clone();
+    let (mut entries, mut rightmost) = collect_interior_entries(&buf, header_start, parent_page)?;
+
+    match entries.iter_mut().find(|(child, _)| *child == old_child) {
+        Some(entry) => entry.0 = new_child,
+        None if rightmost == old_child => rightmost = new_child,
+        None => {
+            return Err(BtreeError::MissingChildRoute {
+                page_num: parent_page,
+                child: old_child,
+            })
+        }
+    }
+
+    let cell_bytes: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(child, key)| build_interior_cell(*child, *key))
+        .collect();
+    let buf = pager.get_page_mut(parent_page)?;
+    write_interior_page(buf, header_start, parent_page, &cell_bytes, rightmost)
 }
 
 /// The root page number can never change, so collapsing the root's sole
@@ -293,5 +342,68 @@ mod tests {
         let cells = collect_leaf_cells(&buf, header_start, 1, header.usable_page_size()).unwrap();
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].0, 2);
+    }
+
+    /// Regression guard for a real bug found while implementing the
+    /// index b-tree delete path (#171): when an interior page drains to
+    /// zero routing entries, its surviving `rightmost` child (which may
+    /// hold real, live rows entirely unrelated to whatever just emptied)
+    /// must be spliced into the interior page's own parent — not dropped
+    /// by recursing into `collapse_into_ancestors` as if the whole
+    /// interior page (rightmost included) had emptied. Small pages with
+    /// a big-enough spread of rowids force cascading interior splits
+    /// down to single-entry interior pages; deleting everything under
+    /// one such entry's child (draining it) while its sibling
+    /// `rightmost` subtree stays alive reproduces the scenario.
+    #[test]
+    fn deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let n = 60i64;
+        for i in 1..=n {
+            insert_row(
+                &mut pager,
+                &header,
+                1,
+                i,
+                format!("{filler}-{i:04}").as_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Delete the lowest half of rowids — on a small enough page size
+        // this drains at least one interior page down to a single
+        // routing entry and then to zero, exercising the splice path,
+        // while the upper half's rows must all remain reachable.
+        for i in 1..=(n / 2) {
+            delete_row(&mut pager, &header, 1, i).unwrap();
+        }
+
+        let usable_size = header.usable_page_size();
+        let mut remaining = Vec::new();
+        let mut stack = vec![1u32];
+        while let Some(page_num) = stack.pop() {
+            let header_start = page1_header_start(page_num);
+            let buf = pager.get_page_mut(page_num).unwrap().clone();
+            let page_type = read_page_type(&buf, header_start, page_num).unwrap();
+            if page_type == LEAF_TABLE {
+                let cells = collect_leaf_cells(&buf, header_start, page_num, usable_size).unwrap();
+                remaining.extend(cells.into_iter().map(|(rowid, _)| rowid));
+            } else {
+                let (entries, rightmost) =
+                    collect_interior_entries(&buf, header_start, page_num).unwrap();
+                stack.push(rightmost);
+                stack.extend(entries.iter().map(|(child, _)| *child));
+            }
+        }
+        remaining.sort_unstable();
+        let expected: Vec<i64> = (n / 2 + 1..=n).collect();
+        assert_eq!(
+            remaining, expected,
+            "every surviving row must still be reachable from the root — none orphaned"
+        );
     }
 }

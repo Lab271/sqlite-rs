@@ -4,21 +4,54 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [Unreleased]
-
-### Fixed
-
-- Overflow chain pages leaked on b-tree row delete (#173), V3 phase 1
-  (epic #161). `delete_row` (#169) freed emptied leaf/interior pages but
-  never freed the overflow pages a deleted cell's payload had spilled
-  into (#168) — those pages were orphaned instead of returning to the
-  freelist (#167). `src/btree/delete.rs` now reads the removed cell's
-  first overflow pointer and walks/deallocates the whole chain, with the
-  same revisited-page cycle guard the read-side `reassemble_payload`
-  uses. #173 was re-scoped to this narrower gap once investigation found
-  the insert-side overflow-chain write was already delivered by #168.
+## [0.9.0] - 2026-08-18
 
 ### Added
+
+- V3 phase 1 exit gate (epic #161): the b-tree write path is fully
+  shipped — pager write path + freelist (#166, #167), table and index
+  b-tree insert/delete with page split/merge/collapse (#168, #169,
+  #171), overflow chain write/free (#168, #173), and statement-level
+  rollback journaling (#172). Every file this crate writes is opened and
+  `PRAGMA integrity_check`-ed by stock `sqlite3`; round-trip write→read
+  via this crate's own readers is oracle-identical. Next up: V3 phase 2
+  (0.10.0), the write-path parser + schema layer (INSERT/UPDATE/DELETE,
+  CREATE/DROP TABLE/INDEX, `sqlite_master` maintenance).
+
+- Index b-tree insert/delete — same ops for index b-trees, including
+  WITHOUT ROWID tables (#171), V3 phase 1 (epic #161). New
+  `src/btree/index_insert.rs::insert_entry` and
+  `src/btree/index_delete.rs::delete_entry` mirror the table write path
+  (#168/#169) in shape but not mechanism: index interior cells carry a
+  full entry (not just a routing key), so an index leaf split promotes
+  its median entry into the parent (removing it from both halves, unlike
+  a table leaf split's copy-and-keep divider), and a delete target found
+  at interior level requires a predecessor swap
+  (`delete_via_predecessor_swap`/`extract_max_entry`) rather than a
+  plain routing-entry removal, to avoid discarding the live value that
+  entry itself carries. `descend_index_tree` (shared by both write
+  paths) checks for an exact key match at every interior level while
+  descending, not just at the final leaf — needed because a duplicate or
+  delete target may have been promoted to interior level by an earlier
+  split. Verified against stock `sqlite3` for single-entry insert,
+  bulk insert of 500 entries (forcing splits), delete-all, WITHOUT ROWID
+  insert/delete, and duplicate-key rejection (spec 006-btree
+  Requirements 15-17).
+- Fix (found while implementing the above): `delete.rs`'s (table,
+  #169) and `index_delete.rs`'s underflow cascade both had a latent bug
+  where an interior page draining to zero routing entries recursed into
+  `collapse_into_ancestors` as if the page itself had "emptied" —
+  silently orphaning its own still-live `rightmost` subtree (the
+  grandparent's handling of "child died" repoints/removes its reference
+  to the collapsing page, with nothing carrying `rightmost` forward).
+  Both now `splice_child` the surviving `rightmost` directly into the
+  collapsing page's own slot in its parent instead of cascading further.
+  Not confirmed reachable by the table write path's actual test
+  parameters (an exhaustive single-delete probe over 60 rows found no
+  repro there), but the index write path hit it immediately once
+  interior-level values needed preserving — applying the same
+  correction to both, plus a table-side regression test
+  (`deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree`).
 
 - Table b-tree delete — cell delete + page merge/rebalance (#169), V3
   phase 1 (epic #161). New `src/btree/delete.rs::delete_row`: locates a
@@ -81,6 +114,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   `close()`-drops-all-`fcntl`-locks hazard. A page flushed through the
   new write path still opens and `PRAGMA integrity_check`s cleanly in
   stock `sqlite3` (spec 007-pager Requirement 4).
+
+### Fixed
+
+- Overflow chain pages leaked on b-tree row delete (#173), V3 phase 1
+  (epic #161). `delete_row` (#169) freed emptied leaf/interior pages but
+  never freed the overflow pages a deleted cell's payload had spilled
+  into (#168) — those pages were orphaned instead of returning to the
+  freelist (#167). `src/btree/delete.rs` now reads the removed cell's
+  first overflow pointer and walks/deallocates the whole chain, with the
+  same revisited-page cycle guard the read-side `reassemble_payload`
+  uses. #173 was re-scoped to this narrower gap once investigation found
+  the insert-side overflow-chain write was already delivered by #168.
 
 ## [0.8.0] - 2026-08-16
 

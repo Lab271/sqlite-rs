@@ -68,6 +68,12 @@ pub enum BtreeError {
     #[error("cannot delete rowid {rowid}: no such row")]
     RowidNotFound { rowid: i64 },
 
+    #[error("cannot insert duplicate index key")]
+    DuplicateKey,
+
+    #[error("cannot delete index key: no such entry")]
+    KeyNotFound,
+
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
 }

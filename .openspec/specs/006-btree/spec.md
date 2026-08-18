@@ -358,3 +358,85 @@ When collapsing a page leaves its own parent with zero routing entries (just a `
 - THEN the file's page count MUST NOT grow past what the first insert pass produced (freed pages are reused via the freelist), and stock `sqlite3` MUST pass `PRAGMA integrity_check`
 
 **Tests:** `tests/corpus/btree_delete_test.rs::round_trip_insert_delete_insert_reuses_freed_pages`
+
+#### Scenario: Draining one subtree never orphans a sibling's surviving `rightmost` subtree
+
+- GIVEN an interior page that drains down to zero routing entries while its own `rightmost` pointer still leads to a subtree holding real, live rows
+- WHEN the cascade collapses that interior page away
+- THEN `rightmost`'s subtree MUST be spliced into the interior page's own parent (replacing whichever reference pointed at the collapsing page), never dropped — every surviving row MUST remain reachable from the root
+
+**Tests:** `src/btree/delete.rs::tests::deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree`
+
+### Requirement 15: Index Leaf Cell Insert and Split [MUST]
+
+The system MUST insert an entry (a full record — indexed columns plus the referenced rowid for an ordinary secondary index, or the whole row for a WITHOUT ROWID table) into an index b-tree leaf page (`src/btree/index.rs`'s `LEAF_INDEX`/`INTERIOR_INDEX` page types), keyed by [`compare_keys`](BINARY-collation, per Requirement 6) rather than numeric rowid order. Unlike a table leaf split (Requirement 9), which copies the divider and keeps it in the leaf, an index leaf split MUST promote its median entry into the parent, removing it from both halves — because index interior cells carry a full entry, not just a routing key (Requirement 5). Inserting an entry whose key compares exactly equal to an existing one — whether that existing entry lives in a leaf or has been promoted to interior level — MUST return `Err(BtreeError::DuplicateKey)`.
+
+**Implementation:** `src/btree/index_insert.rs::insert_entry`, `src/btree/index_insert.rs::insert_into_index_leaf`
+
+#### Scenario: Duplicate key is rejected even when the existing entry lives at interior level
+
+- GIVEN an index b-tree where a prior split promoted some entry's key to interior level
+- WHEN a second insert targets that same key
+- THEN `insert_entry` MUST return `Err(BtreeError::DuplicateKey)`, leaving the tree unchanged
+
+**Tests:** `src/btree/index_insert.rs::tests::duplicate_key_is_rejected`
+
+#### Scenario: Bulk insert forces index splits and reads back in BINARY order
+
+- GIVEN 500 secondary-index entries inserted one at a time (forcing leaf and cascading interior splits)
+- WHEN the file is reopened by stock `sqlite3`
+- THEN `PRAGMA integrity_check` MUST pass and every entry MUST be reachable in ascending BINARY-collation order via both the oracle and this crate's own `IndexCursor`
+
+**Tests:** `tests/corpus/btree_index_insert_delete_test.rs::bulk_insert_forces_index_splits_and_reads_back_in_order`
+
+#### Scenario: WITHOUT ROWID table insert shares the same code path
+
+- GIVEN a WITHOUT ROWID table (stored as an index b-tree clustered on its declared PRIMARY KEY, per Requirement 5)
+- WHEN rows are inserted via `insert_entry`
+- THEN stock `sqlite3` MUST open the file, pass `PRAGMA integrity_check`, and read back every row in primary-key order
+
+**Tests:** `tests/corpus/btree_index_insert_delete_test.rs::without_rowid_table_insert_and_delete_round_trip`
+
+### Requirement 16: Index Entry Delete [MUST]
+
+The system MUST delete the entry with a given key from an index b-tree. Deleting a key that doesn't exist MUST return `Err(BtreeError::KeyNotFound)`, leaving the tree unchanged. An emptied leaf (or an interior page that drains to zero of its own entries) is left in place rather than deallocated — a documented simplification mirroring Requirement 13's for table b-trees, adapted for the fact that an index interior entry's own value must never be discarded merely because its child subtree emptied (see Requirement 17).
+
+**Implementation:** `src/btree/index_delete.rs::delete_entry`, `src/btree/index_delete.rs::delete_from_leaf`
+
+#### Scenario: Deleting a missing key errors without mutating the tree
+
+- GIVEN an index b-tree that does not contain the given key
+- WHEN `delete_entry` is called with that key
+- THEN it MUST return `Err(BtreeError::KeyNotFound)`, leaving the tree unchanged
+
+**Tests:** `src/btree/index_delete.rs::tests::deleting_a_missing_key_errors`
+
+#### Scenario: Delete-all leaves the index empty
+
+- GIVEN 200 secondary-index entries inserted (forcing splits), then every entry deleted in ascending order
+- WHEN the last entry is deleted
+- THEN stock `sqlite3` MUST report zero rows in the underlying table and pass `PRAGMA integrity_check`, and this crate's own `IndexCursor` MUST also report zero entries
+
+**Tests:** `tests/corpus/btree_index_insert_delete_test.rs::delete_all_entries_leaves_an_empty_index`
+
+### Requirement 17: Interior-Match Deletion via Predecessor Swap [MUST]
+
+Because index interior cells carry a full entry (Requirement 5), deleting a key that was promoted to interior level by an earlier split MUST NOT simply remove that routing entry — its child pointer is load-bearing, and removing the entry would also discard whichever value it carries. The system MUST instead find that entry's in-order predecessor (the maximum entry within its own left-child subtree, found by recursively descending — preferring the rightmost subtree, falling back to an interior page's own last entry once its rightmost subtree is confirmed drained) and swap the predecessor's value into the matched entry's position, physically removing the predecessor from wherever it actually lived. If the matched entry's subtree is entirely drained (no predecessor available), the entry is removed outright instead.
+
+**Implementation:** `src/btree/index_delete.rs::delete_via_predecessor_swap`, `src/btree/index_delete.rs::extract_max_entry`
+
+#### Scenario: Deleting an entry promoted to interior level swaps in its predecessor
+
+- GIVEN an index b-tree where a split promoted some entry's key to interior level, with a live predecessor entry in its left-child subtree
+- WHEN that interior-level key is deleted
+- THEN the interior entry's value MUST be replaced by its predecessor's, the predecessor MUST be physically removed from its leaf, and the tree MUST remain oracle-valid
+
+**Tests:** `src/btree/index_delete.rs::tests::minimal_two_entry_split_then_delete_promoted_key`
+
+#### Scenario: Deleting every entry, including ones promoted to interior level, in ascending order
+
+- GIVEN 30 entries small enough (relative to the page size) to force splits after just 2 entries, then every entry deleted in ascending order
+- WHEN each delete runs — some hitting a leaf directly, others hitting an interior-level promoted entry
+- THEN every delete MUST succeed (no `KeyNotFound` false negative from an incomplete predecessor search) and the tree MUST end fully empty
+
+**Tests:** `src/btree/index_delete.rs::tests::split_then_delete_all_including_promoted_interior_entries`
