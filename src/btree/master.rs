@@ -209,7 +209,17 @@ fn find_master_rootpage(
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(rp))) = (values.get(1), values.get(3)) {
             if n == name {
-                return Ok(Some(*rp as u32));
+                let rootpage = u32::try_from(*rp).map_err(|_| BtreeError::InvalidRootPage {
+                    name: name.to_string(),
+                    rootpage: *rp,
+                })?;
+                if rootpage == 0 {
+                    return Err(BtreeError::InvalidRootPage {
+                        name: name.to_string(),
+                        rootpage: *rp,
+                    });
+                }
+                return Ok(Some(rootpage));
             }
         }
         row = cursor.next()?;
@@ -294,6 +304,30 @@ mod tests {
         let mut vfs = MemoryVfs::new();
         vfs.insert("/test.db", page1);
         (vfs, header)
+    }
+
+    #[test]
+    fn find_master_rootpage_rejects_out_of_range_rootpage() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        // Craft a sqlite_master row with a negative rootpage — something a
+        // stock MasterEntry (rootpage: u32) can never produce, but a
+        // corrupted/malicious .db file can.
+        let values = [
+            Value::Text("table".to_string()),
+            Value::Text("evil".to_string()),
+            Value::Text("evil".to_string()),
+            Value::Integer(-1),
+            Value::Text(String::new()),
+        ];
+        let payload = encode_record(&values, header.text_encoding);
+        super::super::insert_row(&mut pager, &header, SQLITE_MASTER_ROOT_PAGE, 1, &payload)
+            .unwrap();
+
+        let err = find_master_rootpage(&mut pager, &header, "evil").unwrap_err();
+        assert!(matches!(err, BtreeError::InvalidRootPage { rootpage: -1, .. }));
     }
 
     #[test]
