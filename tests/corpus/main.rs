@@ -21,6 +21,7 @@ mod dump_oracle_test;
 mod expr_vectors_test;
 mod families_test;
 mod harness_test;
+mod journal_interop_test;
 mod oracle_test;
 mod pager_write_test;
 mod parser_oracle_test;
