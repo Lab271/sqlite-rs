@@ -37,6 +37,10 @@ name = "unit_parser"
 path = "tests/unit/parser.rs"
 
 [[test]]
+name = "unit_insert_parser"
+path = "tests/unit/insert_parser.rs"
+
+[[test]]
 name = "unit_codegen"
 path = "tests/unit/codegen.rs"
 

@@ -171,6 +171,31 @@ pub enum UnaryOp {
     BitNot,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Insert {
+    pub or_action: Option<ConflictAction>,
+    pub table: String,
+    pub columns: Option<Vec<String>>,
+    pub source: InsertSource,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictAction {
+    Replace,
+    Ignore,
+    Abort,
+    Rollback,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertSource {
+    Values(Vec<Vec<Expr>>),
+    Select(Box<Select>),
+    DefaultValues,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Or,

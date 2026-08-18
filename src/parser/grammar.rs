@@ -203,6 +203,84 @@ impl Parser {
 
     // ---- statement -----------------------------------------------------
 
+    pub(super) fn parse_insert_stmt(&mut self) -> PResult<Insert> {
+        let start = self.expect_kw(Keyword::INSERT)?;
+        let or_action = if self.eat_kw(Keyword::OR) {
+            Some(self.conflict_action()?)
+        } else {
+            None
+        };
+        self.expect_kw(Keyword::INTO)?;
+        let (table, _) = self.identifier()?;
+
+        let columns = if self.eat_punct(&TokenKind::LParen) {
+            let mut cols = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                cols.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')'")?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        let (source, end) = if self.eat_kw(Keyword::DEFAULT) {
+            let end = self.expect_kw(Keyword::VALUES)?;
+            (InsertSource::DefaultValues, end)
+        } else if self.eat_kw(Keyword::VALUES) {
+            let first_row = self.value_row()?;
+            // `expr_list` always yields at least one element, so `last()` is safe.
+            #[allow(clippy::expect_used)]
+            let mut end = first_row.last().expect("value row is non-empty").span;
+            let mut rows = vec![first_row];
+            while self.eat_punct(&TokenKind::Comma) {
+                let row = self.value_row()?;
+                if let Some(last) = row.last() {
+                    end = last.span;
+                }
+                rows.push(row);
+            }
+            (InsertSource::Values(rows), end)
+        } else if self.at_kw(Keyword::SELECT) || self.at_kw(Keyword::WITH) {
+            let select = self.parse_select_stmt()?;
+            let end = select.span;
+            (InsertSource::Select(Box::new(select)), end)
+        } else {
+            return self.invalid("expected VALUES, DEFAULT VALUES, or SELECT after INSERT INTO");
+        };
+
+        Ok(Insert {
+            or_action,
+            table,
+            columns,
+            source,
+            span: join_span(start, end),
+        })
+    }
+
+    fn conflict_action(&mut self) -> PResult<ConflictAction> {
+        if self.eat_kw(Keyword::REPLACE) {
+            Ok(ConflictAction::Replace)
+        } else if self.eat_kw(Keyword::IGNORE) {
+            Ok(ConflictAction::Ignore)
+        } else if self.eat_kw(Keyword::ABORT) {
+            Ok(ConflictAction::Abort)
+        } else if self.eat_kw(Keyword::ROLLBACK) {
+            Ok(ConflictAction::Rollback)
+        } else if self.eat_kw(Keyword::FAIL) {
+            Ok(ConflictAction::Fail)
+        } else {
+            self.invalid("expected REPLACE, IGNORE, ABORT, ROLLBACK, or FAIL after OR")
+        }
+    }
+
+    fn value_row(&mut self) -> PResult<Vec<Expr>> {
+        self.expect_punct(TokenKind::LParen, "'('")?;
+        let list = self.expr_list()?;
+        self.expect_punct(TokenKind::RParen, "')'")?;
+        Ok(list)
+    }
+
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
         if self.at_kw(Keyword::WITH) {
             return self.unsupported("WITH / CTEs not yet supported");

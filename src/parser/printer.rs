@@ -259,6 +259,54 @@ impl fmt::Display for Literal {
     }
 }
 
+impl fmt::Display for Insert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "INSERT")?;
+        if let Some(action) = self.or_action {
+            let action = match action {
+                ConflictAction::Replace => "REPLACE",
+                ConflictAction::Ignore => "IGNORE",
+                ConflictAction::Abort => "ABORT",
+                ConflictAction::Rollback => "ROLLBACK",
+                ConflictAction::Fail => "FAIL",
+            };
+            write!(f, " OR {action}")?;
+        }
+        write!(f, " INTO {}", self.table)?;
+        if let Some(columns) = &self.columns {
+            write!(f, " (")?;
+            for (i, col) in columns.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{col}")?;
+            }
+            write!(f, ")")?;
+        }
+        match &self.source {
+            InsertSource::DefaultValues => write!(f, " DEFAULT VALUES"),
+            InsertSource::Values(rows) => {
+                write!(f, " VALUES ")?;
+                for (i, row) in rows.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "(")?;
+                    for (j, expr) in row.iter().enumerate() {
+                        if j > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{expr}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+            InsertSource::Select(select) => write!(f, " {select}"),
+        }
+    }
+}
+
 impl fmt::Display for ParamKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

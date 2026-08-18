@@ -5,7 +5,7 @@
 //! (e.g. `JOIN`) from "actually malformed" — otherwise a not-yet-built
 //! feature reads identically to a typo.
 
-use super::ast::Select;
+use super::ast::{Insert, Select};
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
@@ -51,5 +51,35 @@ pub fn parse_select(src: &str) -> ParseOutcome {
             ParseOutcome::Unsupported { message, span }
         }
         Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for INSERT (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertOutcome {
+    Accepted(Box<Insert>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single INSERT statement (grammar `.openspec/grammar/sqlite.ebnf`
+/// V3 block). Never panics — any input produces one of the three
+/// [`InsertOutcome`] variants.
+pub fn parse_insert(src: &str) -> InsertOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_insert_stmt() {
+        Ok(insert) => match parser.expect_end() {
+            Ok(()) => InsertOutcome::Accepted(Box::new(insert)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                InsertOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => InsertOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            InsertOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => InsertOutcome::Invalid { message, span },
     }
 }
