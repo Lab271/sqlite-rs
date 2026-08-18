@@ -8,6 +8,11 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Parser: DELETE statement (#191), V3 phase 2 (epic #161). `parse_delete`
+  accepts `DELETE FROM table [WHERE ...]` (no LIMIT/ORDER BY — deferred),
+  mirroring `parse_insert`'s three-way accept/unsupported/invalid outcome
+  contract (spec 002-parser). New `Delete` AST node reuses the existing
+  expr parser for WHERE, plus printer round-trip support.
 - Parser: INSERT statement — VALUES + SELECT forms (#188), V3 phase 2
   (epic #161). `parse_insert` accepts `INSERT [OR REPLACE/IGNORE/ABORT/
   ROLLBACK/FAIL] INTO table [(cols)] (VALUES (...), ... | SELECT ... |
