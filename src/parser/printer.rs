@@ -307,6 +307,16 @@ impl fmt::Display for Insert {
     }
 }
 
+impl fmt::Display for Delete {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DELETE FROM {}", self.table)?;
+        if let Some(w) = &self.where_clause {
+            write!(f, " WHERE {w}")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for ParamKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

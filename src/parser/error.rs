@@ -5,7 +5,7 @@
 //! (e.g. `JOIN`) from "actually malformed" — otherwise a not-yet-built
 //! feature reads identically to a typo.
 
-use super::ast::{Insert, Select};
+use super::ast::{Delete, Insert, Select};
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
@@ -81,5 +81,35 @@ pub fn parse_insert(src: &str) -> InsertOutcome {
             InsertOutcome::Unsupported { message, span }
         }
         Err(ParseFail::Invalid { message, span }) => InsertOutcome::Invalid { message, span },
+    }
+}
+
+/// Same three-way contract as [`ParseOutcome`], for DELETE (spec
+/// 002-parser, V3 block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeleteOutcome {
+    Accepted(Box<Delete>),
+    Unsupported { message: String, span: Span },
+    Invalid { message: String, span: Span },
+}
+
+/// Parses a single DELETE statement (grammar `.openspec/grammar/sqlite.ebnf`
+/// V3 block). Never panics — any input produces one of the three
+/// [`DeleteOutcome`] variants.
+pub fn parse_delete(src: &str) -> DeleteOutcome {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_delete_stmt() {
+        Ok(delete) => match parser.expect_end() {
+            Ok(()) => DeleteOutcome::Accepted(Box::new(delete)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                DeleteOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => DeleteOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            DeleteOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => DeleteOutcome::Invalid { message, span },
     }
 }
