@@ -6,6 +6,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.10.0] - 2026-08-18
+
+V3 phase 2 (epic #161) complete: write-path parser (INSERT/UPDATE/DELETE,
+CREATE/DROP TABLE, CREATE/DROP INDEX) plus schema cookie + `sqlite_master`
+maintenance and AUTOINCREMENT tracking.
+
 ### Added
 
 - Schema cookie + `sqlite_master`/`sqlite_sequence` write maintenance
