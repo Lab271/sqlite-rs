@@ -33,11 +33,61 @@ use oracle::{oracle_csv_output, oracle_list_output, pinned_oracle, skip_no_oracl
 use sqlite_rs::dump::dump_database;
 use sqlite_rs::format::{format_csv_value, format_list_value};
 use sqlite_rs::record::Value;
-use sqlite_rs::vfs::UnixVfs;
+use sqlite_rs::vfs::{companion_path, UnixVfs};
 use std::path::Path;
 
 fn journalstates_fixture(name: &str) -> std::path::PathBuf {
     oracle::corpus_dir().join("journalstates").join(name)
+}
+
+/// Copies a fixture (and its `-wal`/`-journal` companion, if present) into
+/// an isolated temp directory, removed on drop.
+///
+/// Needed because tests here run concurrently within one binary, and some
+/// paths open a WAL fixture's real, adjacent `-shm` file: `dump_database`
+/// via `vfs::claim_wal_read_lock` (read-only, but writes reader-mark bytes
+/// into an existing `-shm`), and — more importantly — the pinned oracle
+/// itself when `oracle_list_output`/`oracle_csv_output` shell out to a
+/// real `sqlite3` against a WAL db, which creates its own `-shm` file on
+/// connect. Two tests hitting the same shared, committed fixture path at
+/// once can have one see the other's `-shm` mid-creation and read it as
+/// too short. Fixtures without an adjacent `-wal`/`-journal`
+/// (most families) don't need this, but applying it uniformly is cheap
+/// and removes the whole race class rather than special-casing WAL
+/// fixtures only.
+struct IsolatedFixture {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
+impl IsolatedFixture {
+    fn new(path: &Path) -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sqlite-rs-tier0-isolated-{}-{n}-{}",
+            std::process::id(),
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("fixture"),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join(path.file_name().unwrap());
+        std::fs::copy(path, &dest).unwrap();
+        for suffix in ["-wal", "-journal"] {
+            let companion = companion_path(path, suffix);
+            if companion.exists() {
+                std::fs::copy(&companion, companion_path(&dest, suffix)).unwrap();
+            }
+        }
+        Self { dir, path: dest }
+    }
+}
+
+impl Drop for IsolatedFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 fn dump_t_rows(path: &Path) -> Vec<(i64, String)> {
@@ -89,7 +139,12 @@ fn t0_any_feature_bearing_file_dumps_all_rows() {
             if path.file_name().and_then(|n| n.to_str()) == Some("hot_journal.db") {
                 continue; // covered by t0_hot_journal_recovers_committed_state below
             }
-            let result = dump_database(&UnixVfs, &path)
+            // Isolated: the oracle shell-out below creates its own `-shm`
+            // when connecting to a WAL fixture, which would otherwise race
+            // other tests reading the same shared, committed path.
+            let isolated = IsolatedFixture::new(&path);
+            let path = &isolated.path;
+            let result = dump_database(&UnixVfs, path)
                 .unwrap_or_else(|e| panic!("dumping {}: {e}", path.display()));
 
             for table in &result.tables {
@@ -107,7 +162,7 @@ fn t0_any_feature_bearing_file_dumps_all_rows() {
                     })
                     .collect();
                 let mine_list = mine_list.join("\n") + if mine_list.is_empty() { "" } else { "\n" };
-                let oracle_list = oracle_list_output(&oracle, &path, &table.name, &table.columns);
+                let oracle_list = oracle_list_output(&oracle, path, &table.name, &table.columns);
                 assert_eq!(
                     mine_list,
                     oracle_list,
@@ -130,7 +185,7 @@ fn t0_any_feature_bearing_file_dumps_all_rows() {
                     .iter()
                     .map(|line| format!("{line}\r\n"))
                     .collect::<String>();
-                let oracle_csv = oracle_csv_output(&oracle, &path, &table.name, &table.columns);
+                let oracle_csv = oracle_csv_output(&oracle, path, &table.name, &table.columns);
                 assert_eq!(
                     mine_csv,
                     oracle_csv,
@@ -212,8 +267,13 @@ fn t0_hot_journal_recovers_committed_state() {
 /// big-endian checksum, foreign-frame rejection, rolled-back trailer).
 #[test]
 fn t0_wal_pending_rows_visible() {
+    let dump_isolated = |name: &str| {
+        let isolated = IsolatedFixture::new(&journalstates_fixture(name));
+        dump_t_rows(&isolated.path)
+    };
+
     assert_eq!(
-        dump_t_rows(&journalstates_fixture("wal_pending.db")),
+        dump_isolated("wal_pending.db"),
         vec![
             (1, "one".to_string()),
             (2, "two".to_string()),
@@ -221,17 +281,17 @@ fn t0_wal_pending_rows_visible() {
         ]
     );
     assert_eq!(
-        dump_t_rows(&journalstates_fixture("wal_pending_bigendian.db")),
-        dump_t_rows(&journalstates_fixture("wal_pending.db"))
+        dump_isolated("wal_pending_bigendian.db"),
+        dump_isolated("wal_pending.db")
     );
-    let stale_rows = dump_t_rows(&journalstates_fixture("wal_pending_stale.db"));
+    let stale_rows = dump_isolated("wal_pending_stale.db");
     assert_eq!(
         stale_rows,
         vec![(10, "ten".to_string()), (11, "eleven".to_string())]
     );
     assert!(!stale_rows.iter().any(|(_, b)| b.contains("STALE-FRAME")));
     assert_eq!(
-        dump_t_rows(&journalstates_fixture("wal_pending_trailing.db")),
+        dump_isolated("wal_pending_trailing.db"),
         vec![(1, "committed-before".to_string())]
     );
 }
