@@ -8,7 +8,7 @@ use super::value::{TextEncoding, Value};
     clippy::arithmetic_side_effects,
     reason = "groups/i/shift all range over the compile-time-constant 0..8, so these additions and the 7x multiply never overflow"
 )]
-fn encode_varint(value: u64) -> Vec<u8> {
+pub(crate) fn encode_varint(value: u64) -> Vec<u8> {
     // The 9-byte form only kicks in once the value needs more than 56
     // bits (8 groups of 7): the decoder's own threshold (it reads 8
     // 7-bit groups, then an unconditional 9th full-byte group).

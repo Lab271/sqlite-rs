@@ -18,9 +18,11 @@
 
 mod error;
 mod index;
+mod insert;
 
 pub use error::BtreeError;
 pub use index::{IndexCursor, IndexRow};
+pub use insert::insert_row;
 
 use crate::header::DatabaseHeader;
 use crate::record::decode_varint;

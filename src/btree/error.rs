@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::pager::PagerError;
 use crate::record::RecordError;
 use crate::vfs::PageError;
 
@@ -54,4 +55,16 @@ pub enum BtreeError {
 
     #[error("b-tree traversal visited more than {max} pages (possible cycle)")]
     TraversalTooLong { max: usize },
+
+    #[error("pager error: {0}")]
+    Pager(#[from] PagerError),
+
+    #[error("cannot insert duplicate rowid {rowid}")]
+    DuplicateRowid { rowid: i64 },
+
+    #[error("interior page {page_num} has no routing entry for child page {child}")]
+    MissingChildRoute { page_num: u32, child: u32 },
+
+    #[error("internal invariant violated: {0}")]
+    Internal(&'static str),
 }

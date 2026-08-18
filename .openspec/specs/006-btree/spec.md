@@ -188,3 +188,91 @@ The originating issue's corpus section expects an index fixture with an overflow
 - THEN the reassembled key payload MUST be byte-identical to the pinned oracle's value
 
 **Tests:** `tools/gen_fixtures.sh` (planned)
+
+### Requirement 8: Leaf Cell Insert Without Split [MUST]
+
+The system MUST insert a `(rowid, payload)` row into a table b-tree leaf page that has room for it: encoding the cell (payload-length varint + rowid varint + local payload bytes, plus a 4-byte overflow-page pointer per Requirement 2 when the payload doesn't fit locally), locating the rowid-ordered insertion position, and rewriting the page's cell-pointer array and cell count so the leaf's cells remain in strict ascending rowid order. Inserting a rowid that already exists in the leaf MUST return `Err`, never silently overwrite or duplicate.
+
+**Implementation:** `src/btree/insert.rs::insert_into_leaf`, `src/btree/insert.rs::encode_leaf_cell`
+
+#### Scenario: Single-row insert into an otherwise-empty leaf
+
+- GIVEN a table with no existing rows
+- WHEN one row is inserted via `insert_row`
+- THEN stock `sqlite3` MUST open the file, pass `PRAGMA integrity_check`, and read back the exact row
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_single_row_no_split`
+
+#### Scenario: Duplicate rowid is rejected
+
+- GIVEN a leaf that already holds a row with rowid `R`
+- WHEN a second insert targets rowid `R`
+- THEN `insert_row` MUST return `Err(BtreeError::DuplicateRowid)`, leaving the page unchanged
+
+**Tests:** inline `#[cfg(test)]` in `src/btree/insert.rs` (planned — not yet written; duplicate-rowid rejection is implemented but not corpus/oracle-tested)
+
+### Requirement 9: Leaf Split with Median Propagation [MUST]
+
+When a cell won't fit in its target leaf, the system MUST allocate a new page (via the pager's freelist-aware allocator), distribute the leaf's existing cells plus the new cell roughly in half by count (the original page keeps the lower rowids, the newly allocated page takes the upper half), and propagate the split to the parent interior page by inserting a routing cell (child = original leaf, key = the original leaf's new maximum rowid) immediately before whatever routing entry previously pointed at the original leaf, redirecting that entry to the new page.
+
+**Implementation:** `src/btree/insert.rs::insert_into_leaf`, `src/btree/insert.rs::insert_into_parent`
+
+#### Scenario: Insert forces exactly one leaf split
+
+- GIVEN enough rows inserted that a single leaf page's free space is exhausted, but not enough to grow past one interior level
+- WHEN the split runs
+- THEN stock `sqlite3` MUST open the file, pass `PRAGMA integrity_check`, and read back every row, in order, unchanged
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_forces_a_leaf_split`
+
+### Requirement 10: Cascading Interior Splits [MUST]
+
+When an interior page's routing-cell insert (propagated up from a child split, per Requirement 9) doesn't fit, the system MUST split the interior page itself: promoting the median key to the grandparent without duplicating it in either child, with the left interior page's rightmost pointer becoming the promoted entry's former child pointer. This MUST recurse arbitrarily many levels up the ancestor chain produced by the leaf-to-root path search.
+
+**Implementation:** `src/btree/insert.rs::insert_into_parent`
+
+#### Scenario: Insert forces multiple cascading interior splits
+
+- GIVEN enough rows inserted to overflow more than one interior page's worth of routing cells
+- WHEN the cascade runs
+- THEN stock `sqlite3` MUST open the file, pass `PRAGMA integrity_check`, and read back every row, in order, unchanged
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_forces_cascading_splits_and_a_root_split`
+
+### Requirement 11: Root Split [MUST]
+
+Because a table's root page number is fixed (referenced by its `sqlite_master` entry) and can never be relocated, the system MUST handle a split that reaches the root by relocating the root's current content (leaf or interior, verbatim) to a newly allocated page, then reinitializing the root page in place as a fresh interior page holding a single routing cell (child = the relocated page, key = the promoted divider) and the split's new sibling as the rightmost pointer. This MUST work whether the root is page 1 (the 100-byte file-header offset per the page-1 trap) or any other page number.
+
+**Implementation:** `src/btree/insert.rs::root_split`
+
+#### Scenario: Insert forces a root split
+
+- GIVEN enough rows inserted that even the root page overflows
+- WHEN the root split runs
+- THEN stock `sqlite3` MUST open the file, pass `PRAGMA integrity_check`, and read back every row, including the first and last rowids inserted, unchanged
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_forces_cascading_splits_and_a_root_split`
+
+#### Scenario: Root split on page 1 preserves the 100-byte file header
+
+- GIVEN a table b-tree rooted at page 1 (`sqlite_master` itself), the one root that physically shares its page with the 100-byte file header
+- WHEN enough rows are inserted that page 1 itself splits into an interior root
+- THEN stock `sqlite3` MUST still open the file, pass `PRAGMA integrity_check`, and every row present before the split (including the file header's own fields, proven by the file still opening at all) MUST survive unchanged
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_into_page_one_root_preserves_the_file_header_across_a_split`
+
+#### Scenario: Bulk insert stays oracle-identical at scale
+
+- GIVEN 1000 rows inserted one at a time (spanning multiple leaf and interior splits)
+- WHEN the file is reopened by stock `sqlite3`
+- THEN `PRAGMA integrity_check` MUST pass and every row MUST read back identically, in rowid order
+
+**Tests:** `tests/corpus/btree_insert_test.rs::bulk_insert_1000_rows_is_oracle_identical`
+
+#### Scenario: Overflow payload combined with a split
+
+- GIVEN rows whose payload is large enough to require an overflow chain (Requirement 2), inserted in enough quantity to also force a leaf split
+- WHEN the file is reopened by stock `sqlite3`
+- THEN `PRAGMA integrity_check` MUST pass and every row's overflowing payload MUST read back byte-identical
+
+**Tests:** `tests/corpus/btree_insert_test.rs::insert_with_overflow_payload_combined_with_a_split`

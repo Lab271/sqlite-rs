@@ -8,6 +8,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Table b-tree insert — cell insert + page split (#168), V3 phase 1
+  (epic #161). New `src/btree/insert.rs`: rowid-ordered leaf cell insert
+  (encoding rowid varint + payload + overflow chain, reusing
+  `record::encode_record`/`local_payload_size`), leaf split with
+  median-key propagation, cascading interior splits, and root split
+  (including the page-1/`sqlite_master` root special case). Verified
+  against stock `sqlite3` (`PRAGMA integrity_check` + `select`) for
+  no-split, single-split, cascading/root-split, 1000-row bulk insert,
+  and overflow+split scenarios (spec 006-btree Requirements 8-11).
+
 - Freelist management — allocate/deallocate pages (#167), V3 phase 1
   (epic #161). `Pager::allocate_page` pops a page off the freelist (or
   extends the file when it's empty); `Pager::deallocate_page` pushes a
