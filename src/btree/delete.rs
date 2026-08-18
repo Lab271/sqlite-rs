@@ -24,9 +24,9 @@
 //! scratch write path does either.
 
 use super::{
-    build_interior_cell, collect_interior_entries, collect_leaf_cells, find_leaf_page,
-    page1_header_start, read_page_type, write_interior_page, write_leaf_page, BtreeError,
-    INTERIOR_TABLE, LEAF_TABLE,
+    build_interior_cell, collect_interior_entries, collect_leaf_cells, decode_cell_head,
+    find_leaf_page, local_payload_size, page1_header_start, read_page_type, read_u32,
+    write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -53,7 +53,8 @@ pub fn delete_row(
         .iter()
         .position(|(existing_rowid, _)| *existing_rowid == rowid)
         .ok_or(BtreeError::RowidNotFound { rowid })?;
-    cells.remove(pos);
+    let (_, removed_cell) = cells.remove(pos);
+    let overflow_page = cell_overflow_page(&removed_cell, leaf_page, usable_size)?;
 
     let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
     if !remaining.is_empty() || ancestors.is_empty() {
@@ -61,13 +62,53 @@ pub fn delete_row(
         // can't be removed/collapsed — an empty root leaf is a valid,
         // empty table).
         let buf = pager.get_page_mut(leaf_page)?;
-        return write_leaf_page(buf, header_start, leaf_page, &remaining);
+        write_leaf_page(buf, header_start, leaf_page, &remaining)?;
+        return free_overflow_chain(pager, overflow_page);
     }
 
     let buf = pager.get_page_mut(leaf_page)?;
     write_leaf_page(buf, header_start, leaf_page, &remaining)?;
     pager.deallocate_page(leaf_page)?;
+    free_overflow_chain(pager, overflow_page)?;
     collapse_into_ancestors(pager, usable_size, root_page, &ancestors, leaf_page)
+}
+
+/// Returns the first overflow page referenced by a leaf cell (as produced
+/// by [`collect_leaf_cells`]), or `0` if the cell's payload fit entirely
+/// locally. `collect_leaf_cells` already trims each cell to exactly its
+/// local bytes plus (when present) the trailing 4-byte overflow pointer,
+/// so the pointer — when present — is always the cell's last 4 bytes.
+fn cell_overflow_page(cell: &[u8], page_num: u32, usable_size: u32) -> Result<u32, BtreeError> {
+    let (_, payload_len, tail_start) = decode_cell_head(cell, 0, page_num)?;
+    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    if (local_size as u64) >= payload_len {
+        return Ok(0);
+    }
+    let ptr_start = tail_start.saturating_add(local_size);
+    read_u32(cell, ptr_start, page_num)
+}
+
+/// Walks an overflow chain starting at `first_page` (a no-op if it's `0`,
+/// i.e. the deleted cell had no overflow), deallocating every page in the
+/// chain back to the freelist (#167). Guards against a corrupt/cyclic
+/// chain the same way [`super::reassemble_payload`] does, so a malformed
+/// on-disk chain fails deletion cleanly rather than looping forever.
+fn free_overflow_chain(pager: &mut Pager, first_page: u32) -> Result<(), BtreeError> {
+    let mut page_num = first_page;
+    let mut visited = std::collections::HashSet::new();
+    while page_num != 0 {
+        if !visited.insert(page_num) {
+            return Err(BtreeError::OverflowChainCycle {
+                page_num: first_page,
+                revisited_page: page_num,
+            });
+        }
+        let buf = pager.get_page_mut(page_num)?.clone();
+        let next = read_u32(&buf, 0, page_num)?;
+        pager.deallocate_page(page_num)?;
+        page_num = next;
+    }
+    Ok(())
 }
 
 /// Removes the routing entry for `emptied_page` from its immediate parent
