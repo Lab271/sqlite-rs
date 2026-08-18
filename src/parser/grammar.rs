@@ -258,6 +258,27 @@ impl Parser {
         })
     }
 
+    pub(super) fn parse_delete_stmt(&mut self) -> PResult<Delete> {
+        let start = self.expect_kw(Keyword::DELETE)?;
+        self.expect_kw(Keyword::FROM)?;
+        let (table, table_span) = self.identifier()?;
+
+        let mut end = table_span;
+        let where_clause = if self.eat_kw(Keyword::WHERE) {
+            let expr = self.expr()?;
+            end = expr.span;
+            Some(expr)
+        } else {
+            None
+        };
+
+        Ok(Delete {
+            table,
+            where_clause,
+            span: join_span(start, end),
+        })
+    }
+
     fn conflict_action(&mut self) -> PResult<ConflictAction> {
         if self.eat_kw(Keyword::REPLACE) {
             Ok(ConflictAction::Replace)

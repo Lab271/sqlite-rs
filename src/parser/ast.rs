@@ -196,6 +196,13 @@ pub enum InsertSource {
     DefaultValues,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delete {
+    pub table: String,
+    pub where_clause: Option<Expr>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Or,
