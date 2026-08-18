@@ -331,7 +331,7 @@ fn column_name(def: &str) -> String {
 /// (datatype3.html §3.1), which may span several words (`DOUBLE
 /// PRECISION`, `UNSIGNED BIG INT`). Empty when the column has no type
 /// (`CREATE TABLE t(x)`).
-fn column_type(def: &str) -> String {
+pub(crate) fn column_type(def: &str) -> String {
     const CONSTRAINT_KEYWORDS: [&str; 8] = [
         "PRIMARY",
         "NOT",
