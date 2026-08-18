@@ -99,6 +99,12 @@ impl VfsFile for UnixVfsFile {
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
+    fn truncate(&self, len: u64) -> Result<()> {
+        self.file
+            .set_len(len)
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
     fn sync(&self) -> Result<()> {
         self.file
             .sync_data()

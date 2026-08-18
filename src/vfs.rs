@@ -116,6 +116,12 @@ pub trait VfsFile {
     /// is past the current end (#166 pager write path).
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<()>;
 
+    /// Truncates (or, if `len` is past the current end, extends with
+    /// zeros) the file to exactly `len` bytes — used by rollback-journal
+    /// recovery to shrink the main file back to its pre-transaction page
+    /// count after replaying journaled pages (#172).
+    fn truncate(&self, len: u64) -> Result<()>;
+
     /// Flushes any buffered writes to durable storage.
     fn sync(&self) -> Result<()>;
 }

@@ -129,6 +129,12 @@ impl VfsFile for MemoryVfsFile {
         Ok(())
     }
 
+    fn truncate(&self, len: u64) -> Result<()> {
+        let mut data = self.0.lock().map_err(|_| poisoned(Path::new("<memory>")))?;
+        data.resize(len as usize, 0);
+        Ok(())
+    }
+
     fn sync(&self) -> Result<()> {
         Ok(())
     }
