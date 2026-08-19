@@ -800,6 +800,210 @@ pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `CreateTable` (#215): allocates a fresh table-b-tree root page,
+/// registers it in `sqlite_master`, and bumps the schema cookie — the
+/// whole statement in one opcode, per `codegen::create_table`'s doc.
+pub fn create_table(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let (name, sql) = match &instr.p4 {
+        P4::CreateTable { name, sql } => (name.clone(), sql.clone()),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "CreateTable",
+                reason: format!("expected P4::CreateTable, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("CreateTable")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    let root_page = btree::create_empty_table_root(&mut pager).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "CreateTable",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::insert_master_row(
+        &mut pager,
+        &header,
+        &btree::MasterEntry {
+            kind: "table".to_string(),
+            name: name.clone(),
+            tbl_name: name,
+            rootpage: root_page,
+            sql,
+        },
+    )
+    .map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateTable",
+        reason: e.to_string(),
+    })?;
+    btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateTable",
+        reason: e.to_string(),
+    })?;
+    Ok(Step::Next)
+}
+
+/// `DropTable` (#215): frees the target table's b-tree pages plus every
+/// index on it (cascading), removes the corresponding `sqlite_master`
+/// rows, and bumps the schema cookie once.
+pub fn drop_table(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let (name, root_page, indexes) = match &instr.p4 {
+        P4::DropTable {
+            name,
+            root_page,
+            indexes,
+        } => (name.clone(), *root_page, indexes.clone()),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "DropTable",
+                reason: format!("expected P4::DropTable, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("DropTable")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    for (index_name, index_root) in &indexes {
+        btree::free_btree_pages(&mut pager, &header, *index_root).map_err(|e| {
+            ExecError::MalformedInstruction {
+                opcode: "DropTable",
+                reason: e.to_string(),
+            }
+        })?;
+        btree::delete_master_row(&mut pager, &header, index_name).map_err(|e| {
+            ExecError::MalformedInstruction {
+                opcode: "DropTable",
+                reason: e.to_string(),
+            }
+        })?;
+    }
+    btree::free_btree_pages(&mut pager, &header, root_page).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "DropTable",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::delete_master_row(&mut pager, &header, &name).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "DropTable",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
+        opcode: "DropTable",
+        reason: e.to_string(),
+    })?;
+    Ok(Step::Next)
+}
+
+/// `CreateIndex` (#215): allocates a fresh index-b-tree root page,
+/// populates it with one entry per pre-existing row of the target table
+/// (see `btree::populate_index_from_table`), registers the index in
+/// `sqlite_master`, and bumps the schema cookie.
+pub fn create_index(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let (name, table_name, table_root_page, sql, column_indices) = match &instr.p4 {
+        P4::CreateIndex {
+            name,
+            table_name,
+            table_root_page,
+            sql,
+            column_indices,
+            ..
+        } => (
+            name.clone(),
+            table_name.clone(),
+            *table_root_page,
+            sql.clone(),
+            column_indices.clone(),
+        ),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "CreateIndex",
+                reason: format!("expected P4::CreateIndex, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("CreateIndex")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    let index_root = btree::create_empty_index_root(&mut pager).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "CreateIndex",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::populate_index_from_table(
+        &mut pager,
+        &header,
+        table_root_page,
+        index_root,
+        &column_indices,
+    )
+    .map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateIndex",
+        reason: e.to_string(),
+    })?;
+    btree::insert_master_row(
+        &mut pager,
+        &header,
+        &btree::MasterEntry {
+            kind: "index".to_string(),
+            name: name.clone(),
+            tbl_name: table_name,
+            rootpage: index_root,
+            sql,
+        },
+    )
+    .map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateIndex",
+        reason: e.to_string(),
+    })?;
+    btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateIndex",
+        reason: e.to_string(),
+    })?;
+    Ok(Step::Next)
+}
+
+/// `DropIndex` (#215): frees the target index's b-tree pages, removes
+/// its `sqlite_master` row, and bumps the schema cookie.
+pub fn drop_index(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let (name, root_page) = match &instr.p4 {
+        P4::DropIndex { name, root_page } => (name.clone(), *root_page),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "DropIndex",
+                reason: format!("expected P4::DropIndex, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("DropIndex")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    btree::free_btree_pages(&mut pager, &header, root_page).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "DropIndex",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::delete_master_row(&mut pager, &header, &name).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "DropIndex",
+            reason: e.to_string(),
+        }
+    })?;
+    btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
+        opcode: "DropIndex",
+        reason: e.to_string(),
+    })?;
+    Ok(Step::Next)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {

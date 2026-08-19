@@ -56,6 +56,10 @@ fn render_p4(p4: &P4) -> String {
         P4::SortKey(cols) => render_sort_key(cols),
         P4::Affinity(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         P4::Bool(b) => b.to_string(),
+        P4::CreateTable { name, sql } => format!("{name}: {sql}"),
+        P4::DropTable { name, .. } => name.clone(),
+        P4::CreateIndex { name, sql, .. } => format!("{name}: {sql}"),
+        P4::DropIndex { name, .. } => name.clone(),
     }
 }
 
@@ -121,6 +125,10 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::Delete => "Delete",
         Opcode::Insert => "Insert",
         Opcode::NewRowid => "NewRowid",
+        Opcode::CreateTable => "CreateTable",
+        Opcode::DropTable => "DropTable",
+        Opcode::CreateIndex => "CreateIndex",
+        Opcode::DropIndex => "DropIndex",
         Opcode::Eq => "Eq",
         Opcode::Ge => "Ge",
         Opcode::Gt => "Gt",

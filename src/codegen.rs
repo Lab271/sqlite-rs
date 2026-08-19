@@ -4,14 +4,22 @@
 //! sorter/ephemeral opcodes). Expressions compile to jump-based control
 //! flow, never an intermediate boolean register (Requirement 11).
 
+pub mod create_index;
+pub mod create_table;
 pub mod delete;
+pub mod drop_index;
+pub mod drop_table;
 pub mod expr;
 pub(crate) mod index_maintenance;
 pub mod insert;
 pub mod select;
 pub mod update;
 
+pub use create_index::compile_create_index;
+pub use create_table::compile_create_table;
 pub use delete::compile_delete;
+pub use drop_index::compile_drop_index;
+pub use drop_table::compile_drop_table;
 pub use insert::compile_insert;
 pub use select::{compile_select, CodegenError};
 pub use update::compile_update;

@@ -16,6 +16,7 @@
 //! column is a schema-aware operation that belongs above this layer,
 //! once the DDL reader (step 7) knows which column, if any, is the alias.
 
+mod ddl;
 mod delete;
 mod error;
 mod index;
@@ -24,6 +25,7 @@ mod index_insert;
 mod insert;
 mod master;
 
+pub use ddl::{create_empty_index_root, create_empty_table_root, populate_index_from_table};
 pub use delete::delete_row;
 pub use error::BtreeError;
 pub use index::{IndexCursor, IndexRow};
@@ -575,6 +577,83 @@ pub(super) fn find_leaf_page(
             });
         }
     }
+}
+
+/// Frees every page of the b-tree (table or index) rooted at `root_page`,
+/// walking interior pages depth-first and freeing children before their
+/// parent, finally freeing `root_page` itself. Used by DROP TABLE/DROP
+/// INDEX (#215) to reclaim the pages a dropped object's b-tree occupied.
+///
+/// Known gap: does not walk or free overflow-page chains hanging off
+/// individual cells — freeing an overflow chain needs per-cell
+/// has-overflow detection that neither `collect_interior_entries` (table)
+/// nor `index::collect_index_interior_entries` (index) expose today. A
+/// DROP on a b-tree whose rows/entries overflowed their page therefore
+/// leaks those overflow pages rather than returning them to the
+/// freelist. This does not affect query-visible correctness (the dropped
+/// object is gone from `sqlite_master` either way) — only on-disk space
+/// reclamation is incomplete. Tracked as a follow-up, not fixed here.
+pub(crate) fn free_btree_pages(
+    pager: &mut crate::pager::Pager,
+    header: &DatabaseHeader,
+    root_page: u32,
+) -> Result<(), BtreeError> {
+    let usable_size = header.usable_page_size();
+    let encoding = header.text_encoding;
+    let mut visited = 0usize;
+    free_btree_pages_inner(pager, root_page, usable_size, encoding, &mut visited)
+}
+
+fn free_btree_pages_inner(
+    pager: &mut crate::pager::Pager,
+    page_num: u32,
+    usable_size: u32,
+    encoding: crate::record::TextEncoding,
+    visited: &mut usize,
+) -> Result<(), BtreeError> {
+    *visited = visited.saturating_add(1);
+    if *visited > MAX_PAGES_VISITED {
+        return Err(BtreeError::TraversalTooLong {
+            max: MAX_PAGES_VISITED,
+        });
+    }
+    let buf = pager
+        .read_page(page_num)
+        .map_err(|source| BtreeError::PageSource { page_num, source })?;
+    let header_start = page1_header_start(page_num);
+    let page_type = read_page_type(&buf, header_start, page_num)?;
+    match page_type {
+        LEAF_TABLE => {}
+        INTERIOR_TABLE => {
+            let (entries, rightmost) = collect_interior_entries(&buf, header_start, page_num)?;
+            for (child, _) in &entries {
+                free_btree_pages_inner(pager, *child, usable_size, encoding, visited)?;
+            }
+            free_btree_pages_inner(pager, rightmost, usable_size, encoding, visited)?;
+        }
+        t if t == index::LEAF_INDEX => {}
+        t if t == index::INTERIOR_INDEX => {
+            let (entries, rightmost) = index::collect_index_interior_entries(
+                &*pager,
+                &buf,
+                header_start,
+                page_num,
+                usable_size,
+                encoding,
+            )?;
+            for (child, _, _) in &entries {
+                free_btree_pages_inner(pager, *child, usable_size, encoding, visited)?;
+            }
+            free_btree_pages_inner(pager, rightmost, usable_size, encoding, visited)?;
+        }
+        _ => {
+            return Err(BtreeError::UnexpectedPageType {
+                page_num,
+                page_type,
+            })
+        }
+    }
+    Ok(pager.deallocate_page(page_num)?)
 }
 
 /// Reads every cell of a leaf page in on-disk (rowid-ascending) order,

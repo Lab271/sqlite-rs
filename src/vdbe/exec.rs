@@ -375,13 +375,14 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, DecrJumpZero, Delete,
-        Divide, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot,
-        IfNotZero, IfPos, Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply,
-        MustBeInt, NewRowid, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
-        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
-        Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
-        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, CreateIndex,
+        CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable, Eq, Found, Function, Ge,
+        Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Insert, Int64,
+        Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next, Not,
+        NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite,
+        Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence,
+        ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort,
+        String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -450,6 +451,10 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Delete => cursor::delete(vm, instr),
         Insert => cursor::insert(vm, instr),
         NewRowid => cursor::new_rowid(vm, instr),
+        CreateTable => cursor::create_table(vm, instr),
+        DropTable => cursor::drop_table(vm, instr),
+        CreateIndex => cursor::create_index(vm, instr),
+        DropIndex => cursor::drop_index(vm, instr),
 
         SorterOpen => sorter::sorter_open(vm, instr),
         SorterInsert => sorter::sorter_insert(vm, instr),

@@ -49,6 +49,15 @@ pub enum Opcode {
     Insert,
     NewRowid,
     IdxDelete,
+    // DDL (#215) — schema-mutating statements, each done procedurally in
+    // one exec.rs handler rather than decomposed into cursor-driven
+    // multi-instruction sequences; never harvested from a V2 oracle
+    // EXPLAIN (DDL postdates V2), so excluded from `ALL` like the other
+    // V3 write opcodes above.
+    CreateTable,
+    DropTable,
+    CreateIndex,
+    DropIndex,
     // compare
     Eq,
     Ge,
@@ -213,6 +222,10 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Insert
         | Opcode::NewRowid
         | Opcode::IdxDelete
+        | Opcode::CreateTable
+        | Opcode::DropTable
+        | Opcode::CreateIndex
+        | Opcode::DropIndex
         | Opcode::Eq
         | Opcode::Ge
         | Opcode::Gt
@@ -297,6 +310,38 @@ pub enum P4 {
     /// AUTOINCREMENT handling (checking/bumping `sqlite_sequence`)
     /// when the VDBE layer has no other place to carry that bit.
     Bool(bool),
+    /// `CreateTable` (#215): the new table's name and verbatim
+    /// `sqlite_master.sql` text (sliced from the original source via the
+    /// AST's `span`, not reconstructed from the parsed columns).
+    CreateTable {
+        name: String,
+        sql: String,
+    },
+    /// `DropTable` (#215): the target table's name/root page, plus every
+    /// index on it (`(name, root_page)`) to cascade-drop in the same
+    /// statement.
+    DropTable {
+        name: String,
+        root_page: u32,
+        indexes: Vec<(String, u32)>,
+    },
+    /// `CreateIndex` (#215): the new index's name, its target table's
+    /// name/root page (to scan and populate entries for pre-existing
+    /// rows), verbatim `sqlite_master.sql` text, the indexed columns'
+    /// 0-based positions in table-column order, and the `UNIQUE` flag.
+    CreateIndex {
+        name: String,
+        table_name: String,
+        table_root_page: u32,
+        sql: String,
+        column_indices: Vec<usize>,
+        unique: bool,
+    },
+    /// `DropIndex` (#215): the target index's name/root page.
+    DropIndex {
+        name: String,
+        root_page: u32,
+    },
 }
 
 /// A single fixed-shape bytecode instruction: an opcode tag, three

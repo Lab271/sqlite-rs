@@ -19,6 +19,7 @@ mod btree_index_insert_delete_test;
 mod btree_insert_test;
 mod btree_test;
 mod cli_e2e_test;
+mod cli_write_test;
 mod dump_oracle_test;
 mod expr_vectors_test;
 mod families_test;

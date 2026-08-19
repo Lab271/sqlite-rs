@@ -13,12 +13,20 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{compile_select, CodegenError};
+use sqlite_rs::codegen::{
+    compile_create_index, compile_create_table, compile_delete, compile_drop_index,
+    compile_drop_table, compile_insert, compile_select, compile_update, CodegenError,
+};
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
+use sqlite_rs::parser::error::{
+    parse_create_index, parse_create_table, parse_delete, parse_drop_index, parse_drop_table,
+    parse_insert, parse_update, CreateIndexOutcome, CreateTableOutcome, DeleteOutcome,
+    DropIndexOutcome, DropTableOutcome, InsertOutcome,
+};
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::{execute_with_db, explain};
+use sqlite_rs::vdbe::{execute_with_db, execute_with_writable_db, explain};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 fn main() -> ExitCode {
@@ -37,7 +45,13 @@ fn main() -> ExitCode {
             Some(path) => run_tables(Path::new(&path)),
             None => usage_error("tables <file>"),
         },
-        _ => usage_error("<dump|export|query|tables> <file>"),
+        Some("exec") => {
+            let (Some(path), Some(sql)) = (args.next(), args.next()) else {
+                return usage_error("exec <file> \"<SQL>\"");
+            };
+            run_exec(Path::new(&path), &sql)
+        }
+        _ => usage_error("<dump|export|query|tables|exec> <file>"),
     }
 }
 
@@ -298,6 +312,126 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `exec <file> "<SQL>"`: runs one INSERT/UPDATE/DELETE/CREATE TABLE/DROP
+/// TABLE/CREATE INDEX/DROP INDEX statement against a writable `Pager`
+/// (#215's write-path CLI surface — Phase 4 of the V3 epic, #161).
+/// Matches stock `sqlite3`'s CLI behavior of printing nothing on success
+/// for a bare DML/DDL statement (no `.echo`/`-changes` flag requested).
+fn run_exec(path: &Path, sql: &str) -> ExitCode {
+    let (header, pager) = match dump::open(&UnixVfs, path) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
+
+    let schemas = {
+        let mut schema_cursor = TableCursor::new(&pager, &header, 1);
+        match read_schema(&mut schema_cursor, header.text_encoding) {
+            Ok(s) => s,
+            Err(e) => return fatal(path, &e),
+        }
+    };
+
+    let program = match compile_statement(path, sql, &schemas) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    match execute_with_writable_db(&program, pager, header) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => fatal(path, &e),
+    }
+}
+
+/// The first one or two whitespace-separated words of `sql`, uppercased
+/// — enough to pick which statement-specific parser to hand `sql` to
+/// (`CREATE TABLE` vs `CREATE INDEX`/`CREATE UNIQUE INDEX`, `DROP TABLE`
+/// vs `DROP INDEX`), without re-tokenizing the whole statement twice.
+fn leading_keywords(sql: &str) -> Vec<String> {
+    sql.split_whitespace()
+        .take(3)
+        .map(|w| w.to_ascii_uppercase())
+        .collect()
+}
+
+fn compile_statement(
+    path: &Path,
+    sql: &str,
+    schemas: &[sqlite_rs::schema::TableSchema],
+) -> Result<sqlite_rs::vdbe::Program, ExitCode> {
+    let find_schema = |name: &str| -> Result<&sqlite_rs::schema::TableSchema, ExitCode> {
+        schemas
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| fatal(path, &format!("no such table: {name}")))
+    };
+    let find_index_root = |name: &str| -> Result<u32, ExitCode> {
+        schemas
+            .iter()
+            .flat_map(|s| &s.indexes)
+            .find(|idx| idx.name.eq_ignore_ascii_case(name))
+            .map(|idx| idx.root_page)
+            .ok_or_else(|| fatal(path, &format!("no such index: {name}")))
+    };
+
+    let keywords = leading_keywords(sql);
+    let kw = |i: usize| keywords.get(i).map(String::as_str).unwrap_or("");
+
+    match kw(0) {
+        "INSERT" => match parse_insert(sql) {
+            InsertOutcome::Accepted(insert) => {
+                let schema = find_schema(&insert.table)?;
+                compile_insert(&insert, schema).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "UPDATE" => match parse_update(sql) {
+            ParseOutcome::Accepted(update) => {
+                let schema = find_schema(&update.table)?;
+                compile_update(&update, schema).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "DELETE" => match parse_delete(sql) {
+            DeleteOutcome::Accepted(delete) => {
+                let schema = find_schema(&delete.table)?;
+                compile_delete(&delete, schema).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "CREATE" if kw(1) == "TABLE" => match parse_create_table(sql) {
+            CreateTableOutcome::Accepted(create) => {
+                compile_create_table(&create, sql).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "CREATE" if kw(1) == "INDEX" || kw(1) == "UNIQUE" => match parse_create_index(sql) {
+            CreateIndexOutcome::Accepted(ci) => {
+                let schema = find_schema(&ci.table)?;
+                compile_create_index(&ci, schema, sql).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "DROP" if kw(1) == "TABLE" => match parse_drop_table(sql) {
+            DropTableOutcome::Accepted(drop) => {
+                let schema = find_schema(&drop.name)?;
+                compile_drop_table(&drop, schema).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        "DROP" if kw(1) == "INDEX" => match parse_drop_index(sql) {
+            DropIndexOutcome::Accepted(di) => {
+                let root_page = find_index_root(&di.name)?;
+                compile_drop_index(&di, root_page).map_err(|e| fatal(path, &e))
+            }
+            other => Err(fatal(path, &format!("{other:?}"))),
+        },
+        other => Err(fatal(
+            path,
+            &format!("unsupported or unrecognized statement: {other:?} ..."),
+        )),
+    }
 }
 
 fn write_list_row(out: &mut impl Write, values: &[Vec<u8>]) -> io::Result<()> {
