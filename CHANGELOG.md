@@ -4,6 +4,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+V03 write-path parity mirror (#72): `tests/parity/v03.rs`'s stub
+replaced with real cases — INSERT/UPDATE/DELETE, `INSERT ... SELECT`,
+`ON CONFLICT IGNORE`/`REPLACE`, `CREATE`/`DROP TABLE`/`INDEX` — driven
+through the `sqlite-rs exec` CLI and diffed against the pinned
+`sqlite3` oracle across the acceptance/output/schema dimensions.
+`make assurance`'s Parity line moves `V03+ pending` -> `V03 3/4`.
+Along the way, confirmed a known limitation (from #207) applies more
+broadly than documented: an inline column-level `UNIQUE` constraint in
+`CREATE TABLE` creates no backing index either (not just a composite
+table-level constraint) — `compile_create_table` never auto-creates
+one, so UNIQUE enforcement only fires via an explicit
+`CREATE UNIQUE INDEX`. Filed as a follow-up, not fixed here.
+
 ## [0.12.1] - 2026-08-20
 
 UNIQUE constraints on non-rowid columns (#207, split out of #195): new
