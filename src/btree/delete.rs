@@ -344,6 +344,403 @@ mod tests {
         assert_eq!(cells[0].0, 2);
     }
 
+    fn freelist_page_count(pager: &mut Pager) -> u32 {
+        let page1 = pager.get_page_mut(1).unwrap().clone();
+        u32::from_be_bytes(page1[36..40].try_into().unwrap())
+    }
+
+    /// Kills mutants that turn `cell_overflow_page`/`free_overflow_chain`
+    /// into no-ops (`Ok(0)` / `Ok(())`): a deleted row whose payload
+    /// actually spilled to overflow pages must return those pages to the
+    /// freelist, not silently leak them.
+    #[test]
+    fn deleting_a_row_with_overflow_frees_its_overflow_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        // max_local for a 512-byte page is 512 - 35 = 477, so this payload
+        // forces at least one overflow page.
+        let payload = vec![b'x'; 1000];
+        insert_row(&mut pager, &header, 1, 1, &payload).unwrap();
+        assert_eq!(freelist_page_count(&mut pager), 0, "no pages freed yet");
+
+        delete_row(&mut pager, &header, 1, 1).unwrap();
+
+        assert!(
+            freelist_page_count(&mut pager) > 0,
+            "the row's overflow chain must be returned to the freelist on delete"
+        );
+    }
+
+    /// Kills the `!` deletion mutant in `free_overflow_chain`'s cycle
+    /// guard (`!visited.insert(page_num)`): a well-formed, non-cyclic
+    /// chain must free cleanly, not error out on its very first page.
+    #[test]
+    fn free_overflow_chain_frees_every_page_in_a_well_formed_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let _ = &header;
+
+        let p2 = pager.allocate_page().unwrap();
+        let p3 = pager.allocate_page().unwrap();
+        let p4 = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(p2).unwrap();
+            buf[0..4].copy_from_slice(&p3.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(p3).unwrap();
+            buf[0..4].copy_from_slice(&p4.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(p4).unwrap();
+            buf[0..4].copy_from_slice(&0u32.to_be_bytes());
+        }
+        let before = freelist_page_count(&mut pager);
+
+        free_overflow_chain(&mut pager, p2).unwrap();
+
+        assert_eq!(
+            freelist_page_count(&mut pager),
+            before + 3,
+            "every page in the 3-page chain must be freed"
+        );
+    }
+
+    /// A cyclic overflow chain (corrupt on-disk data) must fail cleanly
+    /// rather than loop forever.
+    #[test]
+    fn free_overflow_chain_detects_a_cycle() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let _ = &header;
+
+        let p2 = pager.allocate_page().unwrap();
+        let p3 = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(p2).unwrap();
+            buf[0..4].copy_from_slice(&p3.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(p3).unwrap();
+            buf[0..4].copy_from_slice(&p2.to_be_bytes());
+        }
+
+        let err = free_overflow_chain(&mut pager, p2).unwrap_err();
+        assert!(matches!(err, BtreeError::OverflowChainCycle { .. }));
+    }
+
+    fn write_interior(pager: &mut Pager, page_num: u32, entries: &[(u32, i64)], rightmost: u32) {
+        let header_start = page1_header_start(page_num);
+        let cells: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(child, key)| build_interior_cell(*child, *key))
+            .collect();
+        let buf = pager.get_page_mut(page_num).unwrap();
+        write_interior_page(buf, header_start, page_num, &cells, rightmost).unwrap();
+    }
+
+    fn read_interior(pager: &mut Pager, page_num: u32) -> (Vec<(u32, i64)>, u32) {
+        let header_start = page1_header_start(page_num);
+        let buf = pager.get_page_mut(page_num).unwrap().clone();
+        collect_interior_entries(&buf, header_start, page_num).unwrap()
+    }
+
+    fn page_type_of(pager: &mut Pager, page_num: u32) -> u8 {
+        let header_start = page1_header_start(page_num);
+        let buf = pager.get_page_mut(page_num).unwrap().clone();
+        read_page_type(&buf, header_start, page_num).unwrap()
+    }
+
+    /// Kills the `collapse_into_ancestors -> Ok(())` no-op mutant, and the
+    /// `Some(idx) => entries.remove(idx)` branch's effect: when the
+    /// emptied page is a genuine routing entry (not `rightmost`), that
+    /// entry — and only that entry — must be gone from the rewritten
+    /// parent afterward.
+    #[test]
+    fn collapse_into_ancestors_removes_a_matched_routing_entry() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let child_a = pager.allocate_page().unwrap();
+        let child_c = pager.allocate_page().unwrap();
+        let child_b = pager.allocate_page().unwrap();
+        write_interior(&mut pager, parent, &[(child_a, 10), (child_c, 20)], child_b);
+
+        collapse_into_ancestors(&mut pager, header.usable_page_size(), 1, &[parent], child_a)
+            .unwrap();
+
+        let (entries, rightmost) = read_interior(&mut pager, parent);
+        assert_eq!(
+            entries,
+            vec![(child_c, 20)],
+            "only the matched entry must be removed"
+        );
+        assert_eq!(
+            rightmost, child_b,
+            "rightmost is unrelated to the removed entry and must be untouched"
+        );
+    }
+
+    /// Kills the three mutants on the `None if rightmost == emptied_page`
+    /// guard (forced `true`, forced `false`, `==` -> `!=`): when the
+    /// emptied page genuinely *is* `rightmost` and no other routing entry
+    /// references it, the last remaining entry must be promoted to the
+    /// new `rightmost` and removed from the entry list.
+    #[test]
+    fn collapse_into_ancestors_promotes_last_entry_when_rightmost_emptied() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let child_x = pager.allocate_page().unwrap();
+        let child_a = pager.allocate_page().unwrap();
+        let emptied = pager.allocate_page().unwrap();
+        // Two entries so promoting one leaves the parent non-empty — this
+        // isolates the promote-branch behavior from the (separately
+        // tested) full-collapse cascade that an empty `entries` triggers.
+        write_interior(&mut pager, parent, &[(child_x, 1), (child_a, 5)], emptied);
+
+        collapse_into_ancestors(&mut pager, header.usable_page_size(), 1, &[parent], emptied)
+            .unwrap();
+
+        let (entries, rightmost) = read_interior(&mut pager, parent);
+        assert_eq!(
+            entries,
+            vec![(child_x, 1)],
+            "the promoted entry must be removed from the entry list"
+        );
+        assert_eq!(
+            rightmost, child_a,
+            "child_a must be promoted to rightmost since emptied was rightmost"
+        );
+    }
+
+    /// The mirror case: when `emptied_page` is neither a routing entry
+    /// nor `rightmost`, this must be a hard error — the "always true"
+    /// and `!=` variants of the same guard would silently (and
+    /// incorrectly) promote instead.
+    #[test]
+    fn collapse_into_ancestors_errors_when_emptied_page_is_not_a_child() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let child_a = pager.allocate_page().unwrap();
+        let child_b = pager.allocate_page().unwrap();
+        let unrelated = pager.allocate_page().unwrap();
+        write_interior(&mut pager, parent, &[(child_a, 5)], child_b);
+
+        let err = collapse_into_ancestors(
+            &mut pager,
+            header.usable_page_size(),
+            1,
+            &[parent],
+            unrelated,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BtreeError::MissingChildRoute { .. }));
+    }
+
+    /// Kills the `parent_page == root_page` -> `!=` mutant at the
+    /// entries-drained-to-zero branch: when the parent IS the root, the
+    /// surviving child's content must be relocated into the root page in
+    /// place (`collapse_root`), not spliced into a non-existent
+    /// grandparent.
+    #[test]
+    fn collapse_into_ancestors_collapses_the_root_when_parent_is_root() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let root = 1u32;
+        let surviving_child = pager.allocate_page().unwrap();
+        let emptied = pager.allocate_page().unwrap();
+        // A single-entry root: removing its lone entry drains it to zero.
+        write_interior(&mut pager, root, &[(emptied, 1)], surviving_child);
+        {
+            let header_start = page1_header_start(surviving_child);
+            let buf = pager.get_page_mut(surviving_child).unwrap();
+            write_leaf_page(buf, header_start, surviving_child, &[]).unwrap();
+        }
+        let before_free = freelist_page_count(&mut pager);
+
+        collapse_into_ancestors(
+            &mut pager,
+            header.usable_page_size(),
+            root,
+            &[root],
+            emptied,
+        )
+        .unwrap();
+
+        assert_eq!(
+            page_type_of(&mut pager, root),
+            LEAF_TABLE,
+            "the root must now hold surviving_child's (leaf) content in place"
+        );
+        assert!(
+            freelist_page_count(&mut pager) > before_free,
+            "surviving_child's now-vacated page must be freed"
+        );
+    }
+
+    /// Kills the `splice_child -> Ok(())` no-op mutant along with the
+    /// `parent_page == root_page` -> `!=` sibling above: when the parent
+    /// is NOT the root, the grandparent's reference to it must be
+    /// spliced to point at the surviving child instead, and the drained
+    /// parent page freed.
+    #[test]
+    fn collapse_into_ancestors_splices_into_grandparent_when_parent_is_not_root() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let root = 1u32;
+        let parent = pager.allocate_page().unwrap();
+        let sibling = pager.allocate_page().unwrap();
+        let surviving_child = pager.allocate_page().unwrap();
+        let emptied = pager.allocate_page().unwrap();
+        write_interior(&mut pager, root, &[(parent, 100)], sibling);
+        write_interior(&mut pager, parent, &[(emptied, 1)], surviving_child);
+        let before_free = freelist_page_count(&mut pager);
+
+        collapse_into_ancestors(
+            &mut pager,
+            header.usable_page_size(),
+            root,
+            &[root, parent],
+            emptied,
+        )
+        .unwrap();
+
+        let (root_entries, root_rightmost) = read_interior(&mut pager, root);
+        assert_eq!(
+            root_entries.iter().find(|(child, _)| *child == parent),
+            None,
+            "the drained parent must no longer be referenced by the grandparent"
+        );
+        assert!(
+            root_entries
+                .iter()
+                .any(|(child, _)| *child == surviving_child)
+                || root_rightmost == surviving_child,
+            "surviving_child must be spliced in wherever parent used to be"
+        );
+        assert!(
+            freelist_page_count(&mut pager) > before_free,
+            "the drained parent page must be freed"
+        );
+    }
+
+    /// Direct unit test of `splice_child`, covering its `Some` (matched
+    /// routing entry) branch — kills its `-> Ok(())` no-op mutant and the
+    /// `*child == old_child` -> `!=` mutant.
+    #[test]
+    fn splice_child_replaces_a_matched_routing_entry() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let old_child = pager.allocate_page().unwrap();
+        let new_child = pager.allocate_page().unwrap();
+        let other = pager.allocate_page().unwrap();
+        write_interior(&mut pager, parent, &[(old_child, 7)], other);
+
+        splice_child(&mut pager, &[parent], old_child, new_child).unwrap();
+
+        let (entries, rightmost) = read_interior(&mut pager, parent);
+        assert_eq!(entries, vec![(new_child, 7)]);
+        assert_eq!(rightmost, other);
+    }
+
+    /// Covers `splice_child`'s `None if rightmost == old_child` guard —
+    /// kills its three mutants (forced `true`, forced `false`, `==` ->
+    /// `!=`) the same way `collapse_into_ancestors`'s sibling guard is
+    /// covered above.
+    #[test]
+    fn splice_child_replaces_rightmost_when_old_child_is_rightmost() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let other = pager.allocate_page().unwrap();
+        let old_child = pager.allocate_page().unwrap();
+        let new_child = pager.allocate_page().unwrap();
+        write_interior(&mut pager, parent, &[(other, 3)], old_child);
+
+        splice_child(&mut pager, &[parent], old_child, new_child).unwrap();
+
+        let (entries, rightmost) = read_interior(&mut pager, parent);
+        assert_eq!(
+            entries,
+            vec![(other, 3)],
+            "unrelated entries stay untouched"
+        );
+        assert_eq!(rightmost, new_child);
+    }
+
+    /// The mirror case: `old_child` matches neither a routing entry nor
+    /// `rightmost` — must be a hard error.
+    #[test]
+    fn splice_child_errors_when_old_child_is_not_a_child() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let other = pager.allocate_page().unwrap();
+        let rightmost = pager.allocate_page().unwrap();
+        let unrelated = pager.allocate_page().unwrap();
+        let new_child = pager.allocate_page().unwrap();
+        write_interior(&mut pager, parent, &[(other, 3)], rightmost);
+
+        let err = splice_child(&mut pager, &[parent], unrelated, new_child).unwrap_err();
+        assert!(matches!(err, BtreeError::MissingChildRoute { .. }));
+    }
+
+    /// Kills the `collapse_root -> Ok(())` no-op mutant: the root page's
+    /// content must actually be replaced with `only_child`'s content, and
+    /// `only_child`'s now-vacated page freed.
+    #[test]
+    fn collapse_root_relocates_the_surviving_childs_content_into_the_root() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_row(&mut pager, &header, 1, 1, b"hello").unwrap();
+        let only_child = pager.allocate_page().unwrap();
+        {
+            let header_start = page1_header_start(only_child);
+            let buf = pager.get_page_mut(only_child).unwrap();
+            write_leaf_page(buf, header_start, only_child, &[]).unwrap();
+        }
+        let before_free = freelist_page_count(&mut pager);
+
+        collapse_root(&mut pager, header.usable_page_size(), 1, only_child).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let cells = collect_leaf_cells(&buf, header_start, 1, header.usable_page_size()).unwrap();
+        assert!(
+            cells.is_empty(),
+            "root must now hold only_child's (empty) content, not its own prior row"
+        );
+        assert!(
+            freelist_page_count(&mut pager) > before_free,
+            "only_child's now-vacated page must be freed"
+        );
+    }
+
     /// Regression guard for a real bug found while implementing the
     /// index b-tree delete path (#171): when an interior page drains to
     /// zero routing entries, its surviving `rightmost` child (which may

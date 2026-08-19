@@ -487,4 +487,50 @@ mod tests {
              a page missing from both is orphaned"
         );
     }
+
+    /// Kills the `depth > MAX_PAGES_VISITED` -> `==`/`>=` mutants: at
+    /// exactly `MAX_PAGES_VISITED`, the real `>` guard has NOT yet
+    /// tripped (only depths strictly greater than the max are rejected),
+    /// so a call at that exact depth must still succeed.
+    #[test]
+    fn extract_max_entry_does_not_reject_depth_exactly_at_the_limit() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+
+        let result = extract_max_entry(
+            &mut pager,
+            header.usable_page_size(),
+            1,
+            TextEncoding::Utf8,
+            MAX_PAGES_VISITED,
+        )
+        .unwrap();
+        assert!(
+            result.is_some(),
+            "depth == MAX_PAGES_VISITED must still be processed, not rejected"
+        );
+    }
+
+    /// The mirror case: one past the limit must be rejected.
+    #[test]
+    fn extract_max_entry_rejects_depth_past_the_limit() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_entry(&mut pager, &header, 1, &key("a", 1), TextEncoding::Utf8).unwrap();
+
+        let err = extract_max_entry(
+            &mut pager,
+            header.usable_page_size(),
+            1,
+            TextEncoding::Utf8,
+            MAX_PAGES_VISITED + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BtreeError::TraversalTooLong { .. }));
+    }
 }

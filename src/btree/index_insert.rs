@@ -421,7 +421,7 @@ fn root_split(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::vfs::MemoryVfs;
+    use crate::vfs::{MemoryVfs, PageSource};
     use std::path::Path;
 
     /// A one-page, empty-leaf-root database whose root is an index leaf
@@ -535,5 +535,223 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, vec!["apple", "banana", "cherry"]);
+    }
+
+    fn cell_for(pager: &mut Pager, usable_size: u32, encoding: TextEncoding, n: i64) -> Vec<u8> {
+        let payload = encode_record(&key(&format!("k{n:04}"), n), encoding);
+        encode_index_cell(pager, usable_size, &payload).unwrap()
+    }
+
+    /// Kills the `n / 2` -> `n % 2` mutant in `insert_into_index_leaf`'s
+    /// split: the promoted entry must be the true median (index `n/2` of
+    /// the sorted, post-insert entry list), not whatever `n % 2` happens
+    /// to produce for a given entry count.
+    #[test]
+    fn insert_into_index_leaf_split_promotes_the_true_median_entry() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        // Pre-populate the root leaf with 4 sorted entries (k0001..k0004).
+        let cells: Vec<Vec<u8>> = (1..=4)
+            .map(|n| cell_for(&mut pager, usable_size, TextEncoding::Utf8, n))
+            .collect();
+        {
+            let buf = pager.get_page_mut(1).unwrap();
+            write_index_leaf_page(buf, page1_header_start(1), 1, &cells).unwrap();
+        }
+
+        // Inserting k0005 (sorts last) makes n = 5; a tiny page_len forces
+        // an immediate split regardless of actual byte sizes.
+        let new_payload = encode_record(&key("k0005", 5), TextEncoding::Utf8);
+        insert_into_index_leaf(
+            &mut pager,
+            usable_size,
+            1,
+            1,
+            1,
+            &[],
+            &key("k0005", 5),
+            &new_payload,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+
+        // root(1) must now be interior: one entry (the relocated left
+        // half) plus a rightmost pointer (the right half).
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let (entries, rightmost) = collect_index_interior_entries(
+            &pager,
+            &buf,
+            header_start,
+            1,
+            usable_size,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        let (relocated, promoted_key, _) = &entries[0];
+        assert_eq!(
+            promoted_key,
+            &key("k0003", 3),
+            "the true median (n=5, mid=n/2=2) is k0003"
+        );
+
+        let left_cells = collect_index_leaf_cells(
+            &pager,
+            &pager.read_page(*relocated).unwrap(),
+            0,
+            *relocated,
+            usable_size,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert_eq!(
+            left_cells
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>(),
+            vec![key("k0001", 1), key("k0002", 2)],
+            "left half must hold exactly the entries before the true median"
+        );
+
+        let right_cells = collect_index_leaf_cells(
+            &pager,
+            &pager.read_page(rightmost).unwrap(),
+            0,
+            rightmost,
+            usable_size,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert_eq!(
+            right_cells
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>(),
+            vec![key("k0004", 4), key("k0005", 5)],
+            "right half must hold exactly the entries after the true median"
+        );
+    }
+
+    /// Kills the `n / 2` -> `n % 2` mutant in `insert_into_index_parent`'s
+    /// interior split, the same way the sibling leaf-split test above
+    /// covers `insert_into_index_leaf`.
+    #[test]
+    fn insert_into_index_parent_interior_split_promotes_the_true_median_entry() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let parent = pager.allocate_page().unwrap();
+        let child1 = pager.allocate_page().unwrap();
+        let child2 = pager.allocate_page().unwrap();
+        let child3 = pager.allocate_page().unwrap();
+        let child4 = pager.allocate_page().unwrap();
+        let old_page = pager.allocate_page().unwrap();
+        let new_page = pager.allocate_page().unwrap();
+
+        let bytes1 = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 1);
+        let bytes2 = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 2);
+        let bytes3 = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 3);
+        let bytes4 = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 4);
+        let promoted_bytes = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 5);
+
+        // parent's rightmost is old_page (not a routing entry), so
+        // inserting old_page's split pushes a 5th entry and promotes
+        // rightmost to new_page — same shape `delete_row`'s ancestors use.
+        let cells = vec![
+            build_index_interior_cell(child1, &bytes1),
+            build_index_interior_cell(child2, &bytes2),
+            build_index_interior_cell(child3, &bytes3),
+            build_index_interior_cell(child4, &bytes4),
+        ];
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_index_interior_page(buf, page1_header_start(parent), parent, &cells, old_page)
+                .unwrap();
+        }
+
+        insert_into_index_parent(
+            &mut pager,
+            usable_size,
+            1, // page_len: forces an immediate split
+            &[parent],
+            1,
+            old_page,
+            new_page,
+            &key("k0005", 5),
+            promoted_bytes,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+
+        // n = 5 (child1..child4 + pushed old_page), true median mid = 2:
+        // parent keeps [child1, child2] with child3 promoted to rightmost.
+        let header_start = page1_header_start(parent);
+        let buf = pager.get_page_mut(parent).unwrap().clone();
+        let (entries, rightmost) = collect_index_interior_entries(
+            &pager,
+            &buf,
+            header_start,
+            parent,
+            usable_size,
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        assert_eq!(
+            entries.iter().map(|(c, _, _)| *c).collect::<Vec<_>>(),
+            vec![child1, child2],
+            "parent must keep exactly the entries before the true median"
+        );
+        assert_eq!(
+            rightmost, child3,
+            "the true median's child (n=5, mid=n/2=2) must be promoted to rightmost"
+        );
+    }
+
+    /// Kills the `rightmost == old_page` -> `true` mutant in
+    /// `insert_into_index_parent`: when `old_page` is neither a routing
+    /// entry nor `rightmost`, this must be a hard error, not a silent
+    /// (incorrect) promotion.
+    #[test]
+    fn insert_into_index_parent_errors_when_old_page_is_not_a_child() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let parent = pager.allocate_page().unwrap();
+        let other = pager.allocate_page().unwrap();
+        let rightmost = pager.allocate_page().unwrap();
+        let unrelated = pager.allocate_page().unwrap();
+        let new_page = pager.allocate_page().unwrap();
+        let bytes_other = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 1);
+        let promoted_bytes = cell_for(&mut pager, usable_size, TextEncoding::Utf8, 2);
+
+        {
+            let cells = vec![build_index_interior_cell(other, &bytes_other)];
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_index_interior_page(buf, page1_header_start(parent), parent, &cells, rightmost)
+                .unwrap();
+        }
+
+        let err = insert_into_index_parent(
+            &mut pager,
+            usable_size,
+            usable_size as usize,
+            &[parent],
+            1,
+            unrelated,
+            new_page,
+            &key("k0002", 2),
+            promoted_bytes,
+            TextEncoding::Utf8,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BtreeError::MissingChildRoute { .. }));
     }
 }
