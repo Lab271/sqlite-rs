@@ -59,6 +59,7 @@ fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     (path, schema)
 }
@@ -210,6 +211,7 @@ fn nulls_fixture(label: &str) -> (PathBuf, TableSchema) {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     (path, schema)
 }
@@ -370,6 +372,7 @@ fn order_by_collate_nocase_is_case_insensitive() {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     let rows = our_rows(
         &path,

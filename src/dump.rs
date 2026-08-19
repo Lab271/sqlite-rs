@@ -220,6 +220,7 @@ mod tests {
             strict: false,
             is_virtual: false,
             sql: sql.to_string(),
+            indexes: vec![],
         }
     }
 

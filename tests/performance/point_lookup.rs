@@ -56,6 +56,7 @@ fn fixture(row_count: u32, label: &str) -> (PathBuf, TableSchema) {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     (path, schema)
 }
