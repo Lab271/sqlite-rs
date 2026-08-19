@@ -561,17 +561,18 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
     );
 }
 
-/// Pins today's documented (non-enforcing) behavior for a duplicate
-/// value into a `UNIQUE` index: it does NOT surface as a constraint
-/// violation, and it does not even fail — the b-tree's own duplicate
-/// check (`btree::insert_entry`) compares the *whole* key, index
-/// column(s) plus the trailing rowid, so two rows with the same
-/// `v` but different rowids never collide at the b-tree level. UNIQUE
-/// enforcement is tracked separately (#207) — but without a test, a
-/// future reader could easily believe UNIQUE indexes already reject
-/// duplicates when they don't.
+/// A duplicate value into a `UNIQUE` index is now rejected as a
+/// constraint violation (#207): `compile_insert` probes the candidate
+/// key against the real index via the new `Opcode::NoConflict`
+/// primitive before ever reaching `btree::insert_entry`'s own
+/// whole-key (index column(s) + trailing rowid) duplicate check, so the
+/// two rows' different rowids no longer let a duplicate slip through.
+/// See `unique_constraint_test.rs` for the fuller `ON CONFLICT`
+/// (`IGNORE`/`REPLACE`) coverage — this test only pins that the
+/// default `ABORT` behavior changed from "silently accepted" to
+/// "rejected".
 #[test]
-fn insert_duplicate_key_into_unique_index_is_not_enforced_as_a_constraint() {
+fn insert_duplicate_key_into_unique_index_is_rejected() {
     let Some(oracle) = pinned_oracle() else {
         skip_no_oracle("index_maintenance");
         return;
@@ -597,33 +598,18 @@ fn insert_duplicate_key_into_unique_index_is_not_enforced_as_a_constraint() {
     let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
-    execute_with_writable_db(&program, pager, header)
-        .expect("today's (incorrect) behavior: a duplicate UNIQUE value is not rejected (#207)");
+    let err = execute_with_writable_db(&program, pager, header)
+        .expect_err("a duplicate UNIQUE value must be rejected (#207)");
+    assert!(
+        format!("{err:?}").contains("UNIQUE"),
+        "expected a UNIQUE constraint error, got {err:?}"
+    );
 
-    // The b-tree's own duplicate check compares the whole key (index
-    // column(s) + trailing rowid, see `btree::insert_entry`), so two
-    // rows with the same `v` but different rowids never collide there
-    // — both rows land in the table (not rejected) and the *declared*
-    // UNIQUE index ends up with two entries for the same value, which
-    // `PRAGMA integrity_check` — not a plain `SELECT`, since stock
-    // sqlite3's query planner assumes a UNIQUE index has at most one
-    // match and can short-circuit an `INDEXED BY` equality lookup after
-    // the first hit — correctly flags as `non-unique entry in index`.
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "SELECT count(*) FROM t"),
-        "2",
-        "both rows are written; the duplicate is not rejected"
-    );
-    let integrity = Command::new(&oracle)
-        .arg("-readonly")
-        .arg(&db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&integrity.stdout).contains("non-unique entry"),
-        "expected integrity_check to flag the UNIQUE index as violated, got: {}",
-        String::from_utf8_lossy(&integrity.stdout)
+        "1",
+        "the conflicting row must not be written"
     );
 }
 

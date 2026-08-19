@@ -49,6 +49,12 @@ pub enum Opcode {
     Insert,
     NewRowid,
     IdxDelete,
+    // #207: real-index seek+branch primitive for non-rowid UNIQUE
+    // constraint enforcement — like #194's other V3 write-path opcodes
+    // above, this postdates the V2 oracle harvest, so it's excluded
+    // from `ALL` (never harvested from a V2 `EXPLAIN`) but still fully
+    // dispatched and exhaustiveness-checked.
+    NoConflict,
     // DDL (#215) — schema-mutating statements, each done procedurally in
     // one exec.rs handler rather than decomposed into cursor-driven
     // multi-instruction sequences; never harvested from a V2 oracle
@@ -233,6 +239,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Insert
         | Opcode::NewRowid
         | Opcode::IdxDelete
+        | Opcode::NoConflict
         | Opcode::CreateTable
         | Opcode::DropTable
         | Opcode::CreateIndex
