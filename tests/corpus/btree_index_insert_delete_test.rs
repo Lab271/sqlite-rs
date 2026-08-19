@@ -18,7 +18,7 @@ use sqlite_rs::record::encode_record;
 use sqlite_rs::record::{TextEncoding, Value};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -53,17 +53,6 @@ fn read_header(vfs: &UnixVfs, db: &PathBuf, page_size: u32) -> DatabaseHeader {
     let mut buf = [0u8; 100];
     buf.copy_from_slice(&raw[..100]);
     DatabaseHeader::parse(&buf).unwrap()
-}
-
-fn assert_integrity_ok(oracle: &PathBuf, db: &PathBuf) {
-    let integrity = Command::new(oracle)
-        .arg("-readonly")
-        .arg(db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
 }
 
 fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
@@ -140,7 +129,7 @@ fn insert_single_entry_into_a_secondary_index() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "select a, b from t order by a;"),
         "1|existing\n2|new row"
@@ -211,7 +200,7 @@ fn bulk_insert_forces_index_splits_and_reads_back_in_order() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "select count(*) from t;"),
         n.to_string()
@@ -300,7 +289,7 @@ fn delete_all_entries_leaves_an_empty_index() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "0");
 
     let source_vfs = UnixVfs;
@@ -370,7 +359,7 @@ fn without_rowid_table_insert_and_delete_round_trip() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
 
     let source_vfs = UnixVfs;
     let pager_ro = Pager::open(&source_vfs, &db, page_size).unwrap();

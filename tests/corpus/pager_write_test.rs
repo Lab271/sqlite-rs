@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sqlite_rs::pager::Pager;
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -59,14 +59,7 @@ fn flushed_page_still_opens_and_integrity_checks_in_stock_sqlite3() {
         pager.flush().unwrap();
     }
 
-    let integrity = Command::new(&oracle)
-        .arg("-readonly")
-        .arg(&db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
+    assert_integrity_check_ok(&oracle, &db);
 
     let select = Command::new(&oracle)
         .arg("-readonly")
@@ -116,14 +109,7 @@ fn allocate_then_deallocate_page_still_integrity_checks_in_stock_sqlite3() {
         pager.flush().unwrap();
     }
 
-    let integrity = Command::new(&oracle)
-        .arg("-readonly")
-        .arg(&db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
+    assert_integrity_check_ok(&oracle, &db);
 
     let select = Command::new(&oracle)
         .arg("-readonly")

@@ -127,6 +127,22 @@ pub fn run_oracle(oracle: &Path, db: &Path, mode_args: &[&str], sql: &str) -> St
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Runs `PRAGMA integrity_check` through the oracle and fails the test
+/// unless the result is exactly `"ok"`. The single enforcement point for
+/// #216's acceptance criterion: every corpus-generated write, across every
+/// write path (b-tree insert/delete, index maintenance, pager flush, CLI
+/// DML/DDL), must produce a file stock `sqlite3` considers structurally
+/// sound.
+pub fn assert_integrity_check_ok(oracle: &Path, db: &Path) {
+    let result = run_oracle(oracle, db, &[], "PRAGMA integrity_check;");
+    assert_eq!(
+        result.trim(),
+        "ok",
+        "integrity_check failed for {}",
+        db.display()
+    );
+}
+
 /// The oracle's `-list` rendering of every row of `table`.
 pub fn oracle_list_output(oracle: &Path, db: &Path, table: &str, columns: &[String]) -> String {
     let sql = format!(

@@ -16,7 +16,7 @@ use sqlite_rs::record::{encode_record, TextEncoding, Value};
 use sqlite_rs::schema::read_schema;
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -62,17 +62,6 @@ fn read_header(vfs: &UnixVfs, db: &PathBuf, page_size: u32) -> DatabaseHeader {
     let mut buf = [0u8; 100];
     buf.copy_from_slice(&raw[..100]);
     DatabaseHeader::parse(&buf).unwrap()
-}
-
-fn assert_integrity_ok(oracle: &PathBuf, db: &PathBuf) {
-    let integrity = Command::new(oracle)
-        .arg("-readonly")
-        .arg(db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
 }
 
 fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
@@ -130,7 +119,7 @@ fn insert_single_row_no_split() {
         insert_rows(&mut pager, &header, root, &[(1, "one".to_string())]);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select a, b from t;"), "1|one");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
@@ -166,7 +155,7 @@ fn insert_forces_a_leaf_split() {
         insert_rows(&mut pager, &header, root, &rows);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "80");
     assert_eq!(
         oracle_select(&oracle, &db, "select b from t where a = 1;"),
@@ -210,7 +199,7 @@ fn insert_forces_cascading_splits_and_a_root_split() {
         insert_rows(&mut pager, &header, root, &rows);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "select count(*) from t;"),
         "2000"
@@ -257,7 +246,7 @@ fn bulk_insert_1000_rows_is_oracle_identical() {
         insert_rows(&mut pager, &header, root, &rows);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "select count(*) from t;"),
         "1000"
@@ -309,7 +298,7 @@ fn insert_with_overflow_payload_combined_with_a_split() {
         insert_rows(&mut pager, &header, root, &rows);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "10");
     assert_eq!(
         oracle_select(&oracle, &db, "select length(b) from t where a = 1;"),
@@ -375,7 +364,7 @@ fn insert_into_page_one_root_preserves_the_file_header_across_a_split() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     // The original `t` entry, seeded before any insert, must have
     // survived every page-1 rewrite unchanged.
     assert_eq!(

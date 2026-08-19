@@ -6,13 +6,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-V3 phase 4 in progress (#161): write-path CLI surface (#215). New
-`exec` CLI subcommand wires `INSERT`/`UPDATE`/`DELETE` through existing
-codegen, plus new `CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP
-INDEX` codegen (none existed before this ticket). Held at `Unreleased`
-rather than bumped to 0.12.0 — phase 4 isn't complete until #216
-(cross-validation harness) and #217 (exit gate) also close, per this
-project's one-minor-per-completed-phase versioning policy.
+V3 phase 4 in progress (#161): write-path CLI surface (#215); corpus
+`PRAGMA integrity_check` cross-validation centralized into a single
+`assert_integrity_check_ok` oracle helper, replacing per-file
+duplicates across b-tree insert/delete, index maintenance, pager
+flush, and CLI write-path tests (#216). New `exec` CLI subcommand
+wires `INSERT`/`UPDATE`/`DELETE` through existing codegen, plus new
+`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP INDEX` codegen (none
+existed before #215). Held at `Unreleased` rather than bumped to
+0.12.0 — phase 4 isn't complete until #217 (exit gate) also closes,
+per this project's one-minor-per-completed-phase versioning policy.
 
 ## [0.11.1] - 2026-08-19
 
