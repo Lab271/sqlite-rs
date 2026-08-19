@@ -442,3 +442,55 @@ fn insert_on_desc_index_is_rejected_not_silently_miskeyed() {
         "expected Unsupported, got {err:?}"
     );
 }
+
+/// `INSERT OR REPLACE` displacing an existing row must remove that
+/// row's secondary-index entries before writing the replacement's —
+/// `emit_pk_conflict`'s `Replace` arm predates index maintenance and
+/// wasn't updated to call `emit_index_key_ops` when #196 landed,
+/// leaving a stale index entry for the displaced row's old value.
+#[test]
+fn insert_or_replace_removes_the_displaced_rows_index_entry() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("or-replace");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); \
+         CREATE INDEX idx_v ON t(v); \
+         INSERT INTO t VALUES (1, 'a');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let insert = match parse_insert("INSERT OR REPLACE INTO t VALUES (1, 'b')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT count(*) FROM t INDEXED BY idx_v WHERE v = 'a'"
+        ),
+        "0"
+    );
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_v WHERE v = 'b'"
+        ),
+        "1"
+    );
+}

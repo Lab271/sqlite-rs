@@ -272,7 +272,7 @@ fn compile_row(
                     let seek_addr =
                         em.emit(Instruction::new(Opcode::SeekRowid, TABLE_CURSOR, 0, r));
                     em.patch_p2(seek_addr, no_conflict);
-                    emit_pk_conflict(em, action, row_skip, schema, idx);
+                    emit_pk_conflict(em, reg, action, row_skip, schema, idx)?;
                     em.place(no_conflict);
                     r
                 }
@@ -472,16 +472,32 @@ fn emit_constraint_violation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_pk_conflict(
     em: &mut Emitter,
+    reg: &mut RegAlloc,
     action: ConflictAction,
     row_skip: Label,
     schema: &TableSchema,
     idx: usize,
-) {
+) -> Result<(), CodegenError> {
     match action {
         ConflictAction::Ignore => em.goto(row_skip),
         ConflictAction::Replace => {
+            // `SeekRowid` above landed the cursor on the row this
+            // INSERT is about to displace — its secondary-index
+            // entries must be removed before it's deleted, exactly
+            // like `delete.rs`'s ordinary `DELETE` path, or they go
+            // stale (`#196` follow-up: this conflict path predates
+            // index maintenance and wasn't updated when it landed).
+            emit_index_key_ops(
+                em,
+                reg,
+                schema,
+                TABLE_CURSOR,
+                FIRST_INDEX_CURSOR,
+                Opcode::IdxDelete,
+            )?;
             em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
         }
         ConflictAction::Abort | ConflictAction::Fail | ConflictAction::Rollback => {
@@ -499,4 +515,5 @@ fn emit_pk_conflict(
             ));
         }
     }
+    Ok(())
 }
