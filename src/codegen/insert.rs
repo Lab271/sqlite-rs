@@ -17,15 +17,16 @@
 //! DISTINCT/LIMIT machinery `compile_select` uses — with a `sink` that
 //! feeds each projected row's registers into [`compile_row`] instead of
 //! emitting `ResultRow`. `compile_row` itself is source-agnostic: its
-//! per-column value used to always be a literal-or-computed `Expr`
-//! (`RowSource::Exprs`); it now also accepts a row of already-populated
-//! registers (`RowSource::Registers`) from the SELECT scan, since every
-//! constraint check downstream of "the value is in register `r`" (NOT
-//! NULL, CHECK, `MakeRecord`/`Insert`, index maintenance) doesn't care
-//! how `r` was populated. The SELECT's source-table scan gets its own
-//! cursor numbers (via `select::ScanCursors`), offset above this
-//! module's target-table/index cursors, so the two scans never collide
-//! within the same program.
+//! per-column value comes from a `column_at(pos)` closure that either
+//! hands back a literal-or-computed `Expr` (`VALUES`/`DEFAULT VALUES`)
+//! or a [`ColumnSource::Reg`] already populated by the SELECT scan,
+//! since every constraint check downstream of "the value is in
+//! register `r`" (NOT NULL, CHECK, `MakeRecord`/`Insert`, index
+//! maintenance) doesn't care how `r` was populated. The SELECT's
+//! source-table scan gets its own cursor numbers (via
+//! `select::ScanCursors`), offset above this module's target-table/
+//! index cursors, so the two scans never collide within the same
+//! program.
 //!
 //! Known simplifications (deferred to follow-up tickets, not chased
 //! here):
@@ -61,7 +62,7 @@ use crate::codegen::select::{
 use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
     ColumnConstraint, ConflictAction, DefaultValue, Expr, ExprKind, Insert, InsertSource, Literal,
-    Select, TableConstraint,
+    TableConstraint,
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
@@ -94,10 +95,15 @@ fn is_null_literal(expr: &Expr) -> bool {
 /// it: a literal-or-computed `Expr` it must still compile itself
 /// (`VALUES`/`DEFAULT VALUES`), or a register a `SELECT` scan already
 /// populated (#208) — the latter is never statically known to be a
-/// `NULL` literal, since its value isn't known until runtime.
-#[derive(Debug, Clone, Copy)]
-enum ColumnSource<'a> {
-    Expr(&'a Expr),
+/// `NULL` literal, since its value isn't known until runtime. Owns its
+/// `Expr` (rather than borrowing it) so this type carries no lifetime
+/// parameter, per this codebase's qualified-subset gate (`make
+/// mvl-limit`) — `Expr` is cheap enough to clone (used the same way
+/// throughout `insert.rs`/`select.rs` already, e.g. `ColumnPlan`'s own
+/// `checks: Vec<Expr>`).
+#[derive(Debug, Clone)]
+enum ColumnSource {
+    Expr(Expr),
     Reg(i32),
 }
 
@@ -116,34 +122,14 @@ fn compile_column_source(
     reg: &mut RegAlloc,
     schema: &TableSchema,
     cursor: i32,
-    source: ColumnSource<'_>,
+    source: &ColumnSource,
 ) -> Result<i32, CodegenError> {
     match source {
         ColumnSource::Expr(expr) => compile_value(em, reg, schema, cursor, expr),
         ColumnSource::Reg(src) => {
             let dest = reg.alloc();
-            em.emit(Instruction::new(Opcode::Copy, src, dest, 0));
+            em.emit(Instruction::new(Opcode::Copy, *src, dest, 0));
             Ok(dest)
-        }
-    }
-}
-
-/// Where `compile_row` gets each target column's value from: a literal
-/// `VALUES` row's `Expr`s (positionally mapped to `target_columns`, same
-/// as before #208), or a `SELECT`-projected row already sitting in a
-/// contiguous register run (`first..first+count`).
-enum RowSource<'a> {
-    Exprs(&'a [Expr]),
-    Registers { first: i32, count: usize },
-}
-
-impl<'a> RowSource<'a> {
-    fn at(&self, pos: usize) -> Option<ColumnSource<'a>> {
-        match self {
-            RowSource::Exprs(values) => values.get(pos).map(ColumnSource::Expr),
-            RowSource::Registers { first, count } => (pos < *count)
-                .then(|| first.saturating_add(i32::try_from(pos).unwrap_or(i32::MAX)))
-                .map(ColumnSource::Reg),
         }
     }
 }
@@ -168,20 +154,6 @@ fn emit_new_rowid(em: &mut Emitter, dest: i32, schema: &TableSchema, is_autoincr
     } else {
         em.emit(Instruction::new(Opcode::NewRowid, TABLE_CURSOR, dest, 0));
     }
-}
-
-/// Where an `INSERT`'s rows come from: literal `VALUES`/`DEFAULT
-/// VALUES` rows (validated/compiled exactly as before #208), or a
-/// `SELECT` whose FROM-table schema the caller must resolve and pass as
-/// `select_schema` (codegen doesn't do its own name->schema lookups —
-/// see `select.rs`/`insert.rs`'s callers in `src/bin/sqlite-rs.rs`).
-enum RowsSource<'a> {
-    Literal(Vec<Vec<Expr>>),
-    /// Carries the already-resolved `select_schema` alongside the
-    /// `Select` itself (rather than re-consulting the `Option` the
-    /// caller passed in) so the later compile phase can't hit a `None`
-    /// it already ruled out during row-shape validation.
-    Select(&'a Select, &'a TableSchema),
 }
 
 /// Compiles `insert` against `schema` (the resolved target table) into
@@ -259,38 +231,39 @@ pub fn compile_insert(
         None => (0..schema.columns.len()).collect(),
     };
 
-    let rows_source = match &insert.source {
-        InsertSource::Values(rows) => {
-            for row in rows {
-                if !row.is_empty() && row.len() != target_columns.len() {
-                    return Err(CodegenError::RowShapeMismatch {
-                        table: schema.name.clone(),
-                        expected: target_columns.len(),
-                        found: row.len(),
-                    });
-                }
-            }
-            RowsSource::Literal(rows.clone())
-        }
-        InsertSource::DefaultValues => RowsSource::Literal(vec![Vec::new()]),
-        InsertSource::Select(select) => {
-            let Some(select_schema) = select_schema else {
-                return Err(CodegenError::Unsupported {
-                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
-                        .to_string(),
-                });
-            };
-            let found = select_result_column_count(select, select_schema);
-            if found != target_columns.len() {
+    if let InsertSource::Values(rows) = &insert.source {
+        for row in rows {
+            if !row.is_empty() && row.len() != target_columns.len() {
                 return Err(CodegenError::RowShapeMismatch {
                     table: schema.name.clone(),
                     expected: target_columns.len(),
-                    found,
+                    found: row.len(),
                 });
             }
-            RowsSource::Select(select, select_schema)
         }
-    };
+    }
+    // Validated up front (rather than inline in the `Select` compile arm
+    // below) so a missing `select_schema` or a row-shape mismatch is
+    // reported before any code is emitted, matching the literal-`VALUES`
+    // check above.
+    if let InsertSource::Select(select) = &insert.source {
+        let found = match select_schema {
+            Some(select_schema) => select_result_column_count(select, select_schema),
+            None => {
+                return Err(CodegenError::Unsupported {
+                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
+                        .to_string(),
+                })
+            }
+        };
+        if found != target_columns.len() {
+            return Err(CodegenError::RowShapeMismatch {
+                table: schema.name.clone(),
+                expected: target_columns.len(),
+                found,
+            });
+        }
+    }
 
     let action = insert.or_action.unwrap_or(ConflictAction::Abort);
 
@@ -323,9 +296,9 @@ pub fn compile_insert(
     ));
     open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
 
-    match rows_source {
-        RowsSource::Literal(rows) => {
-            for values in &rows {
+    match &insert.source {
+        InsertSource::Values(rows) => {
+            for values in rows {
                 compile_row(
                     &mut em,
                     &mut reg,
@@ -334,14 +307,39 @@ pub fn compile_insert(
                     &plans,
                     &table_checks,
                     &target_columns,
-                    &RowSource::Exprs(values),
+                    |pos| values.get(pos).cloned().map(ColumnSource::Expr),
                     rowid_alias,
                     action,
                     is_autoincrement,
                 )?;
             }
         }
-        RowsSource::Select(select, select_schema) => {
+        InsertSource::DefaultValues => {
+            compile_row(
+                &mut em,
+                &mut reg,
+                schema,
+                &check_schema,
+                &plans,
+                &table_checks,
+                &target_columns,
+                |_pos| None,
+                rowid_alias,
+                action,
+                is_autoincrement,
+            )?;
+        }
+        InsertSource::Select(select) => {
+            // Re-checked (rather than trusted from the validation above)
+            // so this arm never needs an infallible unwrap: `Option` is
+            // `Copy` for a `&TableSchema`, so this is the same value,
+            // not a second lookup.
+            let Some(select_schema) = select_schema else {
+                return Err(CodegenError::Unsupported {
+                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
+                        .to_string(),
+                });
+            };
             // The select's source-table scan needs cursor numbers of its
             // own, distinct from this INSERT's target-table/index
             // cursors above — offset above the last index cursor
@@ -363,6 +361,7 @@ pub fn compile_insert(
             ));
             let end_label = em.new_label();
             let mut sink = |em: &mut Emitter, reg: &mut RegAlloc, first: i32, count: i32| {
+                let count = usize::try_from(count).unwrap_or(0);
                 compile_row(
                     em,
                     reg,
@@ -371,9 +370,10 @@ pub fn compile_insert(
                     &plans,
                     &table_checks,
                     &target_columns,
-                    &RowSource::Registers {
-                        first,
-                        count: usize::try_from(count).unwrap_or(0),
+                    |pos| {
+                        (pos < count)
+                            .then(|| first.saturating_add(i32::try_from(pos).unwrap_or(i32::MAX)))
+                            .map(ColumnSource::Reg)
                     },
                     rowid_alias,
                     action,
@@ -445,6 +445,12 @@ pub(crate) fn column_plans(
     plans
 }
 
+/// `column_at(pos)` resolves the value supplied for the `pos`-th
+/// position in `insert.columns`' (or the schema's default) order — a
+/// literal `VALUES`/`DEFAULT VALUES` row's `Expr` at that position, or
+/// (#208) the SELECT-projected row's `pos`-th register — generic
+/// (rather than a boxed/`dyn` closure) per this codebase's
+/// qualified-subset gate (`make mvl-limit`).
 #[allow(clippy::too_many_arguments)]
 fn compile_row(
     em: &mut Emitter,
@@ -454,19 +460,19 @@ fn compile_row(
     plans: &[ColumnPlan],
     table_checks: &[Expr],
     target_columns: &[usize],
-    row_source: &RowSource<'_>,
+    mut column_at: impl FnMut(usize) -> Option<ColumnSource>,
     rowid_alias: Option<usize>,
     action: ConflictAction,
     is_autoincrement: bool,
 ) -> Result<(), CodegenError> {
-    let mut value_sources: Vec<Option<ColumnSource<'_>>> = vec![None; schema.columns.len()];
+    let mut value_sources: Vec<Option<ColumnSource>> = vec![None; schema.columns.len()];
     for (pos, &col_idx) in target_columns.iter().enumerate() {
-        if let (Some(source), Some(slot)) = (row_source.at(pos), value_sources.get_mut(col_idx)) {
+        if let (Some(source), Some(slot)) = (column_at(pos), value_sources.get_mut(col_idx)) {
             *slot = Some(source);
         }
     }
     let value_source_at =
-        |idx: usize| -> Option<ColumnSource<'_>> { value_sources.get(idx).copied().flatten() };
+        |idx: usize| -> Option<ColumnSource> { value_sources.get(idx).and_then(Option::clone) };
 
     let row_skip = em.new_label();
 
@@ -479,7 +485,7 @@ fn compile_row(
                 .filter(|source| !matches!(source, ColumnSource::Expr(e) if is_null_literal(e)));
             match explicit {
                 Some(source) => {
-                    let r = compile_column_source(em, reg, schema, TABLE_CURSOR, source)?;
+                    let r = compile_column_source(em, reg, schema, TABLE_CURSOR, &source)?;
                     let no_conflict = em.new_label();
                     let seek_addr =
                         em.emit(Instruction::new(Opcode::SeekRowid, TABLE_CURSOR, 0, r));
@@ -519,16 +525,16 @@ fn compile_row(
 
         let provided = value_source_at(idx);
         let use_default = provided.is_none()
-            || (matches!(provided, Some(ColumnSource::Expr(e)) if is_null_literal(e))
+            || (matches!(&provided, Some(ColumnSource::Expr(e)) if is_null_literal(e))
                 && action == ConflictAction::Replace
                 && plan.default.is_some());
-        let chosen: Option<ColumnSource<'_>> = if use_default {
-            plan.default.as_ref().map(ColumnSource::Expr).or(provided)
+        let chosen: Option<ColumnSource> = if use_default {
+            plan.default.clone().map(ColumnSource::Expr).or(provided)
         } else {
             provided
         };
 
-        let r = match chosen {
+        let r = match &chosen {
             Some(source) => compile_column_source(em, reg, schema, TABLE_CURSOR, source)?,
             None => {
                 let r = reg.alloc();

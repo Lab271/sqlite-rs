@@ -76,14 +76,6 @@ impl ScanCursors {
     }
 }
 
-/// What to do with each projected row's `(first_register, count)` run,
-/// in place of always emitting `ResultRow` — `compile_select` passes a
-/// sink that does exactly that; #208's `INSERT ... SELECT` passes one
-/// that feeds the row into `insert.rs`'s per-row constraint-check/write
-/// path instead.
-pub(crate) type RowSink<'a> =
-    dyn FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError> + 'a;
-
 /// Compiles `select` against `schema` (the resolved `FROM` table) into
 /// a `Program`. Single-table V2 scope only — no joins/subqueries.
 pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, CodegenError> {
@@ -126,16 +118,21 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
 /// `Init`/`OpenRead`/`Halt` bracketing — factored out so #208's `INSERT
 /// ... SELECT` codegen can drive the same scan (with its own cursor
 /// numbers and its own `OpenRead` already emitted) and substitute a
-/// different per-row `sink` in place of `ResultRow`.
-pub(crate) fn compile_select_scan(
+/// different per-row `sink` in place of `ResultRow`. Generic over `sink`
+/// (rather than a `dyn FnMut` trait object) per this codebase's
+/// qualified-subset gate (`make mvl-limit`) — no dynamic dispatch.
+pub(crate) fn compile_select_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
-    sink: &mut RowSink<'_>,
-) -> Result<(), CodegenError> {
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
         compile_direct_scan(em, reg, select, schema, cursors, end_label, sink)
@@ -412,14 +409,17 @@ fn compile_row_values(
 /// `ResultRow`, so this same call site works for `compile_select`
 /// (whose sink emits `ResultRow`) and #208's `INSERT ... SELECT` (whose
 /// sink feeds the row into `insert.rs`'s per-row write path).
-fn emit_row_via_sink(
+fn emit_row_via_sink<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursor: i32,
-    sink: &mut RowSink<'_>,
-) -> Result<(), CodegenError> {
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
     let cols = result_columns(select, schema);
     let (first, count) = compile_row_values(em, reg, schema, &cols, cursor)?;
     sink(em, reg, first, i32::try_from(count).unwrap_or(0))
@@ -555,15 +555,18 @@ fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
 /// all fall through to the ordinary scan and stay in V4 per the issue's
 /// bounded scope.
 #[allow(clippy::too_many_arguments)]
-fn try_compile_rowid_seek(
+fn try_compile_rowid_seek<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
-    sink: &mut RowSink<'_>,
-) -> Result<bool, CodegenError> {
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         // A single-row result is already distinct — but keeping this
         // path free of the ephemeral-index bookkeeping means it can
@@ -620,15 +623,18 @@ fn try_compile_rowid_seek(
     Ok(true)
 }
 
-fn compile_direct_scan(
+fn compile_direct_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
-    sink: &mut RowSink<'_>,
-) -> Result<(), CodegenError> {
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
     if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, sink)? {
         return Ok(());
     }
@@ -685,7 +691,7 @@ fn compile_direct_scan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compile_sorted_scan(
+fn compile_sorted_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
@@ -693,8 +699,11 @@ fn compile_sorted_scan(
     order_by_plans: &[OrderByPlan],
     cursors: ScanCursors,
     end_label: Label,
-    sink: &mut RowSink<'_>,
-) -> Result<(), CodegenError> {
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         em.emit(Instruction::new(
             Opcode::OpenEphemeral,
