@@ -8,6 +8,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 No changes yet.
 
+## [0.11.0] - 2026-08-19
+
+V3 phase 3 complete (#161): write codegen + VDBE. Auto-index
+maintenance on write (#196) — `INSERT`/`DELETE`/`UPDATE` codegen now
+opens a write cursor per index and emits `IdxInsert`/`IdxDelete` pairs
+per row, keeping secondary indexes in sync with table data. `DESC`
+index columns and invalid/untrusted `sqlite_master` root pages are
+rejected outright rather than silently mis-keyed or misdirected.
+
 ## [0.10.1] - 2026-08-18
 
 Fixes from `/review` of V3 phase 2 (#188/#190/#191/#192/#193): a parser
