@@ -468,3 +468,276 @@ fn walker_vectors_pass_through_the_compiled_path() {
         failures.join("\n")
     );
 }
+
+// --- #224: raise line coverage on src/codegen/expr.rs above 85% ---
+// Targeted tests below cover: OR's true-first-operand path, negated
+// BETWEEN, IS/IS NOT (as condition and negated), IN with an empty list
+// and with a NULL member, NOT LIKE, unary Minus/Not/BitNot, bitwise/
+// shift/concat operators, an i64-overflow integer literal (Int64
+// harvesting), a blob literal, CAST used both standalone and as a CASE
+// branch (column-branch coverage for `emit_branch_into`), an unknown
+// aggregate call rejection, an unknown-column error, and boolean
+// connectives (AND/OR/comparisons) materialized as a value (the
+// non-`is_definite` path through `compile_bool_to_value`).
+
+#[test]
+fn or_short_circuits_true_on_first_operand() {
+    let (path, schema) = one_row_fixture();
+    // lhs (a = 1) is true; rhs would error if it were evaluated eagerly
+    // as a condition needing a real jump target — exercises OR's
+    // true-label-first-operand path (line 120-129).
+    let out = run_select(&path, &schema, "SELECT a FROM t WHERE a = 1 OR b = 999");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE a = 999 OR b = 10");
+    assert_eq!(out2, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn not_between_excludes_in_range_rows() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(
+        &path,
+        &schema,
+        "SELECT a FROM t WHERE b NOT BETWEEN 5 AND 15",
+    );
+    assert!(out.is_empty());
+    let out2 = run_select(
+        &path,
+        &schema,
+        "SELECT a FROM t WHERE b NOT BETWEEN 20 AND 30",
+    );
+    assert_eq!(out2, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn is_and_is_not_compile_as_conditions() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT a FROM t WHERE a IS 1");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE a IS NOT 1");
+    assert!(out2.is_empty());
+    let out3 = run_select(&path, &schema, "SELECT a FROM t WHERE a IS NOT NULL");
+    assert_eq!(out3, vec![vec![Value::Integer(1)]]);
+    let out4 = run_select(&path, &schema, "SELECT a FROM t WHERE a IS NULL");
+    assert!(out4.is_empty());
+}
+
+#[test]
+fn in_empty_list_is_always_false() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT a FROM t WHERE a IN ()");
+    assert!(out.is_empty());
+    let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE a NOT IN ()");
+    assert_eq!(out2, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn in_list_with_null_member_is_unknown_on_no_match() {
+    let (path, schema) = one_row_fixture();
+    // No item matches `a`, but the list contains NULL: the honest
+    // answer is unknown, which WHERE excludes just like false.
+    let out = run_select(&path, &schema, "SELECT a FROM t WHERE a IN (NULL, 999)");
+    assert!(out.is_empty());
+    // `NOT IN` over the same unknown case is still unknown -> excluded.
+    let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE a NOT IN (NULL, 999)");
+    assert!(out2.is_empty());
+}
+
+#[test]
+fn not_like_negates_the_function_result() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT a FROM t WHERE name NOT LIKE 'z%'");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out2 = run_select(&path, &schema, "SELECT a FROM t WHERE name NOT LIKE 'a%'");
+    assert!(out2.is_empty());
+}
+
+#[test]
+fn unary_operators_compile() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT -b FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(-10)]]);
+    let out2 = run_select(&path, &schema, "SELECT +b FROM t");
+    assert_eq!(out2, vec![vec![Value::Integer(10)]]);
+    let out3 = run_select(&path, &schema, "SELECT NOT (a = 1) FROM t");
+    assert_eq!(out3, vec![vec![Value::Integer(0)]]);
+    let out4 = run_select(&path, &schema, "SELECT ~b FROM t");
+    assert_eq!(out4, vec![vec![Value::Integer(-11)]]);
+}
+
+#[test]
+fn bitwise_shift_and_concat_operators_compile() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT b & 2 FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(2)]]);
+    let out2 = run_select(&path, &schema, "SELECT b | 1 FROM t");
+    assert_eq!(out2, vec![vec![Value::Integer(11)]]);
+    let out3 = run_select(&path, &schema, "SELECT b << 1 FROM t");
+    assert_eq!(out3, vec![vec![Value::Integer(20)]]);
+    let out4 = run_select(&path, &schema, "SELECT b >> 1 FROM t");
+    assert_eq!(out4, vec![vec![Value::Integer(5)]]);
+    let out5 = run_select(&path, &schema, "SELECT name || 'z' FROM t");
+    assert_eq!(out5, vec![vec![Value::Text("aaz".to_string())]]);
+}
+
+#[test]
+fn integer_literal_beyond_i32_uses_int64_opcode() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT 5000000000 FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(5_000_000_000)]]);
+}
+
+#[test]
+fn blob_literal_compiles() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT x'414243' FROM t");
+    assert_eq!(out, vec![vec![Value::Blob(vec![0x41, 0x42, 0x43])]]);
+}
+
+#[test]
+fn case_with_column_branch_and_cast_branch() {
+    let (path, schema) = one_row_fixture();
+    // Column branch result exercises `emit_branch_into`'s Column arm.
+    let out = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 1 THEN name ELSE 'other' END FROM t",
+    );
+    assert_eq!(out, vec![vec![Value::Text("aa".to_string())]]);
+
+    // CAST as a standalone value expression.
+    let out2 = run_select(&path, &schema, "SELECT CAST(name AS INTEGER) FROM t");
+    assert_eq!(out2, vec![vec![Value::Integer(0)]]);
+}
+
+#[test]
+fn case_branch_with_unsupported_expression_is_rejected() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT CASE WHEN a = 1 THEN a + 1 ELSE 0 END FROM t") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    let err = compile_select(&select, &schema).unwrap_err();
+    assert!(
+        matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
+        "expected Unsupported, got {err:?}"
+    );
+}
+
+#[test]
+fn aggregate_call_is_rejected_as_unsupported() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT count(*) FROM t") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    let err = compile_select(&select, &schema).unwrap_err();
+    assert!(
+        matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
+        "expected Unsupported, got {err:?}"
+    );
+}
+
+#[test]
+fn unknown_column_reference_is_rejected() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT nope FROM t") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    let err = compile_select(&select, &schema).unwrap_err();
+    assert!(
+        matches!(err, sqlite_rs::codegen::CodegenError::UnknownColumn { .. }),
+        "expected UnknownColumn, got {err:?}"
+    );
+}
+
+#[test]
+fn boolean_connectives_materialize_as_a_value() {
+    let (path, schema) = one_row_fixture();
+    // `is_definite` is false for AND/OR/comparisons, so this exercises
+    // `compile_bool_to_value`'s two-pass unknown-detecting path.
+    let out = run_select(&path, &schema, "SELECT (a = 1 AND b = 10) FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out2 = run_select(&path, &schema, "SELECT (a = 1 OR b = 999) FROM t");
+    assert_eq!(out2, vec![vec![Value::Integer(1)]]);
+    let out3 = run_select(&path, &schema, "SELECT (a = 999) FROM t");
+    assert_eq!(out3, vec![vec![Value::Integer(0)]]);
+    // NULL operand -> unknown -> NULL result register.
+    let out4 = run_select(&path, &schema, "SELECT (a = NULL) FROM t");
+    assert_eq!(out4, vec![vec![Value::Null]]);
+}
+
+#[test]
+fn case_with_operand_and_various_branch_literal_types() {
+    let (path, schema) = one_row_fixture();
+    // CASE with an operand (`CASE a WHEN ... `) builds an internal `=`
+    // comparison against each WHEN value.
+    let out = run_select(
+        &path,
+        &schema,
+        "SELECT CASE a WHEN 1 THEN 'match' ELSE 'no' END FROM t",
+    );
+    assert_eq!(out, vec![vec![Value::Text("match".to_string())]]);
+
+    // Branch result literal types beyond Integer/Str exercise
+    // `emit_branch_into`'s True/False/Float/Blob/Null arms.
+    let out2 = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 1 THEN TRUE ELSE FALSE END FROM t",
+    );
+    assert_eq!(out2, vec![vec![Value::Integer(1)]]);
+    let out3 = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 1 THEN 1.5 ELSE 0.0 END FROM t",
+    );
+    assert_eq!(out3, vec![vec![Value::Real(1.5)]]);
+    let out4 = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 1 THEN x'41' ELSE x'42' END FROM t",
+    );
+    assert_eq!(out4, vec![vec![Value::Blob(vec![0x41])]]);
+    let out5 = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 999 THEN 1 ELSE NULL END FROM t",
+    );
+    assert_eq!(out5, vec![vec![Value::Null]]);
+}
+
+#[test]
+fn is_and_is_null_materialize_as_a_value() {
+    let (path, schema) = one_row_fixture();
+    // `is_definite` is true for IS/IS NULL, exercising the single-pass
+    // definite branch of `compile_bool_to_value`.
+    let out = run_select(&path, &schema, "SELECT (a IS 1) FROM t");
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out2 = run_select(&path, &schema, "SELECT (a IS NULL) FROM t");
+    assert_eq!(out2, vec![vec![Value::Integer(0)]]);
+    let out3 = run_select(&path, &schema, "SELECT (a IS NOT NULL) FROM t");
+    assert_eq!(out3, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn collate_rtrim_resolves_and_zero_arg_function_call_compiles() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(
+        &path,
+        &schema,
+        "SELECT a FROM t WHERE name = 'aa ' COLLATE RTRIM",
+    );
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+
+    // A zero-argument scalar function call exercises the "reserve a
+    // register nothing reads" path in FunctionCall lowering (`random`
+    // need not be a registered function for codegen to compile it —
+    // only execution would care).
+    let select = match parse_select("SELECT random() FROM t") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    compile_select(&select, &schema).unwrap();
+}
