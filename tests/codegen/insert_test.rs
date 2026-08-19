@@ -119,6 +119,7 @@ fn not_null_violation_halts_and_inserts_nothing() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     let err = run_insert(
@@ -152,6 +153,7 @@ fn valid_row_round_trips() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(
@@ -186,6 +188,7 @@ fn default_value_applied_when_column_omitted() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(
@@ -223,6 +226,7 @@ fn check_violation_halts() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     let err = run_insert(
@@ -268,6 +272,7 @@ fn primary_key_conflict_aborts_by_default() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(
@@ -312,6 +317,7 @@ fn primary_key_conflict_or_ignore_skips_the_row() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(
@@ -353,6 +359,7 @@ fn primary_key_conflict_or_replace_overwrites_the_row() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(
@@ -394,6 +401,7 @@ fn omitted_rowid_alias_is_auto_assigned() {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     };
 
     run_insert(

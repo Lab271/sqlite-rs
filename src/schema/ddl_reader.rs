@@ -1,20 +1,24 @@
 //! `sqlite_master` decode + minimal DDL reader. Lives outside
 //! `src/parser/` by design (spec 002-parser Requirement 5): zero
-//! dependency on the future full SQL parser, so schema decoding keeps
-//! working with the parser feature-gated off (trivially true today,
-//! since no parser module exists yet — re-verify this claim when one
-//! lands).
+//! dependency on the full SQL parser, so schema decoding keeps working
+//! with the parser feature-gated off. `src/parser/` now exists (and
+//! already has a `CREATE INDEX` AST/parser), but this module deliberately
+//! does not call into it — see #211.
 //!
 //! Unparseable DDL (e.g. a virtual table) degrades to raw-row access
 //! (`columns: vec![]`), never an error — Tier 0's "graceful unknowns"
-//! (spec 001-architecture Requirement 4).
+//! (spec 001-architecture Requirement 4). The same rule extends to
+//! `CREATE INDEX` entries (#211): an index this reader can't find a
+//! column list for (e.g. an auto-index, whose `sqlite_master.sql` is
+//! `NULL`) is silently omitted from `TableSchema::indexes`.
 //!
 //! The DDL parser here is deliberately naive, matching spike 005 (#12)'s
 //! prototype: no quoted/bracketed identifiers with embedded whitespace,
 //! no dialect edge cases beyond what the real corpus fixtures exercise.
 //! "Nothing more" than table name, column names, declared types (via
 //! column name extraction only — types are not separately captured),
-//! and WITHOUT ROWID / STRICT markers, per the originating issue's scope.
+//! WITHOUT ROWID / STRICT markers, and (#211) each table's indexes
+//! (column list, ASC/DESC, uniqueness), per the originating issues' scope.
 
 use thiserror::Error;
 
@@ -60,6 +64,31 @@ pub struct TableSchema {
     /// `CREATE TABLE`/`CREATE VIRTUAL TABLE` statement, needed by callers
     /// that reproduce schema DDL verbatim (e.g. a `dump` CLI).
     pub sql: String,
+    /// Every `CREATE INDEX`/`CREATE UNIQUE INDEX` entry in `sqlite_master`
+    /// whose `tbl_name` is this table. Auto-indexes created implicitly for
+    /// `PRIMARY KEY`/`UNIQUE` column constraints have a `NULL` `sql`
+    /// column in `sqlite_master` and are not captured here — same
+    /// graceful-degradation rule as unparseable DDL elsewhere in this
+    /// reader (#211).
+    pub indexes: Vec<IndexSchema>,
+}
+
+/// A minimally-parsed `CREATE INDEX` entry, naive in the same sense as
+/// [`TableSchema`]: column list and ASC/DESC/uniqueness only, nothing more
+/// (#211).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSchema {
+    pub name: String,
+    pub unique: bool,
+    pub columns: Vec<IndexedColumn>,
+}
+
+/// One column (or expression, kept as raw text) in an index's key,
+/// position-for-position with the index's declared column order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedColumn {
+    pub name: String,
+    pub desc: bool,
 }
 
 /// Walks `sqlite_master` via `cursor` (which callers MUST construct with
@@ -71,16 +100,24 @@ pub fn read_schema<P: PageSource>(
     encoding: TextEncoding,
 ) -> Result<Vec<TableSchema>, DdlError> {
     let mut schemas = Vec::new();
+    let mut pending_indexes: Vec<(String, IndexSchema)> = Vec::new();
     let mut row = cursor.first()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if values.len() != 5 {
             return Err(DdlError::MalformedRow(values.len()));
         }
-        if text(values.first()) == "table" {
-            schemas.push(table_schema(&values));
+        match text(values.first()) {
+            "table" => schemas.push(table_schema(&values)),
+            "index" => pending_indexes.extend(index_schema(&values)),
+            _ => {}
         }
         row = cursor.next()?;
+    }
+    for (table_name, index) in pending_indexes {
+        if let Some(schema) = schemas.iter_mut().find(|t| t.name == table_name) {
+            schema.indexes.push(index);
+        }
     }
     Ok(schemas)
 }
@@ -103,6 +140,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
             column_types: Vec::new(),
             is_virtual: true,
             sql: sql.to_string(),
+            indexes: Vec::new(),
         };
     }
 
@@ -116,6 +154,70 @@ fn table_schema(values: &[Value]) -> TableSchema {
         column_types: parsed.column_types,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: Vec::new(),
+    }
+}
+
+/// Parses a `sqlite_master` row with `type = 'index'` into the owning
+/// table's name and a naive [`IndexSchema`]. Returns `None` for anything
+/// this naive reader can't find a column list in — most notably
+/// auto-indexes (`sql` is `NULL` in `sqlite_master`) — treated identically
+/// to unparseable table DDL: graceful, never an error.
+fn index_schema(values: &[Value]) -> Option<(String, IndexSchema)> {
+    let name = text(values.get(1)).to_string();
+    let table_name = text(values.get(2)).to_string();
+    let sql = text(values.get(4));
+
+    let (start, end) = column_list_span(sql)?;
+    let inner = sql.get(start..end)?;
+    let columns = split_top_level_commas(inner)
+        .into_iter()
+        .map(indexed_column)
+        .collect();
+
+    Some((
+        table_name,
+        IndexSchema {
+            name,
+            unique: is_unique_index(sql),
+            columns,
+        },
+    ))
+}
+
+fn is_unique_index(sql: &str) -> bool {
+    sql.trim_start()
+        .to_ascii_uppercase()
+        .starts_with("CREATE UNIQUE INDEX")
+}
+
+/// Splits a single indexed-column definition (`col`, `col DESC`, `col
+/// COLLATE NOCASE ASC`, ...) into its column name and sort direction.
+/// Expression indexes (`lower(col)`) are kept as raw text in `name` —
+/// this reader doesn't parse expressions, matching the rest of this
+/// module's "nothing more than the corpus needs" scope.
+fn indexed_column(def: &str) -> IndexedColumn {
+    let mut span = def.trim();
+    let upper = span.to_ascii_uppercase();
+    let mut desc = false;
+    if let Some(rest) = upper.strip_suffix(" DESC") {
+        desc = true;
+        span = span[..rest.len()].trim_end();
+    } else if let Some(rest) = upper.strip_suffix(" ASC") {
+        span = span[..rest.len()].trim_end();
+    }
+
+    let upper = span.to_ascii_uppercase();
+    if let Some(pos) = upper.find(" COLLATE ") {
+        span = span[..pos].trim_end();
+    }
+
+    IndexedColumn {
+        name: span
+            .trim_matches(['"', '`', '['].as_ref())
+            .trim_matches([']'].as_ref())
+            .to_string(),
+        desc,
     }
 }
 
@@ -632,9 +734,52 @@ mod tests {
     #[test]
     fn non_table_entries_are_excluded() {
         // index.db has an explicit secondary index (idx_b) alongside
-        // table t — read_schema must return only the table.
+        // table t — read_schema must return only tables as top-level
+        // entries, with idx_b attached to t's `indexes` (#211).
         let schemas = read_fixture("btrees", "index.db");
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "t");
+        assert_eq!(schemas[0].indexes.len(), 1);
+        assert_eq!(schemas[0].indexes[0].name, "idx_b");
+        assert!(!schemas[0].indexes[0].unique);
+        assert_eq!(schemas[0].indexes[0].columns.len(), 1);
+        assert_eq!(schemas[0].indexes[0].columns[0].name, "b");
+        assert!(!schemas[0].indexes[0].columns[0].desc);
+    }
+
+    #[test]
+    fn unique_index_with_multiple_columns_and_desc() {
+        let sql = "CREATE UNIQUE INDEX idx_ab ON t(a DESC, b)";
+        let (table_name, index) = index_schema(&[
+            Value::Null,
+            Value::Text("idx_ab".to_string()),
+            Value::Text("t".to_string()),
+            Value::Integer(0),
+            Value::Text(sql.to_string()),
+        ])
+        .expect("index_schema should parse a simple CREATE UNIQUE INDEX");
+        assert_eq!(table_name, "t");
+        assert!(index.unique);
+        assert_eq!(index.columns.len(), 2);
+        assert_eq!(index.columns[0].name, "a");
+        assert!(index.columns[0].desc);
+        assert_eq!(index.columns[1].name, "b");
+        assert!(!index.columns[1].desc);
+    }
+
+    #[test]
+    fn auto_index_with_null_sql_is_omitted() {
+        // Auto-indexes created for PRIMARY KEY/UNIQUE constraints have a
+        // NULL `sql` column in sqlite_master — this naive reader can't
+        // find a column list in an empty string, so it's gracefully
+        // skipped rather than erroring.
+        let result = index_schema(&[
+            Value::Null,
+            Value::Text("sqlite_autoindex_t_1".to_string()),
+            Value::Text("t".to_string()),
+            Value::Integer(0),
+            Value::Null,
+        ]);
+        assert!(result.is_none());
     }
 }

@@ -37,6 +37,7 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         strict: false,
         is_virtual: false,
         sql: sql.to_string(),
+        indexes: vec![],
     }
 }
 

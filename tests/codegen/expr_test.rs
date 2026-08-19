@@ -56,6 +56,7 @@ fn one_row_fixture() -> (std::path::PathBuf, TableSchema) {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     (path, schema)
 }
@@ -176,6 +177,7 @@ fn affinity_fixture() -> (std::path::PathBuf, TableSchema) {
         strict: false,
         is_virtual: false,
         sql: String::new(),
+        indexes: vec![],
     };
     (path, schema)
 }
