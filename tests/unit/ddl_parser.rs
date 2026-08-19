@@ -10,90 +10,89 @@
 
 use sqlite_rs::parser::ast::*;
 use sqlite_rs::parser::{
-    parse_create_index, parse_create_table, parse_drop_index, parse_drop_table, CreateIndexOutcome,
-    CreateTableOutcome, DropIndexOutcome, DropTableOutcome,
+    parse_create_index, parse_create_table, parse_drop_index, parse_drop_table, ParseOutcome,
 };
 
 fn accept_table(src: &str) -> CreateTable {
     match parse_create_table(src) {
-        CreateTableOutcome::Accepted(stmt) => *stmt,
+        ParseOutcome::Accepted(stmt) => *stmt,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported_table(src: &str) -> String {
     match parse_create_table(src) {
-        CreateTableOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid_table(src: &str) -> String {
     match parse_create_table(src) {
-        CreateTableOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }
 
 fn accept_index(src: &str) -> CreateIndex {
     match parse_create_index(src) {
-        CreateIndexOutcome::Accepted(stmt) => *stmt,
+        ParseOutcome::Accepted(stmt) => *stmt,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn accept_drop_table(src: &str) -> DropTable {
     match parse_drop_table(src) {
-        DropTableOutcome::Accepted(stmt) => *stmt,
+        ParseOutcome::Accepted(stmt) => *stmt,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn accept_drop_index(src: &str) -> DropIndex {
     match parse_drop_index(src) {
-        DropIndexOutcome::Accepted(stmt) => *stmt,
+        ParseOutcome::Accepted(stmt) => *stmt,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported_index(src: &str) -> String {
     match parse_create_index(src) {
-        CreateIndexOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid_index(src: &str) -> String {
     match parse_create_index(src) {
-        CreateIndexOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported_drop_table(src: &str) -> String {
     match parse_drop_table(src) {
-        DropTableOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid_drop_table(src: &str) -> String {
     match parse_drop_table(src) {
-        DropTableOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported_drop_index(src: &str) -> String {
     match parse_drop_index(src) {
-        DropIndexOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid_drop_index(src: &str) -> String {
     match parse_drop_index(src) {
-        DropIndexOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }

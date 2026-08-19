@@ -49,14 +49,14 @@ pub fn compile_create_table(create: &CreateTable, source: &str) -> Result<Progra
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::parser::error::CreateTableOutcome;
+    use crate::parser::error::ParseOutcome;
     use crate::vdbe::Opcode;
 
     #[test]
     fn compiles_to_init_create_table_halt() {
         let sql = "CREATE TABLE t(a INTEGER, b TEXT)";
         let create = match crate::parser::error::parse_create_table(sql) {
-            CreateTableOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let program = compile_create_table(&create, sql).unwrap();

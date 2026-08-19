@@ -48,7 +48,7 @@ use crate::parser::ast::{
     ColumnConstraint, ConflictAction, DefaultValue, Expr, ExprKind, Insert, InsertSource, Literal,
     TableConstraint,
 };
-use crate::parser::error::CreateTableOutcome;
+use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
@@ -107,9 +107,9 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
     }
 
     let create = match parse_create_table(&schema.sql) {
-        CreateTableOutcome::Accepted(create) => *create,
-        CreateTableOutcome::Unsupported { message, .. }
-        | CreateTableOutcome::Invalid { message, .. } => {
+        ParseOutcome::Accepted(create) => *create,
+        ParseOutcome::Unsupported { message, .. }
+        | ParseOutcome::Invalid { message, .. } => {
             return Err(CodegenError::Unsupported {
                 reason: format!("could not recover constraints from schema DDL: {message}"),
             })

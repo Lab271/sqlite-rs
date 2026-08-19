@@ -20,7 +20,7 @@ use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::pager::Pager;
 use sqlite_rs::parser::ast::Update;
 use sqlite_rs::parser::{
-    parse_delete, parse_insert, parse_update, DeleteOutcome, InsertOutcome, ParseOutcome,
+    parse_delete, parse_insert, parse_update, ParseOutcome,
 };
 use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::execute_with_writable_db;
@@ -110,7 +110,7 @@ fn insert_maintains_a_secondary_index() {
     assert_eq!(schema.indexes.len(), 1);
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple'), (3, 'banana')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -149,7 +149,7 @@ fn delete_maintains_a_secondary_index() {
     let schema = table_schema(&db, &header, "t");
 
     let delete = match parse_delete("DELETE FROM t WHERE b = 'banana'") {
-        DeleteOutcome::Accepted(d) => *d,
+        ParseOutcome::Accepted(d) => *d,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_delete(&delete, &schema).unwrap();
@@ -285,7 +285,7 @@ fn insert_maintains_multiple_secondary_indexes() {
     assert_eq!(schema.indexes.len(), 2);
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple', 'red')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -334,7 +334,7 @@ fn insert_maintains_a_multicolumn_index() {
     let schema = table_schema(&db, &header, "t");
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple', 'red')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -377,7 +377,7 @@ fn insert_maintains_an_index_on_the_rowid_alias_column() {
     let schema = table_schema(&db, &header, "t");
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -422,7 +422,7 @@ fn insert_on_desc_index_is_rejected_not_silently_miskeyed() {
     assert!(schema.indexes[0].columns[0].desc);
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let err = compile_insert(&insert, &schema).unwrap_err();
@@ -457,7 +457,7 @@ fn insert_or_replace_removes_the_displaced_rows_index_entry() {
     let schema = table_schema(&db, &header, "t");
 
     let insert = match parse_insert("INSERT OR REPLACE INTO t VALUES (1, 'b')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -508,7 +508,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
 
     let schema = table_schema(&db, &header, "t");
     let insert = match parse_insert("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -529,7 +529,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
 
     let schema = table_schema(&db, &header, "t");
     let delete = match parse_delete("DELETE FROM t WHERE id = 1") {
-        DeleteOutcome::Accepted(d) => *d,
+        ParseOutcome::Accepted(d) => *d,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_delete(&delete, &schema).unwrap();
@@ -593,7 +593,7 @@ fn insert_duplicate_key_into_unique_index_is_not_enforced_as_a_constraint() {
     assert!(schema.indexes[0].unique);
 
     let insert = match parse_insert("INSERT INTO t VALUES (2, 'a')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();
@@ -654,7 +654,7 @@ fn insert_into_autoincrement_table_maintains_its_index() {
     let schema = table_schema(&db, &header, "t");
 
     let insert = match parse_insert("INSERT INTO t(v) VALUES ('b')") {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
     let program = compile_insert(&insert, &schema).unwrap();

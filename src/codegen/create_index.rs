@@ -87,7 +87,7 @@ pub fn compile_create_index(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::parser::error::{parse_create_index, CreateIndexOutcome};
+    use crate::parser::error::{parse_create_index, ParseOutcome};
 
     fn schema() -> TableSchema {
         TableSchema {
@@ -107,7 +107,7 @@ mod tests {
     fn resolves_column_and_carries_verbatim_sql() {
         let sql = "CREATE INDEX idx_t_b ON t(b)";
         let ci = match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let program = compile_create_index(&ci, &schema(), sql).unwrap();
@@ -131,7 +131,7 @@ mod tests {
     fn rejects_desc_column() {
         let sql = "CREATE INDEX idx_t_b ON t(b DESC)";
         let ci = match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
@@ -142,7 +142,7 @@ mod tests {
     fn rejects_expression_column() {
         let sql = "CREATE INDEX idx_t_expr ON t(a + 1)";
         let ci = match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
@@ -158,7 +158,7 @@ mod tests {
     fn rejects_unresolvable_column() {
         let sql = "CREATE INDEX idx_t_c ON t(c)";
         let ci = match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
@@ -174,7 +174,7 @@ mod tests {
     fn rejects_out_of_bounds_span() {
         let sql = "CREATE INDEX idx_t_b ON t(b)";
         let mut ci = match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(c) => c,
+            ParseOutcome::Accepted(c) => c,
             other => panic!("expected Accepted, got {other:?}"),
         };
         ci.span.offset = u32::MAX - 1;

@@ -19,7 +19,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{compile_insert, compile_update};
 use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::pager::Pager;
-use sqlite_rs::parser::{parse_insert, parse_update, InsertOutcome, ParseOutcome};
+use sqlite_rs::parser::{parse_insert, parse_update, ParseOutcome};
 use sqlite_rs::record::{decode_record, TextEncoding, Value};
 use sqlite_rs::schema::TableSchema;
 use sqlite_rs::vdbe::{execute_with_writable_db, ExecError};
@@ -74,7 +74,7 @@ fn run_insert(
     schema: &TableSchema,
 ) {
     let insert = match parse_insert(sql) {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse {sql:?}: {other:?}"),
     };
     let program = compile_insert(&insert, schema).unwrap();

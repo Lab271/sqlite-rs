@@ -32,13 +32,13 @@ pub fn compile_drop_index(di: &DropIndex, root_page: u32) -> Result<Program, Cod
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::parser::error::{parse_drop_index, DropIndexOutcome};
+    use crate::parser::error::{parse_drop_index, ParseOutcome};
     use crate::vdbe::Opcode;
 
     #[test]
     fn compiles_to_init_drop_index_halt() {
         let di = match parse_drop_index("DROP INDEX idx_t_a") {
-            DropIndexOutcome::Accepted(d) => d,
+            ParseOutcome::Accepted(d) => d,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let program = compile_drop_index(&di, 3).unwrap();
