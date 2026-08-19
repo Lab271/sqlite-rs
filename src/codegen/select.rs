@@ -36,6 +36,15 @@ pub enum CodegenError {
 
     #[error("unsupported: {reason}")]
     Unsupported { reason: String },
+
+    /// #195: an `INSERT` row supplied a different number of values than
+    /// the target column list names.
+    #[error("{table} has {expected} columns but {found} values were supplied")]
+    RowShapeMismatch {
+        table: String,
+        expected: usize,
+        found: usize,
+    },
 }
 
 const TABLE_CURSOR: i32 = 0;
