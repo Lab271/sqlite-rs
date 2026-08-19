@@ -19,6 +19,9 @@ table-level constraint) — `compile_create_table` never auto-creates
 one, so UNIQUE enforcement only fires via an explicit
 `CREATE UNIQUE INDEX`. Filed as a follow-up, not fixed here.
 
+`sqlite-rs --version`/`-V`: reports `CARGO_PKG_VERSION` and exits 0 —
+the CLI previously had no way to report its own version.
+
 ## [0.12.1] - 2026-08-20
 
 UNIQUE constraints on non-rowid columns (#207, split out of #195): new

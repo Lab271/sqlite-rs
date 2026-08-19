@@ -31,6 +31,10 @@ use sqlite_rs::vfs::{PageSource, UnixVfs};
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        Some("--version" | "-V") => {
+            println!("sqlite-rs {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         Some("dump") => match args.next() {
             Some(path) => run_dump(Path::new(&path)),
             None => usage_error("dump <file>"),
@@ -50,7 +54,7 @@ fn main() -> ExitCode {
             };
             run_exec(Path::new(&path), &sql)
         }
-        _ => usage_error("<dump|export|query|tables|exec> <file>"),
+        _ => usage_error("[--version] <dump|export|query|tables|exec> <file>"),
     }
 }
 
