@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+UNIQUE constraints on non-rowid columns (#207, split out of #195): new
+`Opcode::NoConflict` real-index seek+branch primitive
+(`src/vdbe/cursor.rs`, built on `IndexCursor::seek`) fills the gap
+`CursorSlot` had no read-capable real-index variant — `compile_insert`
+now probes every `UNIQUE` index before writing a row and dispatches
+`ON CONFLICT` (`IGNORE`/`REPLACE`/`ABORT`+`FAIL`+`ROLLBACK`) the same
+way the existing rowid-PK conflict check does. A composite
+`PRIMARY KEY(...)`/`UNIQUE(...)` table constraint with no backing
+on-disk index still isn't enforced (this codebase doesn't auto-create
+`sqlite_autoindex_*` entries yet) — a `CREATE TABLE`-side gap, not an
+INSERT-codegen one.
+
 `INSERT ... SELECT` codegen (#208, split out of #195): `compile_insert`
 now drives `select.rs`'s scan/filter/project/ORDER BY/DISTINCT/LIMIT
 machinery (`compile_select_scan`, factored out of `compile_select`)
