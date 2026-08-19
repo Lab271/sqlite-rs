@@ -24,6 +24,13 @@ fn invalid(src: &str) -> String {
     }
 }
 
+fn unsupported(src: &str) -> String {
+    match parse_delete(src) {
+        DeleteOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_accept_delete_no_where() {
     let delete = accept("DELETE FROM t");
@@ -75,4 +82,16 @@ fn test_invalid_delete_limit_not_yet_supported() {
     // CHANGELOG) and rejected as trailing garbage, not as `Unsupported` —
     // this locks in that documented scope decision.
     invalid("DELETE FROM t LIMIT 1");
+}
+
+#[test]
+fn test_unsupported_delete_trailing_compound() {
+    // Trailing UNION is only rejected once control returns to the
+    // top-level expect_end check (issue #224).
+    unsupported("DELETE FROM t UNION SELECT 1");
+}
+
+#[test]
+fn test_unsupported_delete_where_subquery() {
+    unsupported("DELETE FROM t WHERE a IN (SELECT a FROM t)");
 }

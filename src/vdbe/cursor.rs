@@ -1457,4 +1457,428 @@ mod tests {
         .unwrap();
         assert_eq!(step, Step::Next);
     }
+
+    // --- additional coverage: error branches, Last, OpenPseudo, IdxLE,
+    // CreateTable/DropTable/CreateIndex/DropIndex, type_name(). ---
+
+    #[test]
+    fn cursor_slot_type_name_reports_every_variant() {
+        assert_eq!(
+            CursorSlot::IndexWrite { root_page: 1 }.type_name(),
+            "index write cursor"
+        );
+        assert_eq!(
+            CursorSlot::Pseudo { register: 0 }.type_name(),
+            "pseudo cursor"
+        );
+    }
+
+    #[test]
+    fn last_positions_at_the_highest_rowid_and_jumps_when_empty() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        let step = last(&mut vm, &Instruction::new(Opcode::Last, 0, 999, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(3000));
+    }
+
+    #[test]
+    fn last_jumps_to_p2_on_an_empty_table() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        let step = last(&mut vm, &Instruction::new(Opcode::Last, 0, 999, 0)).unwrap();
+        assert_eq!(step, Step::Jump(999));
+    }
+
+    #[test]
+    fn ephemeral_type_mismatch_errors_instead_of_panicking() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        let err = sequence(&mut vm, &Instruction::new(Opcode::Sequence, 0, 5, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn p4_count_rejects_a_negative_int_and_a_non_int_p4() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let err = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Int(-1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+
+        let err = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Bool(true)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn column_reads_through_an_open_pseudo_cursor() {
+        let mut vm = Vm::new();
+        vm.set_register(3, Value::Integer(7)).unwrap();
+        vm.set_register(4, Value::Text("hi".to_string())).unwrap();
+        crate::vdbe::result::make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 3, 2, 5))
+            .unwrap();
+        open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 5, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 11)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(7));
+        assert_eq!(*vm.register(11).unwrap(), Value::Text("hi".to_string()));
+    }
+
+    #[test]
+    fn column_on_pseudo_cursor_with_non_blob_register_errors() {
+        let mut vm = Vm::new();
+        vm.set_register(5, Value::Integer(1)).unwrap();
+        open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 5, 0)).unwrap();
+        let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn column_on_a_cursor_with_no_current_row_errors() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn column_on_ephemeral_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn rowid_on_a_cursor_with_no_current_row_errors() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        let err = rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn seek_rowid_rejects_a_non_integer_target_register() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        vm.set_register(5, Value::Text("nope".to_string())).unwrap();
+        let err = seek_rowid(&mut vm, &Instruction::new(Opcode::SeekRowid, 0, 42, 5)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn insert_rejects_a_non_integer_rowid_register() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        vm.set_register(0, Value::Text("nope".to_string())).unwrap();
+        vm.set_register(3, Value::Blob(vec![])).unwrap();
+        let err = insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 3)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn insert_rejects_a_non_blob_record_register() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        vm.set_register(3, Value::Integer(2)).unwrap();
+        let err = insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 3)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn delete_on_a_table_cursor_with_no_current_row_errors() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        let err = delete(&mut vm, &Instruction::new(Opcode::Delete, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn delete_on_a_pseudo_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 0, 0)).unwrap();
+        let err = delete(&mut vm, &Instruction::new(Opcode::Delete, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn idx_insert_on_a_pseudo_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 0, 0)).unwrap();
+        let err = idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn idx_delete_on_a_pseudo_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 0, 0)).unwrap();
+        let err = idx_delete(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxDelete, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn idx_le_holds_vacuously_before_any_probe_and_tracks_the_last_key() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        // No probe/insert yet: `last_key` is None, so IdxLE holds
+        // vacuously and jumps.
+        let step = idx_le(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxLE, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap();
+
+        // Probe with a larger key: last_key (5) <= probe (10) holds.
+        vm.set_register(0, Value::Integer(10)).unwrap();
+        let step = idx_le(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxLE, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+
+        // Probe with a smaller key: last_key (5) <= probe (2) does not hold.
+        vm.set_register(0, Value::Integer(2)).unwrap();
+        let step = idx_le(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxLE, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+    }
+
+    #[test]
+    fn new_rowid_autoincrement_rejects_a_non_str_p4() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        let mut instr = Instruction::new(Opcode::NewRowid, 0, 5, 0);
+        instr.p5 = 1;
+        let err = new_rowid(&mut vm, &instr).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn create_table_then_drop_table_round_trip_through_sqlite_master() {
+        let mut vm = writable_vm(0x0d);
+        create_table(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::CreateTable,
+                0,
+                0,
+                0,
+                P4::CreateTable {
+                    name: "t".to_string(),
+                    sql: "CREATE TABLE t (a)".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+
+        // The new table's root page is now registered in sqlite_master
+        // (page 1) -- read it back to prove CreateTable actually wrote it.
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 1, 1, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 1, 0, 20)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 1, 1, 21)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 22)).unwrap();
+        assert_eq!(*vm.register(20).unwrap(), Value::Text("table".to_string()));
+        assert_eq!(*vm.register(21).unwrap(), Value::Text("t".to_string()));
+        let root_page = match vm.register(22).unwrap() {
+            Value::Integer(n) => u32::try_from(*n).unwrap(),
+            other => panic!("expected integer rootpage, got {other:?}"),
+        };
+
+        drop_table(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::DropTable,
+                0,
+                0,
+                0,
+                P4::DropTable {
+                    name: "t".to_string(),
+                    root_page,
+                    indexes: vec![],
+                },
+            ),
+        )
+        .unwrap();
+
+        // sqlite_master is now empty again.
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        assert_eq!(step, Step::Jump(999));
+    }
+
+    #[test]
+    fn create_index_then_drop_index_round_trip_through_sqlite_master() {
+        let mut vm = writable_vm(0x0d);
+        create_table(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::CreateTable,
+                0,
+                0,
+                0,
+                P4::CreateTable {
+                    name: "t".to_string(),
+                    sql: "CREATE TABLE t (a)".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 1, 1, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 22)).unwrap();
+        let table_root = match vm.register(22).unwrap() {
+            Value::Integer(n) => u32::try_from(*n).unwrap(),
+            other => panic!("expected integer rootpage, got {other:?}"),
+        };
+
+        create_index(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::CreateIndex,
+                0,
+                0,
+                0,
+                P4::CreateIndex {
+                    name: "idx".to_string(),
+                    table_name: "t".to_string(),
+                    table_root_page: table_root,
+                    sql: "CREATE INDEX idx ON t (a)".to_string(),
+                    column_indices: vec![0],
+                    unique: false,
+                },
+            ),
+        )
+        .unwrap();
+
+        // sqlite_master now has two rows: the table and the index.
+        let mut names = Vec::new();
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        let mut index_root_for_drop = None;
+        loop {
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 0, 30)).unwrap();
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 1, 31)).unwrap();
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 32)).unwrap();
+            names.push((
+                vm.register(30).unwrap().clone(),
+                vm.register(31).unwrap().clone(),
+            ));
+            if vm.register(30).unwrap() == &Value::Text("index".to_string()) {
+                if let Value::Integer(n) = vm.register(32).unwrap() {
+                    index_root_for_drop = Some(u32::try_from(*n).unwrap());
+                }
+            }
+            match next(&mut vm, &Instruction::new(Opcode::Next, 1, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(
+            names,
+            vec![
+                (
+                    Value::Text("table".to_string()),
+                    Value::Text("t".to_string())
+                ),
+                (
+                    Value::Text("index".to_string()),
+                    Value::Text("idx".to_string())
+                ),
+            ]
+        );
+
+        drop_index(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::DropIndex,
+                0,
+                0,
+                0,
+                P4::DropIndex {
+                    name: "idx".to_string(),
+                    root_page: index_root_for_drop.unwrap(),
+                },
+            ),
+        )
+        .unwrap();
+
+        // After DropIndex, only the table row remains.
+        let mut remaining = Vec::new();
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        loop {
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 1, 40)).unwrap();
+            remaining.push(vm.register(40).unwrap().clone());
+            match next(&mut vm, &Instruction::new(Opcode::Next, 1, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(remaining, vec![Value::Text("t".to_string())]);
+    }
+
+    #[test]
+    fn create_table_rejects_a_mismatched_p4() {
+        let mut vm = writable_vm(0x0d);
+        let err =
+            create_table(&mut vm, &Instruction::new(Opcode::CreateTable, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn drop_table_rejects_a_mismatched_p4() {
+        let mut vm = writable_vm(0x0d);
+        let err = drop_table(&mut vm, &Instruction::new(Opcode::DropTable, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn create_index_rejects_a_mismatched_p4() {
+        let mut vm = writable_vm(0x0d);
+        let err =
+            create_index(&mut vm, &Instruction::new(Opcode::CreateIndex, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn drop_index_rejects_a_mismatched_p4() {
+        let mut vm = writable_vm(0x0d);
+        let err = drop_index(&mut vm, &Instruction::new(Opcode::DropIndex, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
 }

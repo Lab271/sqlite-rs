@@ -406,4 +406,310 @@ mod tests {
             "every surviving row must still be reachable from the root — none orphaned"
         );
     }
+
+    #[test]
+    fn free_overflow_chain_detects_a_cycle() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let page_a = pager.allocate_page().unwrap();
+        let page_b = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(page_a).unwrap();
+            buf[0..4].copy_from_slice(&page_b.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(page_b).unwrap();
+            buf[0..4].copy_from_slice(&page_a.to_be_bytes());
+        }
+
+        let err = free_overflow_chain(&mut pager, page_a).unwrap_err();
+        assert!(matches!(err, BtreeError::OverflowChainCycle { .. }));
+    }
+
+    #[test]
+    fn collapse_into_ancestors_errors_with_no_ancestors() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let err = collapse_into_ancestors(&mut pager, usable_size, 1, &[], 1).unwrap_err();
+        assert!(matches!(err, BtreeError::Internal(_)));
+    }
+
+    #[test]
+    fn collapse_into_ancestors_errors_when_rightmost_emptied_with_no_routing_entries() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let parent = pager.allocate_page().unwrap();
+        let emptied = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_interior_page(buf, 0, parent, &[], emptied).unwrap();
+        }
+
+        let err =
+            collapse_into_ancestors(&mut pager, usable_size, 1, &[parent], emptied).unwrap_err();
+        assert!(matches!(err, BtreeError::Internal(_)));
+    }
+
+    #[test]
+    fn collapse_into_ancestors_errors_when_child_route_missing() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let parent = pager.allocate_page().unwrap();
+        let other_child = pager.allocate_page().unwrap();
+        let unrelated_page = 999u32;
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                parent,
+                &[build_interior_cell(other_child, 5)],
+                other_child,
+            )
+            .unwrap();
+        }
+
+        let err = collapse_into_ancestors(&mut pager, usable_size, 1, &[parent], unrelated_page)
+            .unwrap_err();
+        assert!(matches!(err, BtreeError::MissingChildRoute { .. }));
+    }
+
+    #[test]
+    fn collapse_into_ancestors_collapses_the_root_when_it_drains_to_one_child() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let child_a = pager.allocate_page().unwrap();
+        let child_b = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(child_b).unwrap();
+            write_leaf_page(buf, 0, child_b, &[]).unwrap();
+        }
+        insert_row(&mut pager, &header, child_b, 42, b"payload").unwrap();
+
+        {
+            let header_start = page1_header_start(1);
+            let buf = pager.get_page_mut(1).unwrap();
+            write_interior_page(
+                buf,
+                header_start,
+                1,
+                &[build_interior_cell(child_a, 10)],
+                child_b,
+            )
+            .unwrap();
+        }
+
+        collapse_into_ancestors(&mut pager, usable_size, 1, &[1], child_a).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let page_type = read_page_type(&buf, header_start, 1).unwrap();
+        assert_eq!(page_type, LEAF_TABLE);
+        let cells = collect_leaf_cells(&buf, header_start, 1, usable_size).unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].0, 42);
+    }
+
+    #[test]
+    fn collapse_into_ancestors_cascades_through_a_non_root_parent() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let mid_page = pager.allocate_page().unwrap();
+        let emptied_child = pager.allocate_page().unwrap();
+        let leaf_x = pager.allocate_page().unwrap();
+        let other_root_child = pager.allocate_page().unwrap();
+
+        {
+            let buf = pager.get_page_mut(mid_page).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                mid_page,
+                &[build_interior_cell(emptied_child, 10)],
+                leaf_x,
+            )
+            .unwrap();
+        }
+        {
+            let header_start = page1_header_start(1);
+            let buf = pager.get_page_mut(1).unwrap();
+            write_interior_page(
+                buf,
+                header_start,
+                1,
+                &[build_interior_cell(mid_page, 50)],
+                other_root_child,
+            )
+            .unwrap();
+        }
+
+        collapse_into_ancestors(&mut pager, usable_size, 1, &[1, mid_page], emptied_child).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let (entries, rightmost) = collect_interior_entries(&buf, header_start, 1).unwrap();
+        assert_eq!(entries, vec![(leaf_x, 50)]);
+        assert_eq!(rightmost, other_root_child);
+    }
+
+    #[test]
+    fn collapse_root_relocates_an_interior_only_child() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let only_child = pager.allocate_page().unwrap();
+        let grandchild_a = pager.allocate_page().unwrap();
+        let grandchild_rightmost = 77u32;
+        {
+            let buf = pager.get_page_mut(only_child).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                only_child,
+                &[build_interior_cell(grandchild_a, 5)],
+                grandchild_rightmost,
+            )
+            .unwrap();
+        }
+
+        collapse_root(&mut pager, usable_size, 1, only_child).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let page_type = read_page_type(&buf, header_start, 1).unwrap();
+        assert_eq!(page_type, INTERIOR_TABLE);
+        let (entries, rightmost) = collect_interior_entries(&buf, header_start, 1).unwrap();
+        assert_eq!(entries, vec![(grandchild_a, 5)]);
+        assert_eq!(rightmost, grandchild_rightmost);
+    }
+
+    #[test]
+    fn collapse_root_rejects_an_unexpected_child_page_type() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        let only_child = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(only_child).unwrap();
+            buf[0] = 0xFF;
+        }
+
+        let err = collapse_root(&mut pager, usable_size, 1, only_child).unwrap_err();
+        assert!(matches!(err, BtreeError::UnexpectedPageType { .. }));
+    }
+
+    #[test]
+    fn splice_child_errors_with_no_ancestors() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let err = splice_child(&mut pager, &[], 5, 6).unwrap_err();
+        assert!(matches!(err, BtreeError::Internal(_)));
+    }
+
+    #[test]
+    fn splice_child_errors_when_old_child_route_missing() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let other_child = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                parent,
+                &[build_interior_cell(other_child, 1)],
+                other_child,
+            )
+            .unwrap();
+        }
+
+        let err = splice_child(&mut pager, &[parent], 999, 1000).unwrap_err();
+        assert!(matches!(err, BtreeError::MissingChildRoute { .. }));
+    }
+
+    #[test]
+    fn splice_child_replaces_an_entry_reference() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let old_child = pager.allocate_page().unwrap();
+        let rightmost = pager.allocate_page().unwrap();
+        let new_child = 999u32;
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                parent,
+                &[build_interior_cell(old_child, 7)],
+                rightmost,
+            )
+            .unwrap();
+        }
+
+        splice_child(&mut pager, &[parent], old_child, new_child).unwrap();
+
+        let buf = pager.get_page_mut(parent).unwrap().clone();
+        let (entries, rm) = collect_interior_entries(&buf, 0, parent).unwrap();
+        assert_eq!(entries, vec![(new_child, 7)]);
+        assert_eq!(rm, rightmost);
+    }
+
+    #[test]
+    fn splice_child_replaces_a_rightmost_reference() {
+        let page_size = 512u32;
+        let (vfs, _header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let parent = pager.allocate_page().unwrap();
+        let entry_child = pager.allocate_page().unwrap();
+        let old_rightmost = pager.allocate_page().unwrap();
+        let new_rightmost = 12345u32;
+        {
+            let buf = pager.get_page_mut(parent).unwrap();
+            write_interior_page(
+                buf,
+                0,
+                parent,
+                &[build_interior_cell(entry_child, 3)],
+                old_rightmost,
+            )
+            .unwrap();
+        }
+
+        splice_child(&mut pager, &[parent], old_rightmost, new_rightmost).unwrap();
+
+        let buf = pager.get_page_mut(parent).unwrap().clone();
+        let (entries, rightmost) = collect_interior_entries(&buf, 0, parent).unwrap();
+        assert_eq!(entries, vec![(entry_child, 3)]);
+        assert_eq!(rightmost, new_rightmost);
+    }
 }

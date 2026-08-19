@@ -553,6 +553,9 @@ fn usage_errors_exit_two() {
         vec!["query"],
         vec!["query", "x.db"],
         vec!["tables"],
+        vec!["export"],
+        vec!["exec"],
+        vec!["exec", "x.db"],
     ] {
         let output = Command::new(CLI)
             .args(&args)
@@ -591,6 +594,233 @@ fn tables_lists_all_tables_sorted() {
         tables,
         vec!["customers", "order_items", "orders", "products"],
         "expected four tables in alphabetical order"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `dump` mirrors `export`'s degraded-exit-code behaviour: a table it must
+/// gracefully skip (FTS5's virtual table) still prints everything it could
+/// read, but a warning appears on stderr and the exit code goes non-zero —
+/// previously only checked for `export`.
+#[test]
+fn dump_with_a_skipped_table_still_prints_warnings_and_exits_nonzero() {
+    let fixture = crate::oracle::corpus_dir().join("features/fts5.db");
+    if !fixture.exists() {
+        eprintln!("skipping: {} not present", fixture.display());
+        return;
+    }
+    let dir = scratch_dir("dump-degraded");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = run_cli("dump", &db);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "expected a non-zero exit when a table is skipped, got 0; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("warning:"),
+        "expected a warning on stderr explaining the skip; got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A path that doesn't exist must fail cleanly rather than panic, for
+/// every read-oriented subcommand — `export`, `tables`, `query`, and
+/// `exec` each route through the same `dump::open`/fatal path as `dump`
+/// does.
+#[test]
+fn read_subcommands_on_a_nonexistent_database_fail_cleanly() {
+    let dir = scratch_dir("nonexistent");
+    let missing = dir.join("does_not_exist.db");
+    let missing_str = missing.to_str().unwrap().to_string();
+
+    for args in [
+        vec!["export".to_string(), missing_str.clone()],
+        vec!["tables".to_string(), missing_str.clone()],
+        vec![
+            "query".to_string(),
+            missing_str.clone(),
+            "SELECT 1".to_string(),
+        ],
+        vec![
+            "exec".to_string(),
+            missing_str.clone(),
+            "SELECT 1".to_string(),
+        ],
+    ] {
+        let output = Command::new(CLI)
+            .args(&args)
+            .output()
+            .unwrap_or_else(|e| panic!("running {CLI} {args:?}: {e}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "expected exit 1 for {args:?} on a missing database; stderr: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} wrote to stdout on failure"
+        );
+        assert!(!stderr.is_empty(), "{args:?} gave no diagnostic");
+        assert!(
+            !stderr.contains("panicked at"),
+            "{args:?} panicked instead of failing cleanly: {stderr}"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// If a CSV output path can't be written (here: something else already
+/// occupies it as a directory), `export` reports the failure as a warning
+/// for that one table, keeps going, and degrades its exit code — rather
+/// than aborting the whole export.
+#[test]
+fn export_write_failure_reports_warning_and_degrades_exit_code() {
+    let fixture = crate::oracle::corpus_dir().join("features/multitable.db");
+    if !fixture.exists() {
+        eprintln!("skipping: {} not present", fixture.display());
+        return;
+    }
+    let dir = scratch_dir("export-write-fail");
+    let db = copy_fixture(&fixture, &dir);
+
+    // Occupy one of the expected output filenames with a directory so
+    // `std::fs::write` fails for that table.
+    let blocked = expected_csv_path(&dir, "customers", &db);
+    std::fs::create_dir_all(&blocked).unwrap();
+
+    let output = run_cli("export", &db);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "expected a non-zero exit when a CSV write fails; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("warning:") && stderr.contains("writing"),
+        "expected a write-failure warning naming the path; got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A `SELECT` with no `FROM` clause is syntactically valid but out of this
+/// compiler's single-table scope; `query` must reject it cleanly rather
+/// than panic on the missing table resolution step.
+#[test]
+fn query_with_no_from_clause_fails_cleanly() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-no-from");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT 1")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.is_empty(), "expected a diagnostic; got nothing");
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `query` against a table name that doesn't exist in the schema fails
+/// cleanly with a "no such table" diagnostic.
+#[test]
+fn query_no_such_table_fails_cleanly() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-no-such-table");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT * FROM nonexistent_table")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("no such table"),
+        "expected a no-such-table diagnostic; got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A compile-time codegen error (here: an unknown column name, syntactically
+/// valid but unresolvable against the table's schema) must fail cleanly.
+#[test]
+fn query_unknown_column_fails_cleanly() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-unknown-column");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT nonexistent_column FROM t")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("unknown column") || stderr.contains("nonexistent_column"),
+        "expected an unknown-column diagnostic; got: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `-explain` prints the compiled bytecode as pipe-separated columns
+/// instead of running the program (spec 009 Requirement 10).
+#[test]
+fn query_explain_flag_prints_bytecode_instead_of_running() {
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-explain");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg("-explain")
+        .arg(&db)
+        .arg("SELECT a FROM t WHERE a = 1")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query -explain {}: {e}", db.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "explain failed: {stderr}");
+    assert!(
+        !stdout.is_empty(),
+        "expected bytecode listing on stdout, got nothing"
+    );
+    for line in stdout.lines() {
+        assert_eq!(
+            line.matches('|').count(),
+            7,
+            "expected 8 pipe-separated columns per opcode row; got: {line:?}"
+        );
+    }
+    // Actual row data must not have been printed — explain never executes.
+    assert!(
+        !stdout.lines().any(|l| l == "1"),
+        "explain should not execute the program; got: {stdout}"
     );
 
     std::fs::remove_dir_all(&dir).unwrap();

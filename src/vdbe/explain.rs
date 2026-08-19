@@ -247,4 +247,320 @@ mod tests {
         let rows = explain(&program);
         assert_eq!(rows[0].p4, "g%");
     }
+
+    #[test]
+    fn opcode_name_covers_all_variants() {
+        let cases: &[(Opcode, &str)] = &[
+            (Opcode::Init, "Init"),
+            (Opcode::Goto, "Goto"),
+            (Opcode::Once, "Once"),
+            (Opcode::BeginSubrtn, "BeginSubrtn"),
+            (Opcode::Return, "Return"),
+            (Opcode::Halt, "Halt"),
+            (Opcode::Transaction, "Transaction"),
+            (Opcode::IfNot, "IfNot"),
+            (Opcode::IfNotZero, "IfNotZero"),
+            (Opcode::IfPos, "IfPos"),
+            (Opcode::DecrJumpZero, "DecrJumpZero"),
+            (Opcode::IsNull, "IsNull"),
+            (Opcode::NotNull, "NotNull"),
+            (Opcode::MustBeInt, "MustBeInt"),
+            (Opcode::OffsetLimit, "OffsetLimit"),
+            (Opcode::OpenRead, "OpenRead"),
+            (Opcode::OpenWrite, "OpenWrite"),
+            (Opcode::OpenEphemeral, "OpenEphemeral"),
+            (Opcode::OpenPseudo, "OpenPseudo"),
+            (Opcode::Rewind, "Rewind"),
+            (Opcode::Last, "Last"),
+            (Opcode::Next, "Next"),
+            (Opcode::Column, "Column"),
+            (Opcode::Rowid, "Rowid"),
+            (Opcode::SeekRowid, "SeekRowid"),
+            (Opcode::NullRow, "NullRow"),
+            (Opcode::Sequence, "Sequence"),
+            (Opcode::Found, "Found"),
+            (Opcode::IdxInsert, "IdxInsert"),
+            (Opcode::IdxDelete, "IdxDelete"),
+            (Opcode::IdxLE, "IdxLE"),
+            (Opcode::Delete, "Delete"),
+            (Opcode::Insert, "Insert"),
+            (Opcode::NewRowid, "NewRowid"),
+            (Opcode::CreateTable, "CreateTable"),
+            (Opcode::DropTable, "DropTable"),
+            (Opcode::CreateIndex, "CreateIndex"),
+            (Opcode::DropIndex, "DropIndex"),
+            (Opcode::Eq, "Eq"),
+            (Opcode::Ge, "Ge"),
+            (Opcode::Gt, "Gt"),
+            (Opcode::Le, "Le"),
+            (Opcode::Lt, "Lt"),
+            (Opcode::RealAffinity, "RealAffinity"),
+            (Opcode::Add, "Add"),
+            (Opcode::Subtract, "Subtract"),
+            (Opcode::Multiply, "Multiply"),
+            (Opcode::Divide, "Divide"),
+            (Opcode::Remainder, "Remainder"),
+            (Opcode::Not, "Not"),
+            (Opcode::BitAnd, "BitAnd"),
+            (Opcode::BitOr, "BitOr"),
+            (Opcode::ShiftLeft, "ShiftLeft"),
+            (Opcode::ShiftRight, "ShiftRight"),
+            (Opcode::BitNot, "BitNot"),
+            (Opcode::Concat, "Concat"),
+            (Opcode::Cast, "Cast"),
+            (Opcode::Function, "Function"),
+            (Opcode::Integer, "Integer"),
+            (Opcode::Int64, "Int64"),
+            (Opcode::Real, "Real"),
+            (Opcode::Blob, "Blob"),
+            (Opcode::Null, "Null"),
+            (Opcode::String8, "String8"),
+            (Opcode::Variable, "Variable"),
+            (Opcode::MakeRecord, "MakeRecord"),
+            (Opcode::ResultRow, "ResultRow"),
+            (Opcode::SorterOpen, "SorterOpen"),
+            (Opcode::SorterInsert, "SorterInsert"),
+            (Opcode::SorterSort, "SorterSort"),
+            (Opcode::SorterNext, "SorterNext"),
+            (Opcode::SorterData, "SorterData"),
+            (Opcode::Sort, "Sort"),
+        ];
+        let program = Program::new(
+            cases
+                .iter()
+                .map(|(op, _)| Instruction::new(*op, 0, 0, 0))
+                .collect(),
+        );
+        let rows = explain(&program);
+        for (row, (_, expected)) in rows.iter().zip(cases.iter()) {
+            assert_eq!(row.opcode, *expected);
+        }
+    }
+
+    #[test]
+    fn render_p4_covers_scalar_variants() {
+        let program = Program::new(vec![
+            Instruction::with_p4(Opcode::Integer, 0, 0, 0, P4::None),
+            Instruction::with_p4(Opcode::Integer, 0, 0, 0, P4::Int(42)),
+            Instruction::with_p4(Opcode::Real, 0, 0, 0, P4::Real(3.5)),
+            Instruction::with_p4(Opcode::Blob, 0, 0, 0, P4::Blob(b"abc".to_vec())),
+            Instruction::with_p4(
+                Opcode::Eq,
+                0,
+                0,
+                0,
+                P4::CollSeq {
+                    collation: crate::vdbe::Collation::Binary,
+                    affinity: 65,
+                },
+            ),
+            Instruction::with_p4(
+                Opcode::Eq,
+                0,
+                0,
+                0,
+                P4::CollSeq {
+                    collation: crate::vdbe::Collation::NoCase,
+                    affinity: 65,
+                },
+            ),
+            Instruction::with_p4(
+                Opcode::Eq,
+                0,
+                0,
+                0,
+                P4::CollSeq {
+                    collation: crate::vdbe::Collation::RTrim,
+                    affinity: 65,
+                },
+            ),
+            Instruction::with_p4(Opcode::MakeRecord, 0, 0, 0, P4::Affinity(b"BC".to_vec())),
+            Instruction::with_p4(Opcode::NewRowid, 0, 0, 0, P4::Bool(true)),
+        ]);
+        let rows = explain(&program);
+        assert_eq!(rows[0].p4, "");
+        assert_eq!(rows[1].p4, "42");
+        assert_eq!(rows[2].p4, "3.5");
+        assert_eq!(rows[3].p4, "abc");
+        assert_eq!(rows[4].p4, "BINARY-65");
+        assert_eq!(rows[5].p4, "NOCASE-65");
+        assert_eq!(rows[6].p4, "RTRIM-65");
+        assert_eq!(rows[7].p4, "BC");
+        assert_eq!(rows[8].p4, "true");
+    }
+
+    #[test]
+    fn render_p4_covers_sort_key() {
+        let program = Program::new(vec![Instruction::with_p4(
+            Opcode::SorterOpen,
+            0,
+            0,
+            0,
+            P4::SortKey(vec![
+                SortKeyColumn {
+                    index: 0,
+                    descending: true,
+                    collation: crate::vdbe::Collation::Binary,
+                    nulls_first: false,
+                },
+                SortKeyColumn {
+                    index: 1,
+                    descending: false,
+                    collation: crate::vdbe::Collation::NoCase,
+                    nulls_first: false,
+                },
+            ]),
+        )]);
+        let rows = explain(&program);
+        assert_eq!(rows[0].p4, "k(2,-B,N)");
+    }
+
+    #[test]
+    fn render_p4_covers_ddl_variants() {
+        let program = Program::new(vec![
+            Instruction::with_p4(
+                Opcode::CreateTable,
+                0,
+                0,
+                0,
+                P4::CreateTable {
+                    name: "t".to_string(),
+                    sql: "CREATE TABLE t(a)".to_string(),
+                },
+            ),
+            Instruction::with_p4(
+                Opcode::DropTable,
+                0,
+                0,
+                0,
+                P4::DropTable {
+                    name: "t".to_string(),
+                    root_page: 2,
+                    indexes: vec![],
+                },
+            ),
+            Instruction::with_p4(
+                Opcode::CreateIndex,
+                0,
+                0,
+                0,
+                P4::CreateIndex {
+                    name: "idx".to_string(),
+                    table_name: "t".to_string(),
+                    table_root_page: 2,
+                    sql: "CREATE INDEX idx ON t(a)".to_string(),
+                    column_indices: vec![0],
+                    unique: false,
+                },
+            ),
+            Instruction::with_p4(
+                Opcode::DropIndex,
+                0,
+                0,
+                0,
+                P4::DropIndex {
+                    name: "idx".to_string(),
+                    root_page: 3,
+                },
+            ),
+        ]);
+        let rows = explain(&program);
+        assert_eq!(rows[0].p4, "t: CREATE TABLE t(a)");
+        assert_eq!(rows[1].p4, "t");
+        assert_eq!(rows[2].p4, "idx: CREATE INDEX idx ON t(a)");
+        assert_eq!(rows[3].p4, "idx");
+    }
+
+    #[test]
+    fn comment_for_covers_all_annotated_opcodes() {
+        let program = Program::new(vec![
+            Instruction::new(Opcode::Init, 0, 5, 0),
+            Instruction::new(Opcode::Goto, 0, 7, 0),
+            Instruction::new(Opcode::OpenRead, 1, 2, 0),
+            Instruction::new(Opcode::OpenWrite, 1, 2, 0),
+            Instruction::new(Opcode::OpenEphemeral, 1, 0, 0),
+            Instruction::new(Opcode::OpenPseudo, 1, 2, 0),
+            Instruction::new(Opcode::Rewind, 1, 9, 0),
+            Instruction::new(Opcode::Last, 1, 9, 0),
+            Instruction::new(Opcode::Next, 1, 9, 0),
+            Instruction::new(Opcode::Column, 1, 2, 3),
+            Instruction::new(Opcode::Rowid, 1, 2, 0),
+            Instruction::new(Opcode::ResultRow, 1, 2, 0),
+            Instruction::new(Opcode::Eq, 1, 2, 3),
+            Instruction::new(Opcode::Ge, 1, 2, 3),
+            Instruction::new(Opcode::Gt, 1, 2, 3),
+            Instruction::new(Opcode::Le, 1, 2, 3),
+            Instruction::new(Opcode::Lt, 1, 2, 3),
+            Instruction::new(Opcode::Add, 1, 2, 3),
+            Instruction::new(Opcode::Subtract, 1, 2, 3),
+            Instruction::new(Opcode::Multiply, 1, 2, 3),
+            Instruction::new(Opcode::Divide, 1, 2, 3),
+            Instruction::new(Opcode::Remainder, 1, 2, 3),
+            Instruction::new(Opcode::Function, 1, 2, 3),
+            Instruction::new(Opcode::Integer, 1, 2, 0),
+            Instruction::new(Opcode::Variable, 1, 2, 0),
+            Instruction::new(Opcode::String8, 0, 2, 0),
+            Instruction::new(Opcode::Halt, 0, 0, 0),
+            Instruction::new(Opcode::SorterOpen, 1, 0, 0),
+            Instruction::new(Opcode::SorterInsert, 1, 2, 0),
+            Instruction::new(Opcode::SorterSort, 1, 9, 0),
+            Instruction::new(Opcode::Sort, 1, 9, 0),
+            Instruction::new(Opcode::SorterNext, 1, 9, 0),
+            Instruction::new(Opcode::SorterData, 1, 2, 0),
+            Instruction::new(Opcode::Found, 1, 2, 3),
+            Instruction::new(Opcode::IdxInsert, 1, 2, 0),
+            Instruction::new(Opcode::IdxDelete, 1, 2, 0),
+            Instruction::new(Opcode::Insert, 1, 2, 3),
+            Instruction::new(Opcode::NewRowid, 1, 2, 0),
+            Instruction::new(Opcode::Delete, 1, 0, 0),
+            Instruction::new(Opcode::Not, 0, 0, 0),
+        ]);
+        let rows = explain(&program);
+        let comments: Vec<&str> = rows.iter().map(|r| r.comment.as_str()).collect();
+        assert_eq!(
+            comments,
+            vec![
+                "start at 5",
+                "goto 7",
+                "cursor 1 on root page 2",
+                "cursor 1 write on root page 2",
+                "cursor 1 ephemeral",
+                "cursor 1 pseudo, reads r[2]",
+                "cursor 1 rewind, jump 9 if empty",
+                "cursor 1 to last row, jump 9 if empty",
+                "cursor 1 next, jump 9 if row found",
+                "r[3] = cursor 1 column 2",
+                "r[2] = cursor 1 rowid",
+                "output r[1..1+2]",
+                "if r[1]=r[3] goto 2",
+                "if r[1]>=r[3] goto 2",
+                "if r[1]>r[3] goto 2",
+                "if r[1]<=r[3] goto 2",
+                "if r[1]<r[3] goto 2",
+                "r[3] = r[1] + r[2]",
+                "r[3] = r[2] - r[1]",
+                "r[3] = r[1] * r[2]",
+                "r[3] = r[2] / r[1]",
+                "r[3] = r[2] % r[1]",
+                "r[3] = func(r[2..])",
+                "r[2] = 1",
+                "r[2] = parameter(1)",
+                "r[2] = <string>",
+                "halt",
+                "cursor 1 sorter open",
+                "cursor 1 sorter insert r[2]",
+                "cursor 1 sort, jump 9 if empty",
+                "cursor 1 sort, jump 9 if empty",
+                "cursor 1 sorter next, jump 9 if row found",
+                "r[2] = cursor 1 sorted row",
+                "cursor 1 found key at r[3..], jump 2",
+                "cursor 1 insert key r[2..]",
+                "cursor 1 delete key r[2..]",
+                "cursor 1 insert rowid r[2] record r[3]",
+                "r[2] = cursor 1 new rowid",
+                "cursor 1 delete current row",
+                "",
+            ]
+        );
+    }
 }

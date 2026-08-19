@@ -148,3 +148,61 @@ impl VfsFile for MemoryVfsFile {
 struct NoopLock;
 
 impl SharedLockGuard for NoopLock {}
+
+/// Poisoning the file-table `Mutex` is only reachable via a genuine panic
+/// while it's held, which black-box `tests/unit/vfs.rs` has no way to
+/// trigger (the field is private) — hence these white-box tests live here
+/// instead, exercising the `poisoned` error path per #224.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Poisons `vfs`'s shared file table by locking it on another thread
+    /// and panicking while the guard is held.
+    fn poison(vfs: &MemoryVfs) {
+        let files = vfs.files.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = files.lock().unwrap();
+            panic!("intentionally poisoning the lock for a test");
+        })
+        .join();
+    }
+
+    #[test]
+    fn insert_is_a_noop_when_lock_poisoned() {
+        let mut vfs = MemoryVfs::new();
+        poison(&vfs);
+
+        // Must not panic, and the insert is silently dropped.
+        vfs.insert("/x", vec![1, 2, 3]);
+        assert!(vfs.exists(Path::new("/x")).is_err());
+    }
+
+    #[test]
+    fn handle_surfaces_io_error_when_lock_poisoned() {
+        let vfs = MemoryVfs::new();
+        poison(&vfs);
+
+        let err = match vfs.open_read(Path::new("/x")) {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e,
+        };
+        match err {
+            VfsError::Io { path, .. } => assert_eq!(path, "/x"),
+            other => panic!("expected Io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_surfaces_io_error_when_lock_poisoned() {
+        let vfs = MemoryVfs::new();
+        poison(&vfs);
+
+        let err = vfs.exists(Path::new("/y")).unwrap_err();
+        match err {
+            VfsError::Io { path, .. } => assert_eq!(path, "/y"),
+            other => panic!("expected Io error, got {other:?}"),
+        }
+    }
+}

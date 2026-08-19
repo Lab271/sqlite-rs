@@ -225,3 +225,84 @@ fn drop_index_then_drop_table_removes_them_from_the_schema() {
         );
     }
 }
+
+/// A path that doesn't exist must fail cleanly (exit 1, diagnostic on
+/// stderr, no panic) rather than propagating an I/O panic — `exec`'s
+/// `dump::open` failure path.
+#[test]
+fn exec_on_a_nonexistent_database_fails_cleanly() {
+    let dir = scratch_db("missing").parent().unwrap().to_path_buf();
+    let missing = dir.join("does_not_exist.db");
+
+    let output = run_exec(&missing, "SELECT 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.is_empty(), "expected a diagnostic; got nothing");
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+}
+
+/// A NOT NULL violation is a runtime constraint check inside
+/// `execute_with_writable_db`, not a compile-time error — `exec` must
+/// surface it as a clean failure (exit 1) rather than a panic, and must
+/// leave the table state unaffected (verified via a follow-up SELECT).
+#[test]
+fn exec_not_null_violation_fails_cleanly_at_runtime() {
+    let db = seed_db("not-null");
+    assert!(run_exec(&db, "CREATE TABLE u(id INTEGER, v TEXT NOT NULL)")
+        .status
+        .success());
+
+    let output = run_exec(&db, "INSERT INTO u(id, v) VALUES (1, NULL)");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr.contains("NOT NULL"),
+        "expected a NOT NULL constraint diagnostic; got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+
+    assert_eq!(run_query(&db, "SELECT * FROM u"), "");
+}
+
+/// Each statement-specific parser in `compile_statement` can return a
+/// non-`Accepted` outcome (`Unsupported`/`Invalid`) for malformed input;
+/// `exec` must report it as a clean failure (exit 1) rather than panic,
+/// for every branch of the dispatch — INSERT/UPDATE/DELETE/CREATE TABLE/
+/// CREATE INDEX/DROP TABLE/DROP INDEX — plus the final unrecognized-
+/// statement fallback.
+#[test]
+fn exec_malformed_or_unrecognized_statements_fail_cleanly() {
+    let db = seed_db("malformed");
+    assert!(run_exec(&db, "CREATE INDEX idx_t_b ON t(b)")
+        .status
+        .success());
+
+    for sql in [
+        "INSERT INTO",
+        "UPDATE",
+        "DELETE FROM",
+        "CREATE TABLE",
+        "CREATE INDEX",
+        "DROP TABLE",
+        "DROP INDEX",
+        "SELECT 1",
+        "PRAGMA foo",
+    ] {
+        let output = run_exec(&db, sql);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "expected exit 1 for exec {sql:?}; stderr: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "exec {sql:?} wrote to stdout");
+        assert!(!stderr.is_empty(), "exec {sql:?} gave no diagnostic");
+        assert!(
+            !stderr.contains("panicked at"),
+            "exec {sql:?} must not panic: {stderr}"
+        );
+    }
+}

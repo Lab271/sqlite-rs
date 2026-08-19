@@ -401,4 +401,168 @@ mod tests {
         let err = insert_row(&mut pager, &header, 1, 1, b"world").unwrap_err();
         assert!(matches!(err, BtreeError::DuplicateRowid { rowid: 1 }));
     }
+
+    /// Recursively walks the tree rooted at `page`, collecting every leaf
+    /// rowid it finds. Used to verify a b-tree survives many cascading
+    /// splits (leaf, interior, and root) without losing or duplicating
+    /// rows, regardless of the resulting tree shape/depth.
+    fn collect_all_rowids(pager: &mut Pager, usable_size: u32, page: u32, out: &mut Vec<i64>) {
+        let header_start = page1_header_start(page);
+        let buf = pager.get_page_mut(page).unwrap().clone();
+        let page_type = read_page_type(&buf, header_start, page).unwrap();
+        if page_type == LEAF_TABLE {
+            let cells = collect_leaf_cells(&buf, header_start, page, usable_size).unwrap();
+            out.extend(cells.iter().map(|(rowid, _)| *rowid));
+        } else {
+            let (entries, rightmost) = collect_interior_entries(&buf, header_start, page).unwrap();
+            for (child, _) in &entries {
+                collect_all_rowids(pager, usable_size, *child, out);
+            }
+            collect_all_rowids(pager, usable_size, rightmost, out);
+        }
+    }
+
+    /// 006-btree Requirement 8's split scenarios: inserting enough small
+    /// rows into a tiny-page-size database must cascade through leaf
+    /// splits, an interior split (parent overflow, median promoted), and
+    /// multiple root splits (first leaf-root -> interior, then that
+    /// interior root splitting again) — every row must still be found
+    /// exactly once afterward, regardless of the resulting tree depth.
+    #[test]
+    fn many_inserts_cascade_through_every_split_kind() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        // Ascending inserts drive enough leaf splits to overflow the
+        // parent interior page too (promoting a median key into a fresh
+        // root — the root's first split, from a leaf), and then far
+        // enough to overflow that new root-as-interior page again (the
+        // root's second split, this time relocating an interior page).
+        let n: i64 = 5000;
+        for rowid in 1..=n {
+            insert_row(&mut pager, &header, 1, rowid, b"0123456789").unwrap();
+        }
+
+        // Root must have grown into (at least) an interior page — a
+        // leaf-root could never hold 5000 rows in a 512-byte page.
+        let header_start_root = page1_header_start(1);
+        let root_buf = pager.get_page_mut(1).unwrap().clone();
+        let root_type = read_page_type(&root_buf, header_start_root, 1).unwrap();
+        assert_eq!(root_type, INTERIOR_TABLE);
+
+        // Backfilling with keys smaller than everything inserted so far
+        // routes every one of these into the current *leftmost* leaf,
+        // which (once the tree has more than one leaf) is tracked as a
+        // named routing entry in its parent rather than the parent's
+        // `rightmost` pointer — so these splits exercise the "found the
+        // split child among the parent's named entries" path, not just
+        // the "split child was the parent's rightmost pointer" path that
+        // dominates when every insert lands at the tail.
+        for rowid in (-500..0).rev() {
+            insert_row(&mut pager, &header, 1, rowid, b"0123456789").unwrap();
+        }
+
+        let mut rowids = Vec::new();
+        collect_all_rowids(&mut pager, usable_size, 1, &mut rowids);
+        rowids.sort_unstable();
+        let expected: Vec<i64> = (-500..0).chain(1..=n).collect();
+        assert_eq!(rowids, expected);
+    }
+
+    /// A payload larger than two overflow pages' worth of data must span a
+    /// multi-page overflow chain (not just a single overflow page), and
+    /// the row must be stored as a single leaf cell with the overflow
+    /// pointer trailing it.
+    #[test]
+    fn large_payload_spans_multi_page_overflow_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        // Comfortably larger than two overflow pages' capacity
+        // (usable_size - 4 bytes each) so the chain has at least 3 links.
+        let payload = vec![0xABu8; (usable_size as usize) * 3];
+        insert_row(&mut pager, &header, 1, 1, &payload).unwrap();
+
+        let header_start = page1_header_start(1);
+        let buf = pager.get_page_mut(1).unwrap().clone();
+        let cells = collect_leaf_cells(&buf, header_start, 1, usable_size).unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].0, 1);
+    }
+
+    /// `insert_into_parent`'s error path: if the immediate parent's
+    /// routing entries name neither the split child nor its rightmost
+    /// pointer, that's a corrupt/mismatched tree and must surface as
+    /// `MissingChildRoute`, not silently misroute the split.
+    #[test]
+    fn insert_into_parent_errors_when_parent_has_no_route_for_child() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+        let page_len = pager.get_page_mut(1).unwrap().len();
+
+        // Allocate a fresh page to act as an interior "parent" whose
+        // routing entries don't mention `old_page` at all.
+        let parent_page = pager.allocate_page().unwrap();
+        {
+            let cells = vec![build_interior_cell(5, 10)];
+            let buf = pager.get_page_mut(parent_page).unwrap();
+            write_interior_page(buf, 0, parent_page, &cells, 6).unwrap();
+        }
+
+        let err = insert_into_parent(
+            &mut pager,
+            usable_size,
+            page_len,
+            &[parent_page],
+            1,
+            99,
+            100,
+            50,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::MissingChildRoute {
+                page_num,
+                child: 99,
+            } if page_num == parent_page
+        ));
+    }
+
+    /// `root_split`'s defensive error arm: a root page whose type is
+    /// neither `LEAF_TABLE` nor `INTERIOR_TABLE` (e.g. an index b-tree
+    /// page type, which should never reach a table b-tree's insert path)
+    /// must surface as `UnexpectedPageType`, not panic or silently
+    /// misinterpret the page's bytes.
+    #[test]
+    fn root_split_errors_on_unexpected_root_page_type() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let usable_size = header.usable_page_size();
+
+        // Corrupt the root's page-type byte to an index leaf type — never
+        // a legal root page type for a table b-tree.
+        let header_start = page1_header_start(1);
+        {
+            let buf = pager.get_page_mut(1).unwrap();
+            buf[header_start] = super::super::index::LEAF_INDEX;
+        }
+
+        let new_right = pager.allocate_page().unwrap();
+        let err = root_split(&mut pager, usable_size, 1, new_right, 5).unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::UnexpectedPageType {
+                page_num: 1,
+                page_type,
+            } if page_type == super::super::index::LEAF_INDEX
+        ));
+    }
 }

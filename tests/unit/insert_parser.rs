@@ -24,6 +24,13 @@ fn invalid(src: &str) -> String {
     }
 }
 
+fn unsupported(src: &str) -> String {
+    match parse_insert(src) {
+        InsertOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_accept_insert_values() {
     let insert = accept("INSERT INTO t VALUES (1, 2)");
@@ -139,4 +146,17 @@ fn test_invalid_insert_bad_conflict_action() {
 #[test]
 fn test_invalid_insert_unclosed_paren() {
     invalid("INSERT INTO t VALUES (1, 2");
+}
+
+#[test]
+fn test_invalid_insert_trailing_garbage() {
+    invalid("INSERT INTO t VALUES (1) EXTRA");
+}
+
+#[test]
+fn test_unsupported_insert_select_source_compound() {
+    // The inline SELECT source parses fine on its own, but the trailing
+    // UNION is only rejected once control returns to the top-level
+    // expect_end check (issue #224).
+    unsupported("INSERT INTO t SELECT a FROM other UNION SELECT a FROM other");
 }

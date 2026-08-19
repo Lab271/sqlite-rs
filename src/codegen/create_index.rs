@@ -137,4 +137,54 @@ mod tests {
         let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
         assert!(matches!(err, CodegenError::Unsupported { .. }));
     }
+
+    #[test]
+    fn rejects_expression_column() {
+        let sql = "CREATE INDEX idx_t_expr ON t(a + 1)";
+        let ci = match parse_create_index(sql) {
+            CreateIndexOutcome::Accepted(c) => c,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("indexes an expression"), "{reason}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unresolvable_column() {
+        let sql = "CREATE INDEX idx_t_c ON t(c)";
+        let ci = match parse_create_index(sql) {
+            CreateIndexOutcome::Accepted(c) => c,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("can't resolve"), "{reason}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_span() {
+        let sql = "CREATE INDEX idx_t_b ON t(b)";
+        let mut ci = match parse_create_index(sql) {
+            CreateIndexOutcome::Accepted(c) => c,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        ci.span.offset = u32::MAX - 1;
+        ci.span.len = 10;
+        let err = compile_create_index(&ci, &schema(), sql).unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("out of bounds"), "{reason}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
 }
