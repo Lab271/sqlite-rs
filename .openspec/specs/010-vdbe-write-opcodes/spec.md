@@ -238,6 +238,91 @@ change here) — a future codegen ticket sets these operands once it knows.
 **Tests:**
 `src/vdbe/cursor.rs::tests::new_rowid_autoincrement_consults_and_bumps_sqlite_sequence`
 
+### Requirement 7: NoConflict (real-index seek+branch, #207) [MUST]
+
+`NoConflict` MUST jump to `P2` when no entry in the real index b-tree
+rooted at `CursorSlot::IndexWrite` cursor `P1` has a key whose leading
+columns equal the `P4::Int` (key column count) registers starting at
+`P3` — built on `IndexCursor::seek` (`src/btree/index.rs`), the same
+BINARY-collation-only, linear-scan-from-first-entry cursor Requirement 5
+already uses read-side. On a conflict (fallthrough — no jump), it MUST
+also write the conflicting entry's trailing rowid column into register
+`P3 + count`, one past the probe range, so an `OR REPLACE` caller can
+`SeekRowid` the table cursor onto the displaced row without a second
+lookup.
+
+This is the seek+branch primitive #207 identified as missing for
+non-rowid `UNIQUE` constraint enforcement: `CursorSlot` had no
+read-capable real-index variant, and `Found` (spec 009 Requirement 4)
+only ever worked against `CursorSlot::Ephemeral`. `NoConflict` closes
+that gap without adding new `CursorSlot` state — it builds a fresh,
+stateless `IndexCursor` from the `Vm`'s shared page source on every
+call, matching `IdxInsert`/`IdxDelete`'s existing stateless
+`CursorSlot::IndexWrite` design (Requirements 4/5).
+
+**Implementation:** `src/vdbe/cursor.rs::no_conflict`
+
+**Codegen:** `src/codegen/insert.rs::emit_unique_check` emits this
+opcode per `UNIQUE` index (`schema.indexes.iter().filter(|i| i.unique)`)
+before the row's own `Insert`, dispatching `ON CONFLICT`
+(`IGNORE`/`REPLACE`/`ABORT`+`FAIL`+`ROLLBACK`) the same way
+`emit_pk_conflict` already does for the rowid-PK case.
+
+#### Scenario: NoConflict falls through and reports the conflicting rowid when the key already exists
+
+- GIVEN a real index write cursor with one entry (column value `"v1"`,
+  trailing rowid `42`)
+- WHEN `NoConflict` runs with a probe register holding `Text("v1")`
+  (`P4::Int(1)`)
+- THEN execution falls through (no jump) and the register one past the
+  probe range holds `Integer(42)`
+
+**Tests:**
+`src/vdbe/cursor.rs::tests::no_conflict_falls_through_and_reports_the_rowid_when_the_key_already_exists`
+
+#### Scenario: NoConflict jumps to P2 when no matching key exists
+
+- GIVEN the same index cursor as above
+- WHEN `NoConflict` runs with a probe register holding `Text("v2")`
+- THEN execution jumps to `P2`
+
+**Tests:**
+`src/vdbe/cursor.rs::tests::no_conflict_jumps_to_p2_when_no_matching_key_exists`
+
+#### Scenario: INSERT rejects a duplicate UNIQUE key by default (ABORT)
+
+- GIVEN a table with a `UNIQUE` index and one existing row
+- WHEN `compile_insert` runs a second row with the same indexed value
+  and no `OR` clause (default `ABORT`)
+- THEN execution halts with a UNIQUE constraint error and the row is
+  not written
+
+**Tests:**
+`tests/corpus/unique_constraint_test.rs::insert_rejects_duplicate_unique_key_by_default`,
+`tests/corpus/index_maintenance_test.rs::insert_duplicate_key_into_unique_index_is_rejected`
+
+#### Scenario: INSERT OR IGNORE skips a duplicate UNIQUE key
+
+- GIVEN a table with a `UNIQUE` index and one existing row
+- WHEN `compile_insert` runs `INSERT OR IGNORE` with one conflicting row
+  and one non-conflicting row in the same `VALUES` list
+- THEN the conflicting row is silently skipped and the non-conflicting
+  row is written
+
+**Tests:**
+`tests/corpus/unique_constraint_test.rs::insert_or_ignore_skips_duplicate_unique_key`
+
+#### Scenario: INSERT OR REPLACE displaces the conflicting row
+
+- GIVEN a table with a `UNIQUE` index and existing rows
+- WHEN `compile_insert` runs `INSERT OR REPLACE` with a new row whose
+  indexed value conflicts with an existing row
+- THEN the pre-existing row (and its index entries) is deleted before
+  the new row is written, and `PRAGMA integrity_check` stays clean
+
+**Tests:**
+`tests/corpus/unique_constraint_test.rs::insert_or_replace_displaces_the_conflicting_row`
+
 ## Related regimes
 
 - Tier suite: `tests/tiers/tier2.rs`'s `t2_crud_round_trips_on_rowid_tables`

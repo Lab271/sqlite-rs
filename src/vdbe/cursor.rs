@@ -40,10 +40,11 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::btree::{self, TableCursor, TableRow};
+use crate::btree::{self, IndexCursor, TableCursor, TableRow};
 use crate::record::{decode_record, encode_record, TextEncoding, Value};
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
+use crate::vdbe::{compare, Collation};
 
 /// One open cursor slot: a real table cursor, an in-memory ephemeral
 /// index, a sorter (state owned by `src/vdbe/sorter.rs`, re-exported
@@ -576,6 +577,92 @@ pub fn idx_delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             found: other.type_name(),
             expected: "ephemeral or index write cursor",
         }),
+    }
+}
+
+/// `NoConflict` (#207): jumps to `P2` when no entry in the real index
+/// b-tree rooted at cursor `P1`'s `IndexWrite` root page has a key whose
+/// leading columns equal the `P4` (`Int`, key column count) registers
+/// starting at `P3` — i.e. "no conflicting row exists for this
+/// candidate UNIQUE key", the seek+branch primitive #207's own doc
+/// (`src/vdbe/cursor.rs`, this comment) identified as missing. Falls
+/// through (does not jump) when a matching entry IS found, so callers
+/// emit their `ON CONFLICT` handling as the fallthrough body — mirroring
+/// `SeekRowid`'s "jump on absence" shape used by the rowid-PK conflict
+/// check in `src/codegen/insert.rs`.
+///
+/// On a conflict (fallthrough), also writes the conflicting entry's
+/// trailing rowid column into register `P3 + count` — one past the
+/// probe range — so an `OR REPLACE` caller can `SeekRowid` the table
+/// cursor onto the row being displaced without a second index lookup.
+/// Callers that don't need `OR REPLACE` may leave that register
+/// unallocated for anything else, but MUST NOT reuse it for the probe
+/// itself.
+///
+/// Built on [`IndexCursor::seek`] (`src/btree/index.rs`), a linear scan
+/// from the first entry (BINARY collation only, Tier 0 scope — matches
+/// the cursor's own documented limitation). The probe key is just the
+/// index's declared columns, without the trailing rowid every on-disk
+/// entry carries; `seek` returns the first entry whose full key is not
+/// less than that shorter probe (`compare_keys`' `zip` naturally treats
+/// the probe as a prefix), so this checks only that returned entry's own
+/// leading columns for an exact match — the trailing rowid is irrelevant
+/// to uniqueness.
+pub fn no_conflict(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let count = p4_count(instr, "NoConflict")?;
+    let probe = read_register_range(vm, instr.p3, count, "NoConflict")?;
+    let root_page = match vm.cursor(instr.p1)? {
+        CursorSlot::IndexWrite { root_page } => *root_page,
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "NoConflict",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "index write cursor",
+            })
+        }
+    };
+    let db = vm.db()?;
+    let encoding = db.header.text_encoding;
+    let usable_size = db.header.usable_page_size();
+    let mut cursor = IndexCursor::new(Rc::clone(&db.source), usable_size, root_page);
+    let found = cursor
+        .seek(&probe, encoding)
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "NoConflict",
+            reason: e.to_string(),
+        })?;
+    let conflict_key = match found {
+        Some(row) => {
+            let key = decode_record(&row.payload, encoding).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "NoConflict",
+                    reason: e.to_string(),
+                }
+            })?;
+            let matches = key.len() >= probe.len()
+                && key
+                    .iter()
+                    .zip(probe.iter())
+                    .all(|(k, p)| compare(k, p, Collation::Binary).is_eq());
+            matches.then_some(key)
+        }
+        None => None,
+    };
+    match conflict_key {
+        Some(key) => {
+            if let Some(rowid) = key.last() {
+                let dest = instr.p3.saturating_add(i32::try_from(count).map_err(|_| {
+                    ExecError::RegisterRangeTooLarge {
+                        opcode: "NoConflict",
+                        count: count as i32,
+                    }
+                })?);
+                vm.set_register(dest, rowid.clone())?;
+            }
+            Ok(Step::Next)
+        }
+        None => Ok(Step::Jump(to_pc(instr.p2))),
     }
 }
 
@@ -1424,6 +1511,58 @@ mod tests {
         let mut index_cursor =
             crate::btree::IndexCursor::new(Rc::clone(&db.source), db.header.usable_page_size(), 1);
         assert!(index_cursor.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn no_conflict_falls_through_and_reports_the_rowid_when_the_key_already_exists() {
+        let mut vm = writable_vm(0x0a); // LEAF_INDEX
+        let mut open_instr = Instruction::new(Opcode::OpenWrite, 0, 1, 0);
+        open_instr.p5 = 1; // nonzero P5: open a real index write cursor
+        open_write(&mut vm, &open_instr).unwrap();
+
+        // One index entry: column value "v1", trailing rowid 42.
+        vm.set_register(0, Value::Text("v1".to_string())).unwrap();
+        vm.set_register(1, Value::Integer(42)).unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
+        )
+        .unwrap();
+
+        // Probe with just the column value (no trailing rowid) at
+        // register 5, reserving register 6 for the conflicting rowid.
+        vm.set_register(5, Value::Text("v1".to_string())).unwrap();
+        let step = no_conflict(
+            &mut vm,
+            &Instruction::with_p4(Opcode::NoConflict, 0, 999, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next, "a matching entry must not jump");
+        assert_eq!(*vm.register(6).unwrap(), Value::Integer(42));
+    }
+
+    #[test]
+    fn no_conflict_jumps_to_p2_when_no_matching_key_exists() {
+        let mut vm = writable_vm(0x0a); // LEAF_INDEX
+        let mut open_instr = Instruction::new(Opcode::OpenWrite, 0, 1, 0);
+        open_instr.p5 = 1;
+        open_write(&mut vm, &open_instr).unwrap();
+
+        vm.set_register(0, Value::Text("v1".to_string())).unwrap();
+        vm.set_register(1, Value::Integer(42)).unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
+        )
+        .unwrap();
+
+        vm.set_register(5, Value::Text("v2".to_string())).unwrap();
+        let step = no_conflict(
+            &mut vm,
+            &Instruction::with_p4(Opcode::NoConflict, 0, 999, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(999));
     }
 
     #[test]

@@ -28,13 +28,22 @@
 //! index cursors, so the two scans never collide within the same
 //! program.
 //!
+//! UNIQUE constraints on non-rowid columns (#207) are enforced against
+//! every index in `schema.indexes` with `unique: true`: `emit_unique_check`
+//! probes the candidate row via the new `Opcode::NoConflict` real-index
+//! seek+branch primitive (`src/vdbe/cursor.rs`, built on
+//! `IndexCursor::seek`) and dispatches `ON CONFLICT` the same way
+//! `emit_pk_conflict` does for the rowid-PK case. A composite
+//! `PRIMARY KEY(...)`/`UNIQUE(...)` *table* constraint with no backing
+//! `CREATE INDEX`/on-disk index (this codebase doesn't auto-create
+//! `sqlite_autoindex_*` entries yet) has no real index to seek against,
+//! so it still isn't enforced — that's a `CREATE TABLE`-side gap, not
+//! an INSERT-codegen one.
+//!
 //! Known simplifications (deferred to follow-up tickets, not chased
 //! here):
-//! - UNIQUE constraints on non-rowid columns still aren't *enforced* as
-//!   a constraint violation: a duplicate key surfaces as
-//!   `IdxInsert`'s generic `BtreeError::DuplicateKey` ->
-//!   `MalformedInstruction`, not a `SQLITE_CONSTRAINT_UNIQUE` /
-//!   `ON CONFLICT` outcome. Filed as a follow-up.
+//! - `InsertSource::Select` does not compile (`VALUES`/`DEFAULT VALUES`
+//!   only) — filed separately from #195.
 //! - An index with a `DESC` column is rejected outright
 //!   (`CodegenError::Unsupported`), not silently mis-keyed — see
 //!   `index_maintenance`.
@@ -79,6 +88,9 @@ const FIRST_INDEX_CURSOR: i32 = 2;
 pub(crate) const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 pub(crate) const SQLITE_CONSTRAINT_CHECK: i32 = 275;
+// #207: non-rowid UNIQUE violation, enforced via the new `NoConflict`
+// real-index seek+branch primitive (`src/vdbe/cursor.rs::no_conflict`).
+const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
 #[derive(Debug, Default)]
 pub(crate) struct ColumnPlan {
@@ -566,8 +578,22 @@ fn compile_row(
         }
     }
 
+    let unique_indexes: Vec<(i32, &crate::schema::IndexSchema)> = schema
+        .indexes
+        .iter()
+        .enumerate()
+        .filter(|(_, idx)| idx.unique)
+        .map(|(i, idx)| {
+            (
+                FIRST_INDEX_CURSOR.saturating_add(i32::try_from(i).unwrap_or(0)),
+                idx,
+            )
+        })
+        .collect();
+
     let has_checks = !table_checks.is_empty() || plans.iter().any(|p| !p.checks.is_empty());
-    if has_checks {
+    let needs_row_pseudo = has_checks || !unique_indexes.is_empty();
+    if needs_row_pseudo {
         let base_reg = col_regs.first().copied().unwrap_or(0);
         let count = i32::try_from(col_regs.len()).unwrap_or(0);
         let check_record_reg = reg.alloc();
@@ -583,7 +609,9 @@ fn compile_row(
             check_record_reg,
             0,
         ));
+    }
 
+    if has_checks {
         let mut check_exprs: Vec<&Expr> = plans.iter().flat_map(|p| p.checks.iter()).collect();
         check_exprs.extend(table_checks.iter());
         for expr in check_exprs {
@@ -612,6 +640,19 @@ fn compile_row(
             );
             em.place(ok);
         }
+    }
+
+    for (index_cursor, index) in &unique_indexes {
+        emit_unique_check(
+            em,
+            reg,
+            schema,
+            check_schema,
+            *index_cursor,
+            index,
+            action,
+            row_skip,
+        )?;
     }
 
     let base_reg = col_regs.first().copied().unwrap_or(0);
@@ -733,5 +774,109 @@ fn emit_pk_conflict(
             ));
         }
     }
+    Ok(())
+}
+
+/// Enforces one non-rowid UNIQUE index (#207) against the row currently
+/// staged in `col_regs` (read back via `CHECK_CURSOR`'s pseudo cursor,
+/// same trick `has_checks` uses — see `compile_row`). Emits the probe
+/// key (the index's declared columns, in order) into a fresh contiguous
+/// register run, reserves one more register for `Opcode::NoConflict`'s
+/// conflicting-rowid output, then dispatches on `action` exactly like
+/// `emit_pk_conflict` does for the rowid-PK case.
+#[allow(clippy::too_many_arguments)]
+fn emit_unique_check(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    check_schema: &TableSchema,
+    index_cursor: i32,
+    index: &crate::schema::IndexSchema,
+    action: ConflictAction,
+    row_skip: Label,
+) -> Result<(), CodegenError> {
+    let mut start = None;
+    let mut key_col_indices = Vec::with_capacity(index.columns.len());
+    for col in &index.columns {
+        if col.desc {
+            return Err(CodegenError::Unsupported {
+                reason: format!(
+                    "index {} has a DESC column ({}); descending index keys aren't supported yet",
+                    index.name, col.name
+                ),
+            });
+        }
+        let col_idx = column_index(schema, &col.name).ok_or_else(|| CodegenError::Unsupported {
+            reason: format!(
+                "index {} references a column or expression this codegen can't resolve: {}",
+                index.name, col.name
+            ),
+        })?;
+        key_col_indices.push(col_idx);
+        let r = reg.alloc();
+        if start.is_none() {
+            start = Some(r);
+        }
+        crate::codegen::expr::emit_column_read(em, check_schema, CHECK_CURSOR, col_idx, r)?;
+    }
+    let start = start.unwrap_or(0);
+    let count = i32::try_from(key_col_indices.len()).unwrap_or(0);
+    // `NoConflict`'s contract (`src/vdbe/cursor.rs::no_conflict`): the
+    // register immediately after the probe range receives the
+    // conflicting row's rowid on a fallthrough (conflict) — reserved
+    // here even when `action` doesn't need it (`Ignore`/`Abort`/etc.),
+    // to keep the register layout uniform.
+    let conflict_rowid_reg = reg.alloc();
+
+    let no_conflict = em.new_label();
+    let addr = em.emit(Instruction::with_p4(
+        Opcode::NoConflict,
+        index_cursor,
+        0,
+        start,
+        P4::Int(count.into()),
+    ));
+    em.patch_p2(addr, no_conflict);
+
+    match action {
+        ConflictAction::Ignore => em.goto(row_skip),
+        ConflictAction::Replace => {
+            // The conflicting row's rowid was written into
+            // `conflict_rowid_reg` by `NoConflict` itself — seek the
+            // table cursor onto it, remove its index entries, then
+            // delete it, exactly like `emit_pk_conflict`'s `Replace`
+            // branch (which instead already had the cursor positioned
+            // via `SeekRowid`).
+            let seek_ok = em.new_label();
+            let seek_addr = em.emit(Instruction::new(
+                Opcode::SeekRowid,
+                TABLE_CURSOR,
+                0,
+                conflict_rowid_reg,
+            ));
+            em.patch_p2(seek_addr, seek_ok);
+            crate::codegen::index_maintenance::emit_index_key_ops(
+                em,
+                reg,
+                schema,
+                TABLE_CURSOR,
+                FIRST_INDEX_CURSOR,
+                Opcode::IdxDelete,
+            )?;
+            em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
+            em.place(seek_ok);
+        }
+        ConflictAction::Abort | ConflictAction::Fail | ConflictAction::Rollback => {
+            let message = format!("UNIQUE constraint failed: {}.{}", schema.name, index.name);
+            em.emit(Instruction::with_p4(
+                Opcode::Halt,
+                SQLITE_CONSTRAINT_UNIQUE,
+                0,
+                0,
+                P4::Str(message),
+            ));
+        }
+    }
+    em.place(no_conflict);
     Ok(())
 }
