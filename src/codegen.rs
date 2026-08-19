@@ -5,8 +5,10 @@
 //! flow, never an intermediate boolean register (Requirement 11).
 
 pub mod expr;
+pub mod insert;
 pub mod select;
 
+pub use insert::compile_insert;
 pub use select::{compile_select, CodegenError};
 
 use std::collections::HashMap;

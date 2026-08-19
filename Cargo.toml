@@ -85,6 +85,10 @@ name = "codegen_select"
 path = "tests/codegen/select_test.rs"
 
 [[test]]
+name = "codegen_insert"
+path = "tests/codegen/insert_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 
