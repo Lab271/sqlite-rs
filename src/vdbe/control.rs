@@ -329,4 +329,150 @@ mod tests {
         let instr = Instruction::new(Opcode::NotNull, 1, 5, 0);
         assert_eq!(not_null(&vm, &instr).unwrap(), Step::Jump(5));
     }
+
+    #[test]
+    fn begin_subrtn_falls_through() {
+        assert_eq!(begin_subrtn().unwrap(), Step::Next);
+    }
+
+    #[test]
+    fn transaction_is_a_no_op() {
+        assert_eq!(transaction().unwrap(), Step::Next);
+    }
+
+    #[test]
+    fn return_jumps_to_stored_address() {
+        let vm = vm_with(vec![Value::Integer(42)]);
+        let instr = Instruction::new(Opcode::Return, 0, 0, 0);
+        assert_eq!(r#return(&vm, &instr).unwrap(), Step::Jump(42));
+    }
+
+    #[test]
+    fn return_rejects_non_integer_register() {
+        let vm = vm_with(vec![Value::Text("x".to_string())]);
+        let instr = Instruction::new(Opcode::Return, 0, 0, 0);
+        assert!(matches!(
+            r#return(&vm, &instr),
+            Err(ExecError::TypeMismatch {
+                opcode: "Return",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn not_null_falls_through_on_null() {
+        let vm = vm_with(vec![Value::Null]);
+        let instr = Instruction::new(Opcode::NotNull, 0, 5, 0);
+        assert_eq!(not_null(&vm, &instr).unwrap(), Step::Next);
+    }
+
+    #[test]
+    fn is_falsy_null_is_not_falsy() {
+        assert!(!is_falsy(&Value::Null));
+    }
+
+    #[test]
+    fn is_falsy_text_numeric_coercion() {
+        assert!(is_falsy(&Value::Text("0".to_string())));
+        assert!(is_falsy(&Value::Text("0.0".to_string())));
+        assert!(!is_falsy(&Value::Text("1".to_string())));
+        assert!(is_falsy(&Value::Text("abc".to_string())));
+    }
+
+    #[test]
+    fn is_falsy_blob_is_never_falsy() {
+        assert!(is_falsy(&Value::Blob(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn must_be_int_converts_integral_real_in_place() {
+        let mut vm = vm_with(vec![Value::Real(3.0)]);
+        let instr = Instruction::new(Opcode::MustBeInt, 0, 0, 0);
+        assert_eq!(must_be_int(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(3));
+    }
+
+    #[test]
+    fn must_be_int_converts_integer_text_in_place() {
+        let mut vm = vm_with(vec![Value::Text(" 7 ".to_string())]);
+        let instr = Instruction::new(Opcode::MustBeInt, 0, 0, 0);
+        assert_eq!(must_be_int(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(7));
+    }
+
+    #[test]
+    fn must_be_int_jumps_when_p2_set_and_conversion_fails() {
+        let mut vm = vm_with(vec![Value::Text("not a number".to_string())]);
+        let instr = Instruction::new(Opcode::MustBeInt, 0, 9, 0);
+        assert_eq!(must_be_int(&mut vm, &instr).unwrap(), Step::Jump(9));
+    }
+
+    #[test]
+    fn if_pos_decrements_and_jumps_when_positive() {
+        let mut vm = vm_with(vec![Value::Integer(5)]);
+        let instr = Instruction::new(Opcode::IfPos, 0, 20, 2);
+        assert_eq!(if_pos(&mut vm, &instr).unwrap(), Step::Jump(20));
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(3));
+    }
+
+    #[test]
+    fn if_pos_falls_through_when_not_positive() {
+        let mut vm = vm_with(vec![Value::Integer(0)]);
+        let instr = Instruction::new(Opcode::IfPos, 0, 20, 2);
+        assert_eq!(if_pos(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(0));
+    }
+
+    #[test]
+    fn if_not_zero_decrements_positive_and_jumps() {
+        let mut vm = vm_with(vec![Value::Integer(3)]);
+        let instr = Instruction::new(Opcode::IfNotZero, 0, 8, 0);
+        assert_eq!(if_not_zero(&mut vm, &instr).unwrap(), Step::Jump(8));
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn if_not_zero_jumps_without_decrementing_negative() {
+        let mut vm = vm_with(vec![Value::Integer(-3)]);
+        let instr = Instruction::new(Opcode::IfNotZero, 0, 8, 0);
+        assert_eq!(if_not_zero(&mut vm, &instr).unwrap(), Step::Jump(8));
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(-3));
+    }
+
+    #[test]
+    fn if_not_zero_falls_through_at_zero() {
+        let mut vm = vm_with(vec![Value::Integer(0)]);
+        let instr = Instruction::new(Opcode::IfNotZero, 0, 8, 0);
+        assert_eq!(if_not_zero(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(0));
+    }
+
+    #[test]
+    fn register_as_i64_rejects_non_integer() {
+        let mut vm = vm_with(vec![Value::Text("x".to_string())]);
+        let instr = Instruction::new(Opcode::IfPos, 0, 20, 2);
+        assert!(matches!(
+            if_pos(&mut vm, &instr),
+            Err(ExecError::TypeMismatch {
+                opcode: "control counter",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn init_falls_through_when_p2_zero() {
+        let instr = Instruction::new(Opcode::Init, 0, 0, 0);
+        assert_eq!(init(&instr).unwrap(), Step::Next);
+    }
+
+    #[test]
+    fn value_kind_names_all_variants() {
+        assert_eq!(value_kind(&Value::Null), "NULL");
+        assert_eq!(value_kind(&Value::Integer(1)), "INTEGER");
+        assert_eq!(value_kind(&Value::Real(1.0)), "REAL");
+        assert_eq!(value_kind(&Value::Text("x".to_string())), "TEXT");
+        assert_eq!(value_kind(&Value::Blob(vec![])), "BLOB");
+    }
 }
