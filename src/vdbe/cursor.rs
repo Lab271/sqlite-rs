@@ -534,6 +534,51 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     }
 }
 
+/// `IdxDelete` (#210): for an ephemeral cursor, removes the key built
+/// from `P4` (`Int`, the key column count) registers starting at `P2`
+/// from ephemeral cursor `P1`. For a real [`CursorSlot::IndexWrite`]
+/// cursor, encodes the same register range as an index key and removes
+/// the matching entry from the on-disk index b-tree via
+/// [`btree::delete_entry`] — `Err(BtreeError::KeyNotFound)`
+/// surfaces as a `MalformedInstruction`. Mirrors [`idx_insert`]'s operand
+/// shape and cursor-kind dispatch.
+pub fn idx_delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let count = p4_count(instr, "IdxDelete")?;
+    let values = read_register_range(vm, instr.p2, count, "IdxDelete")?;
+    match vm.cursor(instr.p1)? {
+        CursorSlot::IndexWrite { root_page } => {
+            let root_page = *root_page;
+            let pager = vm.writer("IdxDelete")?;
+            let db = vm.db()?;
+            let encoding = db.header.text_encoding;
+            let header = db.header;
+            let mut pager = pager.borrow_mut();
+            btree::delete_entry(&mut pager, &header, root_page, &values, encoding).map_err(
+                |e| ExecError::MalformedInstruction {
+                    opcode: "IdxDelete",
+                    reason: e.to_string(),
+                },
+            )?;
+            Ok(Step::Next)
+        }
+        CursorSlot::Ephemeral(_) => {
+            let key = encode_record(&values, TextEncoding::Utf8);
+            let state = vm.ephemeral_mut(instr.p1, "IdxDelete")?;
+            state.entries.remove(&key);
+            if state.last_key.as_ref() == Some(&key) {
+                state.last_key = None;
+            }
+            Ok(Step::Next)
+        }
+        other => Err(ExecError::CursorTypeMismatch {
+            opcode: "IdxDelete",
+            slot: instr.p1,
+            found: other.type_name(),
+            expected: "ephemeral or index write cursor",
+        }),
+    }
+}
+
 /// `IdxLE`: jumps to `P2` if the key built from `P4` (`Int`, the key
 /// column count) registers starting at `P3` is `<=` ephemeral cursor
 /// `P1`'s most recently probed/inserted key (byte-order comparison of
@@ -1148,5 +1193,64 @@ mod tests {
             values,
             vec![Value::Integer(5), Value::Text("x".to_string())]
         );
+    }
+
+    #[test]
+    fn idx_delete_real_cursor_removes_an_index_entry() {
+        let mut vm = writable_vm(0x0a); // LEAF_INDEX
+        let mut open_instr = Instruction::new(Opcode::OpenWrite, 0, 1, 0);
+        open_instr.p5 = 1; // nonzero P5: open a real index write cursor
+        open_write(&mut vm, &open_instr).unwrap();
+
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        vm.set_register(1, Value::Text("x".to_string())).unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
+        )
+        .unwrap();
+
+        idx_delete(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxDelete, 0, 0, 0, P4::Int(2)),
+        )
+        .unwrap();
+
+        let db = vm.db().unwrap();
+        let mut index_cursor =
+            crate::btree::IndexCursor::new(Rc::clone(&db.source), db.header.usable_page_size(), 1);
+        assert!(index_cursor.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn idx_delete_ephemeral_cursor_removes_the_entry() {
+        let mut vm = writable_vm(0x0d);
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap();
+        let found_step = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 999, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(found_step, Step::Jump(999));
+
+        idx_delete(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxDelete, 0, 0, 0, P4::Int(1)),
+        )
+        .unwrap();
+
+        let step = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 999, 0, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
     }
 }

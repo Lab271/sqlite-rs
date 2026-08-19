@@ -48,6 +48,7 @@ pub enum Opcode {
     Delete,
     Insert,
     NewRowid,
+    IdxDelete,
     // compare
     Eq,
     Ge,
@@ -211,6 +212,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Delete
         | Opcode::Insert
         | Opcode::NewRowid
+        | Opcode::IdxDelete
         | Opcode::Eq
         | Opcode::Ge
         | Opcode::Gt
