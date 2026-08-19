@@ -4,7 +4,7 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [Unreleased]
+## [0.12.2] - 2026-08-20
 
 V03 write-path parity mirror (#72): `tests/parity/v03.rs`'s stub
 replaced with real cases — INSERT/UPDATE/DELETE, `INSERT ... SELECT`,
