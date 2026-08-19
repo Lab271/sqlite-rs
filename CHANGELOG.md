@@ -6,7 +6,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-No changes yet.
+V3 phase 4 in progress (#161): write-path CLI surface (#215). New
+`exec` CLI subcommand wires `INSERT`/`UPDATE`/`DELETE` through existing
+codegen, plus new `CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP
+INDEX` codegen (none existed before this ticket). Held at `Unreleased`
+rather than bumped to 0.12.0 — phase 4 isn't complete until #216
+(cross-validation harness) and #217 (exit gate) also close, per this
+project's one-minor-per-completed-phase versioning policy.
 
 ## [0.11.0] - 2026-08-19
 
