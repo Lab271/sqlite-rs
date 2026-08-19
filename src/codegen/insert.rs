@@ -12,10 +12,23 @@
 //! read back via `Column`/`Rowid` and written via `IdxInsert` (see
 //! `index_maintenance`).
 //!
+//! `InsertSource::Select` (#208) drives `select.rs`'s
+//! `compile_select_scan` — the same scan/filter/project/ORDER BY/
+//! DISTINCT/LIMIT machinery `compile_select` uses — with a `sink` that
+//! feeds each projected row's registers into [`compile_row`] instead of
+//! emitting `ResultRow`. `compile_row` itself is source-agnostic: its
+//! per-column value used to always be a literal-or-computed `Expr`
+//! (`RowSource::Exprs`); it now also accepts a row of already-populated
+//! registers (`RowSource::Registers`) from the SELECT scan, since every
+//! constraint check downstream of "the value is in register `r`" (NOT
+//! NULL, CHECK, `MakeRecord`/`Insert`, index maintenance) doesn't care
+//! how `r` was populated. The SELECT's source-table scan gets its own
+//! cursor numbers (via `select::ScanCursors`), offset above this
+//! module's target-table/index cursors, so the two scans never collide
+//! within the same program.
+//!
 //! Known simplifications (deferred to follow-up tickets, not chased
 //! here):
-//! - `InsertSource::Select` does not compile (`VALUES`/`DEFAULT VALUES`
-//!   only) — filed separately from #195.
 //! - UNIQUE constraints on non-rowid columns still aren't *enforced* as
 //!   a constraint violation: a duplicate key surfaces as
 //!   `IdxInsert`'s generic `BtreeError::DuplicateKey` ->
@@ -42,11 +55,13 @@
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
-use crate::codegen::select::CodegenError;
+use crate::codegen::select::{
+    compile_select_scan, select_result_column_count, CodegenError, ScanCursors,
+};
 use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
     ColumnConstraint, ConflictAction, DefaultValue, Expr, ExprKind, Insert, InsertSource, Literal,
-    TableConstraint,
+    Select, TableConstraint,
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
@@ -75,6 +90,64 @@ fn is_null_literal(expr: &Expr) -> bool {
     matches!(expr.kind, ExprKind::Literal(Literal::Null))
 }
 
+/// A single column's value, from wherever `compile_row` was told to get
+/// it: a literal-or-computed `Expr` it must still compile itself
+/// (`VALUES`/`DEFAULT VALUES`), or a register a `SELECT` scan already
+/// populated (#208) — the latter is never statically known to be a
+/// `NULL` literal, since its value isn't known until runtime.
+#[derive(Debug, Clone, Copy)]
+enum ColumnSource<'a> {
+    Expr(&'a Expr),
+    Reg(i32),
+}
+
+/// Resolves a column's value into a *freshly allocated* register,
+/// mirroring `compile_value`'s own contract: every column in
+/// `compile_row`'s Pass 2 must bump-allocate exactly one new register,
+/// so `col_regs` stays the contiguous run `MakeRecord` requires. A
+/// `SELECT`-sourced register (`ColumnSource::Reg`) is therefore never
+/// returned verbatim — it's copied (`Opcode::Copy`, #208) into a new
+/// register instead, since it may sit anywhere in the scan's own
+/// register layout (reordered by an explicit target column list,
+/// interleaved with other columns, etc.), not necessarily where this
+/// column needs to land.
+fn compile_column_source(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    cursor: i32,
+    source: ColumnSource<'_>,
+) -> Result<i32, CodegenError> {
+    match source {
+        ColumnSource::Expr(expr) => compile_value(em, reg, schema, cursor, expr),
+        ColumnSource::Reg(src) => {
+            let dest = reg.alloc();
+            em.emit(Instruction::new(Opcode::Copy, src, dest, 0));
+            Ok(dest)
+        }
+    }
+}
+
+/// Where `compile_row` gets each target column's value from: a literal
+/// `VALUES` row's `Expr`s (positionally mapped to `target_columns`, same
+/// as before #208), or a `SELECT`-projected row already sitting in a
+/// contiguous register run (`first..first+count`).
+enum RowSource<'a> {
+    Exprs(&'a [Expr]),
+    Registers { first: i32, count: usize },
+}
+
+impl<'a> RowSource<'a> {
+    fn at(&self, pos: usize) -> Option<ColumnSource<'a>> {
+        match self {
+            RowSource::Exprs(values) => values.get(pos).map(ColumnSource::Expr),
+            RowSource::Registers { first, count } => (pos < *count)
+                .then(|| first.saturating_add(i32::try_from(pos).unwrap_or(i32::MAX)))
+                .map(ColumnSource::Reg),
+        }
+    }
+}
+
 /// Emits `NewRowid` for `schema`'s table cursor into register `dest`.
 /// When `is_autoincrement`, sets `P5`/`P4` so the opcode also
 /// consults/bumps `sqlite_sequence` (see `NewRowid`'s own doc in
@@ -97,9 +170,30 @@ fn emit_new_rowid(em: &mut Emitter, dest: i32, schema: &TableSchema, is_autoincr
     }
 }
 
+/// Where an `INSERT`'s rows come from: literal `VALUES`/`DEFAULT
+/// VALUES` rows (validated/compiled exactly as before #208), or a
+/// `SELECT` whose FROM-table schema the caller must resolve and pass as
+/// `select_schema` (codegen doesn't do its own name->schema lookups —
+/// see `select.rs`/`insert.rs`'s callers in `src/bin/sqlite-rs.rs`).
+enum RowsSource<'a> {
+    Literal(Vec<Vec<Expr>>),
+    /// Carries the already-resolved `select_schema` alongside the
+    /// `Select` itself (rather than re-consulting the `Option` the
+    /// caller passed in) so the later compile phase can't hit a `None`
+    /// it already ruled out during row-shape validation.
+    Select(&'a Select, &'a TableSchema),
+}
+
 /// Compiles `insert` against `schema` (the resolved target table) into
-/// a `Program`.
-pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, CodegenError> {
+/// a `Program`. `select_schema` is only consulted when `insert.source`
+/// is `InsertSource::Select` — it's the resolved schema for that
+/// `SELECT`'s `FROM` table (#208); pass `None` if the caller couldn't
+/// resolve it (or `insert.source` isn't `Select`).
+pub fn compile_insert(
+    insert: &Insert,
+    schema: &TableSchema,
+    select_schema: Option<&TableSchema>,
+) -> Result<Program, CodegenError> {
     if schema.without_rowid {
         return Err(CodegenError::Unsupported {
             reason: "WITHOUT ROWID tables are not supported by INSERT codegen yet".to_string(),
@@ -165,25 +259,38 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
         None => (0..schema.columns.len()).collect(),
     };
 
-    let rows: Vec<Vec<Expr>> = match &insert.source {
-        InsertSource::Values(rows) => rows.clone(),
-        InsertSource::DefaultValues => vec![Vec::new()],
-        InsertSource::Select(_) => {
-            return Err(CodegenError::Unsupported {
-                reason: "INSERT ... SELECT is not supported by codegen yet".to_string(),
-            })
+    let rows_source = match &insert.source {
+        InsertSource::Values(rows) => {
+            for row in rows {
+                if !row.is_empty() && row.len() != target_columns.len() {
+                    return Err(CodegenError::RowShapeMismatch {
+                        table: schema.name.clone(),
+                        expected: target_columns.len(),
+                        found: row.len(),
+                    });
+                }
+            }
+            RowsSource::Literal(rows.clone())
+        }
+        InsertSource::DefaultValues => RowsSource::Literal(vec![Vec::new()]),
+        InsertSource::Select(select) => {
+            let Some(select_schema) = select_schema else {
+                return Err(CodegenError::Unsupported {
+                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
+                        .to_string(),
+                });
+            };
+            let found = select_result_column_count(select, select_schema);
+            if found != target_columns.len() {
+                return Err(CodegenError::RowShapeMismatch {
+                    table: schema.name.clone(),
+                    expected: target_columns.len(),
+                    found,
+                });
+            }
+            RowsSource::Select(select, select_schema)
         }
     };
-
-    for row in &rows {
-        if !row.is_empty() && row.len() != target_columns.len() {
-            return Err(CodegenError::RowShapeMismatch {
-                table: schema.name.clone(),
-                expected: target_columns.len(),
-                found: row.len(),
-            });
-        }
-    }
 
     let action = insert.or_action.unwrap_or(ConflictAction::Abort);
 
@@ -216,20 +323,74 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
     ));
     open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
 
-    for values in &rows {
-        compile_row(
-            &mut em,
-            &mut reg,
-            schema,
-            &check_schema,
-            &plans,
-            &table_checks,
-            &target_columns,
-            values,
-            rowid_alias,
-            action,
-            is_autoincrement,
-        )?;
+    match rows_source {
+        RowsSource::Literal(rows) => {
+            for values in &rows {
+                compile_row(
+                    &mut em,
+                    &mut reg,
+                    schema,
+                    &check_schema,
+                    &plans,
+                    &table_checks,
+                    &target_columns,
+                    &RowSource::Exprs(values),
+                    rowid_alias,
+                    action,
+                    is_autoincrement,
+                )?;
+            }
+        }
+        RowsSource::Select(select, select_schema) => {
+            // The select's source-table scan needs cursor numbers of its
+            // own, distinct from this INSERT's target-table/index
+            // cursors above — offset above the last index cursor
+            // (`open_index_cursors` uses `FIRST_INDEX_CURSOR..
+            // FIRST_INDEX_CURSOR+schema.indexes.len()`).
+            let select_table_cursor =
+                FIRST_INDEX_CURSOR.saturating_add(i32::try_from(schema.indexes.len()).unwrap_or(0));
+            let select_cursors = ScanCursors {
+                table: select_table_cursor,
+                sort: select_table_cursor.saturating_add(1),
+                pseudo: select_table_cursor.saturating_add(2),
+                distinct: select_table_cursor.saturating_add(3),
+            };
+            em.emit(Instruction::new(
+                Opcode::OpenRead,
+                select_cursors.table,
+                i32::try_from(select_schema.root_page).unwrap_or(0),
+                0,
+            ));
+            let end_label = em.new_label();
+            let mut sink = |em: &mut Emitter, reg: &mut RegAlloc, first: i32, count: i32| {
+                compile_row(
+                    em,
+                    reg,
+                    schema,
+                    &check_schema,
+                    &plans,
+                    &table_checks,
+                    &target_columns,
+                    &RowSource::Registers {
+                        first,
+                        count: usize::try_from(count).unwrap_or(0),
+                    },
+                    rowid_alias,
+                    action,
+                    is_autoincrement,
+                )
+            };
+            compile_select_scan(
+                &mut em,
+                &mut reg,
+                select,
+                select_schema,
+                select_cursors,
+                end_label,
+                &mut sink,
+            )?;
+            em.place(end_label);
+        }
     }
 
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
@@ -293,18 +454,19 @@ fn compile_row(
     plans: &[ColumnPlan],
     table_checks: &[Expr],
     target_columns: &[usize],
-    values: &[Expr],
+    row_source: &RowSource<'_>,
     rowid_alias: Option<usize>,
     action: ConflictAction,
     is_autoincrement: bool,
 ) -> Result<(), CodegenError> {
-    let mut value_exprs: Vec<Option<&Expr>> = vec![None; schema.columns.len()];
+    let mut value_sources: Vec<Option<ColumnSource<'_>>> = vec![None; schema.columns.len()];
     for (pos, &col_idx) in target_columns.iter().enumerate() {
-        if let (Some(expr), Some(slot)) = (values.get(pos), value_exprs.get_mut(col_idx)) {
-            *slot = Some(expr);
+        if let (Some(source), Some(slot)) = (row_source.at(pos), value_sources.get_mut(col_idx)) {
+            *slot = Some(source);
         }
     }
-    let value_expr_at = |idx: usize| -> Option<&Expr> { value_exprs.get(idx).copied().flatten() };
+    let value_source_at =
+        |idx: usize| -> Option<ColumnSource<'_>> { value_sources.get(idx).copied().flatten() };
 
     let row_skip = em.new_label();
 
@@ -313,10 +475,11 @@ fn compile_row(
     // needs for `MakeRecord` below.
     let rowid_reg = match rowid_alias {
         Some(idx) => {
-            let explicit = value_expr_at(idx).filter(|expr| !is_null_literal(expr));
+            let explicit = value_source_at(idx)
+                .filter(|source| !matches!(source, ColumnSource::Expr(e) if is_null_literal(e)));
             match explicit {
-                Some(expr) => {
-                    let r = compile_value(em, reg, schema, TABLE_CURSOR, expr)?;
+                Some(source) => {
+                    let r = compile_column_source(em, reg, schema, TABLE_CURSOR, source)?;
                     let no_conflict = em.new_label();
                     let seek_addr =
                         em.emit(Instruction::new(Opcode::SeekRowid, TABLE_CURSOR, 0, r));
@@ -354,19 +517,19 @@ fn compile_row(
             continue;
         }
 
-        let provided = value_expr_at(idx);
+        let provided = value_source_at(idx);
         let use_default = provided.is_none()
-            || (matches!(provided, Some(expr) if is_null_literal(expr))
+            || (matches!(provided, Some(ColumnSource::Expr(e)) if is_null_literal(e))
                 && action == ConflictAction::Replace
                 && plan.default.is_some());
-        let chosen: Option<&Expr> = if use_default {
-            plan.default.as_ref().or(provided)
+        let chosen: Option<ColumnSource<'_>> = if use_default {
+            plan.default.as_ref().map(ColumnSource::Expr).or(provided)
         } else {
             provided
         };
 
         let r = match chosen {
-            Some(expr) => compile_value(em, reg, schema, TABLE_CURSOR, expr)?,
+            Some(source) => compile_column_source(em, reg, schema, TABLE_CURSOR, source)?,
             None => {
                 let r = reg.alloc();
                 em.emit(Instruction::new(Opcode::Null, 0, r, 0));

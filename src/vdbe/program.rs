@@ -93,6 +93,17 @@ pub enum Opcode {
     Variable,
     MakeRecord,
     ResultRow,
+    // #208: copies register `P1`'s value into `P2` verbatim — needed
+    // when `INSERT ... SELECT` re-projects a `SELECT`-scan's already-
+    // populated registers into a target table's schema-column order:
+    // `compile_row`'s `MakeRecord` needs one *fresh*, contiguous
+    // register per column (mirroring the literal-`Expr` path's
+    // `compile_value` calls, which always bump-allocate anew), not the
+    // scan's original (non-contiguous, non-reorderable-in-place)
+    // registers reused directly. Never harvested from a V2 oracle
+    // EXPLAIN (V2 predates any write path), so excluded from `ALL`
+    // like the other V3 write opcodes above.
+    Copy,
     // sorter
     SorterOpen,
     SorterInsert,
@@ -255,6 +266,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Variable
         | Opcode::MakeRecord
         | Opcode::ResultRow
+        | Opcode::Copy
         | Opcode::SorterOpen
         | Opcode::SorterInsert
         | Opcode::SorterSort

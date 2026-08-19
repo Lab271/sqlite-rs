@@ -52,6 +52,38 @@ const SORT_CURSOR: i32 = 1;
 const PSEUDO_CURSOR: i32 = 2;
 const DISTINCT_CURSOR: i32 = 3;
 
+/// The scan's cursor numbers, parameterized (rather than the fixed
+/// `TABLE_CURSOR`/`SORT_CURSOR`/`PSEUDO_CURSOR`/`DISTINCT_CURSOR`
+/// constants) so [`compile_select_scan`] can be embedded inside another
+/// statement's program (#208: `INSERT ... SELECT`) without colliding
+/// with that statement's own cursor numbers.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScanCursors {
+    pub(crate) table: i32,
+    pub(crate) sort: i32,
+    pub(crate) pseudo: i32,
+    pub(crate) distinct: i32,
+}
+
+impl ScanCursors {
+    const fn for_standalone_select() -> Self {
+        Self {
+            table: TABLE_CURSOR,
+            sort: SORT_CURSOR,
+            pseudo: PSEUDO_CURSOR,
+            distinct: DISTINCT_CURSOR,
+        }
+    }
+}
+
+/// What to do with each projected row's `(first_register, count)` run,
+/// in place of always emitting `ResultRow` — `compile_select` passes a
+/// sink that does exactly that; #208's `INSERT ... SELECT` passes one
+/// that feeds the row into `insert.rs`'s per-row constraint-check/write
+/// path instead.
+pub(crate) type RowSink<'a> =
+    dyn FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError> + 'a;
+
 /// Compiles `select` against `schema` (the resolved `FROM` table) into
 /// a `Program`. Single-table V2 scope only — no joins/subqueries.
 pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, CodegenError> {
@@ -67,33 +99,66 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
 
+    let cursors = ScanCursors::for_standalone_select();
     em.emit(Instruction::new(
         Opcode::OpenRead,
-        TABLE_CURSOR,
+        cursors.table,
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
 
     let end_label = em.new_label();
-    let order_by_plans = resolve_order_by(select, schema)?;
-
-    if order_by_plans.is_empty() {
-        compile_direct_scan(&mut em, &mut reg, select, schema, end_label)?;
-    } else {
-        compile_sorted_scan(
-            &mut em,
-            &mut reg,
-            select,
-            schema,
-            &order_by_plans,
-            end_label,
-        )?;
-    }
+    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, count: i32| {
+        em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
+        Ok(())
+    };
+    compile_select_scan(
+        &mut em, &mut reg, select, schema, cursors, end_label, &mut sink,
+    )?;
 
     em.place(end_label);
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
 
     Ok(em.finish())
+}
+
+/// The scan/filter/project core of `compile_select`, minus the
+/// `Init`/`OpenRead`/`Halt` bracketing — factored out so #208's `INSERT
+/// ... SELECT` codegen can drive the same scan (with its own cursor
+/// numbers and its own `OpenRead` already emitted) and substitute a
+/// different per-row `sink` in place of `ResultRow`.
+pub(crate) fn compile_select_scan(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    sink: &mut RowSink<'_>,
+) -> Result<(), CodegenError> {
+    let order_by_plans = resolve_order_by(select, schema)?;
+    if order_by_plans.is_empty() {
+        compile_direct_scan(em, reg, select, schema, cursors, end_label, sink)
+    } else {
+        compile_sorted_scan(
+            em,
+            reg,
+            select,
+            schema,
+            &order_by_plans,
+            cursors,
+            end_label,
+            sink,
+        )
+    }
+}
+
+/// The number of columns `select` projects against `schema` — used by
+/// #208's `INSERT ... SELECT` codegen to validate row shape against the
+/// target column list at compile time, the same way a literal `VALUES`
+/// row's length is checked.
+pub(crate) fn select_result_column_count(select: &Select, schema: &TableSchema) -> usize {
+    result_columns(select, schema).len()
 }
 
 /// Where an ORDER BY term's sort key comes from: a raw table column
@@ -342,30 +407,32 @@ fn compile_row_values(
     Ok((first, cols.len()))
 }
 
-fn emit_result_row(
+/// Computes each result column into a contiguous register run, then
+/// hands `(first, count)` to `sink` — in place of always emitting
+/// `ResultRow`, so this same call site works for `compile_select`
+/// (whose sink emits `ResultRow`) and #208's `INSERT ... SELECT` (whose
+/// sink feeds the row into `insert.rs`'s per-row write path).
+fn emit_row_via_sink(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursor: i32,
+    sink: &mut RowSink<'_>,
 ) -> Result<(), CodegenError> {
     let cols = result_columns(select, schema);
     let (first, count) = compile_row_values(em, reg, schema, &cols, cursor)?;
-    em.emit(Instruction::new(
-        Opcode::ResultRow,
-        first,
-        i32::try_from(count).unwrap_or(0),
-        0,
-    ));
-    Ok(())
+    sink(em, reg, first, i32::try_from(count).unwrap_or(0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_distinct_guard(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
     cursor: i32,
+    distinct_cursor: i32,
     skip_label: Label,
 ) -> Result<(), CodegenError> {
     if !matches!(select.distinct, Some(Distinctness::Distinct)) {
@@ -376,7 +443,7 @@ fn emit_distinct_guard(
     let count = i32::try_from(count).unwrap_or(0);
     let addr = em.emit(Instruction::with_p4(
         Opcode::Found,
-        DISTINCT_CURSOR,
+        distinct_cursor,
         0,
         first,
         P4::Int(i64::from(count)),
@@ -384,7 +451,7 @@ fn emit_distinct_guard(
     em.patch_p2(addr, skip_label);
     em.emit(Instruction::with_p4(
         Opcode::IdxInsert,
-        DISTINCT_CURSOR,
+        distinct_cursor,
         first,
         0,
         P4::Int(i64::from(count)),
@@ -403,13 +470,14 @@ fn compile_limit_setup(
     reg: &mut RegAlloc,
     schema: &TableSchema,
     select: &Select,
+    table_cursor: i32,
 ) -> Result<Option<LimitState>, CodegenError> {
     let Some(limit) = &select.limit else {
         return Ok(None);
     };
-    let limit_reg = compile_value(em, reg, schema, TABLE_CURSOR, &limit.limit)?;
+    let limit_reg = compile_value(em, reg, schema, table_cursor, &limit.limit)?;
     let offset_reg = match &limit.offset {
-        Some(offset_expr) => Some(compile_value(em, reg, schema, TABLE_CURSOR, offset_expr)?),
+        Some(offset_expr) => Some(compile_value(em, reg, schema, table_cursor, offset_expr)?),
         None => None,
     };
     Ok(Some(LimitState {
@@ -486,12 +554,15 @@ fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
 /// secondary-index columns, ranges, and compound conditions (`AND`/`OR`)
 /// all fall through to the ordinary scan and stay in V4 per the issue's
 /// bounded scope.
+#[allow(clippy::too_many_arguments)]
 fn try_compile_rowid_seek(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
+    cursors: ScanCursors,
     end_label: Label,
+    sink: &mut RowSink<'_>,
 ) -> Result<bool, CodegenError> {
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         // A single-row result is already distinct — but keeping this
@@ -527,11 +598,11 @@ fn try_compile_rowid_seek(
         return Ok(false);
     }
 
-    let limit = compile_limit_setup(em, reg, schema, select)?;
-    let value_reg = compile_value(em, reg, schema, TABLE_CURSOR, operand)?;
+    let limit = compile_limit_setup(em, reg, schema, select, cursors.table)?;
+    let value_reg = compile_value(em, reg, schema, cursors.table, operand)?;
     let seek_addr = em.emit(Instruction::new(
         Opcode::SeekRowid,
-        TABLE_CURSOR,
+        cursors.table,
         0,
         value_reg,
     ));
@@ -541,7 +612,7 @@ fn try_compile_rowid_seek(
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_result_row(em, reg, select, schema, TABLE_CURSOR)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
@@ -554,22 +625,24 @@ fn compile_direct_scan(
     reg: &mut RegAlloc,
     select: &Select,
     schema: &TableSchema,
+    cursors: ScanCursors,
     end_label: Label,
+    sink: &mut RowSink<'_>,
 ) -> Result<(), CodegenError> {
-    if try_compile_rowid_seek(em, reg, select, schema, end_label)? {
+    if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, sink)? {
         return Ok(());
     }
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         em.emit(Instruction::new(
             Opcode::OpenEphemeral,
-            DISTINCT_CURSOR,
+            cursors.distinct,
             0,
             0,
         ));
     }
-    let limit = compile_limit_setup(em, reg, schema, select)?;
+    let limit = compile_limit_setup(em, reg, schema, select, cursors.table)?;
 
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
+    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
     em.patch_p2(rewind_addr, end_label);
     let loop_start = em.new_label();
     em.place(loop_start);
@@ -580,7 +653,7 @@ fn compile_direct_scan(
             em,
             reg,
             schema,
-            TABLE_CURSOR,
+            cursors.table,
             where_expr,
             // `WHERE` is the boundary where SQL's three-valued logic
             // collapses to two: a predicate whose truth is unknown
@@ -588,17 +661,25 @@ fn compile_direct_scan(
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
     }
-    emit_distinct_guard(em, reg, select, schema, TABLE_CURSOR, row_skip)?;
+    emit_distinct_guard(
+        em,
+        reg,
+        select,
+        schema,
+        cursors.table,
+        cursors.distinct,
+        row_skip,
+    )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_result_row(em, reg, select, schema, TABLE_CURSOR)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
 
     em.place(row_skip);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
+    let next_addr = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
     em.patch_p2(next_addr, loop_start);
     Ok(())
 }
@@ -610,12 +691,14 @@ fn compile_sorted_scan(
     select: &Select,
     schema: &TableSchema,
     order_by_plans: &[OrderByPlan],
+    cursors: ScanCursors,
     end_label: Label,
+    sink: &mut RowSink<'_>,
 ) -> Result<(), CodegenError> {
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         em.emit(Instruction::new(
             Opcode::OpenEphemeral,
-            DISTINCT_CURSOR,
+            cursors.distinct,
             0,
             0,
         ));
@@ -627,7 +710,7 @@ fn compile_sorted_scan(
     // loop in program order.
     let sorter_open_addr = em.emit(Instruction::with_p4(
         Opcode::SorterOpen,
-        SORT_CURSOR,
+        cursors.sort,
         0,
         0,
         P4::None,
@@ -638,9 +721,9 @@ fn compile_sorted_scan(
     // sorter, WHERE-filtered but pre-DISTINCT/LIMIT (those apply on
     // the sorted output, matching SQLite's own ORDER BY pipeline
     // shape). The trailing expression registers are never read back by
-    // `emit_result_row` (it only ever projects `select.columns`), so
-    // they exist purely as sort keys.
-    let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
+    // `sink` (it only ever projects `select.columns`), so they exist
+    // purely as sort keys.
+    let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
     let sort_step = em.new_label();
     em.patch_p2(scan_rewind, sort_step);
     let scan_loop = em.new_label();
@@ -652,7 +735,7 @@ fn compile_sorted_scan(
             em,
             reg,
             schema,
-            TABLE_CURSOR,
+            cursors.table,
             where_expr,
             // `WHERE` is the boundary where SQL's three-valued logic
             // collapses to two: a predicate whose truth is unknown
@@ -669,7 +752,7 @@ fn compile_sorted_scan(
             .iter()
             .map(|c| ResultColumnPlan::Column(c.clone()))
             .collect::<Vec<_>>(),
-        TABLE_CURSOR,
+        cursors.table,
     )?;
 
     // Compute every genuine-expression sort key into its own register,
@@ -684,7 +767,7 @@ fn compile_sorted_scan(
         let index = match &plan.target {
             OrderByTarget::Column(idx) => *idx,
             OrderByTarget::Expr(expr) => {
-                let r = compile_value(em, reg, schema, TABLE_CURSOR, expr)?;
+                let r = compile_value(em, reg, schema, cursors.table, expr)?;
                 usize::try_from(r.saturating_sub(first)).unwrap_or(0)
             }
         };
@@ -707,32 +790,32 @@ fn compile_sorted_scan(
     ));
     em.emit(Instruction::new(
         Opcode::SorterInsert,
-        SORT_CURSOR,
+        cursors.sort,
         record_reg,
         0,
     ));
 
     em.place(scan_skip);
-    let scan_next = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
+    let scan_next = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
     em.patch_p2(scan_next, scan_loop);
 
     // Pass 2: iterate the sorted buffer, re-deriving the schema's full
     // column tuple from each sorted record via an `OpenPseudo` cursor,
     // then apply DISTINCT/LIMIT/OFFSET and emit result columns exactly
-    // as the direct-scan path does, reading from `PSEUDO_CURSOR`
-    // instead of `TABLE_CURSOR`.
+    // as the direct-scan path does, reading from `cursors.pseudo`
+    // instead of `cursors.table`.
     em.place(sort_step);
-    let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, SORT_CURSOR, 0, 0));
+    let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, cursors.sort, 0, 0));
     em.patch_p2(sort_addr, end_label);
 
-    let limit = compile_limit_setup(em, reg, schema, select)?;
+    let limit = compile_limit_setup(em, reg, schema, select, cursors.table)?;
 
     let sorted_loop = em.new_label();
     em.place(sorted_loop);
     let sorter_data_reg = reg.alloc();
     em.emit(Instruction::new(
         Opcode::SorterData,
-        SORT_CURSOR,
+        cursors.sort,
         sorter_data_reg,
         0,
     ));
@@ -743,23 +826,31 @@ fn compile_sorted_scan(
     // when the underlying data register changes each iteration.
     em.emit(Instruction::new(
         Opcode::OpenPseudo,
-        PSEUDO_CURSOR,
+        cursors.pseudo,
         sorter_data_reg,
         0,
     ));
 
     let row_skip = em.new_label();
-    emit_distinct_guard(em, reg, select, schema, PSEUDO_CURSOR, row_skip)?;
+    emit_distinct_guard(
+        em,
+        reg,
+        select,
+        schema,
+        cursors.pseudo,
+        cursors.distinct,
+        row_skip,
+    )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_result_row(em, reg, select, schema, PSEUDO_CURSOR)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
 
     em.place(row_skip);
-    let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, SORT_CURSOR, 0, 0));
+    let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
     em.patch_p2(sorted_next, sorted_loop);
     Ok(())
 }

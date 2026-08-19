@@ -2,6 +2,7 @@
 //! declared type (spec 008, Requirement 1;
 //! <https://www.sqlite.org/datatype3.html> §3.1).
 
+use crate::format::format_real;
 use crate::record::Value;
 
 /// A column's storage-class preference, derived from its declared type.
@@ -100,7 +101,21 @@ pub fn comparison_affinity(lhs: Option<Affinity>, rhs: Option<Affinity>) -> Affi
 /// affinity — reading it back must undo that, or `SELECT r FROM t`
 /// answers `0` instead of `0.0` for a REAL column holding `0.0` (#143).
 pub fn apply_affinity(value: &mut Value, affinity: Affinity) {
-    if matches!(affinity, Affinity::Text | Affinity::Blob) {
+    if affinity == Affinity::Blob {
+        return;
+    }
+    if affinity == Affinity::Text {
+        // TEXT affinity converts NUMERIC-storage-class values to their
+        // text rendering (datatype3.html §2.2: "the value is converted
+        // into text before being stored") — the opposite direction of
+        // every other affinity's text->numeric coercion below, and it
+        // never touches BLOB (that's the shared early return above) or
+        // an already-Text value.
+        match value {
+            Value::Integer(i) => *value = Value::Text(i.to_string()),
+            Value::Real(r) => *value = Value::Text(format_real(*r)),
+            Value::Text(_) | Value::Blob(_) | Value::Null => {}
+        }
         return;
     }
     if let Value::Text(s) = value {
