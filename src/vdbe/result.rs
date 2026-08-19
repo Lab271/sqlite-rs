@@ -4,6 +4,7 @@
 //! encoding byte-for-byte), and row emission (`ResultRow`).
 
 use crate::record::{encode_record, TextEncoding, Value};
+use crate::vdbe::affinity::{apply_affinity, Affinity};
 use crate::vdbe::exec::{ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
 
@@ -109,8 +110,23 @@ pub fn string8(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `MakeRecord`: packs the contiguous register range `[P1, P1+P2)` into
 /// spec 003's record format, writing the encoded bytes (as a `Value::
 /// Blob`) to register `P3`.
+///
+/// Affinity (#194): when `P4` is a [`P4::Affinity`] byte string, each
+/// byte (SQLite's own `Affinity::to_p4_byte`/`from_p4_byte` convention)
+/// is applied — via [`apply_affinity`] — to a *copy* of the
+/// corresponding source register before encoding, one byte per column
+/// in order; a byte string shorter than the register range leaves the
+/// remaining trailing columns un-coerced (BLOB affinity's no-op, same
+/// as an absent P4 leaves every column un-coerced). This mirrors
+/// SQLite's own `P4_KEYINFO`/affinity-string convention without a
+/// dedicated `KeyInfo` struct. Any other `P4` (including `P4::None`) is
+/// the pre-#194 behavior: no affinity coercion at all.
 pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = Vm::bounded_count("MakeRecord", instr.p2)?;
+    let affinities: &[u8] = match &instr.p4 {
+        P4::Affinity(bytes) => bytes,
+        _ => &[],
+    };
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
         let reg = instr
@@ -120,7 +136,11 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
                 opcode: "MakeRecord",
                 index: instr.p1,
             })?;
-        values.push(vm.register(reg)?.clone());
+        let mut value = vm.register(reg)?.clone();
+        if let Some(byte) = affinities.get(i) {
+            apply_affinity(&mut value, Affinity::from_p4_byte(*byte));
+        }
+        values.push(value);
     }
     let payload = encode_record(&values, TextEncoding::Utf8);
     vm.set_register(instr.p3, Value::Blob(payload))?;
@@ -226,5 +246,52 @@ mod tests {
             decoded,
             vec![Value::Integer(42), Value::Text("abc".to_string())]
         );
+    }
+
+    #[test]
+    fn make_record_applies_p4_affinity_before_encoding() {
+        // #194: a text-typed register holding a numeric-looking literal
+        // is coerced to INTEGER by MakeRecord's P4 affinity string
+        // before encoding — mirrors an `INSERT INTO t(i) VALUES ('42')`
+        // against an INTEGER column, where codegen's compiled affinity
+        // string, not the literal's own type, decides the stored type.
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Text("42".to_string())).unwrap();
+        vm.set_register(1, Value::Text("abc".to_string())).unwrap();
+        make_record(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::MakeRecord,
+                0,
+                2,
+                2,
+                P4::Affinity(vec![b'D', b'B']), // INTEGER, TEXT
+            ),
+        )
+        .unwrap();
+        let Value::Blob(payload) = vm.register(2).unwrap() else {
+            panic!("expected a Blob");
+        };
+        let decoded = crate::record::decode_record(payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(
+            decoded,
+            vec![Value::Integer(42), Value::Text("abc".to_string())]
+        );
+        // The source registers are untouched — affinity applies to a
+        // copy, not the live register (mirrors the compare opcodes'
+        // same rule, `exec.rs`'s `compare_jump`).
+        assert_eq!(*vm.register(0).unwrap(), Value::Text("42".to_string()));
+    }
+
+    #[test]
+    fn make_record_without_affinity_p4_is_unchanged_from_pre_194_behavior() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Text("42".to_string())).unwrap();
+        make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 0, 1, 1)).unwrap();
+        let Value::Blob(payload) = vm.register(1).unwrap() else {
+            panic!("expected a Blob");
+        };
+        let decoded = crate::record::decode_record(payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(decoded, vec![Value::Text("42".to_string())]);
     }
 }

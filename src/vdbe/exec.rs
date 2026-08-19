@@ -69,6 +69,9 @@ pub enum ExecError {
 
     #[error("statement halted with SQLite result code {code}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Halted { code: i32, message: Option<String> },
+
+    #[error("failed to flush pending writes on statement commit: {0}")]
+    FlushFailed(#[from] crate::pager::PagerError),
 }
 
 /// The outcome of executing one instruction: fall through to PC+1, jump
@@ -86,10 +89,21 @@ pub enum Step {
 /// #89 arithmetic/control test, and this ticket's sorter/ephemeral-only
 /// tests) — those construct a `Vm` via `Vm::new()` and never hit
 /// `OpenRead`.
+///
+/// `writer` (#194) is `Some` only for a `Vm` built via
+/// [`Vm::with_writable_db`] — the same underlying `Pager` `source`
+/// reads through (see `src/pager.rs`'s `impl PageSource for
+/// RefCell<Pager>`), kept alongside as a concrete `Rc<RefCell<Pager>>`
+/// so `Insert`/`Delete`/`IdxInsert`/`NewRowid` can borrow it mutably for
+/// b-tree writes, something a type-erased `Rc<dyn PageSource>` cannot
+/// offer back. A `Vm::with_db` (read-only) `VmDb` always has `writer:
+/// None`, and every write opcode errors via [`ExecError::NoDatabase`]
+/// if it runs against one.
 #[derive(Clone)]
 pub(crate) struct VmDb {
     pub(crate) source: Rc<dyn PageSource>,
     pub(crate) header: DatabaseHeader,
+    pub(crate) writer: Option<Rc<std::cell::RefCell<crate::pager::Pager>>>,
 }
 
 impl std::fmt::Debug for VmDb {
@@ -143,7 +157,32 @@ impl Vm {
     /// the underlying file handle.
     pub fn with_db(source: Rc<dyn PageSource>, header: DatabaseHeader) -> Self {
         Self {
-            db: Some(VmDb { source, header }),
+            db: Some(VmDb {
+                source,
+                header,
+                writer: None,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Builds a `Vm` that can service both `OpenRead` and the write
+    /// opcodes (`OpenWrite`/`Insert`/`Delete`/`IdxInsert`/`NewRowid`,
+    /// #194) against `pager`. `pager` is wrapped once in a shared
+    /// `Rc<RefCell<_>>`: one clone is unsized to `Rc<dyn PageSource>`
+    /// for `TableCursor`'s ordinary read traversal (`OpenRead`,
+    /// `Rewind`/`Next`/`SeekRowid`/`Column`/`Rowid`, all unchanged from
+    /// the read-only path), the other kept concrete so write opcodes can
+    /// borrow it mutably — see [`VmDb`]'s doc.
+    pub fn with_writable_db(pager: crate::pager::Pager, header: DatabaseHeader) -> Self {
+        let shared = Rc::new(std::cell::RefCell::new(pager));
+        let source: Rc<dyn PageSource> = Rc::clone(&shared) as Rc<dyn PageSource>;
+        Self {
+            db: Some(VmDb {
+                source,
+                header,
+                writer: Some(shared),
+            }),
             ..Self::default()
         }
     }
@@ -245,6 +284,17 @@ impl Vm {
         Ok(())
     }
 
+    /// Returns the shared write-capable `Pager` handle (#194), erroring
+    /// if this `Vm` was built via [`Vm::with_db`] (read-only) rather
+    /// than [`Vm::with_writable_db`].
+    pub(crate) fn writer(
+        &self,
+        opcode: &'static str,
+    ) -> Result<Rc<std::cell::RefCell<crate::pager::Pager>>, ExecError> {
+        let db = self.db.as_ref().ok_or(ExecError::NoDatabase { opcode })?;
+        db.writer.clone().ok_or(ExecError::NoDatabase { opcode })
+    }
+
     pub fn emit_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
     }
@@ -327,11 +377,11 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
     use Opcode::{
         Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, DecrJumpZero, Delete,
         Divide, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos,
-        Init, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, Next, Not,
-        NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, Real,
-        RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid, Sequence, ShiftLeft,
-        ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
-        Subtract, Transaction, Variable,
+        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
+        NewRowid, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
+        OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid,
+        SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext,
+        SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -382,6 +432,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         ResultRow => result::result_row(vm, instr),
 
         OpenRead => cursor::open_read(vm, instr),
+        OpenWrite => cursor::open_write(vm, instr),
         OpenEphemeral => cursor::open_ephemeral(vm, instr),
         OpenPseudo => cursor::open_pseudo(vm, instr),
         Rewind => cursor::rewind(vm, instr),
@@ -396,6 +447,8 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         IdxInsert => cursor::idx_insert(vm, instr),
         IdxLE => cursor::idx_le(vm, instr),
         Delete => cursor::delete(vm, instr),
+        Insert => cursor::insert(vm, instr),
+        NewRowid => cursor::new_rowid(vm, instr),
 
         SorterOpen => sorter::sorter_open(vm, instr),
         SorterInsert => sorter::sorter_insert(vm, instr),
@@ -510,6 +563,17 @@ pub fn execute_with_db(
     run(Vm::with_db(source, header), program)
 }
 
+/// Like [`execute_with_db`], but the `Vm` can also service the write
+/// opcodes (#194: `OpenWrite`/`Insert`/`Delete`/`IdxInsert`/`NewRowid`)
+/// against `pager` — see [`Vm::with_writable_db`].
+pub fn execute_with_writable_db(
+    program: &Program,
+    pager: crate::pager::Pager,
+    header: DatabaseHeader,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    run(Vm::with_writable_db(pager, header), program)
+}
+
 /// Combines [`execute_with_db`] and [`execute_with_params`].
 pub fn execute_with_db_and_params(
     program: &Program,
@@ -540,7 +604,23 @@ fn run(mut vm: Vm, program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
                     .ok_or(ExecError::ProgramCounterOutOfRange { pc })?;
             }
             Step::Jump(target) => pc = target,
-            Step::Halt { code: 0, .. } => return Ok(vm.rows),
+            Step::Halt { code: 0, .. } => {
+                // #194: this VM has no explicit COMMIT/ROLLBACK opcode
+                // yet (`Transaction` is still a no-op, see
+                // `control::transaction`) — a successful `Halt` is
+                // therefore treated as an implicit commit, flushing any
+                // pending write-opcode changes to the underlying file
+                // before returning. A `Vm::with_db` (read-only) or a
+                // writable `Vm` that never actually wrote anything both
+                // take the cheap `writer.is_none()`/`dirty.is_empty()`
+                // no-op path.
+                if let Some(db) = &vm.db {
+                    if let Some(writer) = &db.writer {
+                        writer.borrow_mut().flush()?;
+                    }
+                }
+                return Ok(vm.rows);
+            }
             Step::Halt { code, message } => return Err(ExecError::Halted { code, message }),
         }
     }

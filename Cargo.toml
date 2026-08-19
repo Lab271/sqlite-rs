@@ -73,6 +73,10 @@ name = "vdbe_explain"
 path = "tests/vdbe/explain_test.rs"
 
 [[test]]
+name = "vdbe_write_opcodes"
+path = "tests/vdbe/write_opcodes_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/codegen/expr_test.rs"
 

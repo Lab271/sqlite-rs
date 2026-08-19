@@ -40,7 +40,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::btree::{TableCursor, TableRow};
+use crate::btree::{self, TableCursor, TableRow};
 use crate::record::{decode_record, encode_record, TextEncoding, Value};
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
@@ -52,8 +52,19 @@ use crate::vdbe::program::{Instruction, P4};
 #[derive(Debug)]
 pub(crate) enum CursorSlot {
     Table(TableCursorState),
+    /// A real index b-tree write cursor (#194) opened by `OpenWrite`
+    /// with `P5` nonzero — `root_page` is the index (or WITHOUT ROWID
+    /// table) b-tree's root page. Unlike `Table`, this slot carries no
+    /// traversal position: `IdxInsert`'s real-cursor path is a
+    /// stateless one-shot `insert_entry` call, so there is nothing to
+    /// track between opcodes.
+    IndexWrite {
+        root_page: u32,
+    },
     Ephemeral(EphemeralState),
-    Pseudo { register: i32 },
+    Pseudo {
+        register: i32,
+    },
     Sorter(crate::vdbe::sorter::SorterState),
 }
 
@@ -61,6 +72,7 @@ impl CursorSlot {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             CursorSlot::Table(_) => "table cursor",
+            CursorSlot::IndexWrite { .. } => "index write cursor",
             CursorSlot::Ephemeral(_) => "ephemeral cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
             CursorSlot::Sorter(_) => "sorter cursor",
@@ -78,6 +90,12 @@ pub(crate) struct TableCursorState {
     cursor: TableCursor<Rc<dyn crate::vfs::PageSource>>,
     current: Option<TableRow>,
     forced_null: bool,
+    /// The table b-tree's root page (#194) — recorded so `Insert`/
+    /// `Delete`/`NewRowid` know which b-tree to write to without a
+    /// separate cursor-slot variant. Populated by both `OpenRead` and
+    /// `OpenWrite`; a read-only cursor never uses it (no write opcode
+    /// runs against it), so it costs nothing on the read-only path.
+    root_page: u32,
 }
 
 impl std::fmt::Debug for TableCursorState {
@@ -194,6 +212,41 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             cursor,
             current: None,
             forced_null: false,
+            root_page,
+        }),
+    )?;
+    Ok(Step::Next)
+}
+
+/// `OpenWrite` (#194): opens a write-capable cursor into slot `P1` on
+/// root page `P2`. `P5` selects the b-tree kind: `0` (default) opens a
+/// table cursor — the same `CursorSlot::Table` `OpenRead` uses (so
+/// `Rewind`/`Next`/`SeekRowid`/`Column`/`Rowid` all work unchanged on a
+/// write cursor too, matching decision 6's "`Delete` reads the
+/// cursor's current position" requirement); nonzero opens a
+/// [`CursorSlot::IndexWrite`] for `IdxInsert`'s real (non-ephemeral)
+/// path. Requires a `Vm` built via [`Vm::with_writable_db`] — errors
+/// with [`ExecError::NoDatabase`] against a read-only `Vm::with_db`.
+pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    // Fails fast if this `Vm` has no writer, before opening the slot.
+    vm.writer("OpenWrite")?;
+    let root_page = u32::try_from(instr.p2).map_err(|_| ExecError::MalformedInstruction {
+        opcode: "OpenWrite",
+        reason: format!("invalid root page {}", instr.p2),
+    })?;
+    if instr.p5 != 0 {
+        vm.set_cursor(instr.p1, CursorSlot::IndexWrite { root_page })?;
+        return Ok(Step::Next);
+    }
+    let db = vm.db()?;
+    let cursor = TableCursor::new(Rc::clone(&db.source), &db.header, root_page);
+    vm.set_cursor(
+        instr.p1,
+        CursorSlot::Table(TableCursorState {
+            cursor,
+            current: None,
+            forced_null: false,
+            root_page,
         }),
     )?;
     Ok(Step::Next)
@@ -437,16 +490,48 @@ pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-/// `IdxInsert`: inserts the key built from `P4` (`Int`, the key column
-/// count) registers starting at `P2` into ephemeral cursor `P1`.
+/// `IdxInsert`: for an ephemeral cursor (DISTINCT's dedup path,
+/// unchanged), inserts the key built from `P4` (`Int`, the key column
+/// count) registers starting at `P2` into ephemeral cursor `P1`. For a
+/// real [`CursorSlot::IndexWrite`] cursor (#194, opened by `OpenWrite`
+/// with `P5` nonzero), instead encodes the same register range as a
+/// full index entry and writes it into the on-disk index b-tree via
+/// [`btree::insert_entry`] — `Err(BtreeError::DuplicateKey)` surfaces as
+/// a `MalformedInstruction` (this opcode does not model `OR IGNORE`/`OR
+/// REPLACE` conflict resolution).
 pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = p4_count(instr, "IdxInsert")?;
     let values = read_register_range(vm, instr.p2, count, "IdxInsert")?;
-    let key = encode_record(&values, TextEncoding::Utf8);
-    let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
-    state.entries.insert(key.clone(), values);
-    state.last_key = Some(key);
-    Ok(Step::Next)
+    match vm.cursor(instr.p1)? {
+        CursorSlot::IndexWrite { root_page } => {
+            let root_page = *root_page;
+            let pager = vm.writer("IdxInsert")?;
+            let db = vm.db()?;
+            let encoding = db.header.text_encoding;
+            let header = db.header;
+            let mut pager = pager.borrow_mut();
+            btree::insert_entry(&mut pager, &header, root_page, &values, encoding).map_err(
+                |e| ExecError::MalformedInstruction {
+                    opcode: "IdxInsert",
+                    reason: e.to_string(),
+                },
+            )?;
+            Ok(Step::Next)
+        }
+        CursorSlot::Ephemeral(_) => {
+            let key = encode_record(&values, TextEncoding::Utf8);
+            let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
+            state.entries.insert(key.clone(), values);
+            state.last_key = Some(key);
+            Ok(Step::Next)
+        }
+        other => Err(ExecError::CursorTypeMismatch {
+            opcode: "IdxInsert",
+            slot: instr.p1,
+            found: other.type_name(),
+            expected: "ephemeral or index write cursor",
+        }),
+    }
 }
 
 /// `IdxLE`: jumps to `P2` if the key built from `P4` (`Int`, the key
@@ -480,15 +565,193 @@ pub fn idx_le(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-/// `Delete`: removes ephemeral cursor `P1`'s most recently probed/
-/// inserted entry (per `Found`/`IdxInsert`'s `last_key`) — DISTINCT's
-/// "insert then delete the just-produced duplicate" path (spec 009
-/// Requirement 4).
+/// `Delete`: for an ephemeral cursor (unchanged), removes cursor `P1`'s
+/// most recently probed/inserted entry (per `Found`/`IdxInsert`'s
+/// `last_key`) — DISTINCT's "insert then delete the just-produced
+/// duplicate" path (spec 009 Requirement 4). For a real
+/// [`CursorSlot::Table`] write cursor (#194), deletes the row at the
+/// cursor's *current* position (whatever `Rewind`/`Next`/`SeekRowid`
+/// last positioned it on) from the on-disk table b-tree via
+/// [`btree::delete_row`].
 pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = vm.ephemeral_mut(instr.p1, "Delete")?;
-    if let Some(key) = state.last_key.take() {
-        state.entries.remove(&key);
+    match vm.cursor(instr.p1)? {
+        CursorSlot::Table(state) => {
+            let rowid = state
+                .current
+                .as_ref()
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode: "Delete",
+                    reason: "cursor has no current row".to_string(),
+                })?
+                .rowid;
+            let root_page = state.root_page;
+            let pager = vm.writer("Delete")?;
+            let db = vm.db()?;
+            let header = db.header;
+            let mut pager = pager.borrow_mut();
+            btree::delete_row(&mut pager, &header, root_page, rowid).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "Delete",
+                    reason: e.to_string(),
+                }
+            })?;
+            drop(pager);
+            // The row this cursor was positioned on is now gone —
+            // clear `current` so a stray follow-up `Rowid`/`Column`
+            // reads as "no row" rather than stale data.
+            if let CursorSlot::Table(state) = vm.cursor_mut(instr.p1)? {
+                state.current = None;
+            }
+            Ok(Step::Next)
+        }
+        CursorSlot::Ephemeral(_) => {
+            let state = vm.ephemeral_mut(instr.p1, "Delete")?;
+            if let Some(key) = state.last_key.take() {
+                state.entries.remove(&key);
+            }
+            Ok(Step::Next)
+        }
+        other => Err(ExecError::CursorTypeMismatch {
+            opcode: "Delete",
+            slot: instr.p1,
+            found: other.type_name(),
+            expected: "ephemeral or table cursor",
+        }),
     }
+}
+
+/// `Insert` (#194): inserts a row into the table b-tree cursor `P1` is
+/// open on (must be a real [`CursorSlot::Table`] write cursor, opened
+/// via `OpenWrite`). `P2` holds the row's rowid (an integer register),
+/// `P3` holds the already-`MakeRecord`-encoded payload blob. Delegates
+/// to [`btree::insert_row`]; `OR REPLACE`/`OR IGNORE`-style `P5`
+/// conflict-resolution flags are not modeled — every insert is an
+/// unconditional add, matching `insert_row`'s own contract.
+pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let root_page = vm.table_cursor_mut(instr.p1, "Insert")?.root_page;
+    let rowid = match vm.register(instr.p2)? {
+        Value::Integer(i) => *i,
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Insert",
+                reason: format!("rowid register holds {other:?}, not an integer"),
+            })
+        }
+    };
+    let payload = match vm.register(instr.p3)? {
+        Value::Blob(bytes) => bytes.clone(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Insert",
+                reason: format!("record register holds {other:?}, not a blob"),
+            })
+        }
+    };
+    let pager = vm.writer("Insert")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    btree::insert_row(&mut pager, &header, root_page, rowid, &payload).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "Insert",
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(Step::Next)
+}
+
+/// `NewRowid` (#194): computes a fresh rowid for table cursor `P1`
+/// (`max(rowid) + 1`, or `1` for an empty table — via
+/// [`TableCursor::last`]) and writes it to register `P2`.
+///
+/// AUTOINCREMENT simplification: this VDBE layer has no schema-aware
+/// way to know whether a table was declared `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` (that bit lives in codegen/the schema, not here), so
+/// AUTOINCREMENT handling is opt-in per instruction instead: when `P5`
+/// is nonzero AND `P4` carries the table's name (`P4::Str`), this also
+/// consults/bumps `sqlite_sequence` via
+/// [`crate::btree::ensure_sqlite_sequence_table`]/[`crate::btree::update_sequence`],
+/// taking `max(sqlite_sequence.seq, TableCursor::last() rowid) + 1`
+/// (matching stock SQLite: `sqlite_sequence` never regresses even after
+/// the row it recorded is deleted). Without `P5`/`P4`, this opcode is
+/// plain non-AUTOINCREMENT rowid allocation.
+pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let root_page = vm.table_cursor_mut(instr.p1, "NewRowid")?.root_page;
+    let db = vm.db()?;
+    let mut probe = TableCursor::new(Rc::clone(&db.source), &db.header, root_page);
+    let max_from_table = probe
+        .last()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "NewRowid",
+            reason: e.to_string(),
+        })?
+        .map_or(0, |row| row.rowid);
+
+    let new_rowid = if instr.p5 != 0 {
+        let table_name = match &instr.p4 {
+            P4::Str(name) => name.clone(),
+            other => {
+                return Err(ExecError::MalformedInstruction {
+                    opcode: "NewRowid",
+                    reason: format!(
+                        "AUTOINCREMENT requested (P5 nonzero) but P4 is not a table-name string, got {other:?}"
+                    ),
+                })
+            }
+        };
+        let pager = vm.writer("NewRowid")?;
+        let db = vm.db()?;
+        let header = db.header;
+        let mut pager = pager.borrow_mut();
+        let seq_root = btree::ensure_sqlite_sequence_table(&mut pager, &header).map_err(|e| {
+            ExecError::MalformedInstruction {
+                opcode: "NewRowid",
+                reason: e.to_string(),
+            }
+        })?;
+        let mut seq_cursor = TableCursor::new(&*pager, &header, seq_root);
+        let mut tracked_seq = 0i64;
+        let mut row = seq_cursor
+            .first()
+            .map_err(|e| ExecError::MalformedInstruction {
+                opcode: "NewRowid",
+                reason: e.to_string(),
+            })?;
+        while let Some(r) = row {
+            let values = decode_record(&r.payload, header.text_encoding).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "NewRowid",
+                    reason: e.to_string(),
+                }
+            })?;
+            if let (Some(Value::Text(n)), Some(Value::Integer(seq))) =
+                (values.first(), values.get(1))
+            {
+                if *n == table_name {
+                    tracked_seq = *seq;
+                    break;
+                }
+            }
+            row = seq_cursor
+                .next()
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode: "NewRowid",
+                    reason: e.to_string(),
+                })?;
+        }
+        let candidate = max_from_table.max(tracked_seq).saturating_add(1);
+        btree::update_sequence(&mut pager, &header, &table_name, candidate).map_err(|e| {
+            ExecError::MalformedInstruction {
+                opcode: "NewRowid",
+                reason: e.to_string(),
+            }
+        })?;
+        candidate
+    } else {
+        max_from_table.saturating_add(1)
+    };
+
+    vm.set_register(instr.p2, Value::Integer(new_rowid))?;
     Ok(Step::Next)
 }
 
@@ -497,6 +760,7 @@ pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 mod tests {
     use super::*;
     use crate::header::DatabaseHeader;
+    use crate::vdbe::affinity::Affinity;
     use crate::vdbe::program::Opcode;
     use crate::vfs::{UnixVfs, Vfs, VfsPageSource};
     use std::path::Path;
@@ -510,6 +774,52 @@ mod tests {
         let header = DatabaseHeader::parse(&header_buf).unwrap();
         let source = VfsPageSource::open(&vfs, &path, header.page_size).unwrap();
         Vm::with_db(Rc::new(source), header)
+    }
+
+    /// A one-page, empty-leaf-root database (root page 1 doubling as a
+    /// table b-tree root, rather than a real `sqlite_master` page — a
+    /// simplification this ticket's tests share with
+    /// `src/btree/insert.rs::tests::minimal_db`, whose private
+    /// `write_leaf_page` helper isn't reachable from here). `page_type`
+    /// is `0x0d` (`LEAF_TABLE`) or `0x0a` (`LEAF_INDEX`) — see
+    /// `src/btree/index.rs`'s `LEAF_INDEX` constant.
+    fn minimal_writable_db(
+        page_size: u32,
+        page_type: u8,
+    ) -> (crate::vfs::MemoryVfs, DatabaseHeader) {
+        let mut page1 = vec![0u8; page_size as usize];
+        page1[0..16].copy_from_slice(b"SQLite format 3\0");
+        page1[16..18].copy_from_slice(&u16::try_from(page_size).unwrap_or(1).to_be_bytes());
+        page1[18] = 1;
+        page1[19] = 1;
+        page1[28..32].copy_from_slice(&1u32.to_be_bytes());
+        page1[56..60].copy_from_slice(&1u32.to_be_bytes());
+
+        let header_start = 100usize;
+        page1[header_start] = page_type;
+        page1[header_start + 1..header_start + 3].copy_from_slice(&0u16.to_be_bytes());
+        page1[header_start + 3..header_start + 5].copy_from_slice(&0u16.to_be_bytes());
+        let content_start = if page_size == 65536 {
+            0u16
+        } else {
+            u16::try_from(page_size).unwrap()
+        };
+        page1[header_start + 5..header_start + 7].copy_from_slice(&content_start.to_be_bytes());
+        page1[header_start + 7] = 0;
+
+        let mut header_bytes = [0u8; 100];
+        header_bytes.copy_from_slice(&page1[..100]);
+        let header = DatabaseHeader::parse(&header_bytes).unwrap();
+
+        let mut vfs = crate::vfs::MemoryVfs::new();
+        vfs.insert("/test.db", page1);
+        (vfs, header)
+    }
+
+    fn writable_vm(page_type: u8) -> Vm {
+        let (vfs, header) = minimal_writable_db(512, page_type);
+        let pager = crate::pager::Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        Vm::with_writable_db(pager, header)
     }
 
     #[test]
@@ -697,5 +1007,146 @@ mod tests {
         let mut vm = Vm::new();
         let err = rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 5, 0)).unwrap_err();
         assert!(matches!(err, ExecError::CursorNotOpen { slot: 0 }));
+    }
+
+    // --- #194: write-path opcodes (OpenWrite/Insert/Delete/IdxInsert/NewRowid) ---
+
+    #[test]
+    fn open_write_requires_a_writable_vm() {
+        // A read-only `Vm::with_db` must reject `OpenWrite` rather than
+        // silently opening a cursor that later opcodes can't actually
+        // write through.
+        let mut vm = open_vm("table_multipage.db");
+        let err = open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 2, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::NoDatabase { .. }));
+    }
+
+    #[test]
+    fn new_rowid_starts_at_one_on_an_empty_table() {
+        let mut vm = writable_vm(0x0d); // LEAF_TABLE
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        new_rowid(&mut vm, &Instruction::new(Opcode::NewRowid, 0, 5, 0)).unwrap();
+        assert_eq!(*vm.register(5).unwrap(), Value::Integer(1));
+    }
+
+    #[test]
+    fn insert_then_read_back_round_trips_through_make_record_and_column() {
+        let mut vm = writable_vm(0x0d); // LEAF_TABLE
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+
+        // NewRowid -> r0.
+        new_rowid(&mut vm, &Instruction::new(Opcode::NewRowid, 0, 0, 0)).unwrap();
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(1));
+
+        // MakeRecord over r1..r3 (with INTEGER/TEXT affinity applied to
+        // text-literal-but-numeric-looking input in r1) -> r3.
+        vm.set_register(1, Value::Text("42".to_string())).unwrap();
+        vm.set_register(2, Value::Text("hello".to_string()))
+            .unwrap();
+        crate::vdbe::result::make_record(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::MakeRecord,
+                1,
+                2,
+                3,
+                P4::Affinity(vec![
+                    Affinity::Integer.to_p4_byte(),
+                    Affinity::Text.to_p4_byte(),
+                ]),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(vm.register(3).unwrap(), Value::Blob(_)));
+
+        // Insert cursor 0, rowid r0, record r3.
+        insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 3)).unwrap();
+
+        // Read back through the same cursor's Rewind/Column — V1's
+        // reader path (`decode_record`) must decode exactly what was
+        // written, with the affinity-coerced INTEGER, not the original
+        // TEXT "42".
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 11)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(42));
+        assert_eq!(*vm.register(11).unwrap(), Value::Text("hello".to_string()));
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 12, 0)).unwrap();
+        assert_eq!(*vm.register(12).unwrap(), Value::Integer(1));
+    }
+
+    #[test]
+    fn new_rowid_after_insert_skips_past_the_max_existing_rowid() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        vm.set_register(1, Value::Integer(7)).unwrap();
+        crate::vdbe::result::make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 1, 1, 2))
+            .unwrap();
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 2)).unwrap();
+
+        new_rowid(&mut vm, &Instruction::new(Opcode::NewRowid, 0, 9, 0)).unwrap();
+        assert_eq!(*vm.register(9).unwrap(), Value::Integer(6));
+    }
+
+    #[test]
+    fn delete_removes_the_row_at_the_cursors_current_position() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        vm.set_register(1, Value::Integer(99)).unwrap();
+        crate::vdbe::result::make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 1, 1, 2))
+            .unwrap();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 2)).unwrap();
+
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+        delete(&mut vm, &Instruction::new(Opcode::Delete, 0, 0, 0)).unwrap();
+
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+        assert_eq!(step, Step::Jump(999));
+    }
+
+    #[test]
+    fn new_rowid_autoincrement_consults_and_bumps_sqlite_sequence() {
+        let mut vm = writable_vm(0x0d);
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+
+        let mut instr = Instruction::with_p4(Opcode::NewRowid, 0, 5, 0, P4::Str("t".to_string()));
+        instr.p5 = 1;
+        new_rowid(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(5).unwrap(), Value::Integer(1));
+
+        // sqlite_sequence now tracks ("t", 1); a second NewRowid call
+        // (simulating a second INSERT without actually inserting a row
+        // in between, which this focused test doesn't need) must not
+        // regress below the tracked value.
+        new_rowid(&mut vm, &instr).unwrap();
+        assert_eq!(*vm.register(5).unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn idx_insert_real_cursor_writes_an_index_entry_readable_by_index_cursor() {
+        let mut vm = writable_vm(0x0a); // LEAF_INDEX
+        let mut open_instr = Instruction::new(Opcode::OpenWrite, 0, 1, 0);
+        open_instr.p5 = 1; // nonzero P5: open a real index write cursor
+        open_write(&mut vm, &open_instr).unwrap();
+
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        vm.set_register(1, Value::Text("x".to_string())).unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
+        )
+        .unwrap();
+
+        let db = vm.db().unwrap();
+        let mut index_cursor =
+            crate::btree::IndexCursor::new(Rc::clone(&db.source), db.header.usable_page_size(), 1);
+        let row = index_cursor.first().unwrap().unwrap();
+        let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(
+            values,
+            vec![Value::Integer(5), Value::Text("x".to_string())]
+        );
     }
 }
