@@ -16,7 +16,7 @@ use sqlite_rs::record::{encode_record, TextEncoding, Value};
 use sqlite_rs::schema::read_schema;
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -62,17 +62,6 @@ fn read_header(vfs: &UnixVfs, db: &PathBuf, page_size: u32) -> DatabaseHeader {
     let mut buf = [0u8; 100];
     buf.copy_from_slice(&raw[..100]);
     DatabaseHeader::parse(&buf).unwrap()
-}
-
-fn assert_integrity_ok(oracle: &PathBuf, db: &PathBuf) {
-    let integrity = Command::new(oracle)
-        .arg("-readonly")
-        .arg(db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
 }
 
 fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
@@ -139,7 +128,7 @@ fn delete_single_row_from_a_two_row_leaf() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "1");
     assert_eq!(oracle_select(&oracle, &db, "select a, b from t;"), "2|two");
 
@@ -177,7 +166,7 @@ fn delete_all_rows_leaves_an_empty_table() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "0");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
@@ -213,7 +202,7 @@ fn bulk_delete_every_other_row_out_of_1000() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(&oracle, &db, "select count(*) from t;"),
         "500"
@@ -270,7 +259,7 @@ fn delete_triggers_page_collapse_across_a_split_boundary() {
         pager.flush().unwrap();
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "0");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
@@ -321,7 +310,7 @@ fn round_trip_insert_delete_insert_reuses_freed_pages() {
         assert_eq!(page_count_after_reinsert, page_count_after_insert);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "80");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
@@ -363,7 +352,7 @@ fn deleting_a_row_with_an_overflow_payload_frees_its_overflow_pages() {
         page_count_after_insert = u32::from_be_bytes([raw[28], raw[29], raw[30], raw[31]]);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "1");
     assert_eq!(oracle_select(&oracle, &db, "select a from t;"), "2");
 
@@ -379,7 +368,7 @@ fn deleting_a_row_with_an_overflow_payload_frees_its_overflow_pages() {
         assert_eq!(page_count_after_reinsert, page_count_after_insert);
     }
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(oracle_select(&oracle, &db, "select count(*) from t;"), "2");
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();

@@ -26,7 +26,7 @@ use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::execute_with_writable_db;
 use sqlite_rs::vfs::{PageSource, UnixVfs, Vfs, VfsPageSource};
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -77,17 +77,6 @@ fn table_schema(db: &PathBuf, header: &DatabaseHeader, table: &str) -> TableSche
         .unwrap_or_else(|| panic!("no schema for table {table}"))
 }
 
-fn assert_integrity_ok(oracle: &PathBuf, db: &PathBuf) {
-    let integrity = Command::new(oracle)
-        .arg("-readonly")
-        .arg(db)
-        .arg("PRAGMA integrity_check;")
-        .output()
-        .unwrap();
-    assert!(integrity.status.success());
-    assert_eq!(String::from_utf8_lossy(&integrity.stdout).trim(), "ok");
-}
-
 fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
     let out = Command::new(oracle)
         .arg("-readonly")
@@ -129,7 +118,7 @@ fn insert_maintains_a_secondary_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -168,7 +157,7 @@ fn delete_maintains_a_secondary_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -207,7 +196,7 @@ fn update_maintains_a_secondary_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -259,7 +248,7 @@ fn update_reassigning_rowid_alias_maintains_the_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -304,7 +293,7 @@ fn insert_maintains_multiple_secondary_indexes() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -353,7 +342,7 @@ fn insert_maintains_a_multicolumn_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -396,7 +385,7 @@ fn insert_maintains_an_index_on_the_rowid_alias_column() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -476,7 +465,7 @@ fn insert_or_replace_removes_the_displaced_rows_index_entry() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     assert_eq!(
         oracle_select(
             &oracle,
@@ -526,7 +515,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
 
     let schema = table_schema(&db, &header, "t");
     let update: Update = match parse_update("UPDATE t SET v = 'z' WHERE id = 2") {
@@ -536,7 +525,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
     let program = compile_update(&update, &schema).unwrap();
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
 
     let schema = table_schema(&db, &header, "t");
     let delete = match parse_delete("DELETE FROM t WHERE id = 1") {
@@ -546,7 +535,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
     let program = compile_delete(&delete, &schema).unwrap();
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
 
     assert_eq!(
         oracle_select(
@@ -673,7 +662,7 @@ fn insert_into_autoincrement_table_maintains_its_index() {
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
 
-    assert_integrity_ok(&oracle, &db);
+    assert_integrity_check_ok(&oracle, &db);
     // AUTOINCREMENT never reuses a rowid even after the table was
     // emptied — the new row must be keyed (in both the table and the
     // index) on a rowid greater than the deleted one, not `1` again.

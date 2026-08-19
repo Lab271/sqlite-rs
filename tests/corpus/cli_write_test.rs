@@ -11,7 +11,7 @@
 //! fixture — `export`'s convention of never mutating the fixture tree
 //! applies doubly here, since these tests write to the database itself.
 
-use crate::oracle::{pinned_oracle, skip_no_oracle};
+use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -89,11 +89,6 @@ fn oracle_select(oracle: &Path, db: &Path, sql: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-fn assert_integrity_ok(oracle: &Path, db: &Path) {
-    let out = oracle_select(oracle, db, "PRAGMA integrity_check");
-    assert_eq!(out.trim(), "ok", "integrity_check failed for {db:?}");
-}
-
 #[test]
 fn insert_round_trips_through_cli_query() {
     let db = seed_db("insert");
@@ -108,7 +103,7 @@ fn insert_round_trips_through_cli_query() {
     assert_eq!(rows, "1|x\n2|y\n");
 
     if let Some(oracle) = pinned_oracle() {
-        assert_integrity_ok(&oracle, &db);
+        assert_integrity_check_ok(&oracle, &db);
         assert_eq!(oracle_select(&oracle, &db, "SELECT * FROM t"), "1|x\n2|y\n");
     } else {
         skip_no_oracle("insert_round_trips_through_cli_query (oracle cross-check)");
@@ -132,7 +127,7 @@ fn update_and_delete_round_trip_through_cli_query() {
     assert_eq!(rows, "2|y\n3|zz\n");
 
     if let Some(oracle) = pinned_oracle() {
-        assert_integrity_ok(&oracle, &db);
+        assert_integrity_check_ok(&oracle, &db);
         assert_eq!(
             oracle_select(&oracle, &db, "SELECT * FROM t"),
             "2|y\n3|zz\n"
@@ -155,7 +150,7 @@ fn create_table_is_visible_to_cli_query_and_tables() {
     assert_eq!(run_query(&db, "SELECT * FROM u"), "42\n");
 
     if let Some(oracle) = pinned_oracle() {
-        assert_integrity_ok(&oracle, &db);
+        assert_integrity_check_ok(&oracle, &db);
         assert_eq!(oracle_select(&oracle, &db, "SELECT * FROM u"), "42\n");
     } else {
         skip_no_oracle("create_table_is_visible_to_cli_query_and_tables (oracle cross-check)");
@@ -181,7 +176,7 @@ fn create_index_populates_existing_rows_and_survives_reopen() {
     assert_eq!(run_query(&db, "SELECT * FROM t"), "1|x\n2|y\n");
 
     if let Some(oracle) = pinned_oracle() {
-        assert_integrity_ok(&oracle, &db);
+        assert_integrity_check_ok(&oracle, &db);
         assert_eq!(
             oracle_select(&oracle, &db, "SELECT * FROM t ORDER BY b"),
             "1|x\n2|y\n"
@@ -217,7 +212,7 @@ fn drop_index_then_drop_table_removes_them_from_the_schema() {
     );
 
     if let Some(oracle) = pinned_oracle() {
-        assert_integrity_ok(&oracle, &db);
+        assert_integrity_check_ok(&oracle, &db);
         let remaining = oracle_select(
             &oracle,
             &db,
