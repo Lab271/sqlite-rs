@@ -1,33 +1,46 @@
-//! `Update` AST -> `Program` compilation (#210, index maintenance #196).
-//! Mirrors `delete.rs`'s scan shape, but per matched row builds the new
-//! record from a mix of assigned expressions and the row's own
-//! unassigned columns (read via `emit_column_read` before the row is
-//! touched), then emits per-index `IdxDelete` + `Delete` + `Insert` +
+//! `Update` AST -> `Program` compilation (#210, index maintenance #196,
+//! constraint re-validation #218). Mirrors `delete.rs`'s scan shape,
+//! but per matched row builds the new record from a mix of assigned
+//! expressions and the row's own unassigned columns (read via
+//! `emit_column_read` before the row is touched), re-validates NOT
+//! NULL/CHECK against the new row the same way `insert.rs` does
+//! (reusing its `column_plans`/`ColumnPlan`/`emit_constraint_violation`
+//! machinery), then emits per-index `IdxDelete` + `Delete` + `Insert` +
 //! per-index `IdxInsert` rather than `Delete`+`Insert` alone — SQLite's
 //! own "no in-place update opcode" convention for a b-tree keyed by
 //! rowid, since a `SET`-assignment to the rowid-alias column can change
 //! the row's key.
 //!
 //! Known simplifications (deferred to follow-up tickets, not chased
-//! here): no NOT NULL/CHECK/DEFAULT constraint re-validation (`INSERT`'s
-//! `column_plans` machinery is not reused), no rowid-equality
-//! `SeekRowid` fast path for the scan itself, and no "skip unchanged
-//! indexed columns" optimization — every index is fully rebuilt
-//! (delete old key, insert new key) on every matched row regardless of
-//! whether the `SET` clause actually touched that index's columns. All
-//! correctness-neutral; `insert.rs`/`select.rs` already document
-//! precedent for the first two.
+//! here): `DEFAULT` is not substituted for an assigned `NULL` (`SET col
+//! = DEFAULT` isn't a thing this parser accepts yet, and an explicit
+//! `SET col = NULL` on a NOT NULL column is correctly a violation, not
+//! a default substitution — unlike `INSERT ... OR REPLACE`, `UPDATE`
+//! has no "explicit NULL means take the default" convention in stock
+//! SQLite either), no rowid-equality `SeekRowid` fast path for the scan
+//! itself, and no "skip unchanged indexed columns" optimization — every
+//! index is fully rebuilt (delete old key, insert new key) on every
+//! matched row regardless of whether the `SET` clause actually touched
+//! that index's columns. All correctness-neutral; `insert.rs`/`select.rs`
+//! already document precedent for the rowid-seek and index-optimization
+//! simplifications.
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
+use crate::codegen::insert::{
+    column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_NOTNULL,
+};
 use crate::codegen::select::CodegenError;
-use crate::codegen::{CondTargets, Emitter, RegAlloc, Target};
-use crate::parser::ast::{Expr, Update};
+use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
+use crate::parser::ast::{ConflictAction, Expr, TableConstraint, Update};
+use crate::parser::error::CreateTableOutcome;
+use crate::parser::parse_create_table;
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
 
 const TABLE_CURSOR: i32 = 0;
-const FIRST_INDEX_CURSOR: i32 = 1;
+const CHECK_CURSOR: i32 = 1;
+const FIRST_INDEX_CURSOR: i32 = 2;
 
 /// Compiles `update` against `schema` (the resolved target table) into
 /// a `Program`.
@@ -38,7 +51,39 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
         });
     }
 
+    let create = match parse_create_table(&schema.sql) {
+        CreateTableOutcome::Accepted(create) => *create,
+        CreateTableOutcome::Unsupported { message, .. }
+        | CreateTableOutcome::Invalid { message, .. } => {
+            return Err(CodegenError::Unsupported {
+                reason: format!("could not recover constraints from schema DDL: {message}"),
+            })
+        }
+    };
+
     let rowid_alias = rowid_alias_column(schema);
+    let plans = column_plans(schema, &create, rowid_alias);
+    let table_checks: Vec<Expr> = create
+        .constraints
+        .iter()
+        .filter_map(|c| match c {
+            TableConstraint::Check(expr) => Some(expr.clone()),
+            TableConstraint::PrimaryKey(_) | TableConstraint::Unique(_) => None,
+        })
+        .collect();
+    let action = update.or_action.unwrap_or(ConflictAction::Abort);
+
+    // Same rationale as `insert.rs`'s `check_schema`: `CHECK` column
+    // references must read via ordinary `Opcode::Column` against the
+    // pseudo-cursor built from the new row's record, not `Opcode::Rowid`
+    // (which `rowid_alias_column`-driven codegen would otherwise emit
+    // for the rowid-alias column, and which the pseudo-cursor can't
+    // answer).
+    let check_schema = TableSchema {
+        sql: String::new(),
+        ..schema.clone()
+    };
+
     let mut assigned: Vec<Option<&Expr>> = vec![None; schema.columns.len()];
     for assignment in &update.assignments {
         for name in &assignment.columns {
@@ -113,6 +158,92 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
             }
         };
         col_regs.push(r);
+    }
+
+    // Re-validate NOT NULL against the new row's values — an unassigned
+    // column keeps a value that already passed this check when the row
+    // was written, but an assigned one might not have (`insert.rs`
+    // documents the same per-column `IsNull` pattern this mirrors).
+    for (idx, plan) in plans.iter().enumerate() {
+        if !plan.not_null {
+            continue;
+        }
+        let Some(&r) = col_regs.get(idx) else {
+            continue;
+        };
+        let violation = em.new_label();
+        let ok = em.new_label();
+        let addr = em.emit(Instruction::new(Opcode::IsNull, r, 0, 0));
+        em.patch_p2(addr, violation);
+        em.goto(ok);
+        em.place(violation);
+        emit_constraint_violation(
+            &mut em,
+            action,
+            SQLITE_CONSTRAINT_NOTNULL,
+            format!(
+                "NOT NULL constraint failed: {}.{}",
+                schema.name,
+                schema.columns.get(idx).map_or("?", String::as_str)
+            ),
+            row_skip,
+        );
+        em.place(ok);
+    }
+
+    // Re-validate CHECK against the new row, the same way `insert.rs`
+    // does: build a plain (pre-affinity) record from `col_regs` and
+    // evaluate each CHECK expression against a pseudo-cursor over it.
+    // Built separately from `record_reg` below (which applies column
+    // affinities) because affinity coercion can change what a CHECK
+    // expression sees — e.g. `CHECK (col = 5)` against a TEXT '5'
+    // reads differently before vs. after INTEGER-affinity coercion.
+    let has_checks = !table_checks.is_empty() || plans.iter().any(|p| !p.checks.is_empty());
+    if has_checks {
+        let base_reg = col_regs.first().copied().unwrap_or(0);
+        let count = i32::try_from(col_regs.len()).unwrap_or(0);
+        let check_record_reg = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::MakeRecord,
+            base_reg,
+            count,
+            check_record_reg,
+        ));
+        em.emit(Instruction::new(
+            Opcode::OpenPseudo,
+            CHECK_CURSOR,
+            check_record_reg,
+            0,
+        ));
+
+        let mut check_exprs: Vec<&Expr> = plans.iter().flat_map(|p| p.checks.iter()).collect();
+        check_exprs.extend(table_checks.iter());
+        for expr in check_exprs {
+            let violation = em.new_label();
+            let ok = em.new_label();
+            compile_cond(
+                &mut em,
+                &mut reg,
+                &check_schema,
+                CHECK_CURSOR,
+                expr,
+                CondTargets {
+                    on_true: Target::Fallthrough,
+                    on_false: Target::Jump(violation),
+                    on_null: NullTarget::True,
+                },
+            )?;
+            em.goto(ok);
+            em.place(violation);
+            emit_constraint_violation(
+                &mut em,
+                action,
+                SQLITE_CONSTRAINT_CHECK,
+                format!("CHECK constraint failed: {}", schema.name),
+                row_skip,
+            );
+            em.place(ok);
+        }
     }
 
     let base_reg = col_regs.first().copied().unwrap_or(0);

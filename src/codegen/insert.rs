@@ -60,19 +60,41 @@ const FIRST_INDEX_CURSOR: i32 = 2;
 // SQLite's own extended result codes (sqlite3.h) — nothing in this
 // codebase defines these yet (grep turns up nothing), so they're
 // introduced here rather than borrowed from an existing constant.
-const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
+pub(crate) const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
-const SQLITE_CONSTRAINT_CHECK: i32 = 275;
+pub(crate) const SQLITE_CONSTRAINT_CHECK: i32 = 275;
 
 #[derive(Debug, Default)]
-struct ColumnPlan {
-    not_null: bool,
-    default: Option<Expr>,
-    checks: Vec<Expr>,
+pub(crate) struct ColumnPlan {
+    pub(crate) not_null: bool,
+    pub(crate) default: Option<Expr>,
+    pub(crate) checks: Vec<Expr>,
 }
 
 fn is_null_literal(expr: &Expr) -> bool {
     matches!(expr.kind, ExprKind::Literal(Literal::Null))
+}
+
+/// Emits `NewRowid` for `schema`'s table cursor into register `dest`.
+/// When `is_autoincrement`, sets `P5`/`P4` so the opcode also
+/// consults/bumps `sqlite_sequence` (see `NewRowid`'s own doc in
+/// `src/vdbe/cursor.rs`) — without this, `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` compiled identically to a plain rowid alias and could
+/// reuse a rowid after every row referencing it was deleted.
+fn emit_new_rowid(em: &mut Emitter, dest: i32, schema: &TableSchema, is_autoincrement: bool) {
+    if is_autoincrement {
+        let mut instr = Instruction::with_p4(
+            Opcode::NewRowid,
+            TABLE_CURSOR,
+            dest,
+            0,
+            P4::Str(schema.name.clone()),
+        );
+        instr.p5 = 1;
+        em.emit(instr);
+    } else {
+        em.emit(Instruction::new(Opcode::NewRowid, TABLE_CURSOR, dest, 0));
+    }
 }
 
 /// Compiles `insert` against `schema` (the resolved target table) into
@@ -96,6 +118,32 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
 
     let rowid_alias = rowid_alias_column(schema);
     let plans = column_plans(schema, &create, rowid_alias);
+    // `AUTOINCREMENT` only ever attaches to the rowid-alias column's
+    // own `INTEGER PRIMARY KEY` declaration (SQLite grammar doesn't
+    // allow it on a table-level `PRIMARY KEY(...)`), so it's enough to
+    // check that one column's constraints.
+    let is_autoincrement = rowid_alias.is_some_and(|idx| {
+        schema
+            .columns
+            .get(idx)
+            .and_then(|name| {
+                create
+                    .columns
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(name))
+            })
+            .is_some_and(|def| {
+                def.constraints.iter().any(|c| {
+                    matches!(
+                        c,
+                        ColumnConstraint::PrimaryKey {
+                            autoincrement: true,
+                            ..
+                        }
+                    )
+                })
+            })
+    });
     let table_checks: Vec<Expr> = create
         .constraints
         .iter()
@@ -181,6 +229,7 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
             values,
             rowid_alias,
             action,
+            is_autoincrement,
         )?;
     }
 
@@ -191,7 +240,7 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
 /// Builds each schema column's constraint facts from the re-parsed
 /// `CREATE TABLE` AST, keyed by schema position (column name matched
 /// case-insensitively — the same convention `column_index` uses).
-fn column_plans(
+pub(crate) fn column_plans(
     schema: &TableSchema,
     create: &crate::parser::ast::CreateTable,
     rowid_alias: Option<usize>,
@@ -248,6 +297,7 @@ fn compile_row(
     values: &[Expr],
     rowid_alias: Option<usize>,
     action: ConflictAction,
+    is_autoincrement: bool,
 ) -> Result<(), CodegenError> {
     let mut value_exprs: Vec<Option<&Expr>> = vec![None; schema.columns.len()];
     for (pos, &col_idx) in target_columns.iter().enumerate() {
@@ -278,14 +328,14 @@ fn compile_row(
                 }
                 None => {
                     let r = reg.alloc();
-                    em.emit(Instruction::new(Opcode::NewRowid, TABLE_CURSOR, r, 0));
+                    emit_new_rowid(em, r, schema, is_autoincrement);
                     r
                 }
             }
         }
         None => {
             let r = reg.alloc();
-            em.emit(Instruction::new(Opcode::NewRowid, TABLE_CURSOR, r, 0));
+            emit_new_rowid(em, r, schema, is_autoincrement);
             r
         }
     };
@@ -448,7 +498,7 @@ fn compile_row(
     Ok(())
 }
 
-fn emit_constraint_violation(
+pub(crate) fn emit_constraint_violation(
     em: &mut Emitter,
     action: ConflictAction,
     code: i32,
