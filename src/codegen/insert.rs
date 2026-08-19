@@ -21,6 +21,9 @@
 //!   `IdxInsert`'s generic `BtreeError::DuplicateKey` ->
 //!   `MalformedInstruction`, not a `SQLITE_CONSTRAINT_UNIQUE` /
 //!   `ON CONFLICT` outcome. Filed as a follow-up.
+//! - An index with a `DESC` column is rejected outright
+//!   (`CodegenError::Unsupported`), not silently mis-keyed — see
+//!   `index_maintenance`.
 //! - `WITHOUT ROWID` tables are rejected (`Unsupported`) — the
 //!   rowid-based insert/seek machinery this module uses doesn't apply.
 //! - `ON CONFLICT ROLLBACK`/`FAIL` both compile identically to `ABORT`
@@ -164,7 +167,7 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
-    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR);
+    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
 
     for values in &rows {
         compile_row(

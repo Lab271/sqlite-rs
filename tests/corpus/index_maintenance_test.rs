@@ -225,3 +225,220 @@ fn update_maintains_a_secondary_index() {
         "0"
     );
 }
+
+/// Reassigning the rowid-alias column moves the row to a new rowid at
+/// the table-btree level; the *old* index entry (keyed on the old
+/// rowid) must be deleted before the row moves, and the new entry
+/// (keyed on the new rowid) inserted after — exercising the trickiest
+/// ordering case `update.rs`'s own module doc calls out.
+#[test]
+fn update_reassigning_rowid_alias_maintains_the_index() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("update-rowid");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT); \
+         CREATE INDEX idx_b ON t(b); \
+         INSERT INTO t VALUES (1, 'apple'), (2, 'banana');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let update: Update = match parse_update("UPDATE t SET id = 99 WHERE id = 2") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_b WHERE b = 'banana'"
+        ),
+        "99"
+    );
+}
+
+/// Multiple indexes on the same table: cursor numbering
+/// (`open_index_cursors`/`emit_index_key_ops` both offset by index
+/// position) must not collide, and every index must independently stay
+/// in sync.
+#[test]
+fn insert_maintains_multiple_secondary_indexes() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("multi-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT, c TEXT); \
+         CREATE INDEX idx_b ON t(b); \
+         CREATE INDEX idx_c ON t(c); \
+         INSERT INTO t VALUES (1, 'seed', 'seed');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert_eq!(schema.indexes.len(), 2);
+
+    let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple', 'red')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_b WHERE b = 'apple'"
+        ),
+        "2"
+    );
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_c WHERE c = 'red'"
+        ),
+        "2"
+    );
+}
+
+/// A multi-column index: register contiguity across more than one
+/// index column, plus the trailing rowid slot, must hold.
+#[test]
+fn insert_maintains_a_multicolumn_index() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("multicolumn-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT, c TEXT); \
+         CREATE INDEX idx_bc ON t(b, c); \
+         INSERT INTO t VALUES (1, 'seed', 'seed');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple', 'red')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_bc WHERE b = 'apple' AND c = 'red'"
+        ),
+        "2"
+    );
+}
+
+/// An index on the rowid-alias column itself: `emit_column_read`'s
+/// rowid substitution (the on-disk record stores `NULL` for that
+/// column) must produce the real rowid value in the index key, not
+/// `NULL`.
+#[test]
+fn insert_maintains_an_index_on_the_rowid_alias_column() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("rowid-alias-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT); \
+         CREATE INDEX idx_id ON t(id); \
+         INSERT INTO t VALUES (1, 'seed');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT b FROM t INDEXED BY idx_id WHERE id = 2"
+        ),
+        "apple"
+    );
+}
+
+/// A `DESC`-ordered index column: there is no b-tree comparator support
+/// for descending index keys anywhere in this codebase yet (a
+/// pre-existing #171 gap, not introduced here), so codegen must reject
+/// it loudly (`CodegenError::Unsupported`) rather than silently build
+/// an ascending key stock `sqlite3` would then compare backwards.
+#[test]
+fn insert_on_desc_index_is_rejected_not_silently_miskeyed() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("desc-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT); \
+         CREATE INDEX idx_b_desc ON t(b DESC); \
+         INSERT INTO t VALUES (1, 'seed');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(schema.indexes[0].columns[0].desc);
+
+    let insert = match parse_insert("INSERT INTO t VALUES (2, 'apple')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let err = compile_insert(&insert, &schema).unwrap_err();
+    assert!(
+        matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
+        "expected Unsupported, got {err:?}"
+    );
+}

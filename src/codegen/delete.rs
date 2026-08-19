@@ -51,7 +51,7 @@ pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, 
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
-    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR);
+    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
 
     let end_label = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
