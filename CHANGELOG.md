@@ -4,18 +4,25 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [Unreleased]
+## [0.12.0] - 2026-08-19
 
-V3 phase 4 in progress (#161): write-path CLI surface (#215); corpus
-`PRAGMA integrity_check` cross-validation centralized into a single
-`assert_integrity_check_ok` oracle helper, replacing per-file
-duplicates across b-tree insert/delete, index maintenance, pager
-flush, and CLI write-path tests (#216). New `exec` CLI subcommand
-wires `INSERT`/`UPDATE`/`DELETE` through existing codegen, plus new
-`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP INDEX` codegen (none
-existed before #215). Held at `Unreleased` rather than bumped to
-0.12.0 — phase 4 isn't complete until #217 (exit gate) also closes,
-per this project's one-minor-per-completed-phase versioning policy.
+V3 exit gate (#217), closing epic #161: write-path CLI surface
+(#215); corpus `PRAGMA integrity_check` cross-validation centralized
+into a single `assert_integrity_check_ok` oracle helper, replacing
+per-file duplicates across b-tree insert/delete, index maintenance,
+pager flush, and CLI write-path tests (#216). New `exec` CLI
+subcommand wires `INSERT`/`UPDATE`/`DELETE` through existing codegen,
+plus new `CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP INDEX`
+codegen (none existed before #215). Tier 2 (WRITE CORE) stubs flip to
+real tests: `t2_crud_round_trips_on_rowid_tables` (CREATE/INSERT/
+UPDATE/DELETE round-trip via the CLI) and
+`t2_written_file_passes_integrity_check` (stock `sqlite3`
+`integrity_check`-clean on a written file), bringing
+`tests/tiers/tier2.rs` to 4/4 active. Scoped `cargo-mutants` run
+against the V3 write-path modules (b-tree insert/delete/index
+maintenance, VDBE write-opcode dispatch) as a sanity check ahead of
+release; a full-crate mutation run remains out of scope for this
+phase (scoped as a V1 exit-gate deliverable, epic #5).
 
 ## [0.11.1] - 2026-08-19
 
