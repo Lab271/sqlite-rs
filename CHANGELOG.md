@@ -8,6 +8,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 No changes yet.
 
+## [0.11.1] - 2026-08-19
+
+Fixes from a phase-level `/review` of V3 phase 3 (#161), found only by
+looking at #195/#210/#196 together: `INSERT OR REPLACE` left stale
+secondary-index entries for the row it displaced (#218); `UPDATE`
+never re-validated NOT NULL/CHECK constraints, letting an invalid
+value propagate into secondary indexes too (#220); `INSERT` never
+wired `AUTOINCREMENT` into `NewRowid`'s opt-in mechanism, so an
+`AUTOINCREMENT` table silently reused rowids after deletion (#221).
+Adds integration-level regression coverage: an INSERT→UPDATE→DELETE
+lifecycle test against the same indexed table, and a test pinning
+today's non-enforcing UNIQUE-index behavior (tracked separately, #207).
+
 ## [0.11.0] - 2026-08-19
 
 V3 phase 3 complete (#161): write codegen + VDBE. Auto-index

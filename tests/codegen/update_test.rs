@@ -254,3 +254,65 @@ fn rowid_alias_reassignment_changes_the_stored_rowid() {
         vec![(100, vec![Value::Null, Value::Text("x".to_string())])]
     );
 }
+
+#[test]
+fn not_null_violation_halts_and_leaves_the_row_unchanged() {
+    let path = scratch_db("update-notnull");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema("CREATE TABLE t(a INTEGER NOT NULL, b TEXT)");
+
+    run_insert(
+        &path,
+        &header,
+        page_size,
+        "INSERT INTO t(a, b) VALUES (1, 'x')",
+        &schema,
+    );
+
+    let err = run_update(&path, &header, page_size, "UPDATE t SET a = NULL", &schema)
+        .expect_err("NULL into a NOT NULL column must fail");
+    match err {
+        ExecError::Halted { code, .. } => assert_eq!(code, 1299),
+        other => panic!("expected Halted, got {other:?}"),
+    }
+
+    assert_eq!(
+        rows(&path, &header, page_size, 1),
+        vec![(1, vec![Value::Integer(1), Value::Text("x".to_string())])]
+    );
+}
+
+#[test]
+fn check_violation_halts_and_leaves_the_row_unchanged() {
+    let path = scratch_db("update-check");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema_with_columns(
+        "CREATE TABLE t(a INTEGER CHECK (a > 0))",
+        &["a"],
+        &["INTEGER"],
+    );
+
+    run_insert(
+        &path,
+        &header,
+        page_size,
+        "INSERT INTO t(a) VALUES (5)",
+        &schema,
+    );
+
+    let err = run_update(&path, &header, page_size, "UPDATE t SET a = -1", &schema)
+        .expect_err("a negative value must fail the CHECK constraint");
+    match err {
+        ExecError::Halted { code, .. } => assert_eq!(code, 275),
+        other => panic!("expected Halted, got {other:?}"),
+    }
+
+    assert_eq!(
+        rows(&path, &header, page_size, 1),
+        vec![(1, vec![Value::Integer(5)])]
+    );
+}
