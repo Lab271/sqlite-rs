@@ -108,8 +108,7 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
 
     let create = match parse_create_table(&schema.sql) {
         ParseOutcome::Accepted(create) => *create,
-        ParseOutcome::Unsupported { message, .. }
-        | ParseOutcome::Invalid { message, .. } => {
+        ParseOutcome::Unsupported { message, .. } | ParseOutcome::Invalid { message, .. } => {
             return Err(CodegenError::Unsupported {
                 reason: format!("could not recover constraints from schema DDL: {message}"),
             })

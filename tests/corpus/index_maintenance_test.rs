@@ -19,9 +19,7 @@ use sqlite_rs::codegen::{compile_delete, compile_insert};
 use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::pager::Pager;
 use sqlite_rs::parser::ast::Update;
-use sqlite_rs::parser::{
-    parse_delete, parse_insert, parse_update, ParseOutcome,
-};
+use sqlite_rs::parser::{parse_delete, parse_insert, parse_update, ParseOutcome};
 use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::execute_with_writable_db;
 use sqlite_rs::vfs::{PageSource, UnixVfs, Vfs, VfsPageSource};
