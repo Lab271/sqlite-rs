@@ -494,3 +494,195 @@ fn insert_or_replace_removes_the_displaced_rows_index_entry() {
         "1"
     );
 }
+
+/// INSERT -> UPDATE -> DELETE through our own codegen, in sequence,
+/// against the same indexed table — an integration scenario no
+/// single-statement test exercises (each other test in this file seeds
+/// the table via the oracle and runs exactly one of our codegen paths).
+/// Checks `PRAGMA integrity_check` after every step.
+#[test]
+fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("lifecycle");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); \
+         CREATE INDEX idx_v ON t(v);",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+
+    let schema = table_schema(&db, &header, "t");
+    let insert = match parse_insert("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+    assert_integrity_ok(&oracle, &db);
+
+    let schema = table_schema(&db, &header, "t");
+    let update: Update = match parse_update("UPDATE t SET v = 'z' WHERE id = 2") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+    assert_integrity_ok(&oracle, &db);
+
+    let schema = table_schema(&db, &header, "t");
+    let delete = match parse_delete("DELETE FROM t WHERE id = 1") {
+        DeleteOutcome::Accepted(d) => *d,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_delete(&delete, &schema).unwrap();
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+    assert_integrity_ok(&oracle, &db);
+
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_v WHERE v = 'z'"
+        ),
+        "2"
+    );
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT count(*) FROM t INDEXED BY idx_v WHERE v = 'a'"
+        ),
+        "0"
+    );
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_v WHERE v = 'c'"
+        ),
+        "3"
+    );
+}
+
+/// Pins today's documented (non-enforcing) behavior for a duplicate
+/// value into a `UNIQUE` index: it does NOT surface as a constraint
+/// violation, and it does not even fail — the b-tree's own duplicate
+/// check (`btree::insert_entry`) compares the *whole* key, index
+/// column(s) plus the trailing rowid, so two rows with the same
+/// `v` but different rowids never collide at the b-tree level. UNIQUE
+/// enforcement is tracked separately (#207) — but without a test, a
+/// future reader could easily believe UNIQUE indexes already reject
+/// duplicates when they don't.
+#[test]
+fn insert_duplicate_key_into_unique_index_is_not_enforced_as_a_constraint() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("unique-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); \
+         CREATE UNIQUE INDEX idx_v ON t(v); \
+         INSERT INTO t VALUES (1, 'a');",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(schema.indexes[0].unique);
+
+    let insert = match parse_insert("INSERT INTO t VALUES (2, 'a')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header)
+        .expect("today's (incorrect) behavior: a duplicate UNIQUE value is not rejected (#207)");
+
+    // The b-tree's own duplicate check compares the whole key (index
+    // column(s) + trailing rowid, see `btree::insert_entry`), so two
+    // rows with the same `v` but different rowids never collide there
+    // — both rows land in the table (not rejected) and the *declared*
+    // UNIQUE index ends up with two entries for the same value, which
+    // `PRAGMA integrity_check` — not a plain `SELECT`, since stock
+    // sqlite3's query planner assumes a UNIQUE index has at most one
+    // match and can short-circuit an `INDEXED BY` equality lookup after
+    // the first hit — correctly flags as `non-unique entry in index`.
+    assert_eq!(
+        oracle_select(&oracle, &db, "SELECT count(*) FROM t"),
+        "2",
+        "both rows are written; the duplicate is not rejected"
+    );
+    let integrity = Command::new(&oracle)
+        .arg("-readonly")
+        .arg(&db)
+        .arg("PRAGMA integrity_check;")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&integrity.stdout).contains("non-unique entry"),
+        "expected integrity_check to flag the UNIQUE index as violated, got: {}",
+        String::from_utf8_lossy(&integrity.stdout)
+    );
+}
+
+/// An `AUTOINCREMENT` table with a secondary index: rowids assigned via
+/// `sqlite_sequence` bookkeeping (#193) must still produce correct,
+/// consistent index keys once #196's `NewRowid`/index-maintenance
+/// wiring is involved.
+#[test]
+fn insert_into_autoincrement_table_maintains_its_index() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("index_maintenance");
+        return;
+    };
+    let db = scratch_db("autoincrement-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT); \
+         CREATE INDEX idx_v ON t(v); \
+         INSERT INTO t(v) VALUES ('a'); \
+         DELETE FROM t;",
+    );
+
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let insert = match parse_insert("INSERT INTO t(v) VALUES ('b')") {
+        InsertOutcome::Accepted(i) => *i,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_insert(&insert, &schema).unwrap();
+    let vfs = UnixVfs;
+    let pager = Pager::open(&vfs, &db, page_size).unwrap();
+    execute_with_writable_db(&program, pager, header).unwrap();
+
+    assert_integrity_ok(&oracle, &db);
+    // AUTOINCREMENT never reuses a rowid even after the table was
+    // emptied — the new row must be keyed (in both the table and the
+    // index) on a rowid greater than the deleted one, not `1` again.
+    assert_eq!(
+        oracle_select(
+            &oracle,
+            &db,
+            "SELECT id FROM t INDEXED BY idx_v WHERE v = 'b'"
+        ),
+        "2"
+    );
+}
