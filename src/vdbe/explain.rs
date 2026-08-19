@@ -54,6 +54,8 @@ fn render_p4(p4: &P4) -> String {
             format!("{}-{affinity}", collation_name(*collation))
         }
         P4::SortKey(cols) => render_sort_key(cols),
+        P4::Affinity(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        P4::Bool(b) => b.to_string(),
     }
 }
 
@@ -101,6 +103,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::MustBeInt => "MustBeInt",
         Opcode::OffsetLimit => "OffsetLimit",
         Opcode::OpenRead => "OpenRead",
+        Opcode::OpenWrite => "OpenWrite",
         Opcode::OpenEphemeral => "OpenEphemeral",
         Opcode::OpenPseudo => "OpenPseudo",
         Opcode::Rewind => "Rewind",
@@ -115,6 +118,8 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::IdxInsert => "IdxInsert",
         Opcode::IdxLE => "IdxLE",
         Opcode::Delete => "Delete",
+        Opcode::Insert => "Insert",
+        Opcode::NewRowid => "NewRowid",
         Opcode::Eq => "Eq",
         Opcode::Ge => "Ge",
         Opcode::Gt => "Gt",
@@ -162,6 +167,7 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::Init => format!("start at {p2}"),
         Opcode::Goto => format!("goto {p2}"),
         Opcode::OpenRead => format!("cursor {p1} on root page {p2}"),
+        Opcode::OpenWrite => format!("cursor {p1} write on root page {p2}"),
         Opcode::OpenEphemeral => format!("cursor {p1} ephemeral"),
         Opcode::OpenPseudo => format!("cursor {p1} pseudo, reads r[{p2}]"),
         Opcode::Rewind => format!("cursor {p1} rewind, jump {p2} if empty"),
@@ -192,6 +198,9 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::SorterData => format!("r[{p2}] = cursor {p1} sorted row"),
         Opcode::Found => format!("cursor {p1} found key at r[{p3}..], jump {p2}"),
         Opcode::IdxInsert => format!("cursor {p1} insert key r[{p2}..]"),
+        Opcode::Insert => format!("cursor {p1} insert rowid r[{p2}] record r[{p3}]"),
+        Opcode::NewRowid => format!("r[{p2}] = cursor {p1} new rowid"),
+        Opcode::Delete => format!("cursor {p1} delete current row"),
         _ => String::new(),
     }
 }

@@ -455,6 +455,19 @@ impl PageSource for Pager {
     }
 }
 
+/// Lets a write-capable `Pager` be shared as a read-only `Rc<dyn
+/// PageSource>` (e.g. `Rc::new(RefCell::new(pager))`, unsized to
+/// `Rc<dyn PageSource>`) while a second `Rc` clone of the same
+/// `RefCell` is kept concrete for `&mut Pager` write access (VDBE's
+/// `Vm::with_writable_db`, #194) — a single underlying `Pager` serves
+/// both `TableCursor`'s read traversal and the write opcodes without
+/// duplicating page state.
+impl PageSource for std::cell::RefCell<Pager> {
+    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        self.borrow().read_page(page_num)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

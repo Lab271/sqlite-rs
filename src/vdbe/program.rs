@@ -31,6 +31,7 @@ pub enum Opcode {
     OffsetLimit,
     // cursor
     OpenRead,
+    OpenWrite,
     OpenEphemeral,
     OpenPseudo,
     Rewind,
@@ -45,6 +46,8 @@ pub enum Opcode {
     IdxInsert,
     IdxLE,
     Delete,
+    Insert,
+    NewRowid,
     // compare
     Eq,
     Ge,
@@ -90,11 +93,17 @@ pub enum Opcode {
 }
 
 impl Opcode {
-    /// All 65 variants, in enum-declaration order — the harvested
-    /// inventory `tests/vdbe/opcode_completeness_test.rs` checks against
-    /// `tools/opcodes-v2.json` (#65). Kept honest by `_exhaustive` below:
-    /// an unmatched new variant fails the build rather than silently
-    /// falling out of this list.
+    /// The 65 harvested variants (`tools/opcodes-v2.json`), in
+    /// enum-declaration order — `tests/vdbe/opcode_completeness_test.rs`
+    /// checks this list against that harvest exactly, so `OpenWrite`/
+    /// `Insert`/`NewRowid` (#194, the V3 write path — never harvested
+    /// from a V2 oracle EXPLAIN, since V2 predates any write-path
+    /// support) are deliberately excluded from `ALL`, not just missing
+    /// by omission. `_exhaustive` below is the separate, unrelated
+    /// guarantee that every `Opcode` variant (harvested or not) is
+    /// handled by at least one match arm somewhere that matches on
+    /// `Opcode` exhaustively — it does not require a variant to appear
+    /// in `ALL`.
     pub const ALL: [Opcode; 65] = [
         Opcode::Init,
         Opcode::Goto,
@@ -185,6 +194,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::MustBeInt
         | Opcode::OffsetLimit
         | Opcode::OpenRead
+        | Opcode::OpenWrite
         | Opcode::OpenEphemeral
         | Opcode::OpenPseudo
         | Opcode::Rewind
@@ -199,6 +209,8 @@ fn _exhaustive(o: Opcode) {
         | Opcode::IdxInsert
         | Opcode::IdxLE
         | Opcode::Delete
+        | Opcode::Insert
+        | Opcode::NewRowid
         | Opcode::Eq
         | Opcode::Ge
         | Opcode::Gt
@@ -266,8 +278,23 @@ pub enum P4 {
     Real(f64),
     Blob(Vec<u8>),
     Str(String),
-    CollSeq { collation: Collation, affinity: u8 },
+    CollSeq {
+        collation: Collation,
+        affinity: u8,
+    },
     SortKey(Vec<SortKeyColumn>),
+    /// `MakeRecord`'s (#194) per-column affinity string, one
+    /// [`crate::vdbe::affinity::Affinity`] byte
+    /// (`Affinity::to_p4_byte`'s `'A'..='E'` convention) per source
+    /// register, applied before encoding — SQLite's own
+    /// `P4_KEYINFO`/affinity-string convention (`sqlite3VdbeMakeLabel`'s
+    /// affinity string), modeled minimally as an owned byte string
+    /// rather than a dedicated `KeyInfo` struct.
+    Affinity(Vec<u8>),
+    /// A boolean flag operand — used by `NewRowid` (#194) to request
+    /// AUTOINCREMENT handling (checking/bumping `sqlite_sequence`)
+    /// when the VDBE layer has no other place to carry that bit.
+    Bool(bool),
 }
 
 /// A single fixed-shape bytecode instruction: an opcode tag, three
