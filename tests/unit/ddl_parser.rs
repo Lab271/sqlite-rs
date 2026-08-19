@@ -56,6 +56,48 @@ fn accept_drop_index(src: &str) -> DropIndex {
     }
 }
 
+fn unsupported_index(src: &str) -> String {
+    match parse_create_index(src) {
+        CreateIndexOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_index(src: &str) -> String {
+    match parse_create_index(src) {
+        CreateIndexOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_drop_table(src: &str) -> String {
+    match parse_drop_table(src) {
+        DropTableOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_drop_table(src: &str) -> String {
+    match parse_drop_table(src) {
+        DropTableOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_drop_index(src: &str) -> String {
+    match parse_drop_index(src) {
+        DropIndexOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_drop_index(src: &str) -> String {
+    match parse_drop_index(src) {
+        DropIndexOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
 // ---- CREATE TABLE ---------------------------------------------------------
 
 #[test]
@@ -355,4 +397,61 @@ fn test_printer_roundtrip_drop_index() {
     let printed = d.to_string();
     let reparsed = accept_drop_index(&printed);
     assert_eq!(d, reparsed, "printed: {printed}");
+}
+
+// ---- issue #224: expect_end branches (trailing tokens after a valid parse) -
+
+#[test]
+fn test_unsupported_create_table_trailing_compound() {
+    unsupported_table("CREATE TABLE t (a INTEGER) UNION SELECT 1");
+}
+
+#[test]
+fn test_invalid_create_table_trailing_garbage() {
+    invalid_table("CREATE TABLE t (a INTEGER) EXTRA");
+}
+
+#[test]
+fn test_unsupported_create_index_trailing_compound() {
+    unsupported_index("CREATE INDEX i ON t (a) UNION SELECT 1");
+}
+
+#[test]
+fn test_invalid_create_index_trailing_garbage() {
+    invalid_index("CREATE INDEX i ON t (a) EXTRA");
+}
+
+#[test]
+fn test_invalid_create_index_missing_on() {
+    invalid_index("CREATE INDEX i t (a)");
+}
+
+#[test]
+fn test_unsupported_drop_table_trailing_compound() {
+    unsupported_drop_table("DROP TABLE t UNION SELECT 1");
+}
+
+#[test]
+fn test_invalid_drop_table_trailing_garbage() {
+    invalid_drop_table("DROP TABLE t EXTRA");
+}
+
+#[test]
+fn test_invalid_drop_table_missing_name() {
+    invalid_drop_table("DROP TABLE");
+}
+
+#[test]
+fn test_unsupported_drop_index_trailing_compound() {
+    unsupported_drop_index("DROP INDEX i UNION SELECT 1");
+}
+
+#[test]
+fn test_invalid_drop_index_trailing_garbage() {
+    invalid_drop_index("DROP INDEX i EXTRA");
+}
+
+#[test]
+fn test_invalid_drop_index_missing_name() {
+    invalid_drop_index("DROP INDEX");
 }

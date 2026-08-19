@@ -112,6 +112,20 @@ fn test_reject_update_missing_set() {
     invalid_update("UPDATE t1 x=1");
 }
 
+/// Issue #224: trailing UNION after a valid UPDATE is rejected at
+/// `expect_end`, not during statement parsing itself.
+#[test]
+fn test_reject_update_trailing_compound_unsupported() {
+    unsupported_update("UPDATE t1 SET x=1 UNION SELECT 1");
+}
+
+/// Issue #224: trailing garbage after a valid UPDATE is rejected at
+/// `expect_end` as `Invalid`.
+#[test]
+fn test_reject_update_trailing_garbage_invalid() {
+    invalid_update("UPDATE t1 SET x=1 EXTRA");
+}
+
 fn unsupported(src: &str) -> String {
     match parse_select(src) {
         ParseOutcome::Unsupported { message, .. } => message,
