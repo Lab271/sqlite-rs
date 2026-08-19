@@ -81,6 +81,9 @@ pub struct IndexSchema {
     pub name: String,
     pub unique: bool,
     pub columns: Vec<IndexedColumn>,
+    /// The index b-tree's root page (`sqlite_master.rootpage`), needed
+    /// to `OpenWrite` a write cursor onto it (#196).
+    pub root_page: u32,
 }
 
 /// One column (or expression, kept as raw text) in an index's key,
@@ -166,6 +169,10 @@ fn table_schema(values: &[Value]) -> TableSchema {
 fn index_schema(values: &[Value]) -> Option<(String, IndexSchema)> {
     let name = text(values.get(1)).to_string();
     let table_name = text(values.get(2)).to_string();
+    let root_page = match values.get(3) {
+        Some(Value::Integer(i)) => *i as u32,
+        _ => 0,
+    };
     let sql = text(values.get(4));
 
     let (start, end) = column_list_span(sql)?;
@@ -181,6 +188,7 @@ fn index_schema(values: &[Value]) -> Option<(String, IndexSchema)> {
             name,
             unique: is_unique_index(sql),
             columns,
+            root_page,
         },
     ))
 }

@@ -6,6 +6,7 @@
 
 pub mod delete;
 pub mod expr;
+pub(crate) mod index_maintenance;
 pub mod insert;
 pub mod select;
 pub mod update;

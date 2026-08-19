@@ -1,9 +1,8 @@
-//! `Delete` AST -> `Program` compilation (#210): table-only path, no
-//! secondary-index maintenance (that's #196, once `IdxDelete` is wired
-//! in). Mirrors `select.rs`'s `Init -> OpenRead -> Rewind -> [WHERE
-//! test] -> Next -> Halt` scan shape, swapping `OpenRead` for
-//! `OpenWrite` and the result-row emission for a single `Delete`
-//! per matched row.
+//! `Delete` AST -> `Program` compilation (#210, index maintenance #196).
+//! Mirrors `select.rs`'s `Init -> OpenRead -> Rewind -> [WHERE test] ->
+//! Next -> Halt` scan shape, swapping `OpenRead` for `OpenWrite` and the
+//! result-row emission for a per-index `IdxDelete` plus a table
+//! `Delete` per matched row.
 //!
 //! Safe to delete mid-scan: `TableCursor`'s traversal frames are
 //! snapshotted page bytes captured at descent time (`src/btree.rs`'s
@@ -19,6 +18,7 @@
 //! criterion, which only checks value semantics.
 
 use crate::codegen::expr::compile_cond;
+use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
 use crate::codegen::select::CodegenError;
 use crate::codegen::{CondTargets, Emitter, RegAlloc, Target};
 use crate::parser::ast::Delete;
@@ -26,6 +26,7 @@ use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, Program};
 
 const TABLE_CURSOR: i32 = 0;
+const FIRST_INDEX_CURSOR: i32 = 1;
 
 /// Compiles `delete` against `schema` (the resolved target table) into
 /// a `Program`.
@@ -50,6 +51,7 @@ pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, 
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
+    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR);
 
     let end_label = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
@@ -69,6 +71,14 @@ pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, 
         )?;
     }
 
+    emit_index_key_ops(
+        &mut em,
+        &mut reg,
+        schema,
+        TABLE_CURSOR,
+        FIRST_INDEX_CURSOR,
+        Opcode::IdxDelete,
+    )?;
     em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
 
     em.place(row_skip);

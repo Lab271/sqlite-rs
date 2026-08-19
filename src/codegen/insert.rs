@@ -6,14 +6,21 @@
 //! `schema.sql` with the real parser to recover them, the same trick
 //! `rowid_alias_column` already uses for the PK-rowid-alias fact.
 //!
+//! Secondary indexes are maintained on every row (#196): each index on
+//! the table gets its own write cursor, and once a row is inserted the
+//! table cursor is `SeekRowid`'d back onto it so the index key can be
+//! read back via `Column`/`Rowid` and written via `IdxInsert` (see
+//! `index_maintenance`).
+//!
 //! Known simplifications (deferred to follow-up tickets, not chased
 //! here):
 //! - `InsertSource::Select` does not compile (`VALUES`/`DEFAULT VALUES`
 //!   only) — filed separately from #195.
-//! - UNIQUE constraints on non-rowid columns are not enforced: no real
-//!   (non-ephemeral) index-seek opcode exists, and INSERT doesn't
-//!   maintain secondary indexes yet (#196). Filed as a follow-up
-//!   blocked on #196.
+//! - UNIQUE constraints on non-rowid columns still aren't *enforced* as
+//!   a constraint violation: a duplicate key surfaces as
+//!   `IdxInsert`'s generic `BtreeError::DuplicateKey` ->
+//!   `MalformedInstruction`, not a `SQLITE_CONSTRAINT_UNIQUE` /
+//!   `ON CONFLICT` outcome. Filed as a follow-up.
 //! - `WITHOUT ROWID` tables are rejected (`Unsupported`) — the
 //!   rowid-based insert/seek machinery this module uses doesn't apply.
 //! - `ON CONFLICT ROLLBACK`/`FAIL` both compile identically to `ABORT`
@@ -31,6 +38,7 @@
 //!   an ordinary `NOT NULL` violation.
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
+use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
 use crate::codegen::select::CodegenError;
 use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
@@ -44,6 +52,7 @@ use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
 
 const TABLE_CURSOR: i32 = 0;
 const CHECK_CURSOR: i32 = 1;
+const FIRST_INDEX_CURSOR: i32 = 2;
 
 // SQLite's own extended result codes (sqlite3.h) — nothing in this
 // codebase defines these yet (grep turns up nothing), so they're
@@ -155,6 +164,7 @@ pub fn compile_insert(insert: &Insert, schema: &TableSchema) -> Result<Program, 
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
+    open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR);
 
     for values in &rows {
         compile_row(
@@ -404,6 +414,33 @@ fn compile_row(
         rowid_reg,
         record_reg,
     ));
+
+    if !schema.indexes.is_empty() {
+        // `Insert` doesn't reposition `TABLE_CURSOR` onto the row it
+        // just wrote, but the index-key registers are read back via
+        // `Opcode::Column`/`Opcode::Rowid` against the cursor's current
+        // row (see `index_maintenance`), so seek onto it first. A
+        // not-found jump target is required by `SeekRowid`'s shape but
+        // should be unreachable — the row was just inserted.
+        let seek_ok = em.new_label();
+        let seek_addr = em.emit(Instruction::new(
+            Opcode::SeekRowid,
+            TABLE_CURSOR,
+            0,
+            rowid_reg,
+        ));
+        em.patch_p2(seek_addr, seek_ok);
+        emit_index_key_ops(
+            em,
+            reg,
+            schema,
+            TABLE_CURSOR,
+            FIRST_INDEX_CURSOR,
+            Opcode::IdxInsert,
+        )?;
+        em.place(seek_ok);
+    }
+
     em.place(row_skip);
     Ok(())
 }
