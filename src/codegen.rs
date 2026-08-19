@@ -4,12 +4,16 @@
 //! sorter/ephemeral opcodes). Expressions compile to jump-based control
 //! flow, never an intermediate boolean register (Requirement 11).
 
+pub mod delete;
 pub mod expr;
 pub mod insert;
 pub mod select;
+pub mod update;
 
+pub use delete::compile_delete;
 pub use insert::compile_insert;
 pub use select::{compile_select, CodegenError};
+pub use update::compile_update;
 
 use std::collections::HashMap;
 

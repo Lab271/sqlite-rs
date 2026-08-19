@@ -376,12 +376,12 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
         Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, DecrJumpZero, Delete,
-        Divide, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos,
-        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
-        NewRowid, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
-        OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid,
-        SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext,
-        SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        Divide, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot,
+        IfNotZero, IfPos, Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply,
+        MustBeInt, NewRowid, Next, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
+        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
+        Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
+        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -445,6 +445,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Sequence => cursor::sequence(vm, instr),
         Found => cursor::found(vm, instr),
         IdxInsert => cursor::idx_insert(vm, instr),
+        IdxDelete => cursor::idx_delete(vm, instr),
         IdxLE => cursor::idx_le(vm, instr),
         Delete => cursor::delete(vm, instr),
         Insert => cursor::insert(vm, instr),

@@ -89,6 +89,14 @@ name = "codegen_insert"
 path = "tests/codegen/insert_test.rs"
 
 [[test]]
+name = "codegen_delete"
+path = "tests/codegen/delete_test.rs"
+
+[[test]]
+name = "codegen_update"
+path = "tests/codegen/update_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 
