@@ -19,7 +19,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{compile_delete, compile_insert};
 use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::pager::Pager;
-use sqlite_rs::parser::{parse_delete, parse_insert, DeleteOutcome, InsertOutcome};
+use sqlite_rs::parser::{parse_delete, parse_insert, ParseOutcome};
 use sqlite_rs::record::{decode_record, TextEncoding, Value};
 use sqlite_rs::schema::TableSchema;
 use sqlite_rs::vdbe::{execute_with_writable_db, ExecError};
@@ -74,7 +74,7 @@ fn run_insert(
     schema: &TableSchema,
 ) {
     let insert = match parse_insert(sql) {
-        InsertOutcome::Accepted(i) => *i,
+        ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse {sql:?}: {other:?}"),
     };
     let program = compile_insert(&insert, schema).unwrap();
@@ -91,7 +91,7 @@ fn run_delete(
     schema: &TableSchema,
 ) -> Result<(), ExecError> {
     let delete = match parse_delete(sql) {
-        DeleteOutcome::Accepted(d) => *d,
+        ParseOutcome::Accepted(d) => *d,
         other => panic!("failed to parse {sql:?}: {other:?}"),
     };
     let program = compile_delete(&delete, schema).unwrap();

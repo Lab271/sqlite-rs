@@ -21,8 +21,7 @@ use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
 use sqlite_rs::parser::error::{
     parse_create_index, parse_create_table, parse_delete, parse_drop_index, parse_drop_table,
-    parse_insert, parse_update, CreateIndexOutcome, CreateTableOutcome, DeleteOutcome,
-    DropIndexOutcome, DropTableOutcome, InsertOutcome,
+    parse_insert, parse_update,
 };
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::schema::read_schema;
@@ -380,7 +379,7 @@ fn compile_statement(
 
     match kw(0) {
         "INSERT" => match parse_insert(sql) {
-            InsertOutcome::Accepted(insert) => {
+            ParseOutcome::Accepted(insert) => {
                 let schema = find_schema(&insert.table)?;
                 compile_insert(&insert, schema).map_err(|e| fatal(path, &e))
             }
@@ -394,34 +393,34 @@ fn compile_statement(
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "DELETE" => match parse_delete(sql) {
-            DeleteOutcome::Accepted(delete) => {
+            ParseOutcome::Accepted(delete) => {
                 let schema = find_schema(&delete.table)?;
                 compile_delete(&delete, schema).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "CREATE" if kw(1) == "TABLE" => match parse_create_table(sql) {
-            CreateTableOutcome::Accepted(create) => {
+            ParseOutcome::Accepted(create) => {
                 compile_create_table(&create, sql).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "CREATE" if kw(1) == "INDEX" || kw(1) == "UNIQUE" => match parse_create_index(sql) {
-            CreateIndexOutcome::Accepted(ci) => {
+            ParseOutcome::Accepted(ci) => {
                 let schema = find_schema(&ci.table)?;
                 compile_create_index(&ci, schema, sql).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "DROP" if kw(1) == "TABLE" => match parse_drop_table(sql) {
-            DropTableOutcome::Accepted(drop) => {
+            ParseOutcome::Accepted(drop) => {
                 let schema = find_schema(&drop.name)?;
                 compile_drop_table(&drop, schema).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "DROP" if kw(1) == "INDEX" => match parse_drop_index(sql) {
-            DropIndexOutcome::Accepted(di) => {
+            ParseOutcome::Accepted(di) => {
                 let root_page = find_index_root(&di.name)?;
                 compile_drop_index(&di, root_page).map_err(|e| fatal(path, &e))
             }

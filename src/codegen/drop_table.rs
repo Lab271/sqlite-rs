@@ -42,7 +42,7 @@ pub fn compile_drop_table(drop: &DropTable, schema: &TableSchema) -> Result<Prog
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::parser::error::{parse_drop_table, DropTableOutcome};
+    use crate::parser::error::{parse_drop_table, ParseOutcome};
     use crate::schema::IndexSchema;
     use crate::vdbe::Opcode;
 
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn compiles_to_init_drop_table_halt_carrying_indexes() {
         let drop = match parse_drop_table("DROP TABLE t") {
-            DropTableOutcome::Accepted(d) => d,
+            ParseOutcome::Accepted(d) => d,
             other => panic!("expected Accepted, got {other:?}"),
         };
         let schema = schema_with_index();

@@ -11,6 +11,5 @@ pub mod tokenizer;
 
 pub use error::{
     parse_create_index, parse_create_table, parse_delete, parse_drop_index, parse_drop_table,
-    parse_insert, parse_select, parse_update, CreateIndexOutcome, CreateTableOutcome,
-    DeleteOutcome, DropIndexOutcome, DropTableOutcome, InsertOutcome, ParseOutcome,
+    parse_insert, parse_select, parse_update, ParseOutcome,
 };

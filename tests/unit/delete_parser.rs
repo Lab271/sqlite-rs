@@ -8,25 +8,25 @@
 )]
 
 use sqlite_rs::parser::ast::*;
-use sqlite_rs::parser::{parse_delete, DeleteOutcome};
+use sqlite_rs::parser::{parse_delete, ParseOutcome};
 
 fn accept(src: &str) -> Delete {
     match parse_delete(src) {
-        DeleteOutcome::Accepted(delete) => *delete,
+        ParseOutcome::Accepted(delete) => *delete,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid(src: &str) -> String {
     match parse_delete(src) {
-        DeleteOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported(src: &str) -> String {
     match parse_delete(src) {
-        DeleteOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }

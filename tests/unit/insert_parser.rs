@@ -8,25 +8,25 @@
 )]
 
 use sqlite_rs::parser::ast::*;
-use sqlite_rs::parser::{parse_insert, InsertOutcome};
+use sqlite_rs::parser::{parse_insert, ParseOutcome};
 
 fn accept(src: &str) -> Insert {
     match parse_insert(src) {
-        InsertOutcome::Accepted(insert) => *insert,
+        ParseOutcome::Accepted(insert) => *insert,
         other => panic!("expected accept for {src:?}, got {other:?}"),
     }
 }
 
 fn invalid(src: &str) -> String {
     match parse_insert(src) {
-        InsertOutcome::Invalid { message, .. } => message,
+        ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
 }
 
 fn unsupported(src: &str) -> String {
     match parse_insert(src) {
-        InsertOutcome::Unsupported { message, .. } => message,
+        ParseOutcome::Unsupported { message, .. } => message,
         other => panic!("expected unsupported for {src:?}, got {other:?}"),
     }
 }

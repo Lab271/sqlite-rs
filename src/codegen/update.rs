@@ -33,7 +33,7 @@ use crate::codegen::insert::{
 use crate::codegen::select::CodegenError;
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{ConflictAction, Expr, TableConstraint, Update};
-use crate::parser::error::CreateTableOutcome;
+use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
@@ -52,9 +52,8 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
     }
 
     let create = match parse_create_table(&schema.sql) {
-        CreateTableOutcome::Accepted(create) => *create,
-        CreateTableOutcome::Unsupported { message, .. }
-        | CreateTableOutcome::Invalid { message, .. } => {
+        ParseOutcome::Accepted(create) => *create,
+        ParseOutcome::Unsupported { message, .. } | ParseOutcome::Invalid { message, .. } => {
             return Err(CodegenError::Unsupported {
                 reason: format!("could not recover constraints from schema DDL: {message}"),
             })
