@@ -11,23 +11,115 @@
 //! droppable — every clause below is a stub today, filling in through
 //! V3/V5 per `plan.md`'s Value Blocks table.
 
+#[path = "../corpus/oracle.rs"]
+#[allow(dead_code)]
+mod oracle;
+
+use oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 use sqlite_rs::pager::journal::{page_checksum, JournalHeader, JOURNAL_HEADER_LEN};
 use sqlite_rs::pager::Pager;
 use sqlite_rs::vfs::{MemoryVfs, PageSource, Vfs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+const CLI: &str = env!("CARGO_BIN_EXE_sqlite-rs");
 
-#[test]
-#[ignore = "V3 — CREATE/INSERT/UPDATE/DELETE round-trip"]
-fn t2_crud_round_trips_on_rowid_tables() {
-    unimplemented!()
+fn scratch_db(label: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "sqlite-rs-tier2-{label}-{}-{n}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("scratch.db")
 }
 
+fn run_exec(db: &Path, sql: &str) -> Output {
+    Command::new(CLI)
+        .arg("exec")
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} exec {} {sql:?}: {e}", db.display()))
+}
+
+fn run_query(db: &Path, sql: &str) -> String {
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {} {sql:?}: {e}", db.display()));
+    assert!(
+        output.status.success(),
+        "query {sql:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A scratch db seeded via the pinned oracle if available, else via our
+/// own CLI's CREATE TABLE — either way, gives every test a real on-disk
+/// database with a valid header before it starts exercising `exec`.
+fn seed_db(label: &str, ddl: &str) -> PathBuf {
+    let db = scratch_db(label);
+    if let Some(oracle) = pinned_oracle() {
+        let status = Command::new(&oracle).arg(&db).arg(ddl).status().unwrap();
+        assert!(status.success());
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        assert!(run_exec(&db, ddl).status.success());
+    }
+    db
+}
+
+/// #217 — the exit-gate proof that phases 1-3's CRUD path holds together
+/// end-to-end on a rowid table, via the CLI surface #215 wired up.
 #[test]
-#[ignore = "V3 — written file passes stock sqlite3 PRAGMA integrity_check"]
+fn t2_crud_round_trips_on_rowid_tables() {
+    let db = seed_db("crud", "CREATE TABLE t(a INTEGER, b TEXT)");
+    assert!(
+        run_exec(&db, "INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z')")
+            .status
+            .success()
+    );
+    assert!(run_exec(&db, "UPDATE t SET b = 'yy' WHERE a = 2")
+        .status
+        .success());
+    assert!(run_exec(&db, "DELETE FROM t WHERE a = 3").status.success());
+
+    let rows = run_query(&db, "SELECT * FROM t");
+    assert_eq!(rows, "1|x\n2|yy\n");
+}
+
+/// #217 — every file sqlite-rs writes must be `PRAGMA integrity_check`-ed
+/// clean by stock `sqlite3` (epic #161's acceptance gate), proven here via
+/// the shared oracle helper centralized in #216.
+#[test]
 fn t2_written_file_passes_integrity_check() {
-    unimplemented!()
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("t2_written_file_passes_integrity_check");
+        return;
+    };
+    let db = seed_db("integrity", "CREATE TABLE t(a INTEGER, b TEXT)");
+    assert!(run_exec(&db, "INSERT INTO t VALUES (1, 'x'), (2, 'y')")
+        .status
+        .success());
+    assert!(run_exec(&db, "CREATE INDEX idx_t_a ON t(a)")
+        .status
+        .success());
+    assert!(run_exec(&db, "UPDATE t SET b = 'yy' WHERE a = 2")
+        .status
+        .success());
+    assert!(run_exec(&db, "DELETE FROM t WHERE a = 1").status.success());
+
+    assert_integrity_check_ok(&oracle, &db);
 }
 
 /// #172 — the weak half of statement atomicity: a statement whose writes

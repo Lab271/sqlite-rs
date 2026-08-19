@@ -344,6 +344,71 @@ mod tests {
         assert_eq!(cells[0].0, 2);
     }
 
+    fn freelist_page_count(pager: &mut Pager) -> u32 {
+        let page1 = pager.get_page_mut(1).unwrap().clone();
+        u32::from_be_bytes(page1[36..40].try_into().unwrap())
+    }
+
+    /// Kills mutants that turn `cell_overflow_page`/`free_overflow_chain`
+    /// into no-ops (`Ok(0)` / `Ok(())`): a deleted row whose payload
+    /// actually spilled to overflow pages must return those pages to the
+    /// freelist, not silently leak them.
+    #[test]
+    fn deleting_a_row_with_overflow_frees_its_overflow_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        // max_local for a 512-byte page is 512 - 35 = 477, so this payload
+        // forces at least one overflow page.
+        let payload = vec![b'x'; 1000];
+        insert_row(&mut pager, &header, 1, 1, &payload).unwrap();
+        assert_eq!(freelist_page_count(&mut pager), 0, "no pages freed yet");
+
+        delete_row(&mut pager, &header, 1, 1).unwrap();
+
+        assert!(
+            freelist_page_count(&mut pager) > 0,
+            "the row's overflow chain must be returned to the freelist on delete"
+        );
+    }
+
+    /// Kills the `!` deletion mutant in `free_overflow_chain`'s cycle
+    /// guard (`!visited.insert(page_num)`): a well-formed, non-cyclic
+    /// chain must free cleanly, not error out on its very first page.
+    #[test]
+    fn free_overflow_chain_frees_every_page_in_a_well_formed_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+        let _ = &header;
+
+        let p2 = pager.allocate_page().unwrap();
+        let p3 = pager.allocate_page().unwrap();
+        let p4 = pager.allocate_page().unwrap();
+        {
+            let buf = pager.get_page_mut(p2).unwrap();
+            buf[0..4].copy_from_slice(&p3.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(p3).unwrap();
+            buf[0..4].copy_from_slice(&p4.to_be_bytes());
+        }
+        {
+            let buf = pager.get_page_mut(p4).unwrap();
+            buf[0..4].copy_from_slice(&0u32.to_be_bytes());
+        }
+        let before = freelist_page_count(&mut pager);
+
+        free_overflow_chain(&mut pager, p2).unwrap();
+
+        assert_eq!(
+            freelist_page_count(&mut pager),
+            before + 3,
+            "every page in the 3-page chain must be freed"
+        );
+    }
+
     /// Regression guard for a real bug found while implementing the
     /// index b-tree delete path (#171): when an interior page drains to
     /// zero routing entries, its surviving `rightmost` child (which may
