@@ -158,6 +158,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::Variable => "Variable",
         Opcode::MakeRecord => "MakeRecord",
         Opcode::ResultRow => "ResultRow",
+        Opcode::Copy => "Copy",
         Opcode::SorterOpen => "SorterOpen",
         Opcode::SorterInsert => "SorterInsert",
         Opcode::SorterSort => "SorterSort",
@@ -211,6 +212,7 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::Insert => format!("cursor {p1} insert rowid r[{p2}] record r[{p3}]"),
         Opcode::NewRowid => format!("r[{p2}] = cursor {p1} new rowid"),
         Opcode::Delete => format!("cursor {p1} delete current row"),
+        Opcode::Copy => format!("r[{p2}] = r[{p1}]"),
         _ => String::new(),
     }
 }

@@ -111,7 +111,7 @@ fn insert_maintains_a_secondary_index() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -286,7 +286,7 @@ fn insert_maintains_multiple_secondary_indexes() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -335,7 +335,7 @@ fn insert_maintains_a_multicolumn_index() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -378,7 +378,7 @@ fn insert_maintains_an_index_on_the_rowid_alias_column() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -423,7 +423,7 @@ fn insert_on_desc_index_is_rejected_not_silently_miskeyed() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let err = compile_insert(&insert, &schema).unwrap_err();
+    let err = compile_insert(&insert, &schema, None).unwrap_err();
     assert!(
         matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
         "expected Unsupported, got {err:?}"
@@ -458,7 +458,7 @@ fn insert_or_replace_removes_the_displaced_rows_index_entry() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -509,7 +509,7 @@ fn insert_update_delete_lifecycle_keeps_the_index_consistent() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();
@@ -594,7 +594,7 @@ fn insert_duplicate_key_into_unique_index_is_not_enforced_as_a_constraint() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header)
@@ -655,7 +655,7 @@ fn insert_into_autoincrement_table_maintains_its_index() {
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse: {other:?}"),
     };
-    let program = compile_insert(&insert, &schema).unwrap();
+    let program = compile_insert(&insert, &schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, &db, page_size).unwrap();
     execute_with_writable_db(&program, pager, header).unwrap();

@@ -381,7 +381,17 @@ fn compile_statement(
         "INSERT" => match parse_insert(sql) {
             ParseOutcome::Accepted(insert) => {
                 let schema = find_schema(&insert.table)?;
-                compile_insert(&insert, schema).map_err(|e| fatal(path, &e))
+                let select_schema = match &insert.source {
+                    sqlite_rs::parser::ast::InsertSource::Select(select) => {
+                        let Some(from) = &select.from else {
+                            return Err(fatal(path, &"SELECT has no FROM clause".to_string()));
+                        };
+                        Some(find_schema(&from.name)?)
+                    }
+                    sqlite_rs::parser::ast::InsertSource::Values(_)
+                    | sqlite_rs::parser::ast::InsertSource::DefaultValues => None,
+                };
+                compile_insert(&insert, schema, select_schema).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },

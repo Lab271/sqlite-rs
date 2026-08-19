@@ -137,6 +137,161 @@ fn update_and_delete_round_trip_through_cli_query() {
     }
 }
 
+/// A fresh scratch db seeded with every `ddl` statement given — unlike
+/// `seed_db`'s single hardcoded `t(a, b)`, for tests (like `INSERT ...
+/// SELECT`) that need more than one table. Same oracle-if-available,
+/// else-bootstrap-via-`exec` shape as `seed_db`.
+fn multi_table_db(label: &str, ddls: &[&str]) -> PathBuf {
+    let db = scratch_db(label);
+    if let Some(oracle) = pinned_oracle() {
+        for ddl in ddls {
+            let status = Command::new(&oracle).arg(&db).arg(ddl).status().unwrap();
+            assert!(status.success());
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for ddl in ddls {
+            assert!(run_exec(&db, ddl).status.success());
+        }
+    }
+    db
+}
+
+/// #208: `INSERT INTO t SELECT ...` drives the same scan/filter/project
+/// machinery as a plain `SELECT`, feeding each projected row into the
+/// target table's per-row constraint-check/write path instead of
+/// `ResultRow`.
+#[test]
+fn insert_select_copies_filtered_rows_into_target_table() {
+    let db = multi_table_db(
+        "insert_select_basic",
+        &[
+            "CREATE TABLE src(a INTEGER, b TEXT)",
+            "CREATE TABLE dst(a INTEGER, b TEXT)",
+        ],
+    );
+    assert!(
+        run_exec(&db, "INSERT INTO src VALUES (1,'x'),(2,'y'),(3,'z')")
+            .status
+            .success()
+    );
+
+    let output = run_exec(&db, "INSERT INTO dst SELECT a, b FROM src WHERE a > 1");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(run_query(&db, "SELECT * FROM dst"), "2|y\n3|z\n");
+    // The source table is read-only for this statement — untouched.
+    assert_eq!(run_query(&db, "SELECT * FROM src"), "1|x\n2|y\n3|z\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    } else {
+        skip_no_oracle("insert_select_copies_filtered_rows_into_target_table (oracle cross-check)");
+    }
+}
+
+/// #208: an explicit target column list re-orders which SELECT column
+/// lands in which target column, exactly like a literal-VALUES INSERT's
+/// column list already does.
+#[test]
+fn insert_select_honors_explicit_target_column_list() {
+    let db = multi_table_db(
+        "insert_select_columns",
+        &[
+            "CREATE TABLE src(a INTEGER, b TEXT)",
+            "CREATE TABLE dst(a INTEGER, b TEXT)",
+        ],
+    );
+    assert!(run_exec(&db, "INSERT INTO src VALUES (1,'x')")
+        .status
+        .success());
+
+    // Swap: src's b -> dst's a, src's a -> dst's b.
+    let output = run_exec(&db, "INSERT INTO dst (b, a) SELECT a, b FROM src");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_query(&db, "SELECT * FROM dst"), "x|1\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    } else {
+        skip_no_oracle("insert_select_honors_explicit_target_column_list (oracle cross-check)");
+    }
+}
+
+/// #208: `ORDER BY`/`LIMIT` on the `SELECT` side (the sorted-scan path,
+/// `compile_sorted_scan`) drives the insert exactly like the direct-scan
+/// path — full parity, not just plain scan+WHERE.
+#[test]
+fn insert_select_with_order_by_and_limit_uses_sorted_scan() {
+    let db = multi_table_db(
+        "insert_select_order_limit",
+        &[
+            "CREATE TABLE src(a INTEGER, b TEXT)",
+            "CREATE TABLE dst(a INTEGER, b TEXT)",
+        ],
+    );
+    assert!(
+        run_exec(&db, "INSERT INTO src VALUES (3,'c'),(1,'a'),(2,'b')")
+            .status
+            .success()
+    );
+
+    let output = run_exec(
+        &db,
+        "INSERT INTO dst SELECT a, b FROM src ORDER BY a DESC LIMIT 2",
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Insertion order matters here only insofar as it must be the
+    // sorted-then-limited order, not source-table scan order.
+    assert_eq!(run_query(&db, "SELECT * FROM dst ORDER BY a"), "2|b\n3|c\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    } else {
+        skip_no_oracle(
+            "insert_select_with_order_by_and_limit_uses_sorted_scan (oracle cross-check)",
+        );
+    }
+}
+
+/// #208: a `SELECT`-sourced row that violates a target-table constraint
+/// (NOT NULL here) fails the same way a literal-`VALUES` row would —
+/// the scan/write machinery is shared, so constraint enforcement is too.
+#[test]
+fn insert_select_row_violating_not_null_fails_cleanly() {
+    let db = multi_table_db(
+        "insert_select_not_null",
+        &[
+            "CREATE TABLE src(a INTEGER, b TEXT)",
+            "CREATE TABLE dst(a INTEGER, b TEXT NOT NULL)",
+        ],
+    );
+    assert!(run_exec(&db, "INSERT INTO src VALUES (1, NULL)")
+        .status
+        .success());
+
+    let output = run_exec(&db, "INSERT INTO dst SELECT a, b FROM src");
+    assert!(
+        !output.status.success(),
+        "a NULL projected into a NOT NULL column must fail"
+    );
+    assert_eq!(run_query(&db, "SELECT * FROM dst"), "");
+}
+
 #[test]
 fn create_table_is_visible_to_cli_query_and_tables() {
     let db = seed_db("create_table");

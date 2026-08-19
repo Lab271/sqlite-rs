@@ -107,6 +107,17 @@ pub fn string8(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `Copy`: copies register `P1`'s value into `P2` verbatim (#208 — see
+/// `Opcode::Copy`'s own doc for why `INSERT ... SELECT` needs this: a
+/// `SELECT`-projected row's registers aren't already the fresh,
+/// contiguous run `MakeRecord` needs once reordered/subset into the
+/// target table's schema-column order).
+pub fn copy(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let value = vm.register(instr.p1)?.clone();
+    vm.set_register(instr.p2, value)?;
+    Ok(Step::Next)
+}
+
 /// `MakeRecord`: packs the contiguous register range `[P1, P1+P2)` into
 /// spec 003's record format, writing the encoded bytes (as a `Value::
 /// Blob`) to register `P3`.
@@ -230,6 +241,16 @@ mod tests {
         vm.set_register(1, Value::Integer(2)).unwrap();
         result_row(&mut vm, &Instruction::new(Opcode::ResultRow, 0, 2, 0)).unwrap();
         assert_eq!(vm.rows(), &[vec![Value::Integer(1), Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn copy_duplicates_a_registers_value_leaving_the_source_untouched() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Text("src".to_string())).unwrap();
+        vm.set_register(1, Value::Integer(7)).unwrap();
+        copy(&mut vm, &Instruction::new(Opcode::Copy, 0, 1, 0)).unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Text("src".to_string()));
+        assert_eq!(*vm.register(0).unwrap(), Value::Text("src".to_string()));
     }
 
     #[test]

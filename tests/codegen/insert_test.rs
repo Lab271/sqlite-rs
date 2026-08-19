@@ -78,7 +78,7 @@ fn run_insert(
         ParseOutcome::Accepted(i) => *i,
         other => panic!("failed to parse {sql:?}: {other:?}"),
     };
-    let program = compile_insert(&insert, schema).unwrap();
+    let program = compile_insert(&insert, schema, None).unwrap();
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, path, page_size).unwrap();
     execute_with_writable_db(&program, pager, *header).map(|_| ())

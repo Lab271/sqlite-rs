@@ -4,6 +4,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+`INSERT ... SELECT` codegen (#208, split out of #195): `compile_insert`
+now drives `select.rs`'s scan/filter/project/ORDER BY/DISTINCT/LIMIT
+machinery (`compile_select_scan`, factored out of `compile_select`)
+with a pluggable per-row sink, feeding each projected row into the
+same per-row constraint-check/write path (`compile_row`) a literal
+`VALUES` row uses — full parity with plain `SELECT`, not just
+scan+WHERE. `select.rs`'s scan cursor numbers are now parameterized
+(`ScanCursors`) so the embedded scan never collides with the INSERT's
+own target-table/index cursors. New `Opcode::Copy` (register-to-
+register, #208) re-materializes a SELECT-scan register into the fresh,
+contiguous register `MakeRecord` needs once reordered/subset into the
+target table's schema-column order — mirrors `compile_value`'s own
+"always allocate anew" contract. Also fixes a real (pre-existing,
+found via this ticket's own testing) bug in `apply_affinity`: TEXT
+affinity never converted a NUMERIC value to its text rendering,
+leaving e.g. `INSERT INTO t(b) VALUES (1)` (b TEXT) storing a raw
+integer under a TEXT-affinity column — `PRAGMA integrity_check`
+correctly flagged this as `NUMERIC value in t.b`.
+
 ## [0.12.0] - 2026-08-19
 
 V3 exit gate (#217), closing epic #161: write-path CLI surface
