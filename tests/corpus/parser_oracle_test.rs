@@ -43,7 +43,7 @@ const CASES: &[(&str, Outcome)] = &[
     ("SELECT count(*) FROM t", Outcome::Accept),
     (
         "SELECT * FROM t JOIN t AS t2 ON t.a = t2.a",
-        Outcome::Unsupported,
+        Outcome::Accept,
     ),
     ("SELECT * FROM t, t AS t2", Outcome::Unsupported),
     ("SELECT a FROM t GROUP BY a", Outcome::Unsupported),

@@ -21,7 +21,7 @@ pub use delete::compile_delete;
 pub use drop_index::compile_drop_index;
 pub use drop_table::compile_drop_table;
 pub use insert::compile_insert;
-pub use select::{compile_select, CodegenError};
+pub use select::{compile_select, compile_select_joined, CodegenError};
 pub use update::compile_update;
 
 use std::collections::HashMap;
@@ -254,5 +254,120 @@ pub(crate) fn p4_coll_seq(
     P4::CollSeq {
         collation,
         affinity: affinity.to_p4_byte(),
+    }
+}
+
+/// One table bound into a query's [`Scope`]: its cursor number, and the
+/// schema/alias used to resolve `table.column`/bare `column` references
+/// against it. Owns its `TableSchema` (a small, `Clone` metadata struct)
+/// rather than borrowing it — this crate's qualified subset (`make
+/// mvl-limit`) forbids explicit lifetimes in `src/`, so a borrowed
+/// `Scope<'a>` is not an option here.
+#[derive(Debug, Clone)]
+pub(crate) struct TableBinding {
+    /// The table's `AS alias`, if any. Once a table is aliased, SQLite
+    /// no longer accepts the real table name as a qualifier — `resolve`
+    /// preserves that: it matches `alias` when present, `name`
+    /// otherwise, never both.
+    pub(crate) alias: Option<String>,
+    pub(crate) name: String,
+    pub(crate) schema: crate::schema::TableSchema,
+    pub(crate) cursor: i32,
+    /// #237's LEFT JOIN null-extension: when true, every column read
+    /// against this binding compiles to `Opcode::Null` instead of a
+    /// real `Column`/`Rowid` read against `cursor` — `cursor` may not
+    /// even hold a matching row (or any row at all) in that case. Set
+    /// by the join codegen's "no match found" branch; always `false`
+    /// for [`Scope::single`] and for an INNER/CROSS-joined table.
+    pub(crate) forced_null: bool,
+}
+
+impl TableBinding {
+    /// Whether `table` (a `Column` expression's optional qualifier)
+    /// names this binding — the alias when present, the bare table name
+    /// otherwise.
+    pub(crate) fn matches_qualifier(&self, table: &str) -> bool {
+        match &self.alias {
+            Some(alias) => alias.eq_ignore_ascii_case(table),
+            None => self.name.eq_ignore_ascii_case(table),
+        }
+    }
+}
+
+/// The set of tables a `FROM` clause's column references resolve
+/// against — one binding for a plain single-table `SELECT`, one per
+/// table for a join chain (#237). [`Scope::resolve`] is the single entry
+/// point `expr.rs` uses instead of the old `schema: &TableSchema, cursor:
+/// i32` parameter pair.
+#[derive(Debug, Clone)]
+pub(crate) struct Scope {
+    pub(crate) tables: Vec<TableBinding>,
+}
+
+impl Scope {
+    /// The single-table case — every pre-#237 call site's `schema`/
+    /// `cursor` pair, wrapped so `expr.rs`'s signatures can be uniform
+    /// over 1..N tables without duplicating codegen for the N=1 case.
+    pub(crate) fn single(schema: &crate::schema::TableSchema, cursor: i32) -> Self {
+        Scope {
+            tables: vec![TableBinding {
+                alias: None,
+                name: schema.name.clone(),
+                schema: schema.clone(),
+                cursor,
+                forced_null: false,
+            }],
+        }
+    }
+
+    /// Resolves a `table.name`/bare `name` column reference to
+    /// `(cursor, column_index, schema, forced_null)`. `table: Some(_)`
+    /// matches the alias-or-name qualifier exactly (see
+    /// [`TableBinding::matches_qualifier`]); `table: None` searches
+    /// every binding and rejects more than one match as ambiguous —
+    /// SQLite's own rule for an unqualified column shared by two joined
+    /// tables. `forced_null` is [`TableBinding::forced_null`]'s value
+    /// for whichever binding resolved — see its doc comment.
+    pub(crate) fn resolve(
+        &self,
+        table: Option<&str>,
+        name: &str,
+    ) -> Result<(i32, usize, &crate::schema::TableSchema, bool), select::CodegenError> {
+        if let Some(table) = table {
+            let binding = self
+                .tables
+                .iter()
+                .find(|b| b.matches_qualifier(table))
+                .ok_or_else(|| select::CodegenError::UnknownColumn {
+                    name: format!("{table}.{name}"),
+                })?;
+            let idx =
+                expr::column_index(&binding.schema, name).ok_or_else(|| {
+                    select::CodegenError::UnknownColumn {
+                        name: format!("{table}.{name}"),
+                    }
+                })?;
+            return Ok((binding.cursor, idx, &binding.schema, binding.forced_null));
+        }
+        let mut found: Option<&TableBinding> = None;
+        for binding in &self.tables {
+            if expr::column_index(&binding.schema, name).is_some() {
+                if found.is_some() {
+                    return Err(select::CodegenError::AmbiguousColumn {
+                        name: name.to_string(),
+                    });
+                }
+                found = Some(binding);
+            }
+        }
+        let binding = found.ok_or_else(|| select::CodegenError::UnknownColumn {
+            name: name.to_string(),
+        })?;
+        // Re-resolve rather than reuse the index found above: the loop
+        // only needed presence to detect ambiguity, and re-deriving it
+        // here (cheap — a short linear scan) avoids holding a second
+        // mutable/immutable borrow shape just to carry the index out.
+        let idx = expr::column_index(&binding.schema, name).unwrap_or(0);
+        Ok((binding.cursor, idx, &binding.schema, binding.forced_null))
     }
 }

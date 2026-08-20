@@ -5,19 +5,28 @@
 //! entry point; `compile_value` is the ordinary register-producing
 //! entry point used for result columns, function arguments, and CASE
 //! branch results.
+//!
+//! Every column reference resolves through a [`Scope`] (#237) rather
+//! than a bare `schema: &TableSchema, cursor: i32` pair — the single-
+//! table V2 case is just `Scope::single(schema, cursor)`; a join chain
+//! is `Scope` with one [`crate::codegen::TableBinding`] per joined
+//! table, and `table.column`/bare `column` references resolve against
+//! whichever binding matches (see `Scope::resolve`'s doc comment for
+//! the alias-vs-name precedence rule).
 
 use crate::codegen::{
-    p4_coll_seq, CodegenError, CondTargets, Emitter, Label, NullTarget, RegAlloc, Target,
+    p4_coll_seq, CodegenError, CondTargets, Emitter, Label, NullTarget, RegAlloc, Scope, Target,
 };
 use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, ParamKind, UnaryOp};
 use crate::schema::{rowid_alias_column, TableSchema};
 use crate::vdbe::{affinity_of, comparison_affinity, Affinity, Collation, Instruction, Opcode, P4};
 
-/// Resolves a bare `Expr::Column` name against the schema; any other
-/// expression is a codegen error only when a caller specifically
+/// Resolves a bare `Expr::Column` name against a single schema; any
+/// other expression is a codegen error only when a caller specifically
 /// requires a plain column (there is no such requirement in this
 /// module — kept for callers like `select.rs`'s ORDER BY/DISTINCT
-/// column-index lookups).
+/// column-index lookups, and [`crate::codegen::Scope::resolve`]'s own
+/// per-binding lookup).
 pub(crate) fn column_index(schema: &TableSchema, name: &str) -> Option<usize> {
     schema
         .columns
@@ -42,13 +51,12 @@ pub(crate) fn column_index(schema: &TableSchema, name: &str) -> Option<usize> {
 pub(crate) fn compile_cond(
     em: &mut Emitter,
     reg: &mut RegAlloc,
-    schema: &TableSchema,
-    cursor: i32,
+    scope: &Scope,
     expr: &Expr,
     targets: CondTargets,
 ) -> Result<(), CodegenError> {
     match &expr.kind {
-        ExprKind::Paren(inner) => compile_cond(em, reg, schema, cursor, inner, targets),
+        ExprKind::Paren(inner) => compile_cond(em, reg, scope, inner, targets),
 
         // Swapping the targets is right — it is what SQLite's own
         // `sqlite3ExprIfTrue`/`sqlite3ExprIfFalse` pair does for
@@ -61,7 +69,7 @@ pub(crate) fn compile_cond(
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
-        } => compile_cond(em, reg, schema, cursor, inner, targets.negate()),
+        } => compile_cond(em, reg, scope, inner, targets.negate()),
 
         ExprKind::Binary {
             op: BinaryOp::And,
@@ -90,12 +98,11 @@ pub(crate) fn compile_cond(
             compile_cond(
                 em,
                 reg,
-                schema,
-                cursor,
+                scope,
                 lhs,
                 operand.with_true(Target::Fallthrough),
             )?;
-            compile_cond(em, reg, schema, cursor, rhs, operand)?;
+            compile_cond(em, reg, scope, rhs, operand)?;
             if is_new {
                 em.place(false_label);
             }
@@ -122,12 +129,11 @@ pub(crate) fn compile_cond(
             compile_cond(
                 em,
                 reg,
-                schema,
-                cursor,
+                scope,
                 lhs,
                 operand.with_false(Target::Fallthrough),
             )?;
-            compile_cond(em, reg, schema, cursor, rhs, operand)?;
+            compile_cond(em, reg, scope, rhs, operand)?;
             if is_new {
                 em.place(true_label);
             }
@@ -147,9 +153,9 @@ pub(crate) fn compile_cond(
         {
             let collation = collation_of(lhs).or_else(|| collation_of(rhs));
             let affinity =
-                comparison_affinity(expr_affinity(schema, lhs), expr_affinity(schema, rhs));
-            let l = compile_value(em, reg, schema, cursor, lhs)?;
-            let r = compile_value(em, reg, schema, cursor, rhs)?;
+                comparison_affinity(expr_affinity(scope, lhs), expr_affinity(scope, rhs));
+            let l = compile_value(em, reg, scope, lhs)?;
+            let r = compile_value(em, reg, scope, rhs)?;
             emit_compare_false_jump(em, *op, l, r, collation, affinity, targets)
         }
 
@@ -169,8 +175,8 @@ pub(crate) fn compile_cond(
             } else {
                 (targets.on_true, targets.on_false)
             };
-            let l = compile_value(em, reg, schema, cursor, lhs)?;
-            let r = compile_value(em, reg, schema, cursor, rhs)?;
+            let l = compile_value(em, reg, scope, lhs)?;
+            let r = compile_value(em, reg, scope, rhs)?;
             let result = reg.alloc();
             let both_null = em.new_label();
             let done = em.new_label();
@@ -207,7 +213,7 @@ pub(crate) fn compile_cond(
             expr: inner,
             negated,
         } => {
-            let r = compile_value(em, reg, schema, cursor, inner)?;
+            let r = compile_value(em, reg, scope, inner)?;
             // negated=false is `IS NULL` (condition true when NULL);
             // negated=true is `IS NOT NULL` (condition true when not
             // NULL). Emit the opcode matching "jump when condition is
@@ -260,12 +266,11 @@ pub(crate) fn compile_cond(
                 compile_cond(
                     em,
                     reg,
-                    schema,
-                    cursor,
+                    scope,
                     &lt_lo,
                     arm.with_false(Target::Fallthrough),
                 )?;
-                compile_cond(em, reg, schema, cursor, &gt_hi, arm)?;
+                compile_cond(em, reg, scope, &gt_hi, arm)?;
                 if t_is_new {
                     em.place(t_label);
                 }
@@ -277,12 +282,11 @@ pub(crate) fn compile_cond(
                 compile_cond(
                     em,
                     reg,
-                    schema,
-                    cursor,
+                    scope,
                     &ge_lo,
                     arm.with_true(Target::Fallthrough),
                 )?;
-                compile_cond(em, reg, schema, cursor, &le_hi, arm)?;
+                compile_cond(em, reg, scope, &le_hi, arm)?;
                 if f_is_new {
                     em.place(f_label);
                 }
@@ -318,7 +322,7 @@ pub(crate) fn compile_cond(
             // boolean register" rule (shared with the `Is`/`IsNot`
             // handling above), needed to remember that exception past
             // the loop that discovers it.
-            let l = compile_value(em, reg, schema, cursor, inner)?;
+            let l = compile_value(em, reg, scope, inner)?;
             let saw_null = reg.alloc();
             em.emit(Instruction::new(Opcode::Integer, 0, saw_null, 0));
 
@@ -350,9 +354,9 @@ pub(crate) fn compile_cond(
             for item in list.iter() {
                 let collation = collation_of(inner).or_else(|| collation_of(item));
                 let affinity =
-                    comparison_affinity(expr_affinity(schema, inner), expr_affinity(schema, item));
+                    comparison_affinity(expr_affinity(scope, inner), expr_affinity(scope, item));
                 let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);
-                let r = compile_value(em, reg, schema, cursor, item)?;
+                let r = compile_value(em, reg, scope, item)?;
 
                 let item_null_label = em.new_label();
                 let skip_label = em.new_label();
@@ -386,7 +390,7 @@ pub(crate) fn compile_cond(
         }
 
         ExprKind::Like { .. } => {
-            let r = compile_value(em, reg, schema, cursor, expr)?;
+            let r = compile_value(em, reg, scope, expr)?;
             finish_truthy(em, r, targets);
             Ok(())
         }
@@ -395,7 +399,7 @@ pub(crate) fn compile_cond(
         // a function call, CASE, etc.): evaluate to a value and test
         // truthiness the same way as LIKE above.
         _ => {
-            let r = compile_value(em, reg, schema, cursor, expr)?;
+            let r = compile_value(em, reg, scope, expr)?;
             finish_truthy(em, r, targets);
             Ok(())
         }
@@ -639,15 +643,15 @@ fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> boo
 /// its inner expression. Every other expression (literals, function
 /// calls, arithmetic) has no affinity of its own — matching SQLite,
 /// where only columns and casts do.
-fn expr_affinity(schema: &TableSchema, expr: &Expr) -> Option<Affinity> {
+fn expr_affinity(scope: &Scope, expr: &Expr) -> Option<Affinity> {
     match &expr.kind {
-        ExprKind::Column { name, .. } => {
-            let idx = column_index(schema, name)?;
+        ExprKind::Column { table, name, .. } => {
+            let (_, idx, schema, _) = scope.resolve(table.as_deref(), name).ok()?;
             let declared = schema.column_types.get(idx)?;
             Some(affinity_of(declared))
         }
         ExprKind::Cast { type_name, .. } => Some(affinity_of(type_name)),
-        ExprKind::Paren(inner) => expr_affinity(schema, inner),
+        ExprKind::Paren(inner) => expr_affinity(scope, inner),
         _ => None,
     }
 }
@@ -673,13 +677,12 @@ pub(crate) fn collation_of(expr: &Expr) -> Option<Collation> {
 pub(crate) fn compile_value(
     em: &mut Emitter,
     reg: &mut RegAlloc,
-    schema: &TableSchema,
-    cursor: i32,
+    scope: &Scope,
     expr: &Expr,
 ) -> Result<i32, CodegenError> {
     match &expr.kind {
-        ExprKind::Paren(inner) => compile_value(em, reg, schema, cursor, inner),
-        ExprKind::Collate { expr: inner, .. } => compile_value(em, reg, schema, cursor, inner),
+        ExprKind::Paren(inner) => compile_value(em, reg, scope, inner),
+        ExprKind::Collate { expr: inner, .. } => compile_value(em, reg, scope, inner),
 
         ExprKind::Literal(lit) => {
             let r = reg.alloc();
@@ -769,11 +772,19 @@ pub(crate) fn compile_value(
             Ok(r)
         }
 
-        ExprKind::Column { name, .. } => {
-            let idx = column_index(schema, name)
-                .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
+        ExprKind::Column { table, name, .. } => {
+            let (cursor, idx, schema, forced_null) = scope.resolve(table.as_deref(), name)?;
             let r = reg.alloc();
-            emit_column_read(em, schema, cursor, idx, r)?;
+            if forced_null {
+                // #237's LEFT JOIN null-extension: this binding has no
+                // matching row (or `cursor` may not even be positioned
+                // on live data at all), so every column reads as NULL
+                // rather than going through a real `Column`/`Rowid`
+                // read.
+                em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+            } else {
+                emit_column_read(em, schema, cursor, idx, r)?;
+            }
             Ok(r)
         }
 
@@ -809,7 +820,7 @@ pub(crate) fn compile_value(
             // allocates its destination before its operands).
             let mut first = 0i32;
             for (i, arg) in arg_exprs.iter().enumerate() {
-                let r = compile_value(em, reg, schema, cursor, arg)?;
+                let r = compile_value(em, reg, scope, arg)?;
                 if i == 0 {
                     first = r;
                 } else if r != first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)) {
@@ -854,8 +865,8 @@ pub(crate) fn compile_value(
             // the reverse of SQL's `text LIKE pattern` syntax. Compile
             // operands in that order so the bump allocator hands out a
             // contiguous run matching `Function`'s expected layout.
-            let pat_r = compile_value(em, reg, schema, cursor, pattern)?;
-            let txt_r = compile_value(em, reg, schema, cursor, inner)?;
+            let pat_r = compile_value(em, reg, scope, pattern)?;
+            let txt_r = compile_value(em, reg, scope, inner)?;
             if txt_r != pat_r.saturating_add(1) {
                 return Err(CodegenError::Unsupported {
                     reason: "LIKE/GLOB text operand did not land in the register contiguous \
@@ -864,7 +875,7 @@ pub(crate) fn compile_value(
                 });
             }
             if let Some(e) = escape {
-                let esc_r = compile_value(em, reg, schema, cursor, e)?;
+                let esc_r = compile_value(em, reg, scope, e)?;
                 if esc_r != pat_r.saturating_add(2) {
                     return Err(CodegenError::Unsupported {
                         reason: "LIKE ESCAPE operand did not land in the register contiguous \
@@ -884,9 +895,9 @@ pub(crate) fn compile_value(
         }
 
         ExprKind::Unary { op, expr: inner } => match op {
-            UnaryOp::Plus => compile_value(em, reg, schema, cursor, inner),
+            UnaryOp::Plus => compile_value(em, reg, scope, inner),
             UnaryOp::Minus => {
-                let r = compile_value(em, reg, schema, cursor, inner)?;
+                let r = compile_value(em, reg, scope, inner)?;
                 let zero = reg.alloc();
                 em.emit(Instruction::new(Opcode::Integer, 0, zero, 0));
                 let dest = reg.alloc();
@@ -901,13 +912,13 @@ pub(crate) fn compile_value(
             // pinned 3.53.4 `EXPLAIN`), and it propagates NULL in a
             // register, which jump-mode code cannot do at all.
             UnaryOp::Not => {
-                let r = compile_value(em, reg, schema, cursor, inner)?;
+                let r = compile_value(em, reg, scope, inner)?;
                 let dest = reg.alloc();
                 em.emit(Instruction::new(Opcode::Not, r, dest, 0));
                 Ok(dest)
             }
             UnaryOp::BitNot => {
-                let r = compile_value(em, reg, schema, cursor, inner)?;
+                let r = compile_value(em, reg, scope, inner)?;
                 let dest = reg.alloc();
                 em.emit(Instruction::new(Opcode::BitNot, r, dest, 0));
                 Ok(dest)
@@ -920,8 +931,8 @@ pub(crate) fn compile_value(
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
             ) =>
         {
-            let l = compile_value(em, reg, schema, cursor, lhs)?;
-            let r = compile_value(em, reg, schema, cursor, rhs)?;
+            let l = compile_value(em, reg, scope, lhs)?;
+            let r = compile_value(em, reg, scope, rhs)?;
             let dest = reg.alloc();
             // The caller's own `matches!` filter guarantees `op` is one
             // of these five; any other value is a codegen-internal
@@ -963,8 +974,8 @@ pub(crate) fn compile_value(
                     | BinaryOp::Concat
             ) =>
         {
-            let l = compile_value(em, reg, schema, cursor, lhs)?;
-            let r = compile_value(em, reg, schema, cursor, rhs)?;
+            let l = compile_value(em, reg, scope, lhs)?;
+            let r = compile_value(em, reg, scope, rhs)?;
             let dest = reg.alloc();
             let opcode = match op {
                 BinaryOp::BitAnd => Opcode::BitAnd,
@@ -1012,7 +1023,7 @@ pub(crate) fn compile_value(
                 | BinaryOp::And
                 | BinaryOp::Or,
             ..
-        } => compile_bool_to_value(em, reg, schema, cursor, expr),
+        } => compile_bool_to_value(em, reg, scope, expr),
 
         // Unreachable in practice: `BinaryOp` has no variant left
         // uncovered by the two arms above (#139). Kept as a defensive
@@ -1037,7 +1048,7 @@ pub(crate) fn compile_value(
             expr: inner,
             type_name,
         } => {
-            let r = compile_value(em, reg, schema, cursor, inner)?;
+            let r = compile_value(em, reg, scope, inner)?;
             let affinity = affinity_of(type_name);
             let p2 = i32::from(affinity.to_p4_byte());
             em.emit(Instruction::new(Opcode::Cast, r, p2, 0));
@@ -1070,12 +1081,11 @@ pub(crate) fn compile_value(
                 compile_cond(
                     em,
                     reg,
-                    schema,
-                    cursor,
+                    scope,
                     &cond,
                     CondTargets::null_is_false(Target::Fallthrough, Target::Jump(next_label)),
                 )?;
-                emit_branch_into(em, schema, cursor, then_expr, dest)?;
+                emit_branch_into(em, scope, then_expr, dest)?;
                 em.goto(end_label);
                 em.place(next_label);
             }
@@ -1086,7 +1096,7 @@ pub(crate) fn compile_value(
             // iterations), so the no-match path always explicitly
             // (re)writes NULL rather than relying on "never written".
             match else_ {
-                Some(else_expr) => emit_branch_into(em, schema, cursor, else_expr, dest)?,
+                Some(else_expr) => emit_branch_into(em, scope, else_expr, dest)?,
                 None => {
                     // This used to fake a NULL with an out-of-range
                     // `Column` read; `Null` (#134) says what it means,
@@ -1105,7 +1115,7 @@ pub(crate) fn compile_value(
         ExprKind::Is { .. }
         | ExprKind::IsNull { .. }
         | ExprKind::Between { .. }
-        | ExprKind::In { .. } => compile_bool_to_value(em, reg, schema, cursor, expr),
+        | ExprKind::In { .. } => compile_bool_to_value(em, reg, scope, expr),
     }
 }
 
@@ -1133,8 +1143,7 @@ fn compile_negate_value(em: &mut Emitter, reg: &mut RegAlloc, src: i32) -> i32 {
 /// ticket needs a real MOVE opcode to close this gap generally.
 fn emit_branch_into(
     em: &mut Emitter,
-    schema: &TableSchema,
-    cursor: i32,
+    scope: &Scope,
     expr: &Expr,
     dest: i32,
 ) -> Result<(), CodegenError> {
@@ -1188,10 +1197,13 @@ fn emit_branch_into(
         ExprKind::Literal(Literal::Null) => {
             em.emit(Instruction::new(Opcode::Null, 0, dest, 0));
         }
-        ExprKind::Column { name, .. } => {
-            let idx = column_index(schema, name)
-                .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
-            emit_column_read(em, schema, cursor, idx, dest)?;
+        ExprKind::Column { table, name, .. } => {
+            let (cursor, idx, schema, forced_null) = scope.resolve(table.as_deref(), name)?;
+            if forced_null {
+                em.emit(Instruction::new(Opcode::Null, 0, dest, 0));
+            } else {
+                emit_column_read(em, schema, cursor, idx, dest)?;
+            }
         }
         _ => {
             return Err(CodegenError::Unsupported {
@@ -1234,8 +1246,7 @@ fn is_definite(expr: &Expr) -> bool {
 fn compile_bool_to_value(
     em: &mut Emitter,
     reg: &mut RegAlloc,
-    schema: &TableSchema,
-    cursor: i32,
+    scope: &Scope,
     expr: &Expr,
 ) -> Result<i32, CodegenError> {
     let dest = reg.alloc();
@@ -1246,8 +1257,7 @@ fn compile_bool_to_value(
         compile_cond(
             em,
             reg,
-            schema,
-            cursor,
+            scope,
             expr,
             CondTargets::null_is_false(Target::Jump(true_label), Target::Fallthrough),
         )?;
@@ -1266,8 +1276,7 @@ fn compile_bool_to_value(
     compile_cond(
         em,
         reg,
-        schema,
-        cursor,
+        scope,
         expr,
         CondTargets::null_is_false(Target::Jump(true_label), Target::Fallthrough),
     )?;
@@ -1277,8 +1286,7 @@ fn compile_bool_to_value(
     compile_cond(
         em,
         reg,
-        schema,
-        cursor,
+        scope,
         expr,
         CondTargets::null_is_true(Target::Jump(null_label), Target::Jump(false_label)),
     )?;

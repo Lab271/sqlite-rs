@@ -145,7 +145,7 @@ fn invalid(src: &str) -> String {
 fn test_accept_select_star() {
     let select = accept("SELECT * FROM t");
     assert_eq!(select.columns, vec![ResultColumn::Star]);
-    assert_eq!(select.from.unwrap().name, "t");
+    assert_eq!(select.from.unwrap().first.name, "t");
 }
 
 /// Requirement 3, "Preserve column aliases" scenario.
@@ -390,15 +390,18 @@ fn test_parameters() {
 #[test]
 fn test_table_alias() {
     let select = accept("SELECT a FROM t AS x");
-    assert_eq!(select.from.unwrap().alias.as_deref(), Some("x"));
+    assert_eq!(select.from.unwrap().first.alias.as_deref(), Some("x"));
     let select = accept("SELECT a FROM t x");
-    assert_eq!(select.from.unwrap().alias.as_deref(), Some("x"));
+    assert_eq!(select.from.unwrap().first.alias.as_deref(), Some("x"));
 }
 
 // ---- three-way outcome: unsupported ------------------------------------
 
 #[test]
 fn test_unsupported_join() {
+    // A bare `JOIN` with no `ON`/`USING` — real SQL (equivalent to a
+    // constraint-less cross join), but outside #237's `ON`-qualified
+    // MVP scope.
     let msg = unsupported("SELECT * FROM a JOIN b");
     assert!(msg.contains("JOIN"), "message: {msg}");
 }
@@ -407,6 +410,93 @@ fn test_unsupported_join() {
 fn test_unsupported_comma_join() {
     let msg = unsupported("SELECT * FROM a, b");
     assert!(msg.contains("JOIN"), "message: {msg}");
+}
+
+/// #237: `JOIN`/`INNER JOIN ... ON`, `LEFT [OUTER] JOIN ... ON`, and
+/// `CROSS JOIN` (no `ON`) all parse into a `FromClause` with one `Join`
+/// per join step, in source order.
+#[test]
+fn test_accept_inner_join_with_on() {
+    let select = accept("SELECT * FROM a JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.first.name, "a");
+    assert_eq!(from.joins.len(), 1);
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert_eq!(from.joins[0].table.name, "b");
+    assert!(matches!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::On(_))
+    ));
+}
+
+#[test]
+fn test_accept_explicit_inner_join_with_on() {
+    let select = accept("SELECT * FROM a INNER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+}
+
+#[test]
+fn test_accept_left_join_with_on() {
+    let select = accept("SELECT * FROM a LEFT JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Left);
+}
+
+#[test]
+fn test_accept_left_outer_join_with_on() {
+    let select = accept("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Left);
+}
+
+#[test]
+fn test_accept_cross_join_without_on() {
+    let select = accept("SELECT * FROM a CROSS JOIN b");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Cross);
+    assert!(from.joins[0].constraint.is_none());
+}
+
+#[test]
+fn test_accept_multi_way_join_chain() {
+    let select = accept("SELECT * FROM a JOIN b ON a.x = b.y LEFT JOIN c ON b.z = c.w");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins.len(), 2);
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert_eq!(from.joins[0].table.name, "b");
+    assert_eq!(from.joins[1].op, JoinOp::Left);
+    assert_eq!(from.joins[1].table.name, "c");
+}
+
+#[test]
+fn test_unsupported_join_using() {
+    let msg = unsupported("SELECT * FROM a JOIN b USING (x)");
+    assert!(msg.contains("USING"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_natural_join() {
+    let msg = unsupported("SELECT * FROM a NATURAL JOIN b");
+    assert!(msg.contains("NATURAL"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_right_join() {
+    let msg = unsupported("SELECT * FROM a RIGHT JOIN b ON a.x = b.y");
+    assert!(msg.contains("RIGHT"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_full_join() {
+    let msg = unsupported("SELECT * FROM a FULL JOIN b ON a.x = b.y");
+    assert!(msg.contains("FULL"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_cross_join_with_on() {
+    let msg = unsupported("SELECT * FROM a CROSS JOIN b ON a.x = b.y");
+    assert!(msg.contains("CROSS"), "message: {msg}");
 }
 
 #[test]

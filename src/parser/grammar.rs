@@ -809,7 +809,7 @@ impl Parser {
         }
 
         let from = if self.eat_kw(Keyword::FROM) {
-            Some(self.table_ref()?)
+            Some(self.parse_from_clause()?)
         } else {
             None
         };
@@ -904,6 +904,99 @@ impl Parser {
         Ok(None)
     }
 
+    /// Parses `FROM <table_ref> (<join_op> <table_ref> [ON <expr>])*`
+    /// (#237, the V4 join slice): an INNER/plain `JOIN`, `LEFT [OUTER]
+    /// JOIN`, or `CROSS JOIN` chain, left-to-right. `NATURAL`/`RIGHT`/
+    /// `FULL`, `USING (...)`, and comma-style `FROM a, b` are still
+    /// explicit `unsupported(..)` errors rather than silently
+    /// mis-parsed.
+    fn parse_from_clause(&mut self) -> PResult<FromClause> {
+        let first = self.table_ref()?;
+        let mut joins = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                return self.unsupported("comma-style JOIN (FROM a, b) not yet supported");
+            }
+            if self.at_kw(Keyword::NATURAL) {
+                return self.unsupported("NATURAL joins not yet supported");
+            }
+            if self.at_kw(Keyword::RIGHT) {
+                return self.unsupported("RIGHT joins not yet supported");
+            }
+            if self.at_kw(Keyword::FULL) {
+                return self.unsupported("FULL joins not yet supported");
+            }
+            // A bare `OUTER` only ever appears right after `LEFT`/
+            // `RIGHT`/`FULL` (consumed together with those, below) —
+            // seeing it here means some other/malformed join-operator
+            // ordering. Reporting it as unsupported keeps it out of the
+            // "unexpected trailing token" hard-error bucket, matching
+            // this parser's convention of a graceful `unsupported(..)`
+            // for anything recognizably join-shaped but out of this
+            // slice's scope.
+            if self.at_kw(Keyword::OUTER) {
+                return self.unsupported("OUTER without a preceding LEFT/RIGHT/FULL not yet supported");
+            }
+            if self.eat_kw(Keyword::CROSS) {
+                self.expect_kw(Keyword::JOIN)?;
+                let table = self.table_ref()?;
+                if self.at_kw(Keyword::ON) {
+                    return self.unsupported("CROSS JOIN with an ON clause not yet supported");
+                }
+                if self.at_kw(Keyword::USING) {
+                    return self.unsupported("USING clause not yet supported");
+                }
+                joins.push(Join {
+                    op: JoinOp::Cross,
+                    table,
+                    constraint: None,
+                });
+                continue;
+            }
+            let op = if self.eat_kw(Keyword::LEFT) {
+                self.eat_kw(Keyword::OUTER);
+                self.expect_kw(Keyword::JOIN)?;
+                Some(JoinOp::Left)
+            } else if self.eat_kw(Keyword::INNER) {
+                self.expect_kw(Keyword::JOIN)?;
+                Some(JoinOp::Inner)
+            } else if self.eat_kw(Keyword::JOIN) {
+                Some(JoinOp::Inner)
+            } else {
+                None
+            };
+            let Some(op) = op else { break };
+            let table = self.table_ref()?;
+            if self.at_kw(Keyword::USING) {
+                return self.unsupported("USING clause not yet supported");
+            }
+            // A real `JOIN`/`INNER JOIN`/`LEFT [OUTER] JOIN` with no
+            // `ON`/`USING` at all is valid SQL (equivalent to a
+            // constraint-less cross join) — real SQLite accepts it, so
+            // this stays a graceful `unsupported(..)` rather than the
+            // hard parse error `expect_kw` would raise, which would
+            // otherwise misclassify valid SQL as malformed (caught by
+            // `tests/corpus/extracted_sql_test.rs`'s
+            // `no_extracted_select_is_reported_invalid`). This bounded
+            // MVP only compiles the `ON`-qualified form.
+            if !self.at_kw(Keyword::ON) {
+                return self.unsupported("JOIN without an ON/USING clause not yet supported");
+            }
+            self.expect_kw(Keyword::ON)?;
+            let on_expr = self.expr()?;
+            joins.push(Join {
+                op,
+                table,
+                constraint: Some(JoinConstraint::On(on_expr)),
+            });
+        }
+        Ok(FromClause { first, joins })
+    }
+
+    /// A single `table-name [AS alias]` — shared by the FROM clause's
+    /// first table and every join's right-hand table. Schema-qualified
+    /// names, subqueries, table-valued functions, and `INDEXED BY`/`NOT
+    /// INDEXED` stay explicit `unsupported(..)` errors.
     fn table_ref(&mut self) -> PResult<TableRef> {
         if matches!(self.peek().kind, TokenKind::LParen) {
             return self
@@ -926,18 +1019,8 @@ impl Parser {
             start
         };
 
-        if self.at_kw(Keyword::JOIN)
-            || self.at_kw(Keyword::NATURAL)
-            || self.at_kw(Keyword::LEFT)
-            || self.at_kw(Keyword::RIGHT)
-            || self.at_kw(Keyword::FULL)
-            || self.at_kw(Keyword::INNER)
-            || self.at_kw(Keyword::CROSS)
-            || self.at_kw(Keyword::OUTER)
-            || self.at_kw(Keyword::INDEXED)
-            || matches!(self.peek().kind, TokenKind::Comma)
-        {
-            return self.unsupported("JOIN / multi-table FROM not yet supported");
+        if self.at_kw(Keyword::INDEXED) {
+            return self.unsupported("INDEXED BY not yet supported");
         }
         if self.at_kw(Keyword::NOT)
             && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::INDEXED))

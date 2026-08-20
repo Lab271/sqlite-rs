@@ -1,11 +1,13 @@
 //! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
-//! 002-parser Requirements 2-4).
+//! 002-parser Requirements 2-4), plus the V4 join slice (#237).
 //!
-//! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`-tagged
-//! rules: single-FROM SELECT, WHERE, ORDER BY, LIMIT/OFFSET, the V2
-//! expression grammar, INSERT/UPDATE/DELETE, and CREATE/DROP TABLE/INDEX.
-//! No GROUP BY/HAVING/joins/subqueries/FOREIGN KEY/REFERENCES (V4/V8)
-//! productions exist here at all.
+//! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`/
+//! `(* V4 *)`-tagged rules: SELECT with an INNER/LEFT [OUTER]/CROSS join
+//! chain (`FromClause`/`Join`/`JoinOp`/`JoinConstraint`, #237), WHERE,
+//! ORDER BY, LIMIT/OFFSET, the V2 expression grammar, INSERT/UPDATE/
+//! DELETE, and CREATE/DROP TABLE/INDEX. NATURAL/RIGHT/FULL joins, `USING`,
+//! comma-style joins, and subqueries in FROM (#238) do not exist here at
+//! all, nor does GROUP BY/HAVING/FOREIGN KEY/REFERENCES (V8).
 //!
 //! Every node carries a [`Span`] (Requirement 3: "AST completeness") and
 //! parenthesized expressions are preserved explicitly via `ExprKind::Paren`
@@ -35,7 +37,7 @@ pub struct Assignment {
 pub struct Select {
     pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,
-    pub from: Option<TableRef>,
+    pub from: Option<FromClause>,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderingTerm>,
     pub limit: Option<Limit>,
@@ -60,6 +62,45 @@ pub struct TableRef {
     pub name: String,
     pub alias: Option<String>,
     pub span: Span,
+}
+
+/// A `FROM` clause (#237): the first table plus zero or more joins,
+/// evaluated left-to-right — `a JOIN b ON .. JOIN c ON ..` joins `b`
+/// against `a`, then `c` against that result. Bare `Option<TableRef>`
+/// (V2 scope) was replaced by this once a second table entered scope;
+/// the single-table case is simply `joins: vec![]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FromClause {
+    pub first: TableRef,
+    pub joins: Vec<Join>,
+}
+
+/// One `<join_op> <table> [ON <expr>]` step of a [`FromClause`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    pub op: JoinOp,
+    pub table: TableRef,
+    /// `None` only for [`JoinOp::Cross`] (and a bare `JOIN`/`INNER JOIN`
+    /// with no `ON` — rejected by the parser, since this V4 slice
+    /// requires an explicit condition for INNER/LEFT).
+    pub constraint: Option<JoinConstraint>,
+}
+
+/// `INNER`/plain `JOIN`, `LEFT [OUTER] JOIN`, and `CROSS JOIN` — the V4
+/// slice (#237). `NATURAL`/`RIGHT`/`FULL` and comma-style joins are still
+/// parse-time `unsupported(..)` errors (see `grammar.rs::from_clause`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinOp {
+    Inner,
+    Left,
+    Cross,
+}
+
+/// The join's matching condition. `USING (...)` is out of scope for this
+/// slice — only `ON <expr>` is represented.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinConstraint {
+    On(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

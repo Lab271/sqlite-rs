@@ -75,6 +75,31 @@ impl fmt::Display for TableRef {
     }
 }
 
+impl fmt::Display for FromClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.first)?;
+        for join in &self.joins {
+            write!(f, " {join}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Join {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self.op {
+            JoinOp::Inner => "JOIN",
+            JoinOp::Left => "LEFT JOIN",
+            JoinOp::Cross => "CROSS JOIN",
+        };
+        write!(f, "{op} {}", self.table)?;
+        if let Some(JoinConstraint::On(expr)) = &self.constraint {
+            write!(f, " ON {expr}")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for OrderingTerm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.expr)?;

@@ -25,6 +25,7 @@ mod expr_vectors_test;
 mod families_test;
 mod harness_test;
 mod index_maintenance_test;
+mod join_test;
 mod journal_interop_test;
 mod oracle_test;
 mod pager_write_test;

@@ -485,10 +485,11 @@ fn query_csv_flag_renders_without_header() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A syntactically-recognized-but-unsupported construct (a `JOIN`, out
-/// of this compiler's single-table V2 scope) must fail cleanly: non-zero
-/// exit, a diagnostic naming it as unsupported (not a bare "syntax
-/// error", per the three-way outcome from #61), empty stdout, no panic.
+/// A syntactically-recognized-but-unsupported construct (a comma-style
+/// `FROM a, b`, out of #237's INNER/LEFT/CROSS `JOIN ... ON` scope) must
+/// fail cleanly: non-zero exit, a diagnostic naming it as unsupported
+/// (not a bare "syntax error", per the three-way outcome from #61),
+/// empty stdout, no panic.
 #[test]
 fn query_unsupported_sql_fails_cleanly_and_says_so() {
     let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
@@ -498,7 +499,7 @@ fn query_unsupported_sql_fails_cleanly_and_says_so() {
     let output = Command::new(CLI)
         .arg("query")
         .arg(&db)
-        .arg("SELECT a FROM t JOIN t2 ON t.a = t2.a")
+        .arg("SELECT a FROM t, t2")
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -20,7 +20,7 @@
 use crate::codegen::expr::compile_cond;
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
 use crate::codegen::select::CodegenError;
-use crate::codegen::{CondTargets, Emitter, RegAlloc, Target};
+use crate::codegen::{CondTargets, Emitter, RegAlloc, Scope, Target};
 use crate::parser::ast::Delete;
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, Program};
@@ -64,8 +64,7 @@ pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, 
         compile_cond(
             &mut em,
             &mut reg,
-            schema,
-            TABLE_CURSOR,
+            &Scope::single(schema, TABLE_CURSOR),
             where_expr,
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
