@@ -20,8 +20,8 @@ use crate::codegen::expr::{
 };
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target};
 use crate::parser::ast::{
-    BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FunctionArgs, JoinConstraint, JoinOp,
-    Literal, ParamKind, ResultColumn, Select, TableRef,
+    BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
+    JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef,
 };
 use crate::parser::tokenizer::Span;
 use crate::schema::{rowid_alias_column, TableSchema};
@@ -420,19 +420,38 @@ pub fn compile_select_joined(
             reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
         });
     }
-    // Stopgap for #250's codegen half (parser-only in this PR): the
-    // parser now accepts NATURAL joins, RIGHT/FULL JOIN, and USING (...)
-    // (#250), but this compiler still only implements INNER/LEFT/CROSS
-    // with an ON constraint (#237). Reject the new forms here with a
-    // clean `Unsupported` error instead of silently mis-compiling them
-    // (e.g. `is_left` below would otherwise treat RIGHT/FULL as INNER).
-    // Remove this block once RIGHT/FULL/NATURAL/USING codegen lands.
-    for join in &from.joins {
-        if matches!(join.op, JoinOp::Right | JoinOp::Full) {
-            return Err(CodegenError::Unsupported {
-                reason: "RIGHT/FULL JOIN codegen is not yet supported".to_string(),
-            });
-        }
+
+    // #250's codegen half: `FULL JOIN` gets its own dedicated two-table
+    // emitter (see `compile_full_join_two_table`'s doc comment) rather
+    // than participating in the `RIGHT`-reordering scheme below — it's
+    // only supported as the sole join in the `FROM` clause today.
+    if from.joins.len() == 1 && from.joins.first().is_some_and(|j| j.op == JoinOp::Full) {
+        return compile_full_join_two_table(select, schemas, from);
+    }
+    if from.joins.iter().any(|j| j.op == JoinOp::Full) {
+        return Err(CodegenError::Unsupported {
+            reason: "FULL JOIN codegen only supports a single two-table FULL JOIN today \
+                     (`SELECT ... FROM a FULL JOIN b ON ...`) — a FULL JOIN combined with \
+                     any other join in the same FROM clause is not yet supported"
+                .to_string(),
+        });
+    }
+    // RIGHT JOIN is implemented by reordering the join chain into an
+    // equivalent LEFT JOIN (`A RIGHT JOIN B` == `B LEFT JOIN A`,
+    // generalized to an N-way chain — see the `working_order`/`pos_of`
+    // construction below and `LevelPlan`'s doc comment). Only one
+    // `RIGHT JOIN` per `FROM` clause is supported: a second one would,
+    // in the general case, share its deepest check level with the
+    // first (see the design notes accompanying this ticket), which
+    // this compiler doesn't attempt to disambiguate — rejected here
+    // with a clean error rather than risking a silently wrong plan.
+    let right_count = from.joins.iter().filter(|j| j.op == JoinOp::Right).count();
+    if right_count > 1 {
+        return Err(CodegenError::Unsupported {
+            reason: "RIGHT JOIN codegen only supports a single RIGHT JOIN per FROM clause \
+                     today — a chain with more than one RIGHT JOIN is not yet supported"
+                .to_string(),
+        });
     }
 
     let mut em = Emitter::new();
@@ -446,32 +465,32 @@ pub fn compile_select_joined(
     let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
         .chain(from.joins.iter().map(|j| &j.table))
         .collect();
-    let mut bindings = Vec::with_capacity(schemas.len());
-    for (i, (table_ref, schema)) in table_refs.iter().zip(schemas.iter()).enumerate() {
-        let cursor = i32::try_from(i).unwrap_or(0);
-        em.emit(Instruction::new(
-            Opcode::OpenRead,
-            cursor,
-            i32::try_from(schema.root_page).unwrap_or(0),
-            0,
-        ));
+    let n = schemas.len();
+    // `bindings` stays in original FROM-clause order throughout — its
+    // `cursor` field is filled in below once the execution order
+    // (`working_order`) is known, and it (not the reordered execution
+    // list) is what every `Scope` gets built from, so `SELECT *`
+    // expansion order and column-ambiguity resolution are unaffected
+    // by RIGHT JOIN's internal reordering.
+    let mut bindings = Vec::with_capacity(n);
+    for (table_ref, schema) in table_refs.iter().zip(schemas.iter()) {
         bindings.push(TableBinding {
             alias: table_ref.alias.clone(),
             name: table_ref.name.clone(),
             schema: schema.clone(),
-            cursor,
+            cursor: 0,
             forced_null: false,
         });
     }
 
-    let ops: Vec<JoinOp> = from.joins.iter().map(|j| j.op).collect();
     // `dedup_star[i]` names the columns (lowercased) that a plain `*`
     // expansion must skip for `bindings[i]` — populated below for the
     // *right*-hand side of each NATURAL/USING join (#250's codegen
     // half), since SQLite keeps only the left-most occurrence of a
-    // naturally-/USING-joined column in `SELECT *` output.
+    // naturally-/USING-joined column in `SELECT *` output. Indexed by
+    // *original* FROM-clause position, same as `bindings`.
     let mut dedup_star: Vec<std::collections::HashSet<String>> =
-        vec![std::collections::HashSet::new(); bindings.len()];
+        vec![std::collections::HashSet::new(); n];
     let mut constraints: Vec<Option<Expr>> = Vec::with_capacity(from.joins.len());
     for (i, join) in from.joins.iter().enumerate() {
         let right_idx = i.checked_add(1).ok_or_else(|| CodegenError::Unsupported {
@@ -527,6 +546,127 @@ pub fn compile_select_joined(
         constraints.push(constraint);
     }
 
+    // Determine execution order: `working_order[exec_pos]` is the
+    // original FROM-clause index executed at that recursion level.
+    // Every `Inner`/`Left`/`Cross` join (including already-resolved
+    // NATURAL/USING) simply appends its table to the end, exactly like
+    // #237. A `Right` join instead *prepends* its table to the front —
+    // `A RIGHT JOIN B` becomes `B`'s cursor loop outermost, with the
+    // entire prior chain (everything already in `working_order`)
+    // nested beneath it as the side that gets null-extended on a miss,
+    // i.e. exactly `B LEFT JOIN A`. `right_count <= 1` is enforced
+    // above, so at most one such prepend ever happens.
+    struct NormalStep {
+        table: usize,
+        is_left: bool,
+        join_index: usize,
+    }
+    struct RightStep {
+        new_table: usize,
+        deep_orig: usize,
+        join_index: usize,
+    }
+    let mut working_order: Vec<usize> = vec![0];
+    let mut normal_steps: Vec<NormalStep> = Vec::with_capacity(from.joins.len());
+    let mut right_step: Option<RightStep> = None;
+    for (j, join) in from.joins.iter().enumerate() {
+        let new_table = j.saturating_add(1);
+        if join.op == JoinOp::Right {
+            let deep_orig = *working_order.last().unwrap_or(&0);
+            right_step = Some(RightStep {
+                new_table,
+                deep_orig,
+                join_index: j,
+            });
+            working_order = std::iter::once(new_table)
+                .chain(working_order.iter().copied())
+                .collect();
+        } else {
+            normal_steps.push(NormalStep {
+                table: new_table,
+                is_left: join.op == JoinOp::Left,
+                join_index: j,
+            });
+            working_order.push(new_table);
+        }
+    }
+
+    // `pos_of[original_index]` is the execution-order recursion level
+    // that original table ends up at.
+    let mut pos_of = vec![0usize; n];
+    for (pos, &orig) in working_order.iter().enumerate() {
+        if let Some(slot) = pos_of.get_mut(orig) {
+            *slot = pos;
+        }
+    }
+
+    // Cursor numbers follow execution order (simplest: a table's
+    // cursor number is just its recursion level), and every cursor is
+    // `OpenRead` exactly once, in that same order.
+    for (pos, &orig) in working_order.iter().enumerate() {
+        let cursor = i32::try_from(pos).unwrap_or(0);
+        if let Some(binding) = bindings.get_mut(orig) {
+            binding.cursor = cursor;
+        }
+        let root_page = bindings
+            .get(orig)
+            .map(|b| i32::try_from(b.schema.root_page).unwrap_or(0))
+            .unwrap_or(0);
+        em.emit(Instruction::new(Opcode::OpenRead, cursor, root_page, 0));
+    }
+
+    let exec_bindings: Vec<TableBinding> = working_order
+        .iter()
+        .filter_map(|&orig| bindings.get(orig).cloned())
+        .collect();
+
+    // Per-execution-level plan: `levels[level]` describes what to check
+    // while iterating `exec_bindings[level]`'s own loop, and whether
+    // this level owns an outer-join "matched" register.
+    let mut levels: Vec<LevelPlan> = vec![LevelPlan::default(); n];
+    for step in &normal_steps {
+        let pos = pos_of.get(step.table).copied().unwrap_or(0);
+        let constraint = constraints.get(step.join_index).cloned().flatten();
+        if let Some(plan) = levels.get_mut(pos) {
+            plan.checks.push(LevelCheck {
+                constraint,
+                sets_matched: if step.is_left { Some(pos) } else { None },
+            });
+            if step.is_left {
+                plan.null_span = Some((pos, pos));
+            }
+        }
+    }
+    if let Some(rs) = &right_step {
+        // `rs.new_table`'s own execution level (`outer_pos`) needs no
+        // special handling at all — it's a plain unconditional scan,
+        // exactly as if it were `from.first` (nothing shallower depends
+        // on it). The outer-join bookkeeping (matched register,
+        // null-extension) belongs to its *immediate child* level
+        // (`outer_pos + 1`) instead — reset before that level's own
+        // `Rewind`, checked after its own loop exhausts, precisely
+        // mirroring a classic `LEFT JOIN`'s placement (whose "matched"
+        // owner is likewise the LEFT-joined table's own level, nested
+        // inside its parent's loop for the right per-row cadence) —
+        // only here `check_pos` (where the constraint actually gets
+        // evaluated) may be deeper than the owning level whenever the
+        // pre-existing chain being RIGHT-joined against has more than
+        // one table.
+        let outer_pos = pos_of.get(rs.new_table).copied().unwrap_or(0);
+        let check_pos = pos_of.get(rs.deep_orig).copied().unwrap_or(0);
+        let owner_pos = outer_pos.saturating_add(1);
+        let constraint = constraints.get(rs.join_index).cloned().flatten();
+        if let Some(plan) = levels.get_mut(check_pos) {
+            plan.checks.push(LevelCheck {
+                constraint,
+                sets_matched: Some(owner_pos),
+            });
+        }
+        if let Some(plan) = levels.get_mut(owner_pos) {
+            plan.null_span = Some((owner_pos, check_pos));
+        }
+    }
+
     let full_scope = Scope {
         tables: bindings.clone(),
         catalog: schemas.to_vec(),
@@ -540,16 +680,19 @@ pub fn compile_select_joined(
         em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
         Ok(())
     };
-    let mut null_mask = vec![false; bindings.len()];
+    let mut null_mask = vec![false; n];
+    let mut matched_regs: Vec<Option<i32>> = vec![None; n];
     compile_join_level(
         &mut em,
         &mut reg,
         select,
+        &exec_bindings,
         &bindings,
-        &ops,
-        &constraints,
+        &pos_of,
+        &levels,
         &dedup_star,
         &mut null_mask,
+        &mut matched_regs,
         0,
         end_label,
         limit.as_ref(),
@@ -563,27 +706,40 @@ pub fn compile_select_joined(
     Ok(em.finish())
 }
 
-/// Builds the [`Scope`] a join-tree node sees at compile time: every
-/// binding as-is, except that `null_mask[i]` (LEFT JOIN's no-match
-/// branch, see [`compile_join_level`]) forces binding `i`'s
-/// `forced_null` flag on for this recursion branch only — the shared
-/// `bindings` vec itself is never mutated.
+/// Builds the [`Scope`] a join-tree node sees at compile time. `bindings`
+/// is always in *original* FROM-clause order (so `SELECT *` expansion
+/// order and column-ambiguity resolution never depend on RIGHT JOIN's
+/// internal execution reordering — see [`compile_select_joined`]);
+/// `null_mask` is indexed by *execution* level instead, so `pos_of`
+/// (original index -> execution level) translates between the two:
+/// binding `orig` is forced null when `null_mask[pos_of[orig]]` is set
+/// (an outer join's no-match branch, see [`compile_join_level`]) — the
+/// shared `bindings` vec itself is never mutated.
 fn join_scope(
     bindings: &[TableBinding],
     null_mask: &[bool],
+    pos_of: &[usize],
     catalog: &[TableSchema],
     dedup_star: &[std::collections::HashSet<String>],
 ) -> Scope {
     Scope {
         tables: bindings
             .iter()
-            .zip(null_mask.iter())
-            .map(|(b, &forced_null)| TableBinding {
-                alias: b.alias.clone(),
-                name: b.name.clone(),
-                schema: b.schema.clone(),
-                cursor: b.cursor,
-                forced_null: forced_null || b.forced_null,
+            .enumerate()
+            .map(|(orig, b)| {
+                let forced_null = pos_of
+                    .get(orig)
+                    .and_then(|&pos| null_mask.get(pos))
+                    .copied()
+                    .unwrap_or(false)
+                    || b.forced_null;
+                TableBinding {
+                    alias: b.alias.clone(),
+                    name: b.name.clone(),
+                    schema: b.schema.clone(),
+                    cursor: b.cursor,
+                    forced_null,
+                }
             })
             .collect(),
         catalog: catalog.to_vec(),
@@ -679,38 +835,78 @@ fn synthesize_equality_constraint(
     Ok((acc, shared))
 }
 
+/// One constraint checked while iterating `exec_bindings[check_level]`'s
+/// own loop (see [`compile_join_level`]): `constraint` gates whether
+/// recursion continues to the next level (`None` means unconditional —
+/// a `CROSS`/`NATURAL`-with-no-shared-columns join), and if
+/// `sets_matched` is `Some(outer_level)`, passing it also marks
+/// `outer_level`'s "matched" register. For a classic `LEFT JOIN`,
+/// `outer_level == check_level` (the table's own loop both checks its
+/// `ON` condition and owns the matched flag, exactly #237's original
+/// shape). For `RIGHT JOIN` reordered into an equivalent `LEFT JOIN`
+/// (see [`compile_select_joined`]), `outer_level` is the RIGHT-joined
+/// table's own (shallower) level, while `check_level` is the deepest
+/// level of the chain it was joined against — the constraint can only
+/// be evaluated once every table it references is bound.
+#[derive(Debug, Clone)]
+struct LevelCheck {
+    constraint: Option<Expr>,
+    sets_matched: Option<usize>,
+}
+
+/// The full plan for one execution level: zero or more [`LevelCheck`]s
+/// run inside its own `Rewind`/`Next` loop, and — if `null_span` is
+/// `Some((start, end))` — this level owns an outer-join "matched"
+/// register, tested once its own loop exhausts. If nothing matched,
+/// every level in `start..=end` (inclusive, always this level or
+/// deeper) gets `null_mask` forced on and recursion jumps directly to
+/// `end + 1`, skipping those levels' own loops entirely — there is
+/// nothing to iterate for a synthesized outer-join row. A classic
+/// `LEFT JOIN` has `null_span == Some((level, level))` (only itself);
+/// `RIGHT JOIN`'s reordering produces `null_span == Some((outer_level +
+/// 1, check_level))`, spanning every level of the chain it was joined
+/// against.
+#[derive(Debug, Clone, Default)]
+struct LevelPlan {
+    checks: Vec<LevelCheck>,
+    null_span: Option<(usize, usize)>,
+}
+
 /// Recursively emits the nested-loop join, one table per recursion
-/// level (`level` indexes into `bindings`/`ops`/`constraints`, where
-/// `ops[i]`/`constraints[i]` belong to the join that brought in
-/// `bindings[i + 1]`). `level == bindings.len()` is the innermost
-/// point — every table's cursor is positioned on a candidate
-/// combination, so this is where `WHERE`, `LIMIT`/`OFFSET`, and the
-/// result-column projection all compile, via [`emit_join_row`].
+/// level. `exec_bindings` is in *execution* order (level `i` opens
+/// `exec_bindings[i]`'s cursor); `orig_bindings`/`pos_of` are the
+/// original FROM-clause-order bindings and the original-index ->
+/// execution-level map, used only to build a [`Scope`] in FROM order
+/// (see [`join_scope`]) — `SELECT *` expansion and column-ambiguity
+/// resolution must not depend on RIGHT JOIN's internal reordering.
+/// `level == exec_bindings.len()` is the innermost point — every
+/// table's cursor is positioned on a candidate combination, so this is
+/// where `WHERE`, `LIMIT`/`OFFSET`, and the result-column projection
+/// all compile, via [`emit_join_final_row`].
 ///
-/// `LEFT JOIN` (`ops[level - 1] == Left`) wraps its own `Rewind`/`Next`
-/// loop with a `matched` flag register: cleared before the loop,
-/// set to 1 the first time `ON` holds for some inner-side row (which
-/// also fires deeper recursion for that row normally), and tested
-/// with `IfNot` right after the loop exits — if it's still 0, the
-/// join recurses exactly once more with `null_mask[level]` set,
-/// which (per [`join_scope`]) makes every reference to this table's
-/// columns — including from any join further to the right — compile
-/// to a NULL literal instead of a real `Column`/`Rowid` read, so a
-/// non-matching left-side row still contributes exactly one
-/// null-extended output row (SQL's `LEFT JOIN` semantics), and
-/// anything joined *onto* this null-extended table sees a fully
-/// consistent all-NULL row for it rather than a live but
-/// out-of-position cursor read.
+/// A level with `levels[level].null_span == Some((start, end))` wraps
+/// its own `Rewind`/`Next` loop with a `matched` flag register:
+/// cleared before the loop, set to 1 by any [`LevelCheck`] (at this
+/// level or a deeper `check_level`) whose `sets_matched` names this
+/// level, and tested with `IfNot` right after the loop exits — if it's
+/// still 0, the join recurses exactly once more (jumping straight to
+/// `end + 1`) with `null_mask` set for every level in `start..=end`,
+/// which (per [`join_scope`]) makes every reference to those tables'
+/// columns compile to a NULL literal instead of a real `Column`/
+/// `Rowid` read, so a non-matching row still contributes exactly one
+/// null-extended output row.
 #[allow(clippy::too_many_arguments)]
 fn compile_join_level<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
-    bindings: &[TableBinding],
-    ops: &[JoinOp],
-    constraints: &[Option<Expr>],
+    exec_bindings: &[TableBinding],
+    orig_bindings: &[TableBinding],
+    pos_of: &[usize],
+    levels: &[LevelPlan],
     dedup_star: &[std::collections::HashSet<String>],
     null_mask: &mut Vec<bool>,
+    matched_regs: &mut Vec<Option<i32>>,
     level: usize,
     end_label: Label,
     limit: Option<&LimitState>,
@@ -720,45 +916,26 @@ fn compile_join_level<F>(
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
-    if level == bindings.len() {
-        let scope = join_scope(bindings, null_mask, catalog, dedup_star);
-        let row_skip = em.new_label();
-        if let Some(where_expr) = &select.where_clause {
-            compile_cond(
-                em,
-                reg,
-                &scope,
-                where_expr,
-                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
-            )?;
-        }
-        if let Some(limit) = limit {
-            emit_offset_guard(em, limit, row_skip);
-        }
-        emit_join_row(em, reg, select, &scope, sink)?;
-        if let Some(limit) = limit {
-            emit_limit_guard(em, limit, end_label);
-        }
-        em.place(row_skip);
+    if level == exec_bindings.len() {
+        let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+        emit_join_final_row(em, reg, select, &scope, end_label, limit, sink)?;
         return Ok(());
     }
 
-    let Some(binding) = bindings.get(level) else {
+    let Some(binding) = exec_bindings.get(level) else {
         return Err(CodegenError::Unsupported {
             reason: "join level out of range".to_string(),
         });
     };
     let cursor = binding.cursor;
-    let prev_level = level.checked_sub(1);
-    let is_left = prev_level.and_then(|i| ops.get(i)) == Some(&JoinOp::Left);
-    let on_expr = prev_level
-        .and_then(|i| constraints.get(i))
-        .cloned()
-        .flatten();
+    let plan = levels.get(level).cloned().unwrap_or_default();
 
-    let matched = if is_left { Some(reg.alloc()) } else { None };
-    if let Some(matched) = matched {
+    if plan.null_span.is_some() {
+        let matched = reg.alloc();
         em.emit(Instruction::new(Opcode::Integer, 0, matched, 0));
+        if let Some(slot) = matched_regs.get_mut(level) {
+            *slot = Some(matched);
+        }
     }
 
     let rewind_end = em.new_label();
@@ -768,29 +945,41 @@ where
     em.place(loop_start);
 
     let skip = em.new_label();
-    if let Some(on_expr) = &on_expr {
-        let scope = join_scope(bindings, null_mask, catalog, dedup_star);
-        compile_cond(
-            em,
-            reg,
-            &scope,
-            on_expr,
-            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
-        )?;
-    }
-    if let Some(matched) = matched {
-        em.emit(Instruction::new(Opcode::Integer, 1, matched, 0));
+    for check in &plan.checks {
+        if let Some(constraint) = &check.constraint {
+            let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+            compile_cond(
+                em,
+                reg,
+                &scope,
+                constraint,
+                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
+            )?;
+        }
+        if let Some(outer_level) = check.sets_matched {
+            let target = matched_regs
+                .get(outer_level)
+                .copied()
+                .flatten()
+                .ok_or_else(|| CodegenError::Unsupported {
+                    reason: "join level plan referenced an unallocated matched register"
+                        .to_string(),
+                })?;
+            em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
+        }
     }
     let next_level = level.saturating_add(1);
     compile_join_level(
         em,
         reg,
         select,
-        bindings,
-        ops,
-        constraints,
+        exec_bindings,
+        orig_bindings,
+        pos_of,
+        levels,
         dedup_star,
         null_mask,
+        matched_regs,
         next_level,
         end_label,
         limit,
@@ -802,10 +991,16 @@ where
     em.patch_p2(next_addr, loop_start);
     em.place(rewind_end);
 
-    if let Some(matched) = matched {
-        // `matched` is still 0 iff no inner-side row satisfied `ON` —
-        // emit exactly one null-extended row for this table (and
-        // anything joined off of it) in that case, then continue.
+    if let Some((start, end)) = plan.null_span {
+        let matched = matched_regs.get(level).copied().flatten().ok_or_else(|| {
+            CodegenError::Unsupported {
+                reason: "join level plan missing matched register for outer join".to_string(),
+            }
+        })?;
+        // `matched` is still 0 iff nothing satisfied this outer join —
+        // emit exactly one null-extended row for `start..=end` in that
+        // case, then continue from `end + 1` (skipping those levels'
+        // own loops entirely — there's nothing to iterate).
         let do_null = em.new_label();
         let after_null = em.new_label();
         let addr = em.emit(Instruction::new(Opcode::IfNot, matched, 0, 0));
@@ -813,30 +1008,338 @@ where
         em.goto(after_null);
 
         em.place(do_null);
-        if let Some(slot) = null_mask.get_mut(level) {
-            *slot = true;
+        for lv in start..=end {
+            if let Some(slot) = null_mask.get_mut(lv) {
+                *slot = true;
+            }
         }
         compile_join_level(
             em,
             reg,
             select,
-            bindings,
-            ops,
-            constraints,
+            exec_bindings,
+            orig_bindings,
+            pos_of,
+            levels,
             dedup_star,
             null_mask,
-            next_level,
+            matched_regs,
+            end.saturating_add(1),
             end_label,
             limit,
             catalog,
             sink,
         )?;
-        if let Some(slot) = null_mask.get_mut(level) {
-            *slot = false;
+        for lv in start..=end {
+            if let Some(slot) = null_mask.get_mut(lv) {
+                *slot = false;
+            }
         }
         em.place(after_null);
     }
     Ok(())
+}
+
+/// Applies `WHERE`, `LIMIT`/`OFFSET`, and the result-column projection
+/// to one candidate join row (`scope` already reflects every table's
+/// forced-null state for this branch) — factored out of
+/// [`compile_join_level`]'s innermost level so [`compile_full_join_two_table`]
+/// can reuse the exact same sequencing for its own three emission
+/// points (matched, left-nulled, right-unmatched).
+fn emit_join_final_row<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    scope: &Scope,
+    end_label: Label,
+    limit: Option<&LimitState>,
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let row_skip = em.new_label();
+    if let Some(where_expr) = &select.where_clause {
+        compile_cond(
+            em,
+            reg,
+            scope,
+            where_expr,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
+        )?;
+    }
+    if let Some(limit) = limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    emit_join_row(em, reg, select, scope, sink)?;
+    if let Some(limit) = limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+    em.place(row_skip);
+    Ok(())
+}
+
+/// #250: `A FULL JOIN B ON cond` (or `USING (...)`/`NATURAL`),
+/// restricted to the two-table case — `compile_select_joined` only
+/// calls this when `FULL` is the sole join in the `FROM` clause; any
+/// other shape (a `FULL JOIN` combined with another join) is rejected
+/// there with a clean `Unsupported` error instead.
+///
+/// `A FULL JOIN B ON cond` is exactly `(A LEFT JOIN B ON cond)` rows,
+/// plus any row of `B` matched by no row of `A` at all (null-extended
+/// on `A`'s side instead). This is *not* simply `A LEFT JOIN B` unioned
+/// with `B LEFT JOIN A` — that would double-count every matched pair —
+/// so pass 1 runs the ordinary two-table LEFT JOIN nested loop
+/// (mirroring the shape [`compile_join_level`] emits for a plain LEFT
+/// JOIN), additionally recording every matched `B` rowid into an
+/// ephemeral index the moment `cond` passes (mirroring
+/// `emit_distinct_guard`'s `OpenEphemeral`/`Found`/`IdxInsert` dedup
+/// mechanism, keyed by `B`'s rowid instead of a result-row tuple); pass
+/// 2 then re-scans `B` and emits one `A`-nulled row for every `B`
+/// rowid pass 1 never recorded. `WHERE`/`LIMIT`/`OFFSET` apply
+/// identically at all three emission points via
+/// [`emit_join_final_row`].
+fn compile_full_join_two_table(
+    select: &Select,
+    schemas: &[TableSchema],
+    from: &FromClause,
+) -> Result<Program, CodegenError> {
+    let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|j| &j.table))
+        .collect();
+
+    let mut em = Emitter::new();
+    let mut reg = RegAlloc::new();
+    let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
+    let body_start = em.new_label();
+    em.place(body_start);
+    em.patch_p2(init_addr, body_start);
+
+    let mut bindings = Vec::with_capacity(2);
+    for (i, (table_ref, schema)) in table_refs.iter().zip(schemas.iter()).enumerate() {
+        let cursor = i32::try_from(i).unwrap_or(0);
+        em.emit(Instruction::new(
+            Opcode::OpenRead,
+            cursor,
+            i32::try_from(schema.root_page).unwrap_or(0),
+            0,
+        ));
+        bindings.push(TableBinding {
+            alias: table_ref.alias.clone(),
+            name: table_ref.name.clone(),
+            schema: schema.clone(),
+            cursor,
+            forced_null: false,
+        });
+    }
+    let Some(join) = from.joins.first() else {
+        return Err(CodegenError::Unsupported {
+            reason: "FULL JOIN codegen only supports a single two-table FULL JOIN today"
+                .to_string(),
+        });
+    };
+    let out_of_range = || CodegenError::Unsupported {
+        reason: "FULL JOIN codegen only supports a single two-table FULL JOIN today".to_string(),
+    };
+    let binding_a = bindings.first().cloned().ok_or_else(out_of_range)?;
+    let binding_b = bindings.get(1).cloned().ok_or_else(out_of_range)?;
+
+    let mut dedup_star: Vec<std::collections::HashSet<String>> =
+        vec![std::collections::HashSet::new(); 2];
+    let left = std::slice::from_ref(&binding_a);
+    let constraint = match &join.constraint {
+        Some(JoinConstraint::On(e)) => Some(e.clone()),
+        Some(JoinConstraint::Using(cols)) => {
+            let (expr, shared) = synthesize_equality_constraint(left, &binding_b, cols, true)?;
+            if let Some(slot) = dedup_star.get_mut(1) {
+                slot.extend(shared);
+            }
+            expr
+        }
+        None if join.natural => {
+            let shared_names: Vec<String> = binding_b
+                .schema
+                .columns
+                .iter()
+                .filter(|name| {
+                    binding_a
+                        .schema
+                        .columns
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(name))
+                })
+                .cloned()
+                .collect();
+            if shared_names.is_empty() {
+                None
+            } else {
+                let (expr, shared) =
+                    synthesize_equality_constraint(left, &binding_b, &shared_names, false)?;
+                if let Some(slot) = dedup_star.get_mut(1) {
+                    slot.extend(shared);
+                }
+                expr
+            }
+        }
+        None => None,
+    };
+
+    let full_scope = Scope {
+        tables: bindings.clone(),
+        catalog: schemas.to_vec(),
+        outer: None,
+        dedup_star: dedup_star.clone(),
+    };
+    let limit = compile_limit_setup(&mut em, &mut reg, &full_scope, select)?;
+
+    // Ephemeral index tracking every `B` rowid matched during pass 1 —
+    // same mechanism `emit_distinct_guard` uses for DISTINCT, keyed by
+    // `B`'s rowid instead of a result-row tuple.
+    let eph_cursor: i32 = 2;
+    em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
+
+    let end_label = em.new_label();
+    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, count: i32| {
+        em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
+        Ok(())
+    };
+
+    let a_cursor = binding_a.cursor;
+    let b_cursor = binding_b.cursor;
+    let matched = reg.alloc();
+
+    // Pass 1: `A LEFT JOIN B ON cond`, instrumented to record every
+    // matched `B` rowid.
+    let a_rewind_end = em.new_label();
+    let a_rewind = em.emit(Instruction::new(Opcode::Rewind, a_cursor, 0, 0));
+    em.patch_p2(a_rewind, a_rewind_end);
+    let a_loop = em.new_label();
+    em.place(a_loop);
+
+    em.emit(Instruction::new(Opcode::Integer, 0, matched, 0));
+
+    let b_rewind_end = em.new_label();
+    let b_rewind = em.emit(Instruction::new(Opcode::Rewind, b_cursor, 0, 0));
+    em.patch_p2(b_rewind, b_rewind_end);
+    let b_loop = em.new_label();
+    em.place(b_loop);
+
+    let b_skip = em.new_label();
+    let match_scope = Scope {
+        tables: bindings.clone(),
+        catalog: schemas.to_vec(),
+        outer: None,
+        dedup_star: dedup_star.clone(),
+    };
+    if let Some(c) = &constraint {
+        compile_cond(
+            &mut em,
+            &mut reg,
+            &match_scope,
+            c,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(b_skip)),
+        )?;
+    }
+    em.emit(Instruction::new(Opcode::Integer, 1, matched, 0));
+    let rowid_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Rowid, b_cursor, rowid_reg, 0));
+    em.emit(Instruction::with_p4(
+        Opcode::IdxInsert,
+        eph_cursor,
+        rowid_reg,
+        0,
+        P4::Int(1),
+    ));
+    emit_join_final_row(
+        &mut em,
+        &mut reg,
+        select,
+        &match_scope,
+        end_label,
+        limit.as_ref(),
+        &mut sink,
+    )?;
+    em.place(b_skip);
+    let b_next = em.emit(Instruction::new(Opcode::Next, b_cursor, 0, 0));
+    em.patch_p2(b_next, b_loop);
+    em.place(b_rewind_end);
+
+    let do_null = em.new_label();
+    let after_null = em.new_label();
+    let addr = em.emit(Instruction::new(Opcode::IfNot, matched, 0, 0));
+    em.patch_p2(addr, do_null);
+    em.goto(after_null);
+    em.place(do_null);
+    let mut b_null_bindings = bindings.clone();
+    if let Some(b) = b_null_bindings.get_mut(1) {
+        b.forced_null = true;
+    }
+    let b_null_scope = Scope {
+        tables: b_null_bindings,
+        catalog: schemas.to_vec(),
+        outer: None,
+        dedup_star: dedup_star.clone(),
+    };
+    emit_join_final_row(
+        &mut em,
+        &mut reg,
+        select,
+        &b_null_scope,
+        end_label,
+        limit.as_ref(),
+        &mut sink,
+    )?;
+    em.place(after_null);
+
+    let a_next = em.emit(Instruction::new(Opcode::Next, a_cursor, 0, 0));
+    em.patch_p2(a_next, a_loop);
+    em.place(a_rewind_end);
+
+    // Pass 2: one `A`-nulled row for every `B` rowid pass 1 never
+    // recorded.
+    let b2_rewind_end = em.new_label();
+    let b2_rewind = em.emit(Instruction::new(Opcode::Rewind, b_cursor, 0, 0));
+    em.patch_p2(b2_rewind, b2_rewind_end);
+    let b2_loop = em.new_label();
+    em.place(b2_loop);
+    let b2_skip = em.new_label();
+    let rowid2_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Rowid, b_cursor, rowid2_reg, 0));
+    let found_addr = em.emit(Instruction::with_p4(
+        Opcode::Found,
+        eph_cursor,
+        0,
+        rowid2_reg,
+        P4::Int(1),
+    ));
+    em.patch_p2(found_addr, b2_skip);
+    let mut a_null_bindings = bindings.clone();
+    if let Some(a) = a_null_bindings.get_mut(0) {
+        a.forced_null = true;
+    }
+    let a_null_scope = Scope {
+        tables: a_null_bindings,
+        catalog: schemas.to_vec(),
+        outer: None,
+        dedup_star: dedup_star.clone(),
+    };
+    emit_join_final_row(
+        &mut em,
+        &mut reg,
+        select,
+        &a_null_scope,
+        end_label,
+        limit.as_ref(),
+        &mut sink,
+    )?;
+    em.place(b2_skip);
+    let b2_next = em.emit(Instruction::new(Opcode::Next, b_cursor, 0, 0));
+    em.patch_p2(b2_next, b2_loop);
+    em.place(b2_rewind_end);
+
+    em.place(end_label);
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+    Ok(em.finish())
 }
 
 /// Projects `select`'s result columns against `scope` (a join-aware

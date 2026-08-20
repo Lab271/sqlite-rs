@@ -354,20 +354,20 @@ fn comma_join_is_cross_join_sugar() {
     );
 }
 
-/// Still-unsupported *codegen* constructs (RIGHT/FULL) now parse
-/// cleanly (#250) but must still fail cleanly at the codegen stage as
-/// "not yet supported" — via the interim guard in
-/// `src/codegen/select.rs::compile_select_joined` — not panic or
-/// silently mis-compile. USING/NATURAL codegen landed in this same
-/// #250 follow-up, so they're no longer in this list — see
-/// `using_join_matches_oracle`/`natural_join_matches_oracle`/
-/// `star_dedup_across_using_join` below.
+/// A `FULL JOIN` combined with another join in the same `FROM` clause
+/// is still rejected cleanly (#250's codegen only supports a single
+/// two-table `FULL JOIN` — see
+/// `src/codegen/select.rs::compile_full_join_two_table`'s doc comment)
+/// — not panic or silently mis-compile. RIGHT/FULL JOIN's own
+/// supported shapes now compile and match the oracle — see
+/// `right_join_null_extends_unmatched_left_rows`/
+/// `full_join_matches_oracle_both_sides_unmatched` below.
 #[test]
 fn still_unsupported_join_forms_fail_cleanly() {
     let db = join_fixture_db("unsupported");
     for sql in [
-        "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id",
-        "SELECT * FROM a FULL JOIN b ON a.id = b.a_id",
+        "SELECT * FROM a JOIN b ON a.id = b.a_id FULL JOIN c ON b.id = c.b_id",
+        "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id RIGHT JOIN c ON b.id = c.b_id",
     ] {
         let output = Command::new(CLI)
             .arg("query")
@@ -382,5 +382,80 @@ fn still_unsupported_join_forms_fail_cleanly() {
             "expected an unsupported-construct diagnostic for {sql:?}; got: {stderr}"
         );
         assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+    }
+}
+
+/// `RIGHT JOIN` is codegen'd by reordering to an equivalent `LEFT
+/// JOIN` (`a RIGHT JOIN b` == `b LEFT JOIN a`) — the fixture's
+/// `b_id=12, a_id=99` row has no matching row in `a`, so it must still
+/// appear once with `a`'s columns NULL, same shape as
+/// `left_join_null_extends_unmatched_rows` but with the tables' roles
+/// swapped.
+#[test]
+fn right_join_null_extends_unmatched_rows() {
+    let db = join_fixture_db("right");
+    let output = run_query(
+        &db,
+        "SELECT a.id, a.name, b.id, b.tag FROM a RIGHT JOIN b ON a.id = b.a_id",
+    );
+    assert_eq!(
+        output.lines().count(),
+        3,
+        "2 matching `b` rows plus 1 unmatched (`b_id=12`) = 3 rows; got: {output}"
+    );
+    assert!(
+        output.lines().any(|line| line == "||12|z"),
+        "expected the unmatched b row (id=12, a_id=99) to appear with a's columns NULL; got: \
+         {output}"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT a.id, a.name, b.id, b.tag FROM a RIGHT JOIN b ON a.id = b.a_id",
+        "right_join_null_extends_unmatched_rows",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// A three-way chain with the `RIGHT JOIN` in the middle
+/// (`a JOIN b ... RIGHT JOIN c ...`) still compiles via the same
+/// reordering — the whole `a JOIN b` chain becomes `c`'s null-extended
+/// side.
+#[test]
+fn right_join_three_way_chain_matches_oracle() {
+    let db = join_fixture_db("right_three_way");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.name, b.tag, c.note FROM a JOIN b ON a.id = b.a_id RIGHT JOIN c ON b.id = c.b_id",
+        "right_join_three_way_chain_matches_oracle",
+    );
+}
+
+/// `A FULL JOIN B ON cond`: unmatched rows from *both* sides must
+/// appear — `a.id=3` ('carol') matches no `b` row, and `b.id=12`
+/// (`a_id=99`) matches no `a` row.
+#[test]
+fn full_join_matches_oracle_both_sides_unmatched() {
+    let db = join_fixture_db("full");
+    let output = run_query(
+        &db,
+        "SELECT a.id, a.name, b.id, b.tag FROM a FULL JOIN b ON a.id = b.a_id",
+    );
+    assert!(
+        output.lines().any(|line| line == "3|carol||"),
+        "expected unmatched `a` row (id=3, carol) with b's columns NULL; got: {output}"
+    );
+    assert!(
+        output.lines().any(|line| line == "||12|z"),
+        "expected unmatched `b` row (id=12, a_id=99) with a's columns NULL; got: {output}"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT a.id, a.name, b.id, b.tag FROM a FULL JOIN b ON a.id = b.a_id",
+        "full_join_matches_oracle_both_sides_unmatched",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
     }
 }
