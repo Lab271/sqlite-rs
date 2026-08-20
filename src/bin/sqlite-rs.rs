@@ -15,7 +15,8 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete, compile_drop_index,
-    compile_drop_table, compile_insert, compile_select, compile_update, CodegenError,
+    compile_drop_table, compile_insert, compile_select_joined, compile_select_with_catalog,
+    compile_update, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
@@ -273,16 +274,33 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         Ok(s) => s,
         Err(e) => return fatal(path, &e),
     };
-    let Some(schema) = schemas
-        .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(&from.name))
-    else {
-        return fatal(path, &format!("no such table: {}", from.name));
+    let find_schema = |name: &str| {
+        schemas
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .cloned()
+    };
+    let Some(schema) = find_schema(&from.first.name) else {
+        return fatal(path, &format!("no such table: {}", from.first.name));
     };
 
-    let program = match compile_select(&select, schema) {
-        Ok(p) => p,
-        Err(e) => return fatal(path, &e),
+    let program = if from.joins.is_empty() {
+        match compile_select_with_catalog(&select, &schema, &schemas) {
+            Ok(p) => p,
+            Err(e) => return fatal(path, &e),
+        }
+    } else {
+        let mut joined_schemas = vec![schema];
+        for join in &from.joins {
+            let Some(s) = find_schema(&join.table.name) else {
+                return fatal(path, &format!("no such table: {}", join.table.name));
+            };
+            joined_schemas.push(s);
+        }
+        match compile_select_joined(&select, &joined_schemas) {
+            Ok(p) => p,
+            Err(e) => return fatal(path, &e),
+        }
     };
 
     if explain_flag {
@@ -390,7 +408,13 @@ fn compile_statement(
                         let Some(from) = &select.from else {
                             return Err(fatal(path, &"SELECT has no FROM clause".to_string()));
                         };
-                        Some(find_schema(&from.name)?)
+                        if !from.joins.is_empty() {
+                            return Err(fatal(
+                                path,
+                                &"INSERT ... SELECT with a JOIN is not yet supported".to_string(),
+                            ));
+                        }
+                        Some(find_schema(&from.first.name)?)
                     }
                     sqlite_rs::parser::ast::InsertSource::Values(_)
                     | sqlite_rs::parser::ast::InsertSource::DefaultValues => None,

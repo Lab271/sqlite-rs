@@ -43,7 +43,7 @@ const CASES: &[(&str, Outcome)] = &[
     ("SELECT count(*) FROM t", Outcome::Accept),
     (
         "SELECT * FROM t JOIN t AS t2 ON t.a = t2.a",
-        Outcome::Unsupported,
+        Outcome::Accept,
     ),
     ("SELECT * FROM t, t AS t2", Outcome::Unsupported),
     ("SELECT a FROM t GROUP BY a", Outcome::Unsupported),
@@ -51,7 +51,7 @@ const CASES: &[(&str, Outcome)] = &[
         "SELECT a FROM t UNION SELECT b FROM t",
         Outcome::Unsupported,
     ),
-    ("SELECT (SELECT a FROM t) FROM t", Outcome::Unsupported),
+    ("SELECT (SELECT a FROM t) FROM t", Outcome::Accept),
     (
         "WITH cte AS (SELECT a FROM t) SELECT * FROM cte",
         Outcome::Unsupported,
@@ -87,10 +87,10 @@ const UPDATE_CASES: &[(&str, Outcome)] = &[
     ("UPDATE OR ABORT t SET a=1", Outcome::Accept),
     ("UPDATE OR FAIL t SET a=1", Outcome::Accept),
     ("UPDATE t SET (a, b) = (1, 2)", Outcome::Accept),
-    ("UPDATE t SET a=(SELECT x FROM u)", Outcome::Unsupported),
+    ("UPDATE t SET a=(SELECT x FROM u)", Outcome::Accept),
     (
         "UPDATE t SET a=1 WHERE b IN (SELECT x FROM u)",
-        Outcome::Unsupported,
+        Outcome::Accept,
     ),
     (
         "UPDATE t SET (a, b) = (SELECT x, x FROM u)",

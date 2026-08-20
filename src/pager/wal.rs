@@ -135,7 +135,7 @@ impl WalHeader {
 /// directly) simply ignores the trailing partial word via `chunks_exact`.
 fn checksum(native_checksum: bool, data: &[u8], init: (u32, u32)) -> (u32, u32) {
     let (mut s1, mut s2) = init;
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.as_chunks::<8>().0 {
         let (w0_bytes, w1_bytes) = chunk.split_at(4);
         let w0 = read_word(native_checksum, w0_bytes);
         let w1 = read_word(native_checksum, w1_bytes);

@@ -103,7 +103,15 @@ fn test_reject_update_tuple_set_subquery_rhs_unsupported() {
 /// that the V2 expr grammar doesn't support yet.
 #[test]
 fn test_reject_update_where_subquery_unsupported() {
-    unsupported_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
+    // #238 made `IN (SELECT ...)` a generic WHERE-clause production
+    // shared across SELECT/UPDATE/DELETE, so this now parses; UPDATE's
+    // own codegen (untouched by #238) still doesn't thread a catalog
+    // through to resolve it, so it fails one stage later instead.
+    let update = accept_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
+    assert!(matches!(
+        update.where_clause.map(|w| w.kind),
+        Some(ExprKind::InSubquery { .. })
+    ));
 }
 
 /// Issue #190: missing SET keyword is a syntax error.
@@ -145,7 +153,7 @@ fn invalid(src: &str) -> String {
 fn test_accept_select_star() {
     let select = accept("SELECT * FROM t");
     assert_eq!(select.columns, vec![ResultColumn::Star]);
-    assert_eq!(select.from.unwrap().name, "t");
+    assert_eq!(select.from.unwrap().first.name, "t");
 }
 
 /// Requirement 3, "Preserve column aliases" scenario.
@@ -390,15 +398,18 @@ fn test_parameters() {
 #[test]
 fn test_table_alias() {
     let select = accept("SELECT a FROM t AS x");
-    assert_eq!(select.from.unwrap().alias.as_deref(), Some("x"));
+    assert_eq!(select.from.unwrap().first.alias.as_deref(), Some("x"));
     let select = accept("SELECT a FROM t x");
-    assert_eq!(select.from.unwrap().alias.as_deref(), Some("x"));
+    assert_eq!(select.from.unwrap().first.alias.as_deref(), Some("x"));
 }
 
 // ---- three-way outcome: unsupported ------------------------------------
 
 #[test]
 fn test_unsupported_join() {
+    // A bare `JOIN` with no `ON`/`USING` — real SQL (equivalent to a
+    // constraint-less cross join), but outside #237's `ON`-qualified
+    // MVP scope.
     let msg = unsupported("SELECT * FROM a JOIN b");
     assert!(msg.contains("JOIN"), "message: {msg}");
 }
@@ -407,6 +418,93 @@ fn test_unsupported_join() {
 fn test_unsupported_comma_join() {
     let msg = unsupported("SELECT * FROM a, b");
     assert!(msg.contains("JOIN"), "message: {msg}");
+}
+
+/// #237: `JOIN`/`INNER JOIN ... ON`, `LEFT [OUTER] JOIN ... ON`, and
+/// `CROSS JOIN` (no `ON`) all parse into a `FromClause` with one `Join`
+/// per join step, in source order.
+#[test]
+fn test_accept_inner_join_with_on() {
+    let select = accept("SELECT * FROM a JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.first.name, "a");
+    assert_eq!(from.joins.len(), 1);
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert_eq!(from.joins[0].table.name, "b");
+    assert!(matches!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::On(_))
+    ));
+}
+
+#[test]
+fn test_accept_explicit_inner_join_with_on() {
+    let select = accept("SELECT * FROM a INNER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+}
+
+#[test]
+fn test_accept_left_join_with_on() {
+    let select = accept("SELECT * FROM a LEFT JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Left);
+}
+
+#[test]
+fn test_accept_left_outer_join_with_on() {
+    let select = accept("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Left);
+}
+
+#[test]
+fn test_accept_cross_join_without_on() {
+    let select = accept("SELECT * FROM a CROSS JOIN b");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Cross);
+    assert!(from.joins[0].constraint.is_none());
+}
+
+#[test]
+fn test_accept_multi_way_join_chain() {
+    let select = accept("SELECT * FROM a JOIN b ON a.x = b.y LEFT JOIN c ON b.z = c.w");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins.len(), 2);
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert_eq!(from.joins[0].table.name, "b");
+    assert_eq!(from.joins[1].op, JoinOp::Left);
+    assert_eq!(from.joins[1].table.name, "c");
+}
+
+#[test]
+fn test_unsupported_join_using() {
+    let msg = unsupported("SELECT * FROM a JOIN b USING (x)");
+    assert!(msg.contains("USING"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_natural_join() {
+    let msg = unsupported("SELECT * FROM a NATURAL JOIN b");
+    assert!(msg.contains("NATURAL"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_right_join() {
+    let msg = unsupported("SELECT * FROM a RIGHT JOIN b ON a.x = b.y");
+    assert!(msg.contains("RIGHT"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_full_join() {
+    let msg = unsupported("SELECT * FROM a FULL JOIN b ON a.x = b.y");
+    assert!(msg.contains("FULL"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_cross_join_with_on() {
+    let msg = unsupported("SELECT * FROM a CROSS JOIN b ON a.x = b.y");
+    assert!(msg.contains("CROSS"), "message: {msg}");
 }
 
 #[test]
@@ -422,9 +520,16 @@ fn test_unsupported_group_by() {
 }
 
 #[test]
-fn test_unsupported_subquery() {
-    let msg = unsupported("SELECT (SELECT 1)");
-    assert!(msg.contains("subquery"), "message: {msg}");
+fn test_scalar_subquery_parses() {
+    // #238: scalar subqueries are now a supported expression form.
+    let select = accept("SELECT (SELECT 1)");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!(
+            "expected an Expr result column, got {:?}",
+            select.columns[0]
+        );
+    };
+    assert!(matches!(expr.kind, ExprKind::Subquery(_)));
 }
 
 #[test]
@@ -546,5 +651,112 @@ fn test_deeply_nested_not_rejected_not_crashed() {
     match parse_select(&nested) {
         ParseOutcome::Invalid { .. } => {}
         other => panic!("expected Invalid for pathologically nested input, got {other:?}"),
+    }
+}
+
+// ---- #238: subquery expressions -----------------------------------------
+
+#[test]
+fn test_scalar_subquery_in_where_clause_parses() {
+    let select = accept("SELECT id FROM t WHERE x = (SELECT y FROM u)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    let ExprKind::Binary { rhs, .. } = where_clause.kind else {
+        panic!("expected a Binary comparison, got {:?}", where_clause.kind);
+    };
+    assert!(matches!(rhs.kind, ExprKind::Subquery(_)));
+}
+
+#[test]
+fn test_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE id IN (SELECT a_id FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubquery { negated, .. } => assert!(!negated),
+        other => panic!("expected InSubquery, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_not_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE id NOT IN (SELECT a_id FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubquery { negated, .. } => assert!(negated),
+        other => panic!("expected InSubquery, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_exists_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE EXISTS (SELECT 1 FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::Exists { negated, .. } => assert!(!negated),
+        other => panic!("expected Exists, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_not_exists_subquery_parses_as_exists_negated_not_generic_not() {
+    let select = accept("SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    // Must compile directly to `Exists { negated: true, .. }`, not a
+    // generic `Unary { op: Not, expr: Exists { negated: false, .. } }`
+    // wrapper — mirrors how `NOT IN`/`NOT BETWEEN`/`NOT LIKE` are their
+    // own negated variant rather than a `NOT` wrapper.
+    match where_clause.kind {
+        ExprKind::Exists { negated, .. } => assert!(negated),
+        other => panic!("expected Exists {{ negated: true }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_subquery_in_select_list_parses() {
+    let select = accept("SELECT (SELECT 1)");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!("expected an Expr result column");
+    };
+    assert!(matches!(expr.kind, ExprKind::Subquery(_)));
+}
+
+#[test]
+fn test_exists_requires_a_select() {
+    unsupported("SELECT id FROM t WHERE EXISTS (1, 2)");
+}
+
+#[test]
+fn test_compound_select_inside_subquery_is_unsupported_not_invalid() {
+    let msg = unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
+    assert!(msg.contains("compound"), "message: {msg}");
+}
+
+#[test]
+fn test_subqueries_in_from_still_unsupported() {
+    unsupported("SELECT * FROM (SELECT * FROM t) AS sub");
+}
+
+#[test]
+fn test_quantified_any_comparison_still_unsupported_or_invalid() {
+    match parse_select("SELECT id FROM t WHERE x > ANY (SELECT y FROM u)") {
+        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected ANY comparisons to fail to parse cleanly, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_quantified_all_comparison_still_unsupported_or_invalid() {
+    match parse_select("SELECT id FROM t WHERE x > ALL (SELECT y FROM u)") {
+        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected ALL comparisons to fail to parse cleanly, got {other:?}"),
     }
 }

@@ -116,13 +116,13 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
     let loop_start = em.new_label();
     em.place(loop_start);
 
+    let scope = crate::codegen::Scope::single(schema, TABLE_CURSOR);
     let row_skip = em.new_label();
     if let Some(where_expr) = &update.where_clause {
         compile_cond(
             &mut em,
             &mut reg,
-            schema,
-            TABLE_CURSOR,
+            &scope,
             where_expr,
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
@@ -132,7 +132,7 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
     // rowid — is read from the cursor's *current* row before `Delete`
     // below clears it (`cursor::delete` sets `state.current = None`).
     let rowid_reg = match rowid_alias.and_then(|idx| assigned.get(idx).copied().flatten()) {
-        Some(expr) => compile_value(&mut em, &mut reg, schema, TABLE_CURSOR, expr)?,
+        Some(expr) => compile_value(&mut em, &mut reg, &scope, expr)?,
         None => {
             let r = reg.alloc();
             em.emit(Instruction::new(Opcode::Rowid, TABLE_CURSOR, r, 0));
@@ -149,7 +149,7 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
             continue;
         }
         let r = match expr {
-            Some(expr) => compile_value(&mut em, &mut reg, schema, TABLE_CURSOR, expr)?,
+            Some(expr) => compile_value(&mut em, &mut reg, &scope, expr)?,
             None => {
                 let r = reg.alloc();
                 emit_column_read(&mut em, schema, TABLE_CURSOR, idx, r)?;
@@ -223,8 +223,7 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
             compile_cond(
                 &mut em,
                 &mut reg,
-                &check_schema,
-                CHECK_CURSOR,
+                &crate::codegen::Scope::single(&check_schema, CHECK_CURSOR),
                 expr,
                 CondTargets {
                     on_true: Target::Fallthrough,

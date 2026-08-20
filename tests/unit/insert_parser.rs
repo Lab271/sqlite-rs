@@ -71,7 +71,7 @@ fn test_accept_insert_select() {
     let InsertSource::Select(select) = &insert.source else {
         panic!("expected Select source");
     };
-    assert_eq!(select.from.as_ref().unwrap().name, "other");
+    assert_eq!(select.from.as_ref().unwrap().first.name, "other");
 }
 
 #[test]

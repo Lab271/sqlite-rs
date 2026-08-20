@@ -75,6 +75,31 @@ impl fmt::Display for TableRef {
     }
 }
 
+impl fmt::Display for FromClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.first)?;
+        for join in &self.joins {
+            write!(f, " {join}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Join {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self.op {
+            JoinOp::Inner => "JOIN",
+            JoinOp::Left => "LEFT JOIN",
+            JoinOp::Cross => "CROSS JOIN",
+        };
+        write!(f, "{op} {}", self.table)?;
+        if let Some(JoinConstraint::On(expr)) = &self.constraint {
+            write!(f, " ON {expr}")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for OrderingTerm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.expr)?;
@@ -212,6 +237,25 @@ impl fmt::Display for Expr {
             ExprKind::Cast { expr, type_name } => write!(f, "CAST({expr} AS {type_name})"),
             ExprKind::Collate { expr, collation } => write!(f, "{expr} COLLATE {collation}"),
             ExprKind::Paren(inner) => write!(f, "({inner})"),
+            ExprKind::Subquery(select) => write!(f, "({select})"),
+            ExprKind::Exists { subquery, negated } => {
+                if *negated {
+                    write!(f, "NOT EXISTS ({subquery})")
+                } else {
+                    write!(f, "EXISTS ({subquery})")
+                }
+            }
+            ExprKind::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                if *negated {
+                    write!(f, "{expr} NOT IN ({subquery})")
+                } else {
+                    write!(f, "{expr} IN ({subquery})")
+                }
+            }
         }
     }
 }

@@ -137,7 +137,12 @@ fn compile_column_source(
     source: &ColumnSource,
 ) -> Result<i32, CodegenError> {
     match source {
-        ColumnSource::Expr(expr) => compile_value(em, reg, schema, cursor, expr),
+        ColumnSource::Expr(expr) => compile_value(
+            em,
+            reg,
+            &crate::codegen::Scope::single(schema, cursor),
+            expr,
+        ),
         ColumnSource::Reg(src) => {
             let dest = reg.alloc();
             em.emit(Instruction::new(Opcode::Copy, *src, dest, 0));
@@ -399,6 +404,7 @@ pub fn compile_insert(
                 select_schema,
                 select_cursors,
                 end_label,
+                std::slice::from_ref(select_schema),
                 &mut sink,
             )?;
             em.place(end_label);
@@ -620,8 +626,7 @@ fn compile_row(
             compile_cond(
                 em,
                 reg,
-                check_schema,
-                CHECK_CURSOR,
+                &crate::codegen::Scope::single(check_schema, CHECK_CURSOR),
                 expr,
                 CondTargets {
                     on_true: Target::Fallthrough,
