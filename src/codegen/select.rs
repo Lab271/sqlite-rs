@@ -577,9 +577,9 @@ pub fn explain_query_plan(
                 .and_then(|where_expr| top_level_equality_operands(where_expr))
                 .and_then(|(lhs, rhs)| {
                     if is_rowid_reference(&binding.schema, lhs) {
-                        Some(JoinAccess::Rowid(rhs))
+                        Some(JoinAccess::Rowid(rhs.clone()))
                     } else if is_rowid_reference(&binding.schema, rhs) {
-                        Some(JoinAccess::Rowid(lhs))
+                        Some(JoinAccess::Rowid(lhs.clone()))
                     } else {
                         None
                     }
@@ -661,19 +661,16 @@ fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSch
 /// The access strategy #243's join-level planner picked for a table
 /// binding, in place of an unconditional `Rewind`/`Next` full scan —
 /// see [`choose_join_access`].
-enum JoinAccess<'a> {
+enum JoinAccess {
     /// The `ON` equality's other side is a rowid reference (the
     /// `rowid`/`_rowid_`/`oid` keywords, or the table's `INTEGER PRIMARY
     /// KEY` alias column): a `SeekRowid` point lookup, generalizing
     /// [`try_compile_rowid_seek`] to a join's inner table.
-    Rowid(&'a Expr),
+    Rowid(Expr),
     /// The `ON` equality's other side is a column with a single-column
     /// `UNIQUE` index: a `SeekIndexEq` + `IdxRowid` + `SeekRowid` point
     /// lookup (#243).
-    UniqueIndex {
-        index: IndexSchema,
-        operand: &'a Expr,
-    },
+    UniqueIndex { index: IndexSchema, operand: Expr },
 }
 
 /// Whether `table`/`name` (a `Column` expression's qualifier and column
@@ -717,11 +714,11 @@ fn expr_is_safe_join_probe(expr: &Expr, prior_bindings: &[TableBinding]) -> bool
 /// considered — a non-unique index could match more than one row, which
 /// this seek-once codegen shape can't express (see the module doc's
 /// LEFT JOIN "matched" flag: it assumes at most one inner-side match).
-fn choose_join_access<'a>(
+fn choose_join_access(
     binding: &TableBinding,
-    on_expr: &'a Expr,
+    on_expr: &Expr,
     prior_bindings: &[TableBinding],
-) -> Option<JoinAccess<'a>> {
+) -> Option<JoinAccess> {
     let (lhs, rhs) = top_level_equality_operands(on_expr)?;
     let (this_side, other_side) = if matches!(&lhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
     {
@@ -736,7 +733,7 @@ fn choose_join_access<'a>(
         return None;
     }
     if is_rowid_reference(&binding.schema, this_side) {
-        return Some(JoinAccess::Rowid(other_side));
+        return Some(JoinAccess::Rowid(other_side.clone()));
     }
     let ExprKind::Column { name, .. } = &this_side.kind else {
         return None;
@@ -751,7 +748,7 @@ fn choose_join_access<'a>(
     })?;
     Some(JoinAccess::UniqueIndex {
         index: index.clone(),
-        operand: other_side,
+        operand: other_side.clone(),
     })
 }
 
@@ -870,13 +867,13 @@ where
             let miss = em.new_label();
             match access {
                 JoinAccess::Rowid(operand) => {
-                    let value_reg = compile_value(em, reg, &scope, operand)?;
+                    let value_reg = compile_value(em, reg, &scope, &operand)?;
                     let seek_addr =
                         em.emit(Instruction::new(Opcode::SeekRowid, cursor, 0, value_reg));
                     em.patch_p2(seek_addr, miss);
                 }
                 JoinAccess::UniqueIndex { index, operand } => {
-                    let value_reg = compile_value(em, reg, &scope, operand)?;
+                    let value_reg = compile_value(em, reg, &scope, &operand)?;
                     let index_cursor =
                         i32::try_from(bindings.len().saturating_add(level)).unwrap_or(i32::MAX);
                     let root_page = i32::try_from(index.root_page).unwrap_or(0);
