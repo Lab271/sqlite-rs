@@ -5,9 +5,14 @@
 //! `(* V4 *)`-tagged rules: SELECT with an INNER/LEFT [OUTER]/CROSS join
 //! chain (`FromClause`/`Join`/`JoinOp`/`JoinConstraint`, #237), WHERE,
 //! ORDER BY, LIMIT/OFFSET, the V2 expression grammar, INSERT/UPDATE/
-//! DELETE, and CREATE/DROP TABLE/INDEX. NATURAL/RIGHT/FULL joins, `USING`,
-//! comma-style joins, and subqueries in FROM (#238) do not exist here at
-//! all, nor does GROUP BY/HAVING/FOREIGN KEY/REFERENCES (V8).
+//! DELETE, and CREATE/DROP TABLE/INDEX, plus the V4 non-correlated
+//! subquery-expression slice (#238): scalar subqueries (`ExprKind::
+//! Subquery`), `IN (SELECT ...)` (`ExprKind::InSubquery`), and `EXISTS
+//! (SELECT ...)` (`ExprKind::Exists`). NATURAL/RIGHT/FULL joins, `USING`,
+//! comma-style joins, subqueries in FROM, `ANY`/`ALL`/`SOME` quantified
+//! comparisons, multi-column `IN`, and correlated subqueries (rejected at
+//! codegen time, not represented differently in the AST) do not exist
+//! here at all, nor does GROUP BY/HAVING/FOREIGN KEY/REFERENCES (V8).
 //!
 //! Every node carries a [`Span`] (Requirement 3: "AST completeness") and
 //! parenthesized expressions are preserved explicitly via `ExprKind::Paren`
@@ -190,6 +195,21 @@ pub enum ExprKind {
     /// A parenthesized expression, preserved explicitly (Requirement 3's
     /// "preserve parentheses for precedence" scenario).
     Paren(Box<Expr>),
+    /// A scalar subquery `(SELECT ...)` (#238) — usable anywhere an
+    /// expression is. Non-correlated only; codegen rejects a reference
+    /// to an enclosing query's column with `CodegenError::Unsupported`.
+    Subquery(Box<Select>),
+    /// `EXISTS (SELECT ...)` / `NOT EXISTS (SELECT ...)` (#238).
+    Exists { subquery: Box<Select>, negated: bool },
+    /// `expr IN (SELECT ...)` / `expr NOT IN (SELECT ...)` (#238) — kept
+    /// separate from [`ExprKind::In`]'s literal-list form rather than a
+    /// union, so callers pattern-matching on `In` don't need to handle a
+    /// subquery case.
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<Select>,
+        negated: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

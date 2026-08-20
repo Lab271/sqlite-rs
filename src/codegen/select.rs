@@ -89,6 +89,20 @@ impl ScanCursors {
 /// [`compile_select_joined`] instead. Subqueries in `FROM` (#238)
 /// aren't represented in the AST at all yet.
 pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, CodegenError> {
+    compile_select_with_catalog(select, schema, std::slice::from_ref(schema))
+}
+
+/// [`compile_select`], plus `catalog` — the full table catalog (#238),
+/// used to resolve a scalar/`IN`/`EXISTS` subquery expression's own
+/// `FROM` table when it names a table other than `schema` itself.
+/// `compile_select` is the common case (no cross-table subquery
+/// support needed, or a subquery that only ever selects from `schema`
+/// itself) and just calls through with `catalog = [schema]`.
+pub fn compile_select_with_catalog(
+    select: &Select,
+    schema: &TableSchema,
+    catalog: &[TableSchema],
+) -> Result<Program, CodegenError> {
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
     };
@@ -122,7 +136,7 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
         Ok(())
     };
     compile_select_scan(
-        &mut em, &mut reg, select, schema, cursors, end_label, &mut sink,
+        &mut em, &mut reg, select, schema, cursors, end_label, catalog, &mut sink,
     )?;
 
     em.place(end_label);
@@ -138,6 +152,7 @@ pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, 
 /// different per-row `sink` in place of `ResultRow`. Generic over `sink`
 /// (rather than a `dyn FnMut` trait object) per this codebase's
 /// qualified-subset gate (`make mvl-limit`) — no dynamic dispatch.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_select_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -145,6 +160,7 @@ pub(crate) fn compile_select_scan<F>(
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -152,7 +168,7 @@ where
 {
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
-        compile_direct_scan(em, reg, select, schema, cursors, end_label, sink)
+        compile_direct_scan(em, reg, select, schema, cursors, end_label, catalog, sink)
     } else {
         compile_sorted_scan(
             em,
@@ -162,6 +178,7 @@ where
             &order_by_plans,
             cursors,
             end_label,
+            catalog,
             sink,
         )
     }
@@ -264,6 +281,7 @@ pub fn compile_select_joined(
 
     let full_scope = Scope {
         tables: bindings.clone(),
+        catalog: schemas.to_vec(),
     };
     let limit = compile_limit_setup(&mut em, &mut reg, &full_scope, select)?;
 
@@ -284,6 +302,7 @@ pub fn compile_select_joined(
         0,
         end_label,
         limit.as_ref(),
+        schemas,
         &mut sink,
     )?;
 
@@ -298,7 +317,7 @@ pub fn compile_select_joined(
 /// branch, see [`compile_join_level`]) forces binding `i`'s
 /// `forced_null` flag on for this recursion branch only — the shared
 /// `bindings` vec itself is never mutated.
-fn join_scope(bindings: &[TableBinding], null_mask: &[bool]) -> Scope {
+fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSchema]) -> Scope {
     Scope {
         tables: bindings
             .iter()
@@ -311,6 +330,7 @@ fn join_scope(bindings: &[TableBinding], null_mask: &[bool]) -> Scope {
                 forced_null: forced_null || b.forced_null,
             })
             .collect(),
+        catalog: catalog.to_vec(),
     }
 }
 
@@ -348,13 +368,14 @@ fn compile_join_level<F>(
     level: usize,
     end_label: Label,
     limit: Option<&LimitState>,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     if level == bindings.len() {
-        let scope = join_scope(bindings, null_mask);
+        let scope = join_scope(bindings, null_mask, catalog);
         let row_skip = em.new_label();
         if let Some(where_expr) = &select.where_clause {
             compile_cond(
@@ -402,7 +423,7 @@ where
 
     let skip = em.new_label();
     if let Some(on_expr) = &on_expr {
-        let scope = join_scope(bindings, null_mask);
+        let scope = join_scope(bindings, null_mask, catalog);
         compile_cond(
             em,
             reg,
@@ -416,7 +437,8 @@ where
     }
     let next_level = level.saturating_add(1);
     compile_join_level(
-        em, reg, select, bindings, ops, constraints, null_mask, next_level, end_label, limit, sink,
+        em, reg, select, bindings, ops, constraints, null_mask, next_level, end_label, limit,
+        catalog, sink,
     )?;
     em.place(skip);
     let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
@@ -439,7 +461,7 @@ where
         }
         compile_join_level(
             em, reg, select, bindings, ops, constraints, null_mask, next_level, end_label, limit,
-            sink,
+            catalog, sink,
         )?;
         if let Some(slot) = null_mask.get_mut(level) {
             *slot = false;
@@ -719,6 +741,7 @@ fn compile_row_values(
     cols: &[ResultColumnPlan],
     cursor: i32,
     pseudo: bool,
+    catalog: &[TableSchema],
 ) -> Result<(i32, usize), CodegenError> {
     // Each column is compiled into whatever register the bump
     // allocator hands out next (not pre-reserved), since a compound
@@ -806,10 +829,20 @@ fn compile_row_values(
                         ));
                         r
                     } else {
-                        compile_value(em, reg, &Scope::single(schema, cursor), expr)?
+                        compile_value(
+                            em,
+                            reg,
+                            &Scope::single(schema, cursor).with_catalog(catalog.to_vec()),
+                            expr,
+                        )?
                     }
                 } else {
-                    compile_value(em, reg, &Scope::single(schema, cursor), expr)?
+                    compile_value(
+                        em,
+                        reg,
+                        &Scope::single(schema, cursor).with_catalog(catalog.to_vec()),
+                        expr,
+                    )?
                 }
             }
         };
@@ -841,6 +874,7 @@ fn compile_row_values(
 /// `ResultRow`, so this same call site works for `compile_select`
 /// (whose sink emits `ResultRow`) and #208's `INSERT ... SELECT` (whose
 /// sink feeds the row into `insert.rs`'s per-row write path).
+#[allow(clippy::too_many_arguments)]
 fn emit_row_via_sink<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -848,13 +882,14 @@ fn emit_row_via_sink<F>(
     schema: &TableSchema,
     cursor: i32,
     pseudo: bool,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     let cols = result_columns(select, schema);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo)?;
+    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
     sink(em, reg, first, i32::try_from(count).unwrap_or(0))
 }
 
@@ -868,12 +903,13 @@ fn emit_distinct_guard(
     pseudo: bool,
     distinct_cursor: i32,
     skip_label: Label,
+    catalog: &[TableSchema],
 ) -> Result<(), CodegenError> {
     if !matches!(select.distinct, Some(Distinctness::Distinct)) {
         return Ok(());
     }
     let cols = result_columns(select, schema);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo)?;
+    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
     let count = i32::try_from(count).unwrap_or(0);
     let addr = em.emit(Instruction::with_p4(
         Opcode::Found,
@@ -995,6 +1031,7 @@ fn try_compile_rowid_seek<F>(
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<bool, CodegenError>
 where
@@ -1034,7 +1071,7 @@ where
         return Ok(false);
     }
 
-    let scope = Scope::single(schema, cursors.table);
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
     let value_reg = compile_value(em, reg, &scope, operand)?;
     let seek_addr = em.emit(Instruction::new(
@@ -1049,7 +1086,7 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, false, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
@@ -1057,6 +1094,7 @@ where
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_direct_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -1064,12 +1102,13 @@ fn compile_direct_scan<F>(
     schema: &TableSchema,
     cursors: ScanCursors,
     end_label: Label,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
-    if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, sink)? {
+    if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, catalog, sink)? {
         return Ok(());
     }
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
@@ -1080,7 +1119,7 @@ where
             0,
         ));
     }
-    let scope = Scope::single(schema, cursors.table);
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
 
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
@@ -1110,11 +1149,12 @@ where
         false,
         cursors.distinct,
         row_skip,
+        catalog,
     )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, false, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
@@ -1134,6 +1174,7 @@ fn compile_sorted_scan<F>(
     order_by_plans: &[OrderByPlan],
     cursors: ScanCursors,
     end_label: Label,
+    catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -1173,7 +1214,7 @@ where
     let scan_loop = em.new_label();
     em.place(scan_loop);
 
-    let scope = Scope::single(schema, cursors.table);
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let scan_skip = em.new_label();
     if let Some(where_expr) = &select.where_clause {
         compile_cond(
@@ -1198,6 +1239,7 @@ where
             .collect::<Vec<_>>(),
         cursors.table,
         false,
+        catalog,
     )?;
 
     // Compute every genuine-expression sort key into its own register,
@@ -1286,11 +1328,12 @@ where
         true,
         cursors.distinct,
         row_skip,
+        catalog,
     )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }

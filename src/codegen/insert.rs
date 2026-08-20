@@ -401,6 +401,7 @@ pub fn compile_insert(
                 select_schema,
                 select_cursors,
                 end_label,
+                std::slice::from_ref(select_schema),
                 &mut sink,
             )?;
             em.place(end_label);

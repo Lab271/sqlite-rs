@@ -15,7 +15,8 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete, compile_drop_index,
-    compile_drop_table, compile_insert, compile_select, compile_select_joined, compile_update,
+    compile_drop_table, compile_insert, compile_select_joined, compile_select_with_catalog,
+    compile_update,
     CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
@@ -285,7 +286,7 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
     };
 
     let program = if from.joins.is_empty() {
-        match compile_select(&select, &schema) {
+        match compile_select_with_catalog(&select, &schema, &schemas) {
             Ok(p) => p,
             Err(e) => return fatal(path, &e),
         }

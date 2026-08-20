@@ -1104,6 +1104,10 @@ impl Parser {
         self.with_depth_guard(|this| {
             if this.at_kw(Keyword::NOT) {
                 let start = this.advance().span;
+                if this.at_kw(Keyword::EXISTS) {
+                    this.advance();
+                    return this.exists_tail(start, true);
+                }
                 let inner = this.not_expr()?;
                 let span = join_span(start, inner.span);
                 return Ok(Expr {
@@ -1246,13 +1250,61 @@ impl Parser {
         Ok((lo, hi))
     }
 
+    /// `EXISTS (SELECT ...)` / `NOT EXISTS (SELECT ...)` — `start` is the
+    /// span of the `EXISTS`/`NOT` token this tail follows, and anything
+    /// after `EXISTS (` that isn't a `SELECT` is still `unsupported`
+    /// (subqueries in FROM, `ANY`/`ALL`/`SOME`, etc. all parse a `SELECT`
+    /// here so this stays narrow).
+    fn exists_tail(&mut self, start: Span, negated: bool) -> PResult<Expr> {
+        self.expect_punct(TokenKind::LParen, "'(' after EXISTS")?;
+        if !self.at_kw(Keyword::SELECT) {
+            return self.unsupported("EXISTS ( ... ) requires a SELECT subquery");
+        }
+        let subquery = self.parse_select_stmt()?;
+        if matches!(
+            self.peek().kind,
+            TokenKind::Keyword(Keyword::UNION)
+                | TokenKind::Keyword(Keyword::INTERSECT)
+                | TokenKind::Keyword(Keyword::EXCEPT)
+        ) {
+            return self.unsupported("compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported");
+        }
+        let end = self.expect_punct(TokenKind::RParen, "')' to close EXISTS subquery")?;
+        let span = join_span(start, end);
+        Ok(Expr {
+            kind: ExprKind::Exists {
+                subquery: Box::new(subquery),
+                negated,
+            },
+            span,
+        })
+    }
+
     fn in_tail(&mut self, lhs: Expr, negated: bool) -> PResult<Expr> {
         if !matches!(self.peek().kind, TokenKind::LParen) {
             return self.unsupported("IN <table-name> not yet supported");
         }
         self.expect_punct(TokenKind::LParen, "'(' after IN")?;
         if self.at_kw(Keyword::SELECT) {
-            return self.unsupported("IN (subquery) not yet supported");
+            let subquery = self.parse_select_stmt()?;
+        if matches!(
+            self.peek().kind,
+            TokenKind::Keyword(Keyword::UNION)
+                | TokenKind::Keyword(Keyword::INTERSECT)
+                | TokenKind::Keyword(Keyword::EXCEPT)
+        ) {
+            return self.unsupported("compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported");
+        }
+            let end = self.expect_punct(TokenKind::RParen, "')' to close IN subquery")?;
+            let span = join_span(lhs.span, end);
+            return Ok(Expr {
+                kind: ExprKind::InSubquery {
+                    expr: Box::new(lhs),
+                    subquery: Box::new(subquery),
+                    negated,
+                },
+                span,
+            });
         }
         let list = if matches!(self.peek().kind, TokenKind::RParen) {
             Vec::new()
@@ -1480,7 +1532,9 @@ impl Parser {
             TokenKind::Keyword(Keyword::CASE) => self.case_expr(),
             TokenKind::Keyword(Keyword::CAST) => self.cast_expr(),
             TokenKind::Keyword(Keyword::EXISTS) => {
-                self.unsupported("EXISTS (subquery) not yet supported")
+                let start = tok.span;
+                self.advance();
+                self.exists_tail(start, false)
             }
             TokenKind::Identifier(name) => {
                 self.advance();
@@ -1528,7 +1582,21 @@ impl Parser {
             TokenKind::LParen => {
                 self.advance();
                 if self.at_kw(Keyword::SELECT) {
-                    return self.unsupported("subquery expressions not yet supported");
+                    let subquery = self.parse_select_stmt()?;
+        if matches!(
+            self.peek().kind,
+            TokenKind::Keyword(Keyword::UNION)
+                | TokenKind::Keyword(Keyword::INTERSECT)
+                | TokenKind::Keyword(Keyword::EXCEPT)
+        ) {
+            return self.unsupported("compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported");
+        }
+                    let end = self.expect_punct(TokenKind::RParen, "')' to close subquery")?;
+                    let span = join_span(tok.span, end);
+                    return Ok(Expr {
+                        kind: ExprKind::Subquery(Box::new(subquery)),
+                        span,
+                    });
                 }
                 let inner = self.expr()?;
                 let end = self.expect_punct(TokenKind::RParen, "')' to close expression")?;

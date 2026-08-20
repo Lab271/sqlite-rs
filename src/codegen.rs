@@ -13,6 +13,7 @@ pub mod expr;
 pub(crate) mod index_maintenance;
 pub mod insert;
 pub mod select;
+pub(crate) mod subquery;
 pub mod update;
 
 pub use create_index::compile_create_index;
@@ -21,7 +22,7 @@ pub use delete::compile_delete;
 pub use drop_index::compile_drop_index;
 pub use drop_table::compile_drop_table;
 pub use insert::compile_insert;
-pub use select::{compile_select, compile_select_joined, CodegenError};
+pub use select::{compile_select, compile_select_joined, compile_select_with_catalog, CodegenError};
 pub use update::compile_update;
 
 use std::collections::HashMap;
@@ -203,18 +204,46 @@ impl Emitter {
 /// correct scheme for V2's scope; SQLite's real register allocator
 /// reuses freed slots, which this deliberately does not (known
 /// simplification, not a TODO to chase further).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RegAlloc {
     next: i32,
     /// Next bind-parameter index to hand out for a bare `?`
     /// (`ParamKind::Anonymous`) — 1-based, matching SQLite's
     /// `sqlite3_bind_*` convention and `Opcode::Variable`'s `P1`.
     next_param: u32,
+    /// Next cursor number to hand out for a subquery's own scan (#238) —
+    /// started well above every fixed cursor constant this compiler's
+    /// other features use (`TABLE_CURSOR`/`SORT_CURSOR`/`PSEUDO_CURSOR`/
+    /// `DISTINCT_CURSOR`, plus one per joined table), so a subquery's
+    /// cursor never collides with the enclosing query's — subqueries in
+    /// the same statement are never open concurrently (each fully scans
+    /// and closes over before the next expression compiles), so a
+    /// single monotonically-increasing counter suffices without needing
+    /// to reason about lifetimes across subqueries.
+    next_cursor: i32,
+}
+
+impl Default for RegAlloc {
+    fn default() -> Self {
+        RegAlloc {
+            next: 0,
+            next_param: 0,
+            next_cursor: 1000,
+        }
+    }
 }
 
 impl RegAlloc {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Hands out a fresh cursor number for a subquery's own table scan
+    /// or ephemeral materialization (#238).
+    pub(crate) fn alloc_cursor(&mut self) -> i32 {
+        let c = self.next_cursor;
+        self.next_cursor = self.next_cursor.saturating_add(1);
+        c
     }
 
     pub(crate) fn alloc(&mut self) -> i32 {
@@ -299,9 +328,21 @@ impl TableBinding {
 /// table for a join chain (#237). [`Scope::resolve`] is the single entry
 /// point `expr.rs` uses instead of the old `schema: &TableSchema, cursor:
 /// i32` parameter pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Scope {
     pub(crate) tables: Vec<TableBinding>,
+    /// The full table catalog (#238), used only to resolve a subquery
+    /// expression's (`Subquery`/`Exists`/`InSubquery`) own `FROM` table
+    /// — a subquery may name a table that isn't part of the enclosing
+    /// query's own `FROM` clause at all, so `tables` above (the
+    /// enclosing scope's own bindings) isn't enough. Empty for every
+    /// caller that never compiles a subquery-bearing expression (most
+    /// of `delete.rs`/`insert.rs`/`update.rs`, and any `Scope::single`/
+    /// literal-construction call site that hasn't opted in via
+    /// [`Scope::with_catalog`]) — a subquery reached through one of
+    /// those compiles to `CodegenError::Unsupported` (no table found)
+    /// rather than silently resolving against the wrong catalog.
+    pub(crate) catalog: Vec<crate::schema::TableSchema>,
 }
 
 impl Scope {
@@ -317,7 +358,16 @@ impl Scope {
                 cursor,
                 forced_null: false,
             }],
+            catalog: Vec::new(),
         }
+    }
+
+    /// Attaches the full table catalog (#238) so subquery expressions
+    /// compiled against this scope can resolve their own `FROM` table
+    /// even when it isn't one of `tables` above.
+    pub(crate) fn with_catalog(mut self, catalog: Vec<crate::schema::TableSchema>) -> Self {
+        self.catalog = catalog;
+        self
     }
 
     /// Resolves a `table.name`/bare `name` column reference to

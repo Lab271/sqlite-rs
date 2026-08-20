@@ -103,7 +103,15 @@ fn test_reject_update_tuple_set_subquery_rhs_unsupported() {
 /// that the V2 expr grammar doesn't support yet.
 #[test]
 fn test_reject_update_where_subquery_unsupported() {
-    unsupported_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
+    // #238 made `IN (SELECT ...)` a generic WHERE-clause production
+    // shared across SELECT/UPDATE/DELETE, so this now parses; UPDATE's
+    // own codegen (untouched by #238) still doesn't thread a catalog
+    // through to resolve it, so it fails one stage later instead.
+    let update = accept_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
+    assert!(matches!(
+        update.where_clause.map(|w| w.kind),
+        Some(ExprKind::InSubquery { .. })
+    ));
 }
 
 /// Issue #190: missing SET keyword is a syntax error.
@@ -512,9 +520,13 @@ fn test_unsupported_group_by() {
 }
 
 #[test]
-fn test_unsupported_subquery() {
-    let msg = unsupported("SELECT (SELECT 1)");
-    assert!(msg.contains("subquery"), "message: {msg}");
+fn test_scalar_subquery_parses() {
+    // #238: scalar subqueries are now a supported expression form.
+    let select = accept("SELECT (SELECT 1)");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!("expected an Expr result column, got {:?}", select.columns[0]);
+    };
+    assert!(matches!(expr.kind, ExprKind::Subquery(_)));
 }
 
 #[test]
@@ -636,5 +648,112 @@ fn test_deeply_nested_not_rejected_not_crashed() {
     match parse_select(&nested) {
         ParseOutcome::Invalid { .. } => {}
         other => panic!("expected Invalid for pathologically nested input, got {other:?}"),
+    }
+}
+
+// ---- #238: subquery expressions -----------------------------------------
+
+#[test]
+fn test_scalar_subquery_in_where_clause_parses() {
+    let select = accept("SELECT id FROM t WHERE x = (SELECT y FROM u)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    let ExprKind::Binary { rhs, .. } = where_clause.kind else {
+        panic!("expected a Binary comparison, got {:?}", where_clause.kind);
+    };
+    assert!(matches!(rhs.kind, ExprKind::Subquery(_)));
+}
+
+#[test]
+fn test_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE id IN (SELECT a_id FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubquery { negated, .. } => assert!(!negated),
+        other => panic!("expected InSubquery, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_not_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE id NOT IN (SELECT a_id FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubquery { negated, .. } => assert!(negated),
+        other => panic!("expected InSubquery, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_exists_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE EXISTS (SELECT 1 FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::Exists { negated, .. } => assert!(!negated),
+        other => panic!("expected Exists, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_not_exists_subquery_parses_as_exists_negated_not_generic_not() {
+    let select = accept("SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM other)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    // Must compile directly to `Exists { negated: true, .. }`, not a
+    // generic `Unary { op: Not, expr: Exists { negated: false, .. } }`
+    // wrapper — mirrors how `NOT IN`/`NOT BETWEEN`/`NOT LIKE` are their
+    // own negated variant rather than a `NOT` wrapper.
+    match where_clause.kind {
+        ExprKind::Exists { negated, .. } => assert!(negated),
+        other => panic!("expected Exists {{ negated: true }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_subquery_in_select_list_parses() {
+    let select = accept("SELECT (SELECT 1)");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!("expected an Expr result column");
+    };
+    assert!(matches!(expr.kind, ExprKind::Subquery(_)));
+}
+
+#[test]
+fn test_exists_requires_a_select() {
+    unsupported("SELECT id FROM t WHERE EXISTS (1, 2)");
+}
+
+#[test]
+fn test_compound_select_inside_subquery_is_unsupported_not_invalid() {
+    let msg = unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
+    assert!(msg.contains("compound"), "message: {msg}");
+}
+
+#[test]
+fn test_subqueries_in_from_still_unsupported() {
+    unsupported("SELECT * FROM (SELECT * FROM t) AS sub");
+}
+
+#[test]
+fn test_quantified_any_comparison_still_unsupported_or_invalid() {
+    match parse_select("SELECT id FROM t WHERE x > ANY (SELECT y FROM u)") {
+        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected ANY comparisons to fail to parse cleanly, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_quantified_all_comparison_still_unsupported_or_invalid() {
+    match parse_select("SELECT id FROM t WHERE x > ALL (SELECT y FROM u)") {
+        ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => {}
+        other => panic!("expected ALL comparisons to fail to parse cleanly, got {other:?}"),
     }
 }

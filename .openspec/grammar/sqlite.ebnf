@@ -119,8 +119,9 @@ equality-tail   ::= ( "=" | "==" | "!=" | "<>" ) relational-expr          (* V2 
                   | "NOTNULL" | "NOT" "NULL"                              (* V2 [parse.y expr ::= expr NOTNULL] *)
                   | [ "NOT" ] "BETWEEN" relational-expr "AND" relational-expr
                                                                           (* V2 [parse.y expr ::= expr between_op] *)
-                  | [ "NOT" ] "IN" "(" [ expr-list ] ")"                  (* V2 [parse.y expr ::= expr in_op LP exprlist RP]
-                                                                             V4: IN (select-stmt), IN table-name *)
+                  | [ "NOT" ] "IN" "(" [ expr-list ] ")"                  (* V2 [parse.y expr ::= expr in_op LP exprlist RP] *)
+                  | [ "NOT" ] "IN" "(" select-stmt ")"                   (* V4 [parse.y expr ::= expr in_op LP select RP] --
+                                                                             #238: non-correlated only; IN table-name still stubbed below *)
                   | [ "NOT" ] like-op relational-expr [ "ESCAPE" relational-expr ] ;
                                                                           (* V2 [parse.y expr ::= expr likeop expr] *)
 like-op         ::= "LIKE" | "GLOB" ;                                     (* V2; "REGEXP"|"MATCH" V7+ (need functions) *)
@@ -139,8 +140,13 @@ primary-expr    ::= literal-value                                         (* V2 
                   | function-call                                         (* V2 [parse.y:1235] *)
                   | case-expr                                             (* V2 [parse.y expr ::= CASE case_operand case_exprlist case_else END] *)
                   | cast-expr                                             (* V2 [parse.y expr ::= CAST LP expr AS typetoken RP] *)
-                  | "(" expr ")" ;                                        (* V2 [parse.y:1176] *)
-                  (* V4: ( select-stmt ), EXISTS ( select-stmt ); V9: RAISE *)
+                  | "(" expr ")"                                          (* V2 [parse.y:1176] *)
+                  | "(" select-stmt ")"                                   (* V4 [parse.y expr ::= LP select RP] --
+                                                                             #238: scalar subquery, non-correlated only *)
+                  | [ "NOT" ] "EXISTS" "(" select-stmt ")" ;               (* V4 [parse.y expr ::= EXISTS LP select RP] --
+                                                                             #238: NOT EXISTS is this crate's own negated
+                                                                             variant, not a generic NOT wrapper *)
+                  (* V9: RAISE *)
 
 case-expr       ::= "CASE" [ expr ] ( "WHEN" expr "THEN" expr ) { "WHEN" expr "THEN" expr }
                      [ "ELSE" expr ] "END" ;                              (* V2 *)
@@ -234,7 +240,11 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
 (* ===================== Future blocks (stubs -- the denominator) =====================
  * V4:  NATURAL/RIGHT/FULL joins, USING (...), comma-style FROM a, b
  *      (#237 landed the INNER/LEFT [OUTER]/CROSS `JOIN ... ON` subset --
- *      see from-clause/join-op above), subqueries (expr + FROM, #238),
+ *      see from-clause/join-op above), subqueries in FROM (table-valued),
+ *      ANY/ALL/SOME quantified comparisons, multi-column IN, correlated
+ *      subqueries (#238 landed non-correlated scalar/IN/EXISTS subquery
+ *      expressions -- see equality-tail/primary-expr above; correlation
+ *      is rejected at codegen time, not a distinct grammar production),
  *      compound-select (UNION/INTERSECT/EXCEPT), GROUP BY / HAVING,
  *      WITH/CTEs (incl. RECURSIVE), CREATE VIEW, aggregate fns
  * V5:  BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE

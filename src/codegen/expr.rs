@@ -395,6 +395,31 @@ pub(crate) fn compile_cond(
             Ok(())
         }
 
+        // #238: EXISTS/NOT EXISTS never has an unknown outcome (see
+        // `subquery::compile_exists`'s doc comment), so `targets` is
+        // handed through as-is rather than materialized via
+        // `compile_bool_to_value`.
+        ExprKind::Exists { subquery, negated } => {
+            crate::codegen::subquery::compile_exists(em, reg, scope, subquery, *negated, targets)
+        }
+
+        ExprKind::InSubquery {
+            expr: inner,
+            subquery,
+            negated,
+        } => crate::codegen::subquery::compile_in_subquery(
+            em, reg, scope, inner, subquery, *negated, targets,
+        ),
+
+        // A scalar subquery used directly as a boolean condition (e.g.
+        // `WHERE (SELECT x FROM t)`): compute its value, then test
+        // truthiness like any other value-mode boolean.
+        ExprKind::Subquery(_) => {
+            let r = compile_value(em, reg, scope, expr)?;
+            finish_truthy(em, r, targets);
+            Ok(())
+        }
+
         // Any other expression used in boolean context (a bare column,
         // a function call, CASE, etc.): evaluate to a value and test
         // truthiness the same way as LIKE above.
@@ -497,7 +522,7 @@ fn finish_bool(
 /// destination, returning whether that label still needs `em.place`-ing
 /// (i.e. it was freshly synthesized for a `Fallthrough` target rather
 /// than an already-real `Jump`).
-fn ensure_label(em: &mut Emitter, target: Target) -> (Label, bool) {
+pub(crate) fn ensure_label(em: &mut Emitter, target: Target) -> (Label, bool) {
     match target {
         Target::Jump(l) => (l, false),
         Target::Fallthrough => (em.new_label(), true),
@@ -1115,7 +1140,15 @@ pub(crate) fn compile_value(
         ExprKind::Is { .. }
         | ExprKind::IsNull { .. }
         | ExprKind::Between { .. }
-        | ExprKind::In { .. } => compile_bool_to_value(em, reg, scope, expr),
+        | ExprKind::In { .. }
+        | ExprKind::Exists { .. }
+        | ExprKind::InSubquery { .. } => compile_bool_to_value(em, reg, scope, expr),
+
+        // #238: a scalar subquery in value position — `SELECT (SELECT
+        // max(x) FROM t)`, `x = (SELECT ...)`, etc.
+        ExprKind::Subquery(subquery) => {
+            crate::codegen::subquery::compile_scalar_subquery(em, reg, scope, subquery)
+        }
     }
 }
 
@@ -1225,7 +1258,10 @@ fn emit_branch_into(
 fn is_definite(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Paren(inner) => is_definite(inner),
-        ExprKind::Is { .. } | ExprKind::IsNull { .. } => true,
+        // #238: EXISTS is always definitely true or false (see
+        // `subquery::compile_exists`'s doc comment) — unlike
+        // `InSubquery`, whose NULL-LHS case really is unknown.
+        ExprKind::Is { .. } | ExprKind::IsNull { .. } | ExprKind::Exists { .. } => true,
         _ => false,
     }
 }

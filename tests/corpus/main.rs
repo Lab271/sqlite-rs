@@ -33,4 +33,5 @@ mod parser_oracle_test;
 mod regen_test;
 mod schema_test;
 mod sql_corpus_test;
+mod subquery_test;
 mod unique_constraint_test;
