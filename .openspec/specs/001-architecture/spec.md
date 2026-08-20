@@ -319,7 +319,7 @@ sqlite-rs MUST read and write files byte-compatible with SQLite 3.x.
 
 Each layer MUST communicate only through its defined interface. No layer SHALL reach into another layer's internals.
 
-**Implementation:** `src/lib.rs` (planned)
+**Implementation:** `src/vfs/`, `src/pager/`, `src/btree/`, `src/vdbe/`, `src/codegen/`, `src/parser/`
 
 #### Scenario: B-tree does not know SQL
 
@@ -337,9 +337,9 @@ Each layer MUST communicate only through its defined interface. No layer SHALL r
 
 sqlite-rs MUST read and write files that SQLite 3.x can read and write.
 
-**Implementation:** `src/lib.rs` (planned)
+**Implementation:** `src/header.rs`, `src/pager/`, `src/btree/`
 
-**Tests:** `tests/corpus/harness.rs` (planned)
+**Tests:** `tests/corpus/harness.rs`
 
 #### Scenario: Read SQLite file
 
@@ -373,7 +373,7 @@ Development MUST use SQLite's test suite as the compatibility oracle.
 
 sqlite-rs MUST be able to extract every stored row from any well-formed SQLite database, regardless of which SQLite feature created it. Unsupported feature semantics MUST degrade to raw-row access, never to errors.
 
-**Implementation:** `src/lib.rs` (planned)
+**Implementation:** `src/pager.rs`, `src/vfs/lock.rs`, `src/vfs/shm.rs`, `src/btree/index.rs`, `src/schema/ddl_reader.rs`
 
 **Tests:** `tests/tiers/tier0.rs::t0_feature_bearing_files_are_raw_row_readable`
 
