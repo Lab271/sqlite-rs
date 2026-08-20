@@ -185,9 +185,9 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ---
 
-## V6 — WAL & Concurrency
+## V6 — WAL & Concurrency + Deferred Relational
 
-**Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file.
+**Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file. Also completes relational features deferred from V4.
 
 **Scope:**
 
@@ -197,10 +197,16 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 | Checkpoint | All 4 modes (PASSIVE/FULL/RESTART/TRUNCATE), auto-checkpoint |
 | Concurrency | Multi-reader single-writer, busy handler, `busy_timeout` |
 | Pager | `journal_mode=WAL` switching in both directions |
+| Parser | Non-recursive WITH/CTE, UNION (dedup), recursive CTEs, CREATE VIEW |
+| Codegen | CTE materialization, sorter for UNION dedup |
+| Planner | Join ordering heuristics |
+| Aggregates | group_concat |
 
-**Grammar slice:** none (PRAGMA-driven; PRAGMAs land fully in V7 but `journal_mode`/`wal_checkpoint` ship here).
+**Deferred from V4:** non-recursive CTEs, UNION dedup, views, recursive CTEs, INTERSECT/EXCEPT, group_concat, join ordering heuristics.
 
-**Corpus:** `wal*.test`, `walthread*.test`; interop: sqlite3 and sqlite-rs alternating reads/writes on the same WAL-mode database, including cross-process SHM coordination.
+**Grammar slice:** +~30 productions (CTEs, views, compound selects).
+
+**Corpus:** `wal*.test`, `walthread*.test`, `with*.test`, `view.test`; interop: sqlite3 and sqlite-rs alternating reads/writes on the same WAL-mode database, including cross-process SHM coordination.
 
 **Demo:** sqlite-rs writing while stock `sqlite3` reads the same file live — and the reverse.
 
@@ -359,9 +365,10 @@ Parallelizable pairs: V4 ∥ V5 (planner track vs pager track), V8 ∥ V9 ∥ V1
 | V1 | 0 (minimal DDL reader) | 0% |
 | V2 | ~40 | 20% |
 | V3 | ~90 | 45% |
-| V4 | ~140 | 70% |
-| V5 | ~170 | 85% |
-| V6–V7 | ~175 | 88% |
+| V4 | ~130 | 65% |
+| V5 | ~140 | 70% |
+| V6 | ~200 | 100% (core) |
+| V7 | ~200 | 100% (core) |
 | V8 | ~190 | 95% |
 | V9 | ~210* | — |
 | V10 | complete | 100% |
