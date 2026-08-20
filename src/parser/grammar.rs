@@ -1513,7 +1513,7 @@ impl Parser {
                         );
                         return saw_top_comma && (after_in || after_not_in);
                     }
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                 }
                 TokenKind::Comma if depth == 0 => saw_top_comma = true,
                 _ => {}
@@ -1554,7 +1554,8 @@ impl Parser {
         let negated = if self.at_kw(Keyword::IN) {
             self.advance();
             false
-        } else if self.at_kw(Keyword::NOT) && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::IN))
+        } else if self.at_kw(Keyword::NOT)
+            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::IN))
         {
             self.advance();
             self.advance();
@@ -1569,7 +1570,8 @@ impl Parser {
         }
         self.expect_punct(TokenKind::LParen, "'(' after IN")?;
         if !self.at_kw(Keyword::SELECT) {
-            return self.unsupported("multi-column IN requires a SELECT subquery on the right-hand side");
+            return self
+                .unsupported("multi-column IN requires a SELECT subquery on the right-hand side");
         }
         let subquery = self.parse_select_stmt()?;
         if matches!(

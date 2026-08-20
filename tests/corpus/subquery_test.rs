@@ -305,7 +305,10 @@ fn update_set_scalar_subquery_matches_oracle() {
 #[test]
 fn update_where_in_subquery_matches_oracle() {
     let db = subquery_fixture_db("update_where_in");
-    let output = run_exec(&db, "UPDATE t SET x = 0 WHERE id IN (SELECT a_id FROM other)");
+    let output = run_exec(
+        &db,
+        "UPDATE t SET x = 0 WHERE id IN (SELECT a_id FROM other)",
+    );
     assert!(
         output.status.success(),
         "UPDATE failed: {}",

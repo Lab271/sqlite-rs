@@ -491,14 +491,14 @@ fn compile_statement(
         "UPDATE" => match parse_update(sql) {
             ParseOutcome::Accepted(update) => {
                 let schema = find_schema(&update.table)?;
-                compile_update_with_catalog(&update, schema, &schemas).map_err(|e| fatal(path, &e))
+                compile_update_with_catalog(&update, schema, schemas).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "DELETE" => match parse_delete(sql) {
             ParseOutcome::Accepted(delete) => {
                 let schema = find_schema(&delete.table)?;
-                compile_delete_with_catalog(&delete, schema, &schemas).map_err(|e| fatal(path, &e))
+                compile_delete_with_catalog(&delete, schema, schemas).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
