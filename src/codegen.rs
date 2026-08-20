@@ -355,6 +355,16 @@ pub(crate) struct Scope {
     /// falls out for free from trying `self.tables` first and `outer`
     /// only on failure, rather than merging the two table lists.
     pub(crate) outer: Option<Box<Scope>>,
+    /// #250's NATURAL/USING codegen: `dedup_star[i]` names the columns
+    /// (lowercased) that a plain `SELECT *` expansion must skip for
+    /// `tables[i]` — the right-hand side of a NATURAL/USING join
+    /// suppresses its copy of each shared column so only the left-most
+    /// table's value survives in `*` output, matching real SQLite.
+    /// Always a same-length-as-`tables` vec of empty sets outside a
+    /// joined query. `table.*` and explicit column references are
+    /// unaffected — this only gates the [`select::ResultColumn::Star`]
+    /// expansion path.
+    pub(crate) dedup_star: Vec<std::collections::HashSet<String>>,
 }
 
 impl Scope {
@@ -372,6 +382,7 @@ impl Scope {
             }],
             catalog: Vec::new(),
             outer: None,
+            dedup_star: vec![std::collections::HashSet::new()],
         }
     }
 

@@ -428,19 +428,9 @@ pub fn compile_select_joined(
     // (e.g. `is_left` below would otherwise treat RIGHT/FULL as INNER).
     // Remove this block once RIGHT/FULL/NATURAL/USING codegen lands.
     for join in &from.joins {
-        if join.natural {
-            return Err(CodegenError::Unsupported {
-                reason: "NATURAL JOIN codegen is not yet supported".to_string(),
-            });
-        }
         if matches!(join.op, JoinOp::Right | JoinOp::Full) {
             return Err(CodegenError::Unsupported {
                 reason: "RIGHT/FULL JOIN codegen is not yet supported".to_string(),
-            });
-        }
-        if matches!(join.constraint, Some(JoinConstraint::Using(_))) {
-            return Err(CodegenError::Unsupported {
-                reason: "USING (...) join codegen is not yet supported".to_string(),
             });
         }
     }
@@ -475,21 +465,73 @@ pub fn compile_select_joined(
     }
 
     let ops: Vec<JoinOp> = from.joins.iter().map(|j| j.op).collect();
-    let constraints: Vec<Option<Expr>> = from
-        .joins
-        .iter()
-        .map(|j| match &j.constraint {
+    // `dedup_star[i]` names the columns (lowercased) that a plain `*`
+    // expansion must skip for `bindings[i]` — populated below for the
+    // *right*-hand side of each NATURAL/USING join (#250's codegen
+    // half), since SQLite keeps only the left-most occurrence of a
+    // naturally-/USING-joined column in `SELECT *` output.
+    let mut dedup_star: Vec<std::collections::HashSet<String>> =
+        vec![std::collections::HashSet::new(); bindings.len()];
+    let mut constraints: Vec<Option<Expr>> = Vec::with_capacity(from.joins.len());
+    for (i, join) in from.joins.iter().enumerate() {
+        let right_idx = i.checked_add(1).ok_or_else(|| CodegenError::Unsupported {
+            reason: "too many joined tables".to_string(),
+        })?;
+        let left = bindings
+            .get(0..right_idx)
+            .ok_or_else(|| CodegenError::Unsupported {
+                reason: "join level out of range".to_string(),
+            })?;
+        let right = bindings
+            .get(right_idx)
+            .ok_or_else(|| CodegenError::Unsupported {
+                reason: "join level out of range".to_string(),
+            })?;
+        let constraint = match &join.constraint {
             Some(JoinConstraint::On(e)) => Some(e.clone()),
-            // Guarded above: `USING (...)` joins are rejected before
-            // this point, so `constraints` never needs to represent one.
-            Some(JoinConstraint::Using(_)) | None => None,
-        })
-        .collect();
+            Some(JoinConstraint::Using(cols)) => {
+                let (expr, shared) = synthesize_equality_constraint(left, right, cols, true)?;
+                if let Some(slot) = dedup_star.get_mut(right_idx) {
+                    slot.extend(shared);
+                }
+                expr
+            }
+            None if join.natural => {
+                let shared_names: Vec<String> = right
+                    .schema
+                    .columns
+                    .iter()
+                    .filter(|name| {
+                        left.iter().any(|b| {
+                            b.schema
+                                .columns
+                                .iter()
+                                .any(|c| c.eq_ignore_ascii_case(name))
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                if shared_names.is_empty() {
+                    None
+                } else {
+                    let (expr, shared) =
+                        synthesize_equality_constraint(left, right, &shared_names, false)?;
+                    if let Some(slot) = dedup_star.get_mut(right_idx) {
+                        slot.extend(shared);
+                    }
+                    expr
+                }
+            }
+            None => None,
+        };
+        constraints.push(constraint);
+    }
 
     let full_scope = Scope {
         tables: bindings.clone(),
         catalog: schemas.to_vec(),
         outer: None,
+        dedup_star: dedup_star.clone(),
     };
     let limit = compile_limit_setup(&mut em, &mut reg, &full_scope, select)?;
 
@@ -506,6 +548,7 @@ pub fn compile_select_joined(
         &bindings,
         &ops,
         &constraints,
+        &dedup_star,
         &mut null_mask,
         0,
         end_label,
@@ -525,7 +568,12 @@ pub fn compile_select_joined(
 /// branch, see [`compile_join_level`]) forces binding `i`'s
 /// `forced_null` flag on for this recursion branch only — the shared
 /// `bindings` vec itself is never mutated.
-fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSchema]) -> Scope {
+fn join_scope(
+    bindings: &[TableBinding],
+    null_mask: &[bool],
+    catalog: &[TableSchema],
+    dedup_star: &[std::collections::HashSet<String>],
+) -> Scope {
     Scope {
         tables: bindings
             .iter()
@@ -540,7 +588,95 @@ fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSch
             .collect(),
         catalog: catalog.to_vec(),
         outer: None,
+        dedup_star: dedup_star.to_vec(),
     }
+}
+
+/// Builds the qualified-column `Expr` used to reference `binding`'s
+/// `name` column when synthesizing a NATURAL/USING join's equality
+/// constraint — qualified (rather than a bare unqualified `Column`) so
+/// resolution never has to fall back to [`Scope::resolve`]'s
+/// unqualified-ambiguity rule, which would incorrectly reject a column
+/// name shared by more than one already-joined left-side table.
+fn qualified_column_expr(binding: &TableBinding, name: &str) -> Expr {
+    Expr {
+        kind: ExprKind::Column {
+            table: Some(
+                binding
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| binding.name.clone()),
+            ),
+            catalog: None,
+            name: name.to_string(),
+        },
+        span: SYNTHETIC_SPAN,
+    }
+}
+
+/// Synthesizes the `ON`-equivalent equality constraint for a NATURAL
+/// or `USING (...)` join: for each name in `cols`, finds a left-side
+/// binding (searched in `left`, i.e. `bindings[0..=i]`, first match
+/// wins — this is the "simplest defensible interpretation" for 3+-way
+/// chains noted in #250's follow-up plan, since a qualified reference
+/// to that one binding's column sidesteps the unqualified-ambiguity
+/// question entirely) and requires `right` (`bindings[i + 1]`) to have
+/// a same-named column, ANDing `left.col = right.col` together across
+/// every name. Returns the synthesized `Expr` (`None` only if `cols`
+/// is empty) plus the exact schema-cased column names used, so the
+/// caller can also populate `dedup_star` for `SELECT *`
+/// de-duplication.
+fn synthesize_equality_constraint(
+    left: &[TableBinding],
+    right: &TableBinding,
+    cols: &[String],
+    require_left_match: bool,
+) -> Result<(Option<Expr>, Vec<String>), CodegenError> {
+    let mut acc: Option<Expr> = None;
+    let mut shared = Vec::with_capacity(cols.len());
+    for name in cols {
+        let left_binding = left.iter().find(|b| {
+            b.schema
+                .columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(name))
+        });
+        let Some(left_binding) = left_binding else {
+            if require_left_match {
+                return Err(CodegenError::UnknownColumn { name: name.clone() });
+            }
+            continue;
+        };
+        let right_idx = column_index(&right.schema, name)
+            .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
+        let right_name = right
+            .schema
+            .columns
+            .get(right_idx)
+            .cloned()
+            .ok_or_else(|| CodegenError::UnknownColumn { name: name.clone() })?;
+        let eq = Expr {
+            kind: ExprKind::Binary {
+                op: BinaryOp::Eq,
+                lhs: Box::new(qualified_column_expr(left_binding, name)),
+                rhs: Box::new(qualified_column_expr(right, &right_name)),
+            },
+            span: SYNTHETIC_SPAN,
+        };
+        acc = Some(match acc {
+            Some(prev) => Expr {
+                kind: ExprKind::Binary {
+                    op: BinaryOp::And,
+                    lhs: Box::new(prev),
+                    rhs: Box::new(eq),
+                },
+                span: SYNTHETIC_SPAN,
+            },
+            None => eq,
+        });
+        shared.push(name.to_ascii_lowercase());
+    }
+    Ok((acc, shared))
 }
 
 /// Recursively emits the nested-loop join, one table per recursion
@@ -573,6 +709,7 @@ fn compile_join_level<F>(
     bindings: &[TableBinding],
     ops: &[JoinOp],
     constraints: &[Option<Expr>],
+    dedup_star: &[std::collections::HashSet<String>],
     null_mask: &mut Vec<bool>,
     level: usize,
     end_label: Label,
@@ -584,7 +721,7 @@ where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     if level == bindings.len() {
-        let scope = join_scope(bindings, null_mask, catalog);
+        let scope = join_scope(bindings, null_mask, catalog, dedup_star);
         let row_skip = em.new_label();
         if let Some(where_expr) = &select.where_clause {
             compile_cond(
@@ -632,7 +769,7 @@ where
 
     let skip = em.new_label();
     if let Some(on_expr) = &on_expr {
-        let scope = join_scope(bindings, null_mask, catalog);
+        let scope = join_scope(bindings, null_mask, catalog, dedup_star);
         compile_cond(
             em,
             reg,
@@ -652,6 +789,7 @@ where
         bindings,
         ops,
         constraints,
+        dedup_star,
         null_mask,
         next_level,
         end_label,
@@ -685,6 +823,7 @@ where
             bindings,
             ops,
             constraints,
+            dedup_star,
             null_mask,
             next_level,
             end_label,
@@ -719,8 +858,15 @@ where
     for col in &select.columns {
         match col {
             ResultColumn::Star => {
-                for binding in &scope.tables {
+                for (i, binding) in scope.tables.iter().enumerate() {
+                    let suppressed = scope.dedup_star.get(i);
                     for idx in 0..binding.schema.columns.len() {
+                        let Some(name) = binding.schema.columns.get(idx) else {
+                            continue;
+                        };
+                        if suppressed.is_some_and(|s| s.contains(&name.to_ascii_lowercase())) {
+                            continue;
+                        }
                         regs.push(emit_join_column(em, reg, binding, idx)?);
                     }
                 }

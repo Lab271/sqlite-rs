@@ -94,6 +94,44 @@ fn join_fixture_db(label: &str) -> PathBuf {
     db
 }
 
+/// A second fixture, purpose-built for USING/NATURAL join tests: `p`
+/// and `q` share a column name (`id`) whose *values* actually overlap
+/// (unlike `join_fixture_db`'s `a`/`b`/`c`, where every table's PK is
+/// named `id` but the tables are related via differently-named FK
+/// columns instead — great for `ON`, useless for USING/NATURAL's
+/// same-name-same-value join semantics).
+fn using_natural_fixture_db(label: &str) -> PathBuf {
+    let db = scratch_db(label);
+    let ddls = [
+        "CREATE TABLE p(id INTEGER PRIMARY KEY, name TEXT)",
+        "CREATE TABLE q(id INTEGER, extra TEXT)",
+    ];
+    let rows = [
+        "INSERT INTO p VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')",
+        // id=2 matches p.id=2; id=99 matches no row in `p`.
+        "INSERT INTO q VALUES (1, 'x'), (2, 'y'), (99, 'z')",
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    db
+}
+
 /// Runs `sql` through the CLI and, when the pinned oracle is available,
 /// asserts the two outputs are byte-identical; otherwise skips the
 /// cross-check but still exercises the CLI path so a panic/crash is
@@ -220,6 +258,82 @@ fn star_expands_across_every_joined_table() {
     );
 }
 
+/// `USING (id)` joins `a` and `b` on their shared `id` column, exactly
+/// as if `ON a.id = b.id` had been written — content-wise. This
+/// intentionally isn't `a.id = b.a_id` (the FK relationship the other
+/// tests use); it just exercises USING's column-name-driven join
+/// mechanics against the one column name the fixture tables actually
+/// share.
+#[test]
+fn using_join_matches_oracle() {
+    let db = using_natural_fixture_db("using");
+    assert_matches_oracle(
+        &db,
+        "SELECT p.name, q.extra FROM p JOIN q USING (id)",
+        "using_join_matches_oracle",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// `NATURAL JOIN` between `a` and `b` implicitly joins on every column
+/// name they share (`id`), same semantics as `using_join_matches_oracle`.
+#[test]
+fn natural_join_matches_oracle() {
+    let db = using_natural_fixture_db("natural");
+    assert_matches_oracle(
+        &db,
+        "SELECT p.name, q.extra FROM p NATURAL JOIN q",
+        "natural_join_matches_oracle",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// `SELECT *` across a USING join must de-duplicate the shared `id`
+/// column: `p` and `q` have 2 columns each (`id, name` / `id, extra`),
+/// so a naive concatenation would produce 4 columns, but real SQLite
+/// (and this codegen) emit only 3 — one merged `id` (taking the left
+/// table's value) plus `name`, `extra`.
+#[test]
+fn star_dedup_across_using_join() {
+    let db = using_natural_fixture_db("star_dedup_using");
+    let output = run_query(&db, "SELECT * FROM p JOIN q USING (id)");
+    let first_row = output.lines().next().expect("at least one row");
+    assert_eq!(
+        first_row.split('|').count(),
+        3,
+        "USING join's SELECT * must merge the shared `id` column into one \
+         (p.id, p.name, q.extra = 3 columns), got: {first_row:?} in {output:?}"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM p JOIN q USING (id)",
+        "star_dedup_across_using_join",
+    );
+}
+
+/// Same de-duplication check for `NATURAL JOIN`.
+#[test]
+fn star_dedup_across_natural_join() {
+    let db = using_natural_fixture_db("star_dedup_natural");
+    let output = run_query(&db, "SELECT * FROM p NATURAL JOIN q");
+    let first_row = output.lines().next().expect("at least one row");
+    assert_eq!(
+        first_row.split('|').count(),
+        3,
+        "NATURAL JOIN's SELECT * must merge the shared `id` column into one, \
+         got: {first_row:?} in {output:?}"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM p NATURAL JOIN q",
+        "star_dedup_across_natural_join",
+    );
+}
+
 /// #250 gave the parser real grammar for comma-style joins, so
 /// `FROM a, b` now parses AND compiles (it's synthesized as an
 /// unconstrained CROSS JOIN, which codegen already supports) — this is
@@ -240,17 +354,18 @@ fn comma_join_is_cross_join_sugar() {
     );
 }
 
-/// Still-unsupported *codegen* constructs (USING, NATURAL, RIGHT/FULL)
-/// now parse cleanly (#250) but must still fail cleanly at the codegen
-/// stage as "not yet supported" — via the interim guard in
+/// Still-unsupported *codegen* constructs (RIGHT/FULL) now parse
+/// cleanly (#250) but must still fail cleanly at the codegen stage as
+/// "not yet supported" — via the interim guard in
 /// `src/codegen/select.rs::compile_select_joined` — not panic or
-/// silently mis-compile.
+/// silently mis-compile. USING/NATURAL codegen landed in this same
+/// #250 follow-up, so they're no longer in this list — see
+/// `using_join_matches_oracle`/`natural_join_matches_oracle`/
+/// `star_dedup_across_using_join` below.
 #[test]
 fn still_unsupported_join_forms_fail_cleanly() {
     let db = join_fixture_db("unsupported");
     for sql in [
-        "SELECT * FROM a JOIN b USING (id)",
-        "SELECT * FROM a NATURAL JOIN b",
         "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id",
         "SELECT * FROM a FULL JOIN b ON a.id = b.a_id",
     ] {
