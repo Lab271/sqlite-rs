@@ -15,8 +15,8 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete, compile_drop_index,
-    compile_drop_table, compile_insert, compile_select_joined, compile_select_with_catalog,
-    compile_update, CodegenError,
+    compile_drop_table, compile_insert, compile_select_compound, compile_select_joined,
+    compile_select_with_catalog, compile_update, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
@@ -284,7 +284,22 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         return fatal(path, &format!("no such table: {}", from.first.name));
     };
 
-    let program = if from.joins.is_empty() {
+    let program = if !select.compound.is_empty() {
+        let mut arm_schemas = Vec::with_capacity(select.compound.len());
+        for arm in &select.compound {
+            let Some(arm_from) = &arm.from else {
+                return fatal(path, &CodegenError::NoFromClause);
+            };
+            let Some(s) = find_schema(&arm_from.first.name) else {
+                return fatal(path, &format!("no such table: {}", arm_from.first.name));
+            };
+            arm_schemas.push(s);
+        }
+        match compile_select_compound(&select, &schema, &arm_schemas, &schemas) {
+            Ok(p) => p,
+            Err(e) => return fatal(path, &e),
+        }
+    } else if from.joins.is_empty() {
         match compile_select_with_catalog(&select, &schema, &schemas) {
             Ok(p) => p,
             Err(e) => return fatal(path, &e),
