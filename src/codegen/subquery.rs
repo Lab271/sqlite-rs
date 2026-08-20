@@ -37,17 +37,16 @@ use crate::vdbe::{Instruction, Opcode, P4};
 /// rejecting anything this MVP pass doesn't materialize: no `FROM` at
 /// all is only valid when the subquery has no column references (e.g.
 /// `SELECT (SELECT 1)`), and a `JOIN`ed `FROM` isn't supported.
-fn resolve_subquery_schema<'q>(
-    subselect: &'q Select,
+fn resolve_subquery_schema(
+    subselect: &Select,
     catalog: &[TableSchema],
-) -> Result<Option<(&'q crate::parser::ast::TableRef, TableSchema)>, CodegenError> {
+) -> Result<Option<TableSchema>, CodegenError> {
     let Some(from) = &subselect.from else {
         return Ok(None);
     };
     if !from.joins.is_empty() {
         return Err(CodegenError::Unsupported {
-            reason: "a subquery whose own FROM clause has a JOIN is not yet supported"
-                .to_string(),
+            reason: "a subquery whose own FROM clause has a JOIN is not yet supported".to_string(),
         });
     }
     let schema = catalog
@@ -60,7 +59,7 @@ fn resolve_subquery_schema<'q>(
                 from.first.name
             ),
         })?;
-    Ok(Some((&from.first, schema)))
+    Ok(Some(schema))
 }
 
 /// A subquery's single projected result-column expression — scalar
@@ -98,7 +97,7 @@ pub(crate) fn compile_scalar_subquery(
 
     let catalog = outer_scope.catalog.clone();
     let resolved = resolve_subquery_schema(subselect, &catalog)?;
-    let Some((table_ref, schema)) = resolved else {
+    let Some(schema) = resolved else {
         // No FROM: a single computed expression, evaluated exactly
         // once (no rows to iterate).
         if subselect.where_clause.is_some() {
@@ -114,7 +113,6 @@ pub(crate) fn compile_scalar_subquery(
         em.emit(Instruction::new(Opcode::Copy, v, dest, 0));
         return Ok(dest);
     };
-    let _ = table_ref;
 
     let col_expr = single_result_expr(subselect)?;
     let sub_cursor = reg.alloc_cursor();
@@ -172,7 +170,7 @@ pub(crate) fn compile_exists(
 ) -> Result<(), CodegenError> {
     let catalog = outer_scope.catalog.clone();
     let resolved = resolve_subquery_schema(subselect, &catalog)?;
-    let Some((_, schema)) = resolved else {
+    let Some(schema) = resolved else {
         return Err(CodegenError::Unsupported {
             reason: "EXISTS (SELECT ...) requires a FROM clause".to_string(),
         });
@@ -246,7 +244,7 @@ pub(crate) fn compile_in_subquery(
 ) -> Result<(), CodegenError> {
     let catalog = outer_scope.catalog.clone();
     let resolved = resolve_subquery_schema(subselect, &catalog)?;
-    let Some((_, schema)) = resolved else {
+    let Some(schema) = resolved else {
         return Err(CodegenError::Unsupported {
             reason: "IN (SELECT ...) requires a FROM clause".to_string(),
         });

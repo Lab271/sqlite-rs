@@ -12,10 +12,8 @@ const CLI: &str = env!("CARGO_BIN_EXE_sqlite-rs");
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "sqlite-rs-join-{label}-{}-{n}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("sqlite-rs-join-{label}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("scratch.db")
@@ -147,8 +145,7 @@ fn left_join_null_extends_unmatched_rows() {
         "SELECT a.id, a.name, b.id, b.tag FROM a LEFT JOIN b ON a.id = b.a_id",
     );
     assert_eq!(
-        output,
-        "1|alice|10|x\n1|alice|11|y\n2|bob||\n3|carol||\n",
+        output, "1|alice|10|x\n1|alice|11|y\n2|bob||\n3|carol||\n",
         "unmatched left rows (bob, carol) must appear once with NULL b columns"
     );
     assert_matches_oracle(
@@ -204,7 +201,10 @@ fn where_clause_filters_the_joined_result() {
 #[test]
 fn limit_applies_to_the_joined_output() {
     let db = join_fixture_db("limit_after_join");
-    let output = run_query(&db, "SELECT a.id, b.id FROM a JOIN b ON a.id = b.a_id LIMIT 1");
+    let output = run_query(
+        &db,
+        "SELECT a.id, b.id FROM a JOIN b ON a.id = b.a_id LIMIT 1",
+    );
     assert_eq!(output, "1|10\n");
 }
 

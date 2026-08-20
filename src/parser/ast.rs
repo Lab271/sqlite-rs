@@ -201,7 +201,10 @@ pub enum ExprKind {
     /// query's column).
     Subquery(Box<Select>),
     /// `EXISTS (SELECT ...)` / `NOT EXISTS (SELECT ...)` (#238).
-    Exists { subquery: Box<Select>, negated: bool },
+    Exists {
+        subquery: Box<Select>,
+        negated: bool,
+    },
     /// `expr IN (SELECT ...)` / `expr NOT IN (SELECT ...)` (#238) — kept
     /// separate from [`ExprKind::In`]'s literal-list form rather than a
     /// union, so callers pattern-matching on `In` don't need to handle a

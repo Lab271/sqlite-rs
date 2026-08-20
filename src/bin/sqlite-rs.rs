@@ -16,8 +16,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete, compile_drop_index,
     compile_drop_table, compile_insert, compile_select_joined, compile_select_with_catalog,
-    compile_update,
-    CodegenError,
+    compile_update, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};

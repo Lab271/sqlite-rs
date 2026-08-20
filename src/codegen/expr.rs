@@ -95,13 +95,7 @@ pub(crate) fn compile_cond(
             // under this setting.
             let (false_label, is_new) = ensure_label(em, targets.on_false);
             let operand = targets.with_false(Target::Jump(false_label));
-            compile_cond(
-                em,
-                reg,
-                scope,
-                lhs,
-                operand.with_true(Target::Fallthrough),
-            )?;
+            compile_cond(em, reg, scope, lhs, operand.with_true(Target::Fallthrough))?;
             compile_cond(em, reg, scope, rhs, operand)?;
             if is_new {
                 em.place(false_label);
@@ -126,13 +120,7 @@ pub(crate) fn compile_cond(
             // between true and the false/unknown continuation.
             let (true_label, is_new) = ensure_label(em, targets.on_true);
             let operand = targets.with_true(Target::Jump(true_label));
-            compile_cond(
-                em,
-                reg,
-                scope,
-                lhs,
-                operand.with_false(Target::Fallthrough),
-            )?;
+            compile_cond(em, reg, scope, lhs, operand.with_false(Target::Fallthrough))?;
             compile_cond(em, reg, scope, rhs, operand)?;
             if is_new {
                 em.place(true_label);
@@ -263,13 +251,7 @@ pub(crate) fn compile_cond(
                 let gt_hi = cmp(BinaryOp::Gt, hi);
                 let (t_label, t_is_new) = ensure_label(em, targets.on_true);
                 let arm = targets.with_true(Target::Jump(t_label));
-                compile_cond(
-                    em,
-                    reg,
-                    scope,
-                    &lt_lo,
-                    arm.with_false(Target::Fallthrough),
-                )?;
+                compile_cond(em, reg, scope, &lt_lo, arm.with_false(Target::Fallthrough))?;
                 compile_cond(em, reg, scope, &gt_hi, arm)?;
                 if t_is_new {
                     em.place(t_label);
@@ -279,13 +261,7 @@ pub(crate) fn compile_cond(
                 let le_hi = cmp(BinaryOp::Le, hi);
                 let (f_label, f_is_new) = ensure_label(em, targets.on_false);
                 let arm = targets.with_false(Target::Jump(f_label));
-                compile_cond(
-                    em,
-                    reg,
-                    scope,
-                    &ge_lo,
-                    arm.with_true(Target::Fallthrough),
-                )?;
+                compile_cond(em, reg, scope, &ge_lo, arm.with_true(Target::Fallthrough))?;
                 compile_cond(em, reg, scope, &le_hi, arm)?;
                 if f_is_new {
                     em.place(f_label);

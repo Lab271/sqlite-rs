@@ -272,11 +272,7 @@ pub fn compile_select_joined(
     let constraints: Vec<Option<Expr>> = from
         .joins
         .iter()
-        .map(|j| {
-            j.constraint
-                .as_ref()
-                .map(|JoinConstraint::On(e)| e.clone())
-        })
+        .map(|j| j.constraint.as_ref().map(|JoinConstraint::On(e)| e.clone()))
         .collect();
 
     let full_scope = Scope {
@@ -439,8 +435,18 @@ where
     }
     let next_level = level.saturating_add(1);
     compile_join_level(
-        em, reg, select, bindings, ops, constraints, null_mask, next_level, end_label, limit,
-        catalog, sink,
+        em,
+        reg,
+        select,
+        bindings,
+        ops,
+        constraints,
+        null_mask,
+        next_level,
+        end_label,
+        limit,
+        catalog,
+        sink,
     )?;
     em.place(skip);
     let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
@@ -462,8 +468,18 @@ where
             *slot = true;
         }
         compile_join_level(
-            em, reg, select, bindings, ops, constraints, null_mask, next_level, end_label, limit,
-            catalog, sink,
+            em,
+            reg,
+            select,
+            bindings,
+            ops,
+            constraints,
+            null_mask,
+            next_level,
+            end_label,
+            limit,
+            catalog,
+            sink,
         )?;
         if let Some(slot) = null_mask.get_mut(level) {
             *slot = false;

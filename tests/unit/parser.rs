@@ -524,7 +524,10 @@ fn test_scalar_subquery_parses() {
     // #238: scalar subqueries are now a supported expression form.
     let select = accept("SELECT (SELECT 1)");
     let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
-        panic!("expected an Expr result column, got {:?}", select.columns[0]);
+        panic!(
+            "expected an Expr result column, got {:?}",
+            select.columns[0]
+        );
     };
     assert!(matches!(expr.kind, ExprKind::Subquery(_)));
 }

@@ -22,7 +22,9 @@ pub use delete::compile_delete;
 pub use drop_index::compile_drop_index;
 pub use drop_table::compile_drop_table;
 pub use insert::compile_insert;
-pub use select::{compile_select, compile_select_joined, compile_select_with_catalog, CodegenError};
+pub use select::{
+    compile_select, compile_select_joined, compile_select_with_catalog, CodegenError,
+};
 pub use update::compile_update;
 
 use std::collections::HashMap;
@@ -432,12 +434,11 @@ impl Scope {
                 .ok_or_else(|| select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
                 })?;
-            let idx =
-                expr::column_index(&binding.schema, name).ok_or_else(|| {
-                    select::CodegenError::UnknownColumn {
-                        name: format!("{table}.{name}"),
-                    }
-                })?;
+            let idx = expr::column_index(&binding.schema, name).ok_or_else(|| {
+                select::CodegenError::UnknownColumn {
+                    name: format!("{table}.{name}"),
+                }
+            })?;
             return Ok((binding.cursor, idx, &binding.schema, binding.forced_null));
         }
         let mut found: Option<&TableBinding> = None;
