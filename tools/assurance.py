@@ -73,6 +73,12 @@ to this header too):
 10. Line coverage: reads cached cargo-llvm-cov (target/llvm-cov.json) or
     tarpaulin output if present; never runs coverage itself.
 
+10b. Mutation score: reads cached cargo-mutants output
+    (target/mutants.out/outcomes.json, written by `make mutants`);
+    never runs mutation testing itself. Caught/(caught+missed), same
+    convention cargo-mutants itself uses (unviable/timeout excluded
+    from the denominator).
+
 11. CI gate: --min X exits 1 if completeness OR coverage is below X.
 
 12. Opcode completeness: VDBE opcodes dispatched in `src/vdbe/exec.rs`
@@ -105,6 +111,7 @@ Link syntax accepted on **Tests:** / **Implementation:** lines:
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -586,6 +593,67 @@ def _get_test_coverage():
     return None
 
 
+def _get_mutation_score():
+    """Read cached cargo-mutants results (`make mutants` -> target/mutants.out).
+
+    Never runs mutation testing itself, same discipline as
+    `_get_test_coverage()`. Score excludes `unviable` (didn't compile —
+    not a real test gap) and `timeout` (inconclusive) from the
+    denominator, matching cargo-mutants' own convention.
+    """
+    outcomes = REPO_ROOT / "target" / "mutants.out" / "outcomes.json"
+    if not outcomes.exists():
+        return None
+    try:
+        import json
+        data = json.loads(outcomes.read_text())
+        caught = data["caught"]
+        missed = data["missed"]
+        denom = caught + missed
+        if denom == 0:
+            return f"{caught}/{denom} caught (no scored mutants)"
+        pct = 100 * caught / denom
+        return f"{caught}/{denom} caught ({pct:.0f}%, {data['unviable']} unviable, {data['timeout']} timeout)"
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def _get_verify_status():
+    """Read `make verify`'s cached commit (target/verify.json) and report
+    how many commits have landed on HEAD since that gate run — coverage/
+    deny/mvl-limit/mod-files aren't re-checked between full `make verify`
+    runs, so this is a staleness signal, not a pass/fail re-check.
+
+    Returns None if never run (no target/verify.json), else a string;
+    never runs `make verify` itself, same discipline as coverage/mutation.
+    """
+    verify_json = REPO_ROOT / "target" / "verify.json"
+    if not verify_json.exists():
+        return None
+    try:
+        import json
+        commit = json.loads(verify_json.read_text())["commit"]
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+    result = subprocess.run(
+        ["git", "rev-list", "--count", f"{commit}..HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return f"last run at {commit[:7]} (not in current history — rebase?)"
+
+    count = int(result.stdout.strip())
+    short = commit[:7]
+    if count == 0:
+        return f"up to date ({short})"
+    plural = "s" if count != 1 else ""
+    return f"{count} commit{plural} since last run ({short}) — run `make verify`"
+
+
 def report(requirements, verbose=False, traceability_only=False):
     """Print the assurance dashboard: Traceability, then Evidence.
 
@@ -633,6 +701,7 @@ def report(requirements, verbose=False, traceability_only=False):
         corpus_total = sum(1 for r in active if r["corpus_files"])
         corpus_present = sum(1 for r in active if r["corpus_files"] and r["corpus_present"])
         test_coverage = _get_test_coverage()
+        mutation_score = _get_mutation_score()
 
         print()
         print("-- Evidence " + "-" * 48)
@@ -641,6 +710,7 @@ def report(requirements, verbose=False, traceability_only=False):
         else:
             print("Corpus files present: n/a (no **Corpus:** links)")
         print(f"Line coverage:        {test_coverage if test_coverage is not None else 'not cached — run `make coverage`'}")
+        print(f"Mutation score:       {mutation_score if mutation_score is not None else 'not cached — run `make mutants`'}")
 
     print()
     print("-- Verification " + "-" * 44)
@@ -649,6 +719,9 @@ def report(requirements, verbose=False, traceability_only=False):
         print(f"Qualified-subset:     {len(exclusions)} files exempt from mvl-limit (dyn boundary: VFS traits + the VDBE's Rc<dyn PageSource>, not unsafe — #80; src/bin is I/O)")
         model_detail.append("Qualified-subset:")
         model_detail.extend(f"  {f}" for f in exclusions)
+    if not traceability_only:
+        verify_status = _get_verify_status()
+        print(f"Verify:               {verify_status if verify_status is not None else 'never run — `make verify` (coverage-gate + deny + mvl-limit + mod-files)'}")
     print("Not measured here — run `make verification` (alias for `make test`) or `make mvl-limit`")
     print("=" * 60)
 
