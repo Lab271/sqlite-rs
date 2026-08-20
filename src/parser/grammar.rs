@@ -786,6 +786,31 @@ impl Parser {
         })
     }
 
+    /// `explain-stmt` (#243, grammar V4): `EXPLAIN [QUERY PLAN]
+    /// select-stmt`. Only a `SELECT` body is supported — wrapping any
+    /// other statement kind (or bare `EXPLAIN` with no `QUERY PLAN`, the
+    /// oracle's raw-opcode-dump mode already served by the CLI's
+    /// `-explain` flag) is `Unsupported` rather than silently accepted.
+    pub(super) fn parse_explain_stmt(&mut self) -> PResult<Explain> {
+        self.expect_kw(Keyword::EXPLAIN)?;
+        let query_plan = if self.eat_kw(Keyword::QUERY) {
+            self.expect_kw(Keyword::PLAN)?;
+            true
+        } else {
+            false
+        };
+        if !query_plan {
+            return self.unsupported(
+                "bare EXPLAIN (opcode dump) not supported here — use the CLI's -explain flag",
+            );
+        }
+        let select = self.parse_select_stmt()?;
+        Ok(Explain {
+            query_plan,
+            select: Box::new(select),
+        })
+    }
+
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
         if self.at_kw(Keyword::WITH) {
             return self.unsupported("WITH / CTEs not yet supported");

@@ -6,6 +6,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+Planner: join-level WHERE/`ON` equality index selection (#243, V4 phase
+1 epic #235). An inner join table's `ON` equality against the outer
+table's rowid, or against a `UNIQUE` single-column index, now compiles
+to a `SeekRowid`/new `SeekIndexEq`+`IdxRowid`+`SeekRowid` point lookup
+instead of an unconditional `Rewind`/`Next` full scan (`choose_join_access`,
+`src/codegen/select.rs`) — `LEFT JOIN`'s null-extension is unaffected.
+Two new VDBE opcodes (`SeekIndexEq`, `IdxRowid`) and a new real
+secondary-index read cursor (`CursorSlot::IndexRead`, `OpenRead` with
+`P5` nonzero) back the index-seek path; non-unique indexes and compound
+(`AND`) `ON` conditions still fall back to a full scan (deliberately
+narrow, mirroring #137's `try_compile_rowid_seek`). `EXPLAIN QUERY
+PLAN` (pulled forward from its original V7 grammar slot — see
+`.openspec/grammar/sqlite.ebnf`'s `explain-stmt`, V4 now) reports
+`SCAN`/`SEARCH ... USING ...` per table so the planner's choice is
+observable from the CLI (`query "EXPLAIN QUERY PLAN <select>"`); bare
+`EXPLAIN` (opcode dump) is unchanged, still served by `-explain`.
+Spend: ~2x the ticket's original estimate, because scoping surfaced
+three pieces of missing infrastructure (index-seek opcode, EXPLAIN
+QUERY PLAN parsing, and the V7→V4 grammar pull-forward) beyond the
+issue's original "basic WHERE analysis" framing.
+
 `UNION ALL` compound `SELECT` (#240, V4 phase 1 epic #235): parser
 chains `SELECT ... UNION ALL SELECT ...` arms into `Select::compound`,
 with `ORDER BY`/`LIMIT` binding to the whole compound statement rather

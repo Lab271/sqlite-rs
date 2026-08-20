@@ -83,6 +83,19 @@ pub enum CompoundOp {
     UnionAll,
 }
 
+/// `EXPLAIN [QUERY PLAN] select-stmt` (#243) — pulled forward from its
+/// original V7 slot (`.openspec/grammar/sqlite.ebnf`'s `explain-stmt`)
+/// because the planner's join equality-index-selection work needs EQP
+/// output to be observable now. Wraps only a `Select`: the acceptance
+/// criterion this exists for ("EXPLAIN QUERY PLAN shows index usage")
+/// is about the join planner, not `EXPLAIN`'s general opcode-dump form
+/// over every statement kind — that broader form remains future scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explain {
+    pub query_plan: bool,
+    pub select: Box<Select>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Distinctness {
     Distinct,

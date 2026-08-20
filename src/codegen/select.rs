@@ -24,7 +24,7 @@ use crate::parser::ast::{
     Literal, ParamKind, ResultColumn, Select, TableRef,
 };
 use crate::parser::tokenizer::Span;
-use crate::schema::{rowid_alias_column, TableSchema};
+use crate::schema::{rowid_alias_column, IndexSchema, TableSchema};
 use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -491,6 +491,128 @@ pub fn compile_select_joined(
     Ok(em.finish())
 }
 
+/// One row of `EXPLAIN QUERY PLAN` output (#243) — SQLite's own EQP
+/// shape (`id, parent, notused, detail`), distinct from plain
+/// `EXPLAIN`'s per-instruction [`crate::vdbe::explain::ExplainRow`].
+/// `detail` reads like the oracle's own EQP (`SCAN ...`/`SEARCH ...
+/// USING ...`) but isn't guaranteed byte-identical — Requirement 10's
+/// VM-diff guarantee is plain `EXPLAIN`'s job, not this human-readable
+/// summary's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EqpRow {
+    pub id: i32,
+    pub parent: i32,
+    pub notused: i32,
+    pub detail: String,
+}
+
+/// A table binding's `FROM`-clause display name for EQP output:
+/// `name AS alias` when aliased, `name` otherwise — matching how a
+/// `Column` reference would need to qualify it.
+fn eqp_display_name(table_ref: &TableRef) -> String {
+    match &table_ref.alias {
+        Some(alias) => format!("{} AS {alias}", table_ref.name),
+        None => table_ref.name.clone(),
+    }
+}
+
+/// Builds `EXPLAIN QUERY PLAN`'s output for `select` (#243): one row per
+/// `FROM`-clause table, `SCAN` for a full `Rewind`/`Next` scan or
+/// `SEARCH ... USING ...` for a `SeekRowid`/`SeekIndexEq` point lookup —
+/// reusing [`choose_join_access`] (the join codegen's own decision
+/// function) for a join's inner tables, and the same rowid-equality
+/// check [`try_compile_rowid_seek`] uses for a single-table `SELECT`'s
+/// `WHERE` clause, so the report can never drift from what
+/// [`compile_select_joined`]/[`compile_direct_scan`] actually compile.
+pub fn explain_query_plan(
+    select: &Select,
+    schemas: &[TableSchema],
+) -> Result<Vec<EqpRow>, CodegenError> {
+    let Some(from) = &select.from else {
+        return Err(CodegenError::NoFromClause);
+    };
+    let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|j| &j.table))
+        .collect();
+    if schemas.len() != table_refs.len() {
+        return Err(CodegenError::Unsupported {
+            reason: format!(
+                "explain_query_plan needs one schema per FROM table ({} tables, {} schemas \
+                 given)",
+                table_refs.len(),
+                schemas.len()
+            ),
+        });
+    }
+    let bindings: Vec<TableBinding> = table_refs
+        .iter()
+        .zip(schemas.iter())
+        .enumerate()
+        .map(|(i, (table_ref, schema))| TableBinding {
+            alias: table_ref.alias.clone(),
+            name: table_ref.name.clone(),
+            schema: schema.clone(),
+            cursor: i32::try_from(i).unwrap_or(0),
+            forced_null: false,
+        })
+        .collect();
+
+    let mut rows = Vec::with_capacity(bindings.len());
+    for (level, (table_ref, binding)) in table_refs.iter().zip(bindings.iter()).enumerate() {
+        let on_expr = level
+            .checked_sub(1)
+            .and_then(|i| from.joins.get(i))
+            .and_then(|j| j.constraint.as_ref())
+            .map(|JoinConstraint::On(e)| e);
+        let prior_bindings = bindings.get(..level).unwrap_or(&[]);
+        let access = if level == 0 {
+            // The outermost table has no `ON` clause to seek against —
+            // an equality `WHERE` predicate against its rowid still
+            // gets `try_compile_rowid_seek`'s single-table fast path
+            // (#137), so report that here too rather than a blanket
+            // SCAN.
+            select
+                .where_clause
+                .as_ref()
+                .and_then(|where_expr| top_level_equality_operands(where_expr))
+                .and_then(|(lhs, rhs)| {
+                    if is_rowid_reference(&binding.schema, lhs) {
+                        Some(JoinAccess::Rowid(rhs.clone()))
+                    } else if is_rowid_reference(&binding.schema, rhs) {
+                        Some(JoinAccess::Rowid(lhs.clone()))
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            on_expr.and_then(|e| choose_join_access(binding, e, prior_bindings))
+        };
+        let detail = match access {
+            None => format!("SCAN {}", eqp_display_name(table_ref)),
+            Some(JoinAccess::Rowid(_)) => format!(
+                "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
+                eqp_display_name(table_ref)
+            ),
+            Some(JoinAccess::UniqueIndex { index, .. }) => format!(
+                "SEARCH {} USING INDEX {} ({}=?)",
+                eqp_display_name(table_ref),
+                index.name,
+                index
+                    .columns
+                    .first()
+                    .map_or_else(String::new, |c| c.name.clone())
+            ),
+        };
+        rows.push(EqpRow {
+            id: i32::try_from(level).unwrap_or(0),
+            parent: 0,
+            notused: 0,
+            detail,
+        });
+    }
+    Ok(rows)
+}
+
 /// Builds the [`Scope`] a join-tree node sees at compile time: every
 /// binding as-is, except that `null_mask[i]` (LEFT JOIN's no-match
 /// branch, see [`compile_join_level`]) forces binding `i`'s
@@ -536,6 +658,100 @@ fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSch
 /// anything joined *onto* this null-extended table sees a fully
 /// consistent all-NULL row for it rather than a live but
 /// out-of-position cursor read.
+/// The access strategy #243's join-level planner picked for a table
+/// binding, in place of an unconditional `Rewind`/`Next` full scan —
+/// see [`choose_join_access`].
+enum JoinAccess {
+    /// The `ON` equality's other side is a rowid reference (the
+    /// `rowid`/`_rowid_`/`oid` keywords, or the table's `INTEGER PRIMARY
+    /// KEY` alias column): a `SeekRowid` point lookup, generalizing
+    /// [`try_compile_rowid_seek`] to a join's inner table.
+    Rowid(Expr),
+    /// The `ON` equality's other side is a column with a single-column
+    /// `UNIQUE` index: a `SeekIndexEq` + `IdxRowid` + `SeekRowid` point
+    /// lookup (#243).
+    UniqueIndex { index: IndexSchema, operand: Expr },
+}
+
+/// Whether `table`/`name` (a `Column` expression's qualifier and column
+/// name) names a column of `binding`'s own schema — used by
+/// [`choose_join_access`] to tell which side of a join's `=` belongs to
+/// the table currently being brought into the loop.
+fn column_belongs_to_binding(binding: &TableBinding, table: Option<&str>, name: &str) -> bool {
+    if let Some(table) = table {
+        if !binding.matches_qualifier(table) {
+            return false;
+        }
+    }
+    column_index(&binding.schema, name).is_some()
+}
+
+/// Whether every `Column` reference inside `expr` resolves only to one
+/// of `prior_bindings` (already-positioned tables earlier in the join
+/// order) — the safety condition for using `expr` as a join-level index
+/// seek's probe value, since it compiles against cursors that must
+/// already hold a row. Deliberately narrow: only a bare/qualified
+/// column reference or a literal/parameter are recognized; anything
+/// else (a sub-expression, a function call) is rejected rather than
+/// risk treating a reference to the *current* or a *not-yet-bound*
+/// table as safe.
+fn expr_is_safe_join_probe(expr: &Expr, prior_bindings: &[TableBinding]) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(_) | ExprKind::Param(_) => true,
+        ExprKind::Column { table, name, .. } => prior_bindings
+            .iter()
+            .any(|b| column_belongs_to_binding(b, table.as_deref(), name)),
+        _ => false,
+    }
+}
+
+/// Picks an index/rowid seek for join level `level` out of `on_expr` (a
+/// single top-level `binding.column = <safe probe>` equality — anything
+/// else, including `AND`-compound `ON` clauses, falls back to the
+/// ordinary `Rewind`/`Next` scan per #243's bounded scope, matching
+/// [`try_compile_rowid_seek`]'s own narrowness), or `None` to keep the
+/// full scan. Only a `UNIQUE` single-column index (or the rowid) is
+/// considered — a non-unique index could match more than one row, which
+/// this seek-once codegen shape can't express (see the module doc's
+/// LEFT JOIN "matched" flag: it assumes at most one inner-side match).
+fn choose_join_access(
+    binding: &TableBinding,
+    on_expr: &Expr,
+    prior_bindings: &[TableBinding],
+) -> Option<JoinAccess> {
+    let (lhs, rhs) = top_level_equality_operands(on_expr)?;
+    let (this_side, other_side) = if matches!(&lhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (lhs, rhs)
+    } else if matches!(&rhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (rhs, lhs)
+    } else {
+        return None;
+    };
+    if !expr_is_safe_join_probe(other_side, prior_bindings) {
+        return None;
+    }
+    if is_rowid_reference(&binding.schema, this_side) {
+        return Some(JoinAccess::Rowid(other_side.clone()));
+    }
+    let ExprKind::Column { name, .. } = &this_side.kind else {
+        return None;
+    };
+    let index = binding.schema.indexes.iter().find(|idx| {
+        idx.unique
+            && idx.columns.len() == 1
+            && idx
+                .columns
+                .first()
+                .is_some_and(|c| c.name.eq_ignore_ascii_case(name))
+    })?;
+    Some(JoinAccess::UniqueIndex {
+        index: index.clone(),
+        operand: other_side.clone(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_join_level<F>(
     em: &mut Emitter,
@@ -595,44 +811,117 @@ where
         em.emit(Instruction::new(Opcode::Integer, 0, matched, 0));
     }
 
-    let rewind_end = em.new_label();
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
-    em.patch_p2(rewind_addr, rewind_end);
-    let loop_start = em.new_label();
-    em.place(loop_start);
+    // #243: an equality `ON` predicate against this table's rowid or a
+    // UNIQUE single-column index compiles to a `SeekRowid`/`SeekIndexEq`
+    // point lookup instead of an unconditional `Rewind`/`Next` full
+    // scan — see [`choose_join_access`] for the (deliberately narrow)
+    // conditions this applies under.
+    let access = on_expr.as_ref().and_then(|on_expr| {
+        let prior_bindings = bindings.get(..level)?;
+        choose_join_access(binding, on_expr, prior_bindings)
+    });
 
-    let skip = em.new_label();
-    if let Some(on_expr) = &on_expr {
-        let scope = join_scope(bindings, null_mask, catalog);
-        compile_cond(
-            em,
-            reg,
-            &scope,
-            on_expr,
-            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
-        )?;
-    }
-    if let Some(matched) = matched {
-        em.emit(Instruction::new(Opcode::Integer, 1, matched, 0));
-    }
     let next_level = level.saturating_add(1);
-    compile_join_level(
-        em,
-        reg,
-        select,
-        bindings,
-        ops,
-        constraints,
-        null_mask,
-        next_level,
-        end_label,
-        limit,
-        catalog,
-        sink,
-    )?;
-    em.place(skip);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
-    em.patch_p2(next_addr, loop_start);
+    let rewind_end = em.new_label();
+    match access {
+        None => {
+            let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
+            em.patch_p2(rewind_addr, rewind_end);
+            let loop_start = em.new_label();
+            em.place(loop_start);
+
+            let skip = em.new_label();
+            if let Some(on_expr) = &on_expr {
+                let scope = join_scope(bindings, null_mask, catalog);
+                compile_cond(
+                    em,
+                    reg,
+                    &scope,
+                    on_expr,
+                    CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
+                )?;
+            }
+            if let Some(matched) = matched {
+                em.emit(Instruction::new(Opcode::Integer, 1, matched, 0));
+            }
+            compile_join_level(
+                em,
+                reg,
+                select,
+                bindings,
+                ops,
+                constraints,
+                null_mask,
+                next_level,
+                end_label,
+                limit,
+                catalog,
+                sink,
+            )?;
+            em.place(skip);
+            let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
+            em.patch_p2(next_addr, loop_start);
+        }
+        Some(access) => {
+            let scope = join_scope(bindings, null_mask, catalog);
+            let miss = em.new_label();
+            match access {
+                JoinAccess::Rowid(operand) => {
+                    let value_reg = compile_value(em, reg, &scope, &operand)?;
+                    let seek_addr =
+                        em.emit(Instruction::new(Opcode::SeekRowid, cursor, 0, value_reg));
+                    em.patch_p2(seek_addr, miss);
+                }
+                JoinAccess::UniqueIndex { index, operand } => {
+                    let value_reg = compile_value(em, reg, &scope, &operand)?;
+                    let index_cursor =
+                        i32::try_from(bindings.len().saturating_add(level)).unwrap_or(i32::MAX);
+                    let root_page = i32::try_from(index.root_page).unwrap_or(0);
+                    let mut open_instr =
+                        Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+                    open_instr.p5 = 1;
+                    em.emit(open_instr);
+                    let seek_instr = Instruction::with_p4(
+                        Opcode::SeekIndexEq,
+                        index_cursor,
+                        0,
+                        value_reg,
+                        P4::Int(1),
+                    );
+                    let seek_addr = em.emit(seek_instr);
+                    em.patch_p2(seek_addr, miss);
+                    let rowid_reg = reg.alloc();
+                    em.emit(Instruction::new(
+                        Opcode::IdxRowid,
+                        index_cursor,
+                        rowid_reg,
+                        0,
+                    ));
+                    let table_seek_addr =
+                        em.emit(Instruction::new(Opcode::SeekRowid, cursor, 0, rowid_reg));
+                    em.patch_p2(table_seek_addr, miss);
+                }
+            }
+            if let Some(matched) = matched {
+                em.emit(Instruction::new(Opcode::Integer, 1, matched, 0));
+            }
+            compile_join_level(
+                em,
+                reg,
+                select,
+                bindings,
+                ops,
+                constraints,
+                null_mask,
+                next_level,
+                end_label,
+                limit,
+                catalog,
+                sink,
+            )?;
+            em.place(miss);
+        }
+    }
     em.place(rewind_end);
 
     if let Some(matched) = matched {

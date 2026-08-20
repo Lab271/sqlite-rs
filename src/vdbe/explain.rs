@@ -116,6 +116,8 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::Column => "Column",
         Opcode::Rowid => "Rowid",
         Opcode::SeekRowid => "SeekRowid",
+        Opcode::SeekIndexEq => "SeekIndexEq",
+        Opcode::IdxRowid => "IdxRowid",
         Opcode::NullRow => "NullRow",
         Opcode::Sequence => "Sequence",
         Opcode::Found => "Found",
@@ -213,6 +215,10 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::IdxInsert => format!("cursor {p1} insert key r[{p2}..]"),
         Opcode::IdxDelete => format!("cursor {p1} delete key r[{p2}..]"),
         Opcode::NoConflict => format!("cursor {p1} no matching key at r[{p3}..], jump {p2}"),
+        Opcode::SeekIndexEq => {
+            format!("cursor {p1} seek index key at r[{p3}..], jump {p2} if miss")
+        }
+        Opcode::IdxRowid => format!("r[{p2}] = cursor {p1} indexed rowid"),
         Opcode::Insert => format!("cursor {p1} insert rowid r[{p2}] record r[{p3}]"),
         Opcode::NewRowid => format!("r[{p2}] = cursor {p1} new rowid"),
         Opcode::Delete => format!("cursor {p1} delete current row"),

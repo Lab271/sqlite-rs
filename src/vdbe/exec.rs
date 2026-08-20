@@ -407,12 +407,13 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
     use Opcode::{
         Add, AggFinal, AggStep, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat,
         Copy, CreateIndex, CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable, Eq,
-        Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos,
-        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
-        NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
-        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
-        Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
-        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IdxRowid, IfNot,
+        IfNotZero, IfPos, Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply,
+        MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once,
+        OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow,
+        Return, Rewind, Rowid, SeekIndexEq, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort,
+        SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
+        Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -473,6 +474,8 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Column => cursor::column(vm, instr),
         Rowid => cursor::rowid(vm, instr),
         SeekRowid => cursor::seek_rowid(vm, instr),
+        SeekIndexEq => cursor::seek_index_eq(vm, instr),
+        IdxRowid => cursor::idx_rowid(vm, instr),
         NullRow => cursor::null_row(vm, instr),
         Sequence => cursor::sequence(vm, instr),
         Found => cursor::found(vm, instr),
