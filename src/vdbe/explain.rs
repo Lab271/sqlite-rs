@@ -150,6 +150,8 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::Concat => "Concat",
         Opcode::Cast => "Cast",
         Opcode::Function => "Function",
+        Opcode::AggStep => "AggStep",
+        Opcode::AggFinal => "AggFinal",
         Opcode::Integer => "Integer",
         Opcode::Int64 => "Int64",
         Opcode::Real => "Real",

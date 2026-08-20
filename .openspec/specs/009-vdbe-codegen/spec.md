@@ -771,6 +771,58 @@ to produce NULL, not only 0/1.
 
 **Tests:** `tests/unit/codegen.rs::not_in_value_context_uses_the_not_opcode`, `tests/unit/codegen.rs::comparison_in_value_context_materializes_three_outcomes`, `tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
+### Requirement 12: Aggregate Opcodes [MUST]
+
+`AggStep` and `AggFinal` MUST NOT contain any aggregate-specific logic
+themselves — same no-VDBE-layer-logic discipline as `Function`
+(Requirement 7) — dispatching instead by a P4 `"name(arity)"`
+descriptor into a shared aggregate registry (`src/vdbe/aggregate.rs`).
+`AggStep` folds a contiguous run of argument registers (starting at
+`P2`) into an aggregate-context slot addressed by `P1`, creating a
+fresh accumulator on that slot's first `AggStep`. `AggFinal` reads
+context slot `P1` and writes the finalized result to register `P3`,
+without erroring when the slot was never stepped — an empty group is a
+legitimate zero-row result (`count` finalizes to 0, `sum` to NULL), not
+a malformed program. Both opcodes postdate the V2 oracle harvest (no
+GROUP BY codegen existed at harvest time), so they are excluded from
+`Opcode::ALL` like the other V3 opcodes (`Insert`, `Copy`, …) — new
+enum variants, fully dispatched and exhaustiveness-checked, but not
+part of the harvested-opcode denominator.
+
+`OpenEphemeral`'s existing in-memory ephemeral-table support (Requirement
+4) is reused as the GROUP BY grouping-table backing store — no new
+cursor machinery is introduced by this requirement.
+
+**Implementation:** `src/vdbe/exec.rs::agg_step`, `src/vdbe/exec.rs::agg_final`,
+`src/vdbe/aggregate.rs` (registry; `count`/`sum` implemented, `avg`/`min`/`max`
+tracked separately)
+
+#### Scenario: AggStep accumulates across repeated calls into the same context slot
+
+- GIVEN a context slot never stepped, then `AggStep` run three times with
+  `P4 = "sum(1)"` over registers holding 10, 20, 30
+- THEN `AggFinal` on that slot with the same descriptor writes 60 to its
+  result register
+
+**Tests:** `src/vdbe/exec.rs::tests::agg_step_accumulates_across_repeated_calls_into_the_same_context_slot`
+
+#### Scenario: AggFinal on a never-stepped slot yields the aggregate's zero-row result
+
+- GIVEN a context slot with no prior `AggStep` call
+- THEN `AggFinal` with `P4 = "count(0)"` writes 0, and `P4 = "sum(1)"`
+  writes NULL — an empty group is a valid outcome, not an error
+
+**Tests:** `src/vdbe/exec.rs::tests::agg_final_on_a_never_stepped_slot_yields_the_zero_row_result`
+
+#### Scenario: Distinct aggregate-context slots do not alias
+
+- GIVEN `AggStep("count(1)")` run once against slot 0 and twice against
+  slot 1
+- THEN `AggFinal` on slot 0 yields 1 and on slot 1 yields 2 — slots are a
+  disjoint address space, the same shape as cursor slots (Requirement 2)
+
+**Tests:** `src/vdbe/exec.rs::tests::distinct_agg_context_slots_do_not_alias`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made
@@ -780,7 +832,12 @@ sorter opcode families). Requirements 7 (`Function` opcode dispatch), 10
 (`EXPLAIN`), and 11 (expression emission) are now active too: #91 wired
 the real SQL-to-`Program` pipeline (`src/codegen/`), the `Function`
 opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
-(`src/vdbe/explain.rs`).
+(`src/vdbe/explain.rs`). Requirement 12 (`AggStep`/`AggFinal`) is now
+active too: #241 added the two opcodes plus a minimal `count`/`sum`
+aggregate registry (`src/vdbe/aggregate.rs`), reusing Requirement 4's
+existing `OpenEphemeral` support as the grouping-table backing store;
+GROUP BY codegen integration and the remaining `avg`/`min`/`max`
+aggregates are tracked separately (#239, #242).
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s

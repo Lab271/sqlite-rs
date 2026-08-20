@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::header::DatabaseHeader;
 use crate::record::Value;
 use crate::vdbe::affinity::{apply_affinity, Affinity};
+use crate::vdbe::aggregate::AggState;
 use crate::vdbe::cast::cast_to;
 use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
@@ -128,6 +129,11 @@ pub struct Vm {
     /// real table cursor, an in-memory ephemeral index, a sorter, or a
     /// single-row pseudo-cursor).
     cursors: Vec<Option<CursorSlot>>,
+    /// Aggregate-context storage: a disjoint slot table addressed by
+    /// `AggStep`/`AggFinal`'s `P1`, the same shape as `cursors` —
+    /// `None` until the first `AggStep` for that slot runs (spec 009
+    /// Requirement 12, #241).
+    agg_contexts: Vec<Option<AggState>>,
     pub(crate) db: Option<VmDb>,
     rows: Vec<Vec<Value>>,
     pub(crate) once_fired: HashSet<usize>,
@@ -295,6 +301,30 @@ impl Vm {
         db.writer.clone().ok_or(ExecError::NoDatabase { opcode })
     }
 
+    /// Reads aggregate-context slot `slot`. `None` if no `AggStep` has
+    /// run for this slot yet (or the group is empty) — distinct from
+    /// `cursor`'s error-on-unopened behavior, since an unaggregated
+    /// slot is a legitimate zero-row state, not a malformed program.
+    pub(crate) fn agg_context(&self, slot: i32) -> Result<Option<&AggState>, ExecError> {
+        let idx = Self::index("agg context read", slot)?;
+        Ok(self.agg_contexts.get(idx).and_then(Option::as_ref))
+    }
+
+    /// Writes aggregate-context slot `slot`, growing the table with
+    /// empty filler as needed — mirrors `set_cursor`'s growth policy,
+    /// into the disjoint `agg_contexts` storage.
+    pub(crate) fn set_agg_context(&mut self, slot: i32, value: AggState) -> Result<(), ExecError> {
+        let idx = Self::index("agg context write", slot)?;
+        if idx >= self.agg_contexts.len() {
+            self.agg_contexts
+                .resize_with(idx.saturating_add(1), || None);
+        }
+        if let Some(cell) = self.agg_contexts.get_mut(idx) {
+            *cell = Some(value);
+        }
+        Ok(())
+    }
+
     pub fn emit_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
     }
@@ -375,14 +405,14 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat, Copy, CreateIndex,
-        CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable, Eq, Found, Function, Ge,
-        Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos, Init, Insert, Int64,
-        Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict,
-        Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead,
-        OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekRowid,
-        Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen,
-        SorterSort, String8, Subtract, Transaction, Variable,
+        Add, AggFinal, AggStep, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat,
+        Copy, CreateIndex, CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable, Eq,
+        Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IfNot, IfNotZero, IfPos,
+        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
+        NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
+        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
+        Rowid, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
+        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -465,6 +495,8 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         SorterData => sorter::sorter_data(vm, instr),
 
         Function => function(vm, instr),
+        AggStep => agg_step(vm, instr),
+        AggFinal => agg_final(vm, instr),
     }
 }
 
@@ -510,6 +542,86 @@ fn function(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             opcode: "Function",
             reason: e.to_string(),
         })?;
+    vm.set_register(instr.p3, result)?;
+    Ok(Step::Next)
+}
+
+/// `AggStep` (spec 009, Requirement 12, #241): folds the argument
+/// registers (a contiguous run starting at `P2`, per `P4`'s
+/// `"name(arity)"` descriptor — same shape as `Function`'s `P4`) into
+/// the aggregate-context slot `P1`, creating a fresh accumulator on the
+/// slot's first `AggStep`. No result is produced here — `AggFinal`
+/// reads the accumulated state once the group is done.
+fn agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let descriptor = match &instr.p4 {
+        P4::Str(s) => s.as_str(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "AggStep",
+                reason: format!("expected a \"name(arity)\" string P4, got {other:?}"),
+            })
+        }
+    };
+    let (name, arity) =
+        parse_function_descriptor(descriptor).ok_or_else(|| ExecError::MalformedInstruction {
+            opcode: "AggStep",
+            reason: format!("malformed aggregate descriptor {descriptor:?}"),
+        })?;
+    let mut args = Vec::with_capacity(arity);
+    for i in 0..arity {
+        let reg = instr
+            .p2
+            .checked_add(
+                i32::try_from(i).map_err(|_| ExecError::RegisterRangeTooLarge {
+                    opcode: "AggStep",
+                    count: i32::try_from(arity).unwrap_or(i32::MAX),
+                })?,
+            )
+            .ok_or(ExecError::RegisterOutOfRange {
+                opcode: "AggStep",
+                index: instr.p2,
+            })?;
+        args.push(vm.register(reg)?.clone());
+    }
+    let current = vm.agg_context(instr.p1)?.cloned();
+    let updated = crate::vdbe::aggregate::step(name, current, &args).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "AggStep",
+            reason: e.to_string(),
+        }
+    })?;
+    vm.set_agg_context(instr.p1, updated)?;
+    Ok(Step::Next)
+}
+
+/// `AggFinal` (spec 009, Requirement 12, #241): finalizes aggregate-
+/// context slot `P1` (via `P4`'s `"name(arity)"` descriptor, arity
+/// unused here) and writes the result into register `P3`. A slot never
+/// stepped (`P1` holds `None`) finalizes as the aggregate's own
+/// zero-row result (`count` → 0, `sum` → NULL) rather than erroring —
+/// an empty group is a legitimate outcome, not a malformed program.
+fn agg_final(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let descriptor = match &instr.p4 {
+        P4::Str(s) => s.as_str(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "AggFinal",
+                reason: format!("expected a \"name(arity)\" string P4, got {other:?}"),
+            })
+        }
+    };
+    let (name, _arity) =
+        parse_function_descriptor(descriptor).ok_or_else(|| ExecError::MalformedInstruction {
+            opcode: "AggFinal",
+            reason: format!("malformed aggregate descriptor {descriptor:?}"),
+        })?;
+    let state = vm.agg_context(instr.p1)?;
+    let result = crate::vdbe::aggregate::finalize(name, state).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "AggFinal",
+            reason: e.to_string(),
+        }
+    })?;
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
 }
@@ -773,6 +885,104 @@ mod tests {
         assert!(matches!(
             execute(&program),
             Err(ExecError::Halted { code: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn agg_step_accumulates_across_repeated_calls_into_the_same_context_slot() {
+        let mut vm = Vm::new();
+        for v in [Value::Integer(10), Value::Integer(20), Value::Integer(30)] {
+            vm.set_register(0, v).unwrap();
+            agg_step(
+                &mut vm,
+                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("sum(1)".to_string())),
+            )
+            .unwrap();
+        }
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 0, 0, 1, P4::Str("sum(1)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Integer(60));
+    }
+
+    #[test]
+    fn agg_final_on_a_never_stepped_slot_yields_the_zero_row_result() {
+        let mut vm = Vm::new();
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 0, 0, 1, P4::Str("count(0)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Integer(0));
+
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 2, 0, 3, P4::Str("sum(1)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(3).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn distinct_agg_context_slots_do_not_alias() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        agg_step(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("count(1)".to_string())),
+        )
+        .unwrap();
+        agg_step(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, P4::Str("count(1)".to_string())),
+        )
+        .unwrap();
+        agg_step(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, P4::Str("count(1)".to_string())),
+        )
+        .unwrap();
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 0, 0, 10, P4::Str("count(0)".to_string())),
+        )
+        .unwrap();
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 1, 0, 11, P4::Str("count(0)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(1));
+        assert_eq!(*vm.register(11).unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn agg_step_rejects_a_non_string_p4() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            agg_step(&mut vm, &Instruction::new(Opcode::AggStep, 0, 0, 0)),
+            Err(ExecError::MalformedInstruction {
+                opcode: "AggStep",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn agg_step_rejects_an_unknown_aggregate_name() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        assert!(matches!(
+            agg_step(
+                &mut vm,
+                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("median(1)".to_string())),
+            ),
+            Err(ExecError::MalformedInstruction {
+                opcode: "AggStep",
+                ..
+            })
         ));
     }
 }
