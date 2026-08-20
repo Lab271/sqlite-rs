@@ -4,6 +4,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+`GROUP BY` / `HAVING` (#239, V4 phase 1 epic #235): parser accepts
+`GROUP BY` (single/multi-column, arbitrary expressions) and `HAVING`.
+Codegen groups via the existing `Sorter*` opcode machinery
+(sort-then-group, mirroring SQLite's own `select.c` shape) and
+accumulates `count`/`sum`/`avg`/`min`/`max` per group from existing
+arithmetic/compare opcodes rather than new dedicated `AggStep`/
+`AggFinal` opcodes. `HAVING` and aggregate result columns compile
+against a synthetic per-group record via AST substitution of
+aggregate calls into synthetic column references, reusing
+`compile_row_values`/`compile_cond` unchanged. `GROUP BY`/`HAVING`
+combined with `ORDER BY`/`DISTINCT` in the same `SELECT`, and
+aggregates beyond `count`/`sum`/`avg`/`min`/`max`, are out of scope for
+this ticket.
+
 ## [0.12.3] - 2026-08-20
 
 `ORDER BY` of a rowid-alias column crashed ("Rowid: cursor slot 2 is a
