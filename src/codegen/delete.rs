@@ -29,8 +29,21 @@ const TABLE_CURSOR: i32 = 0;
 const FIRST_INDEX_CURSOR: i32 = 1;
 
 /// Compiles `delete` against `schema` (the resolved target table) into
-/// a `Program`.
+/// a `Program`. `catalog = [schema]` — no cross-table subquery support
+/// in the `WHERE` expression; use [`compile_delete_with_catalog`] for
+/// that (#251).
 pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, CodegenError> {
+    compile_delete_with_catalog(delete, schema, std::slice::from_ref(schema))
+}
+
+/// [`compile_delete`], plus `catalog` — the full table catalog, used to
+/// resolve a scalar/`IN`/`EXISTS` subquery expression in the `WHERE`
+/// clause when it names a table other than `schema` itself (#251).
+pub fn compile_delete_with_catalog(
+    delete: &Delete,
+    schema: &TableSchema,
+    catalog: &[TableSchema],
+) -> Result<Program, CodegenError> {
     if schema.without_rowid {
         return Err(CodegenError::Unsupported {
             reason: "WITHOUT ROWID tables are not supported by DELETE codegen yet".to_string(),
@@ -64,7 +77,7 @@ pub fn compile_delete(delete: &Delete, schema: &TableSchema) -> Result<Program, 
         compile_cond(
             &mut em,
             &mut reg,
-            &Scope::single(schema, TABLE_CURSOR),
+            &Scope::single(schema, TABLE_CURSOR).with_catalog(catalog.to_vec()),
             where_expr,
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;

@@ -318,6 +318,25 @@ impl fmt::Display for Expr {
                     write!(f, "{expr} IN ({subquery})")
                 }
             }
+            ExprKind::InSubqueryMulti {
+                exprs,
+                subquery,
+                negated,
+            } => {
+                write!(f, "(")?;
+                for (i, e) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                write!(f, ")")?;
+                if *negated {
+                    write!(f, " NOT IN ({subquery})")
+                } else {
+                    write!(f, " IN ({subquery})")
+                }
+            }
         }
     }
 }

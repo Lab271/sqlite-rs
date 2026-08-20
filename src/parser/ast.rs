@@ -271,6 +271,16 @@ pub enum ExprKind {
         subquery: Box<Select>,
         negated: bool,
     },
+    /// `(a, b) IN (SELECT x, y FROM ...)` / `... NOT IN (...)` (#251) —
+    /// the multi-column form of [`ExprKind::InSubquery`]. `exprs` is the
+    /// LHS tuple (arity >= 2); the subquery's own result-column count
+    /// must match it, checked at codegen time once the subquery's
+    /// projection is known.
+    InSubqueryMulti {
+        exprs: Vec<Expr>,
+        subquery: Box<Select>,
+        negated: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

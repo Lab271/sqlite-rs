@@ -95,11 +95,9 @@ fn test_unsupported_delete_trailing_compound() {
 fn test_unsupported_delete_where_subquery() {
     // #238 made `IN (SELECT ...)` a generic expression-grammar
     // production shared by every WHERE clause (SELECT, DELETE, UPDATE
-    // alike), so this now parses — DELETE's own codegen doesn't thread
-    // a table catalog through to resolve the subquery, so it still
-    // fails, just one stage later (at `compile_delete`, not parse
-    // time). What used to be a parse-time `unsupported` for DELETE
-    // specifically no longer exists as a distinct case.
+    // alike). #251 threaded a table catalog through `compile_delete`,
+    // so this now compiles too, not just parses — see
+    // `tests/corpus/subquery_test.rs`'s `delete_where_in_subquery_matches_oracle`.
     let delete = accept("DELETE FROM t WHERE a IN (SELECT a FROM t)");
     assert!(matches!(
         delete.where_clause.map(|w| w.kind),

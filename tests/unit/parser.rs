@@ -104,9 +104,9 @@ fn test_reject_update_tuple_set_subquery_rhs_unsupported() {
 #[test]
 fn test_reject_update_where_subquery_unsupported() {
     // #238 made `IN (SELECT ...)` a generic WHERE-clause production
-    // shared across SELECT/UPDATE/DELETE, so this now parses; UPDATE's
-    // own codegen (untouched by #238) still doesn't thread a catalog
-    // through to resolve it, so it fails one stage later instead.
+    // shared across SELECT/UPDATE/DELETE. #251 threaded a table catalog
+    // through `compile_update`, so this now compiles too — see
+    // `tests/corpus/subquery_test.rs`'s `update_where_in_subquery_matches_oracle`.
     let update = accept_update("UPDATE t1 SET x=1 WHERE x IN (SELECT x FROM t)");
     assert!(matches!(
         update.where_clause.map(|w| w.kind),
@@ -925,4 +925,60 @@ fn test_quantified_all_comparison_still_unsupported_or_invalid() {
         ParseOutcome::Unsupported { .. } | ParseOutcome::Invalid { .. } => {}
         other => panic!("expected ALL comparisons to fail to parse cleanly, got {other:?}"),
     }
+}
+
+// ---- #251: multi-column IN (subquery) ------------------------------------
+
+#[test]
+fn test_multi_column_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubqueryMulti { exprs, negated, .. } => {
+            assert!(!negated);
+            assert_eq!(exprs.len(), 2);
+        }
+        other => panic!("expected InSubqueryMulti, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_multi_column_not_in_subquery_parses() {
+    let select = accept("SELECT id FROM t WHERE (a, b) NOT IN (SELECT x, y FROM u)");
+    let Some(where_clause) = select.where_clause else {
+        panic!("expected a WHERE clause");
+    };
+    match where_clause.kind {
+        ExprKind::InSubqueryMulti { negated, .. } => assert!(negated),
+        other => panic!("expected InSubqueryMulti, got {other:?}"),
+    }
+}
+
+/// A plain grouping paren around a single expression must still parse
+/// as `ExprKind::Paren`, not be swept up by the tuple-`IN` speculative
+/// parse (arity < 2 rolls back to the normal path).
+#[test]
+fn test_single_paren_expr_still_parses_as_paren_not_tuple() {
+    let select = accept("SELECT (1 + 2) FROM t");
+    let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+        panic!("expected an Expr result column");
+    };
+    assert!(matches!(expr.kind, ExprKind::Paren(_)));
+}
+
+/// A bare parenthesized expr-list not followed by IN/NOT IN isn't valid
+/// SQLite syntax outside that context — the speculative tuple-IN parse
+/// rewinds and the normal single-expr path reports the trailing comma
+/// as a clean parse error, not a panic.
+#[test]
+fn test_bare_tuple_without_in_is_invalid() {
+    invalid("SELECT (a, b) FROM t");
+}
+
+#[test]
+fn test_multi_column_in_rejects_compound_subquery() {
+    let msg = unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u UNION SELECT 1, 2)");
+    assert!(msg.contains("compound"), "message: {msg}");
 }

@@ -387,6 +387,14 @@ pub(crate) fn compile_cond(
             em, reg, scope, inner, subquery, *negated, targets,
         ),
 
+        ExprKind::InSubqueryMulti {
+            exprs,
+            subquery,
+            negated,
+        } => crate::codegen::subquery::compile_in_subquery_multi(
+            em, reg, scope, exprs, subquery, *negated, targets,
+        ),
+
         // A scalar subquery used directly as a boolean condition (e.g.
         // `WHERE (SELECT x FROM t)`): compute its value, then test
         // truthiness like any other value-mode boolean.
@@ -1118,7 +1126,8 @@ pub(crate) fn compile_value(
         | ExprKind::Between { .. }
         | ExprKind::In { .. }
         | ExprKind::Exists { .. }
-        | ExprKind::InSubquery { .. } => compile_bool_to_value(em, reg, scope, expr),
+        | ExprKind::InSubquery { .. }
+        | ExprKind::InSubqueryMulti { .. } => compile_bool_to_value(em, reg, scope, expr),
 
         // #238: a scalar subquery in value position — `SELECT (SELECT
         // max(x) FROM t)`, `x = (SELECT ...)`, etc.

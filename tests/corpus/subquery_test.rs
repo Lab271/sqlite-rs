@@ -246,8 +246,8 @@ fn correlated_in_subquery_matches_oracle() {
 }
 
 /// `ANY`/`ALL`/`SOME` quantified comparisons and subqueries in `FROM`
-/// stay out of scope — must fail cleanly as unsupported/invalid, not
-/// panic.
+/// stay out of scope for now — must fail cleanly as unsupported/
+/// invalid, not panic. Flipped one at a time as #251's sub-items land.
 #[test]
 fn still_unsupported_subquery_forms_fail_cleanly() {
     let db = subquery_fixture_db("still_unsupported");
@@ -261,4 +261,96 @@ fn still_unsupported_subquery_forms_fail_cleanly() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
     }
+}
+
+/// #251: multi-column `IN (SELECT ...)` materializes the subquery's
+/// projected columns into an N-key ephemeral index.
+#[test]
+fn multi_column_in_subquery_matches_oracle() {
+    let db = subquery_fixture_db("multi_col_in");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE (id, x) IN (SELECT id, x FROM t WHERE id = 2)",
+        "multi_column_in_subquery_matches_oracle",
+    );
+}
+
+#[test]
+fn multi_column_not_in_subquery_matches_oracle() {
+    let db = subquery_fixture_db("multi_col_not_in");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE (id, x) NOT IN (SELECT id, x FROM t WHERE id = 2)",
+        "multi_column_not_in_subquery_matches_oracle",
+    );
+}
+
+/// #251: UPDATE's `SET`/`WHERE` clauses now thread the full table
+/// catalog through, so a subquery referencing a table other than the
+/// target resolves instead of failing at codegen time.
+#[test]
+fn update_set_scalar_subquery_matches_oracle() {
+    let db = subquery_fixture_db("update_set_scalar");
+    run_exec(
+        &db,
+        "UPDATE t SET x = (SELECT id FROM other WHERE other.a_id = t.id) WHERE id = 1",
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t ORDER BY id",
+        "update_set_scalar_subquery_matches_oracle",
+    );
+}
+
+#[test]
+fn update_where_in_subquery_matches_oracle() {
+    let db = subquery_fixture_db("update_where_in");
+    let output = run_exec(&db, "UPDATE t SET x = 0 WHERE id IN (SELECT a_id FROM other)");
+    assert!(
+        output.status.success(),
+        "UPDATE failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t ORDER BY id",
+        "update_where_in_subquery_matches_oracle",
+    );
+}
+
+/// #251: DELETE's `WHERE` clause now threads the full table catalog
+/// through as well.
+#[test]
+fn delete_where_in_subquery_matches_oracle() {
+    let db = subquery_fixture_db("delete_where_in");
+    let output = run_exec(&db, "DELETE FROM t WHERE id IN (SELECT a_id FROM other)");
+    assert!(
+        output.status.success(),
+        "DELETE failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t ORDER BY id",
+        "delete_where_in_subquery_matches_oracle",
+    );
+}
+
+#[test]
+fn delete_where_exists_correlated_matches_oracle() {
+    let db = subquery_fixture_db("delete_where_exists");
+    let output = run_exec(
+        &db,
+        "DELETE FROM t WHERE EXISTS (SELECT 1 FROM other WHERE other.a_id = t.id)",
+    );
+    assert!(
+        output.status.success(),
+        "DELETE failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t ORDER BY id",
+        "delete_where_exists_correlated_matches_oracle",
+    );
 }
