@@ -192,26 +192,57 @@ fn not_exists_subquery_matches_oracle() {
 /// this pass's documented "correlated subqueries are not yet
 /// supported" diagnostic — not panic, not silently mis-compile, and not
 /// a generic parse error (it parses fine; the rejection is a codegen
-/// decision made once schema information is available). #238 does NOT
-/// implement correlated subqueries — this is the issue's "Correlated
-/// subqueries work" acceptance criterion, explicitly deferred.
+/// decision made once schema information is available). Correlated
+/// subqueries (the issue's "Correlated subqueries work" acceptance
+/// criterion) work under materialization for free: the subquery's own
+/// `Scope` falls back to the enclosing scope for any reference it can't
+/// resolve itself, and since the subquery's codegen is inlined at the
+/// exact point it's evaluated, it naturally re-runs once per outer row
+/// with that row's outer cursor already correctly positioned — see
+/// `src/codegen/subquery.rs`'s module doc comment.
 #[test]
-fn correlated_subquery_fails_cleanly_not_silently() {
-    let db = subquery_fixture_db("correlated");
-    let output = run_query(
+fn correlated_exists_matches_oracle() {
+    let db = subquery_fixture_db("correlated_exists");
+    assert_matches_oracle(
         &db,
         "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM other WHERE other.a_id = t.id)",
+        "correlated_exists_matches_oracle",
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "expected the correlated subquery to fail to compile"
+}
+
+#[test]
+fn correlated_not_exists_matches_oracle() {
+    let db = subquery_fixture_db("correlated_not_exists");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE NOT EXISTS (SELECT 1 FROM other WHERE other.a_id = t.id)",
+        "correlated_not_exists_matches_oracle",
     );
-    assert!(
-        stderr.contains("correlated subqueries are not yet supported"),
-        "expected the documented correlated-subquery diagnostic; got: {stderr}"
+}
+
+#[test]
+fn correlated_scalar_subquery_matches_oracle() {
+    let db = subquery_fixture_db("correlated_scalar");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, (SELECT other.id FROM other WHERE other.a_id = t.id) FROM t",
+        "correlated_scalar_subquery_matches_oracle",
     );
-    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+}
+
+/// `IN (SELECT ...)` materializes an ephemeral index per evaluation —
+/// correlated here means that materialization re-runs (and the
+/// ephemeral table is rebuilt from scratch, see `OpenEphemeral`'s
+/// execution) once per outer row, since the correlated reference makes
+/// each row's subquery result potentially different.
+#[test]
+fn correlated_in_subquery_matches_oracle() {
+    let db = subquery_fixture_db("correlated_in");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE id IN (SELECT other.a_id FROM other WHERE other.a_id = t.id)",
+        "correlated_in_subquery_matches_oracle",
+    );
 }
 
 /// `ANY`/`ALL`/`SOME` quantified comparisons and subqueries in `FROM`

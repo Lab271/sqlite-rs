@@ -1,25 +1,35 @@
-//! Non-correlated subquery-expression codegen (#238): scalar subqueries
-//! (`(SELECT ...)`), `IN (SELECT ...)`/`NOT IN (SELECT ...)`, and
-//! `EXISTS (SELECT ...)`/`NOT EXISTS (SELECT ...)`. Materialization
-//! only (no coroutines) — each subquery occurrence opens its own table
-//! cursor (and, for `IN`, an ephemeral index to hold the materialized
-//! result column) via [`RegAlloc::alloc_cursor`], compiles the inner
-//! `SELECT`'s own single-table scan inline into the enclosing
-//! instruction stream, and either captures its first row's leading
-//! column (scalar subquery) or tests row existence (`EXISTS`) or row
-//! membership (`IN`).
+//! Subquery-expression codegen (#238, plus the correlated-subquery
+//! follow-up): scalar subqueries (`(SELECT ...)`), `IN (SELECT ...)`/
+//! `NOT IN (SELECT ...)`, and `EXISTS (SELECT ...)`/`NOT EXISTS
+//! (SELECT ...)`. Materialization only (no coroutines) — each subquery
+//! occurrence opens its own table cursor (and, for `IN`, an ephemeral
+//! index to hold the materialized result column) via
+//! [`RegAlloc::alloc_cursor`], compiles the inner `SELECT`'s own
+//! single-table scan inline into the enclosing instruction stream, and
+//! either captures its first row's leading column (scalar subquery) or
+//! tests row existence (`EXISTS`) or row membership (`IN`).
+//!
+//! Correlation (a column reference inside the subquery that resolves
+//! against the *enclosing* query's scope rather than the subquery's
+//! own) works for free under materialization: the subquery's own
+//! `Scope` is built with [`Scope::with_outer`] pointing at the
+//! enclosing scope, so [`Scope::resolve`] falls back there for any
+//! reference the subquery's own tables don't resolve. Because this
+//! whole `compile_*` call is inlined at the exact point the subquery
+//! expression is evaluated (once per outer row, for a subquery inside
+//! a `WHERE`/result-column expression), the outer table's cursor is
+//! already correctly positioned on the current row every time this
+//! code runs — no coroutine or per-row re-invocation machinery needed.
 //!
 //! Deliberately out of scope for this pass (see the doc comments on
-//! each `compile_*` function below for the exact rejection): correlated
-//! subqueries (a column reference inside the subquery that resolves
-//! only against the *enclosing* query's scope), subqueries in `FROM`,
-//! `ANY`/`ALL`/`SOME`, multi-column `IN`, and a subquery whose own
-//! `FROM` has a `JOIN`.
+//! each `compile_*` function below for the exact rejection): subqueries
+//! in `FROM`, `ANY`/`ALL`/`SOME`, multi-column `IN`, and a subquery
+//! whose own `FROM` has a `JOIN`.
 
 use crate::codegen::expr::{compile_cond, compile_value};
 use crate::codegen::select::CodegenError;
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Scope, Target};
-use crate::parser::ast::{Expr, ExprKind, ResultColumn, Select};
+use crate::parser::ast::{Expr, ResultColumn, Select};
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, P4};
 
@@ -67,112 +77,6 @@ fn single_result_expr(subselect: &Select) -> Result<&Expr, CodegenError> {
     }
 }
 
-/// Correlation detection: walks `expr` for every column reference,
-/// resolving each against `inner_scope` (the subquery's own `FROM`
-/// table(s), possibly none) first. A reference that fails there but
-/// resolves against `outer_scope` is a correlated reference — rejected
-/// per this pass's bounded scope, rather than silently mis-compiled (it
-/// would otherwise read whatever the *enclosing* query's cursor happens
-/// to be positioned on, which is actually well-defined register-wise
-/// for expressions but wrong for a non-correlated subquery's compiled
-/// shape below, which relies on running the subquery's scan exactly
-/// once regardless of the outer row). A reference that resolves in
-/// neither scope is a genuine unknown column, reported as such.
-///
-/// Does not recurse into a nested `Subquery`/`Exists`/`InSubquery`'s
-/// own subquery body — that nested subquery gets its own correlation
-/// check (against `inner_scope` as its immediate enclosing scope) when
-/// it is itself compiled.
-fn check_correlation(
-    expr: &Expr,
-    inner_scope: &Scope,
-    outer_scope: &Scope,
-) -> Result<(), CodegenError> {
-    match &expr.kind {
-        ExprKind::Column { table, name, .. } => {
-            if inner_scope.resolve(table.as_deref(), name).is_ok() {
-                return Ok(());
-            }
-            if outer_scope.resolve(table.as_deref(), name).is_ok() {
-                return Err(CodegenError::Unsupported {
-                    reason: "correlated subqueries are not yet supported".to_string(),
-                });
-            }
-            // Neither scope resolved it: surface the honest "no such
-            // column" answer rather than the generic correlation
-            // message.
-            inner_scope.resolve(table.as_deref(), name).map(|_| ())
-        }
-        ExprKind::Unary { expr: inner, .. }
-        | ExprKind::IsNull { expr: inner, .. }
-        | ExprKind::Cast { expr: inner, .. }
-        | ExprKind::Collate { expr: inner, .. }
-        | ExprKind::Paren(inner) => check_correlation(inner, inner_scope, outer_scope),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Is { lhs, rhs, .. } => {
-            check_correlation(lhs, inner_scope, outer_scope)?;
-            check_correlation(rhs, inner_scope, outer_scope)
-        }
-        ExprKind::Between { expr, lo, hi, .. } => {
-            check_correlation(expr, inner_scope, outer_scope)?;
-            check_correlation(lo, inner_scope, outer_scope)?;
-            check_correlation(hi, inner_scope, outer_scope)
-        }
-        ExprKind::In { expr, list, .. } => {
-            check_correlation(expr, inner_scope, outer_scope)?;
-            for item in list {
-                check_correlation(item, inner_scope, outer_scope)?;
-            }
-            Ok(())
-        }
-        ExprKind::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            check_correlation(expr, inner_scope, outer_scope)?;
-            check_correlation(pattern, inner_scope, outer_scope)?;
-            if let Some(escape) = escape {
-                check_correlation(escape, inner_scope, outer_scope)?;
-            }
-            Ok(())
-        }
-        ExprKind::Case {
-            operand,
-            whens,
-            else_,
-        } => {
-            if let Some(operand) = operand {
-                check_correlation(operand, inner_scope, outer_scope)?;
-            }
-            for (when, then) in whens {
-                check_correlation(when, inner_scope, outer_scope)?;
-                check_correlation(then, inner_scope, outer_scope)?;
-            }
-            if let Some(else_) = else_ {
-                check_correlation(else_, inner_scope, outer_scope)?;
-            }
-            Ok(())
-        }
-        ExprKind::FunctionCall { args, .. } => {
-            if let crate::parser::ast::FunctionArgs::List(list) = args {
-                for arg in list {
-                    check_correlation(arg, inner_scope, outer_scope)?;
-                }
-            }
-            Ok(())
-        }
-        // The LHS of an `IN (SELECT ...)` is the only field of a
-        // nested subquery expression this walk descends into; the
-        // subquery bodies themselves are checked independently when
-        // compiled.
-        ExprKind::InSubquery { expr, .. } => check_correlation(expr, inner_scope, outer_scope),
-        ExprKind::Literal(_) | ExprKind::Param(_) | ExprKind::Subquery(_) | ExprKind::Exists { .. } => {
-            Ok(())
-        }
-    }
-}
-
 /// Compiles a scalar subquery `(SELECT ...)` (#238) into a fresh
 /// register: NULL if the subquery yields zero rows, otherwise its
 /// first result column's value from the *first* row returned (matching
@@ -203,8 +107,9 @@ pub(crate) fn compile_scalar_subquery(
             });
         }
         let col_expr = single_result_expr(subselect)?;
-        let empty_scope = Scope::default().with_catalog(catalog);
-        check_correlation(col_expr, &empty_scope, outer_scope)?;
+        let empty_scope = Scope::default()
+            .with_catalog(catalog)
+            .with_outer(outer_scope.clone());
         let v = compile_value(em, reg, &empty_scope, col_expr)?;
         em.emit(Instruction::new(Opcode::Copy, v, dest, 0));
         return Ok(dest);
@@ -213,12 +118,9 @@ pub(crate) fn compile_scalar_subquery(
 
     let col_expr = single_result_expr(subselect)?;
     let sub_cursor = reg.alloc_cursor();
-    let sub_scope = Scope::single(&schema, sub_cursor).with_catalog(catalog);
-
-    if let Some(where_expr) = &subselect.where_clause {
-        check_correlation(where_expr, &sub_scope, outer_scope)?;
-    }
-    check_correlation(col_expr, &sub_scope, outer_scope)?;
+    let sub_scope = Scope::single(&schema, sub_cursor)
+        .with_catalog(catalog)
+        .with_outer(outer_scope.clone());
 
     em.emit(Instruction::new(
         Opcode::OpenRead,
@@ -276,10 +178,9 @@ pub(crate) fn compile_exists(
         });
     };
     let sub_cursor = reg.alloc_cursor();
-    let sub_scope = Scope::single(&schema, sub_cursor).with_catalog(catalog);
-    if let Some(where_expr) = &subselect.where_clause {
-        check_correlation(where_expr, &sub_scope, outer_scope)?;
-    }
+    let sub_scope = Scope::single(&schema, sub_cursor)
+        .with_catalog(catalog)
+        .with_outer(outer_scope.clone());
 
     let (exists_true, exists_false) = if negated {
         (targets.on_false, targets.on_true)
@@ -352,11 +253,9 @@ pub(crate) fn compile_in_subquery(
     };
     let col_expr = single_result_expr(subselect)?;
     let sub_cursor = reg.alloc_cursor();
-    let sub_scope = Scope::single(&schema, sub_cursor).with_catalog(catalog);
-    if let Some(where_expr) = &subselect.where_clause {
-        check_correlation(where_expr, &sub_scope, outer_scope)?;
-    }
-    check_correlation(col_expr, &sub_scope, outer_scope)?;
+    let sub_scope = Scope::single(&schema, sub_cursor)
+        .with_catalog(catalog)
+        .with_outer(outer_scope.clone());
 
     let l = compile_value(em, reg, outer_scope, lhs)?;
 

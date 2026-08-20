@@ -343,6 +343,15 @@ pub(crate) struct Scope {
     /// those compiles to `CodegenError::Unsupported` (no table found)
     /// rather than silently resolving against the wrong catalog.
     pub(crate) catalog: Vec<crate::schema::TableSchema>,
+    /// A correlated subquery's enclosing scope (#238 follow-up): set on
+    /// the `Scope` built for a subquery's own `FROM` table(s) so
+    /// [`Scope::resolve`] can fall back to it once this scope's own
+    /// `tables` fails to resolve a reference. `None` for every ordinary
+    /// (non-subquery) scope. SQL's scoping rule — the subquery's own
+    /// tables shadow the enclosing query's, never the other way round —
+    /// falls out for free from trying `self.tables` first and `outer`
+    /// only on failure, rather than merging the two table lists.
+    pub(crate) outer: Option<Box<Scope>>,
 }
 
 impl Scope {
@@ -359,6 +368,7 @@ impl Scope {
                 forced_null: false,
             }],
             catalog: Vec::new(),
+            outer: None,
         }
     }
 
@@ -370,6 +380,15 @@ impl Scope {
         self
     }
 
+    /// Marks this scope as a (possibly) correlated subquery's own scope,
+    /// with `outer` as the enclosing query's scope to fall back to —
+    /// see [`Scope::outer`]'s doc comment for the shadowing rule this
+    /// implements.
+    pub(crate) fn with_outer(mut self, outer: Scope) -> Self {
+        self.outer = Some(Box::new(outer));
+        self
+    }
+
     /// Resolves a `table.name`/bare `name` column reference to
     /// `(cursor, column_index, schema, forced_null)`. `table: Some(_)`
     /// matches the alias-or-name qualifier exactly (see
@@ -378,7 +397,29 @@ impl Scope {
     /// SQLite's own rule for an unqualified column shared by two joined
     /// tables. `forced_null` is [`TableBinding::forced_null`]'s value
     /// for whichever binding resolved — see its doc comment.
+    ///
+    /// Tries this scope's own `tables` first; only on failure does it
+    /// fall back to `self.outer` (a correlated reference) if set — so a
+    /// name that resolves in both this scope and an enclosing one binds
+    /// to this scope, matching SQL's shadowing rule, and two same-named
+    /// columns split across this scope and `outer` are never reported
+    /// ambiguous (only same-scope ambiguity is, per the existing rule
+    /// below).
     pub(crate) fn resolve(
+        &self,
+        table: Option<&str>,
+        name: &str,
+    ) -> Result<(i32, usize, &crate::schema::TableSchema, bool), select::CodegenError> {
+        match self.resolve_own(table, name) {
+            Ok(v) => Ok(v),
+            Err(own_err) => match &self.outer {
+                Some(outer) => outer.resolve(table, name),
+                None => Err(own_err),
+            },
+        }
+    }
+
+    fn resolve_own(
         &self,
         table: Option<&str>,
         name: &str,

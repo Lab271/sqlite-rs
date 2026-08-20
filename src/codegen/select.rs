@@ -282,6 +282,7 @@ pub fn compile_select_joined(
     let full_scope = Scope {
         tables: bindings.clone(),
         catalog: schemas.to_vec(),
+        outer: None,
     };
     let limit = compile_limit_setup(&mut em, &mut reg, &full_scope, select)?;
 
@@ -331,6 +332,7 @@ fn join_scope(bindings: &[TableBinding], null_mask: &[bool], catalog: &[TableSch
             })
             .collect(),
         catalog: catalog.to_vec(),
+        outer: None,
     }
 }
 
