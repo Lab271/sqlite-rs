@@ -157,10 +157,10 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 /// The target is 0. Every one of these is a real diagnostics bug: `Invalid`
 /// asserts the SQL is malformed, whereas `Unsupported` is what a
 /// recognized-but-unimplemented construct should yield. The known causes,
-/// #113 fixed the bulk of these (#110), taking the count from 131 to 7. The
-/// remainder, all valid SQL real sqlite3 accepts:
+/// #113 fixed the bulk of these (#110), taking the count from 131 to 7;
+/// #239 fixed the two `GROUP BY` cases, taking it to 5. The remainder, all
+/// valid SQL real sqlite3 accepts:
 ///
-/// - `GROUP BY` (x2) — not implemented by the V2 slice
 /// - single-quoted aliases, `... AS 'm'` (x2) — SQLite accepts a string
 ///   literal where an alias identifier is expected
 /// - `temp.sqlite_master` — schema-qualified name with a keyword schema
@@ -171,7 +171,7 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 /// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
 /// never raise it. A raise means a regression that reclassified valid SQL as
 /// malformed.
-const SELECT_INVALID_BASELINE: usize = 7;
+const SELECT_INVALID_BASELINE: usize = 5;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

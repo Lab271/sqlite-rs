@@ -30,6 +30,18 @@ impl fmt::Display for Select {
         if let Some(w) = &self.where_clause {
             write!(f, " WHERE {w}")?;
         }
+        if !self.group_by.is_empty() {
+            write!(f, " GROUP BY ")?;
+            for (i, expr) in self.group_by.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{expr}")?;
+            }
+        }
+        if let Some(having) = &self.having {
+            write!(f, " HAVING {having}")?;
+        }
         if !self.order_by.is_empty() {
             write!(f, " ORDER BY ")?;
             for (i, term) in self.order_by.iter().enumerate() {

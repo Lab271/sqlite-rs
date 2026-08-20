@@ -16,12 +16,12 @@
 use thiserror::Error;
 
 use crate::codegen::expr::{
-    collation_of, column_index, compile_cond, compile_value, emit_column_read,
+    collation_of, column_index, compile_cond, compile_value, emit_column_read, is_aggregate_call,
 };
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target};
 use crate::parser::ast::{
-    BinaryOp, Distinctness, Expr, ExprKind, JoinConstraint, JoinOp, Literal, ParamKind,
-    ResultColumn, Select, TableRef,
+    BinaryOp, Distinctness, Expr, ExprKind, FunctionArgs, JoinConstraint, JoinOp, Literal,
+    ParamKind, ResultColumn, Select, TableRef,
 };
 use crate::parser::tokenizer::Span;
 use crate::schema::{rowid_alias_column, TableSchema};
@@ -166,6 +166,25 @@ pub(crate) fn compile_select_scan<F>(
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
+    if !select.group_by.is_empty() {
+        if !select.order_by.is_empty() {
+            return Err(CodegenError::Unsupported {
+                reason: "GROUP BY combined with ORDER BY not yet supported".to_string(),
+            });
+        }
+        if select.distinct.is_some() {
+            return Err(CodegenError::Unsupported {
+                reason: "GROUP BY combined with DISTINCT not yet supported".to_string(),
+            });
+        }
+        return compile_grouped_scan(em, reg, select, schema, cursors, end_label, catalog, sink);
+    }
+    if select.having.is_some() {
+        return Err(CodegenError::Unsupported {
+            reason: "HAVING without GROUP BY not yet supported".to_string(),
+        });
+    }
+
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
         compile_direct_scan(em, reg, select, schema, cursors, end_label, catalog, sink)
@@ -1361,3 +1380,716 @@ where
     em.patch_p2(sorted_next, sorted_loop);
     Ok(())
 }
+
+/// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
+/// sort-then-group `select.c` shape rather than a hash table, since the
+/// `Sorter*` opcode family this compiler already has for `ORDER BY`
+/// (see [`compile_sorted_scan`]) does the heavy lifting for free: pass 1
+/// sorts every WHERE-matching row by its GROUP BY key, pass 2 walks the
+/// sorted stream detecting key changes as group boundaries, accumulating
+/// one register (or two, for `avg`) per aggregate call, and flushing a
+/// finalized output row through `sink` at each boundary (and once more
+/// after the loop, for the final group).
+///
+/// Known simplifications (documented rather than silently wrong):
+/// - `GROUP BY`/`HAVING` combined with `ORDER BY` or `DISTINCT` on the
+///   same `SELECT` are rejected outright (see the caller) rather than
+///   composed.
+/// - Only `count`/`sum`/`avg`/`min`/`max` are supported aggregates;
+///   `group_concat`/`string_agg`/`total` are rejected.
+/// - Aggregate-call detection only descends through `Paren`/`Collate`/
+///   `Unary`/`Binary` wrappers — an aggregate nested inside `CASE`/
+///   `BETWEEN`/`IN`/`LIKE` is not found, and compiling it falls through
+///   to `compile_value`'s ordinary aggregate-rejection error.
+/// - A `GROUP BY`/aggregate-argument expression that itself reads the
+///   table's `INTEGER PRIMARY KEY` rowid-alias column mid-expression
+///   (not as a bare column) reads the wrong value against the pass-2
+///   pseudo cursor — narrow enough (grouping/aggregating by a *bare*
+///   rowid-alias column is handled correctly; only a compound
+///   expression referencing it is affected) not to block this ticket.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn compile_grouped_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let pseudo_scope = Scope::single(schema, cursors.pseudo).with_catalog(catalog.to_vec());
+    let group_targets: Vec<OrderByTarget> = select
+        .group_by
+        .iter()
+        .map(|expr| order_by_target_for_expr(expr, schema))
+        .collect::<Result<_, _>>()?;
+
+    // Pass 1: buffer every WHERE-matching row's full column tuple, plus
+    // a trailing register per computed (non-bare-column) GROUP BY
+    // expression, sorted by the GROUP BY key — identical in shape to
+    // `compile_sorted_scan`'s ORDER BY pass 1.
+    let sorter_open_addr = em.emit(Instruction::with_p4(
+        Opcode::SorterOpen,
+        cursors.sort,
+        0,
+        0,
+        P4::None,
+    ));
+
+    let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
+    let sort_step = em.new_label();
+    em.patch_p2(scan_rewind, sort_step);
+    let scan_loop = em.new_label();
+    em.place(scan_loop);
+
+    let scan_skip = em.new_label();
+    if let Some(where_expr) = &select.where_clause {
+        compile_cond(
+            em,
+            reg,
+            &table_scope,
+            where_expr,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
+        )?;
+    }
+    let (first, _schema_count) = compile_row_values(
+        em,
+        reg,
+        schema,
+        &schema
+            .columns
+            .iter()
+            .map(|c| ResultColumnPlan::Column(c.clone()))
+            .collect::<Vec<_>>(),
+        cursors.table,
+        false,
+        catalog,
+    )?;
+
+    let mut sort_keys = Vec::with_capacity(group_targets.len());
+    for (expr, target) in select.group_by.iter().zip(&group_targets) {
+        let index = match target {
+            OrderByTarget::Column(idx) => *idx,
+            OrderByTarget::Expr(e) => {
+                let r = compile_value(em, reg, &table_scope, e)?;
+                usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+            }
+        };
+        sort_keys.push(SortKeyColumn {
+            index,
+            descending: false,
+            collation: collation_of(expr).unwrap_or(Collation::Binary),
+            nulls_first: true,
+        });
+    }
+    em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
+
+    let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
+    let record_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::MakeRecord,
+        first,
+        i32::try_from(count).unwrap_or(0),
+        record_reg,
+    ));
+    em.emit(Instruction::new(
+        Opcode::SorterInsert,
+        cursors.sort,
+        record_reg,
+        0,
+    ));
+
+    em.place(scan_skip);
+    let scan_next = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
+    em.patch_p2(scan_next, scan_loop);
+
+    // Pass 2: walk the sorted buffer, grouping and aggregating.
+    em.place(sort_step);
+    let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, cursors.sort, 0, 0));
+    em.patch_p2(sort_addr, end_label);
+
+    let limit = compile_limit_setup(em, reg, &table_scope, select)?;
+
+    let aggs = collect_aggregates(select)?;
+    let zero_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, zero_reg, 0));
+    let one_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 1, one_reg, 0));
+    let have_group_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, have_group_reg, 0));
+
+    let prev_key_regs: Vec<i32> = group_targets.iter().map(|_| reg.alloc()).collect();
+    let snapshot_regs: Vec<i32> = schema.columns.iter().map(|_| reg.alloc()).collect();
+    let mut agg_slots: Vec<AggSlot> = aggs
+        .into_iter()
+        .map(|(call, kind, arg)| {
+            let primary = reg.alloc();
+            let aux = matches!(kind, AggKind::Avg).then(|| reg.alloc());
+            AggSlot {
+                call,
+                kind,
+                arg,
+                primary,
+                aux,
+            }
+        })
+        .collect();
+
+    let sorted_loop = em.new_label();
+    em.place(sorted_loop);
+    let sorter_data_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::SorterData,
+        cursors.sort,
+        sorter_data_reg,
+        0,
+    ));
+    em.emit(Instruction::new(
+        Opcode::OpenPseudo,
+        cursors.pseudo,
+        sorter_data_reg,
+        0,
+    ));
+
+    // Compute this row's GROUP BY key into fresh registers.
+    let cur_key_regs: Vec<i32> = group_targets
+        .iter()
+        .zip(&select.group_by)
+        .map(|(target, expr)| match target {
+            OrderByTarget::Column(idx) => {
+                let r = reg.alloc();
+                read_pseudo_column(em, schema, cursors.pseudo, *idx, r)?;
+                Ok(r)
+            }
+            OrderByTarget::Expr(_) => compile_value(em, reg, &pseudo_scope, expr),
+        })
+        .collect::<Result<_, CodegenError>>()?;
+
+    let boundary_label = em.new_label();
+    let not_boundary_label = em.new_label();
+    let first_row_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(first_row_check, boundary_label);
+    for (&cur, &prev) in cur_key_regs.iter().zip(&prev_key_regs) {
+        let a_null = em.new_label();
+        let same_col = em.new_label();
+        let a_null_addr = em.emit(Instruction::new(Opcode::IsNull, cur, 0, 0));
+        em.patch_p2(a_null_addr, a_null);
+        let b_null_addr = em.emit(Instruction::new(Opcode::IsNull, prev, 0, 0));
+        em.patch_p2(b_null_addr, boundary_label);
+        let eq_addr = em.emit(Instruction::new(Opcode::Eq, cur, 0, prev));
+        em.patch_p2(eq_addr, same_col);
+        let goto_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(goto_boundary, boundary_label);
+        em.place(a_null);
+        let b_not_null_addr = em.emit(Instruction::new(Opcode::NotNull, prev, 0, 0));
+        em.patch_p2(b_not_null_addr, boundary_label);
+        em.place(same_col);
+    }
+    let goto_not_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_not_boundary, not_boundary_label);
+
+    em.place(boundary_label);
+    let skip_flush = em.new_label();
+    let flush_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(flush_check, skip_flush);
+    flush_group(
+        em,
+        reg,
+        select,
+        schema,
+        catalog,
+        &snapshot_regs,
+        &agg_slots,
+        limit.as_ref(),
+        end_label,
+        sink,
+    )?;
+    em.place(skip_flush);
+    for (&cur, &prev) in cur_key_regs.iter().zip(&prev_key_regs) {
+        em.emit(Instruction::new(Opcode::Copy, cur, prev, 0));
+    }
+    em.emit(Instruction::new(Opcode::Integer, 1, have_group_reg, 0));
+    for agg in &agg_slots {
+        reset_agg(em, agg);
+    }
+
+    em.place(not_boundary_label);
+    for agg in &mut agg_slots {
+        accumulate_agg(em, reg, &pseudo_scope, agg, zero_reg, one_reg)?;
+    }
+    read_row_columns_into(em, schema, cursors.pseudo, &snapshot_regs)?;
+
+    let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
+    em.patch_p2(sorted_next, sorted_loop);
+
+    // Tail flush: the very last group never sees another row to trigger
+    // `boundary_label`'s mid-loop flush.
+    let skip_tail_flush = em.new_label();
+    let tail_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(tail_check, skip_tail_flush);
+    flush_group(
+        em,
+        reg,
+        select,
+        schema,
+        catalog,
+        &snapshot_regs,
+        &agg_slots,
+        limit.as_ref(),
+        end_label,
+        sink,
+    )?;
+    em.place(skip_tail_flush);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggKind {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+struct AggSlot {
+    call: Expr,
+    kind: AggKind,
+    arg: Option<Expr>,
+    primary: i32,
+    aux: Option<i32>,
+}
+
+/// Recognizes `expr` as an aggregate call this compiler can accumulate,
+/// or reports why not. Only called on expressions [`find_aggregates`]
+/// already identified as `is_aggregate_call`, so the "not an aggregate
+/// at all" case can't happen here.
+fn classify_aggregate(expr: &Expr) -> Result<(AggKind, Option<Expr>), CodegenError> {
+    let ExprKind::FunctionCall { name, args, .. } = &expr.kind else {
+        unreachable!("classify_aggregate called on a non-call expression")
+    };
+    let arg = match args {
+        FunctionArgs::Star => None,
+        FunctionArgs::List(list) if list.len() <= 1 => list.first().cloned(),
+        FunctionArgs::List(_) => {
+            return Err(CodegenError::Unsupported {
+                reason: format!(
+                    "aggregate function {} with more than one argument is not yet supported",
+                    name.to_ascii_lowercase()
+                ),
+            })
+        }
+    };
+    let kind = match name.to_ascii_lowercase().as_str() {
+        "count" => AggKind::Count,
+        "sum" => AggKind::Sum,
+        "avg" => AggKind::Avg,
+        "min" => AggKind::Min,
+        "max" => AggKind::Max,
+        other => {
+            return Err(CodegenError::Unsupported {
+                reason: format!("aggregate function {other} not yet supported in GROUP BY"),
+            })
+        }
+    };
+    Ok((kind, arg))
+}
+
+/// Finds every aggregate-call sub-expression reachable from `select`'s
+/// result columns and `HAVING` clause through `Paren`/`Collate`/`Unary`/
+/// `Binary` wrappers (see [`compile_grouped_scan`]'s doc comment for the
+/// bound), deduplicated by AST equality so `HAVING count(*) > 1` sharing
+/// a call with a `count(*)` result column accumulates into one slot.
+fn collect_aggregates(select: &Select) -> Result<Vec<(Expr, AggKind, Option<Expr>)>, CodegenError> {
+    let mut found: Vec<Expr> = Vec::new();
+    for col in &select.columns {
+        if let ResultColumn::Expr { expr, .. } = col {
+            find_aggregates(expr, &mut found);
+        }
+    }
+    if let Some(having) = &select.having {
+        find_aggregates(having, &mut found);
+    }
+    found
+        .into_iter()
+        .map(|call| {
+            let (kind, arg) = classify_aggregate(&call)?;
+            Ok((call, kind, arg))
+        })
+        .collect()
+}
+
+fn find_aggregates(expr: &Expr, out: &mut Vec<Expr>) {
+    if let ExprKind::FunctionCall { name, args, .. } = &expr.kind {
+        if is_aggregate_call(name, args) {
+            if !out.contains(expr) {
+                out.push(expr.clone());
+            }
+            return;
+        }
+    }
+    match &expr.kind {
+        ExprKind::Paren(inner) | ExprKind::Collate { expr: inner, .. } => {
+            find_aggregates(inner, out);
+        }
+        ExprKind::Unary { expr: inner, .. } => find_aggregates(inner, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            find_aggregates(lhs, out);
+            find_aggregates(rhs, out);
+        }
+        _ => {}
+    }
+}
+
+/// Rewrites every aggregate-call sub-expression matching one of
+/// `agg_slots` into a `Column` reference to that slot's synthetic
+/// output-record field (see [`flush_group`]), so the rewritten
+/// expression can compile against the flush-time synthetic
+/// schema/record via the ordinary (aggregate-unaware) `compile_value`/
+/// `compile_cond` machinery.
+fn substitute_aggregates(expr: &Expr, agg_slots: &[AggSlot], synthetic_names: &[String]) -> Expr {
+    if let Some(pos) = agg_slots.iter().position(|slot| slot.call == *expr) {
+        return Expr {
+            kind: ExprKind::Column {
+                table: None,
+                catalog: None,
+                name: synthetic_names.get(pos).cloned().unwrap_or_default(),
+            },
+            span: expr.span,
+        };
+    }
+    let kind = match &expr.kind {
+        ExprKind::Paren(inner) => ExprKind::Paren(Box::new(substitute_aggregates(
+            inner,
+            agg_slots,
+            synthetic_names,
+        ))),
+        ExprKind::Collate {
+            expr: inner,
+            collation,
+        } => ExprKind::Collate {
+            expr: Box::new(substitute_aggregates(inner, agg_slots, synthetic_names)),
+            collation: collation.clone(),
+        },
+        ExprKind::Unary { op, expr: inner } => ExprKind::Unary {
+            op: *op,
+            expr: Box::new(substitute_aggregates(inner, agg_slots, synthetic_names)),
+        },
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+            op: *op,
+            lhs: Box::new(substitute_aggregates(lhs, agg_slots, synthetic_names)),
+            rhs: Box::new(substitute_aggregates(rhs, agg_slots, synthetic_names)),
+        },
+        other => other.clone(),
+    };
+    Expr {
+        kind,
+        span: expr.span,
+    }
+}
+
+/// Pseudo-cursor-safe single-column read: like `emit_column_read`, but
+/// aware that `cursor` re-reads an already-materialized record (so the
+/// rowid-alias column is an ordinary field within it, not something
+/// `Opcode::Rowid` can fetch) — see `compile_row_values`'s identical
+/// special case for why.
+fn read_pseudo_column(
+    em: &mut Emitter,
+    schema: &TableSchema,
+    cursor: i32,
+    idx: usize,
+    dest: i32,
+) -> Result<(), CodegenError> {
+    if rowid_alias_column(schema) == Some(idx) {
+        em.emit(Instruction::new(
+            Opcode::Column,
+            cursor,
+            i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                reason: format!("column index {idx} does not fit in a P2 operand"),
+            })?,
+            dest,
+        ));
+        return Ok(());
+    }
+    emit_column_read(em, schema, cursor, idx, dest)
+}
+
+/// Reads every one of `schema`'s columns from the pass-2 pseudo cursor
+/// into the given (already-allocated, persistent) destination
+/// registers — the per-row snapshot `compile_grouped_scan` keeps so a
+/// plain (non-aggregate) result/`HAVING` column reads the group's last
+/// row, matching SQLite's own "arbitrary row" semantics for a
+/// non-grouped-by column.
+fn read_row_columns_into(
+    em: &mut Emitter,
+    schema: &TableSchema,
+    cursor: i32,
+    dest: &[i32],
+) -> Result<(), CodegenError> {
+    for (idx, &r) in dest.iter().enumerate() {
+        read_pseudo_column(em, schema, cursor, idx, r)?;
+    }
+    Ok(())
+}
+
+fn reset_agg(em: &mut Emitter, agg: &AggSlot) {
+    match agg.kind {
+        AggKind::Count => {
+            em.emit(Instruction::new(Opcode::Integer, 0, agg.primary, 0));
+        }
+        AggKind::Sum | AggKind::Min | AggKind::Max => {
+            em.emit(Instruction::new(Opcode::Null, 0, agg.primary, 0));
+        }
+        AggKind::Avg => {
+            em.emit(Instruction::new(Opcode::Null, 0, agg.primary, 0));
+            if let Some(aux) = agg.aux {
+                em.emit(Instruction::new(Opcode::Integer, 0, aux, 0));
+            }
+        }
+    }
+}
+
+fn accumulate_agg(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    scope: &Scope,
+    agg: &mut AggSlot,
+    zero_reg: i32,
+    one_reg: i32,
+) -> Result<(), CodegenError> {
+    let arg_reg = match &agg.arg {
+        Some(expr) => Some(compile_value(em, reg, scope, expr)?),
+        None => None,
+    };
+    match agg.kind {
+        AggKind::Count => {
+            let _ = zero_reg;
+            if let Some(arg_reg) = arg_reg {
+                let skip = em.new_label();
+                let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
+                em.patch_p2(addr, skip);
+                em.emit(Instruction::new(
+                    Opcode::Add,
+                    agg.primary,
+                    one_reg,
+                    agg.primary,
+                ));
+                em.place(skip);
+            } else {
+                em.emit(Instruction::new(
+                    Opcode::Add,
+                    agg.primary,
+                    one_reg,
+                    agg.primary,
+                ));
+            }
+        }
+        AggKind::Sum | AggKind::Avg => {
+            let arg_reg = arg_reg.ok_or_else(|| CodegenError::Unsupported {
+                reason: "sum/avg require a single argument".to_string(),
+            })?;
+            let skip = em.new_label();
+            let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
+            em.patch_p2(addr, skip);
+            let first_val = em.new_label();
+            let after = em.new_label();
+            let is_null_addr = em.emit(Instruction::new(Opcode::IsNull, agg.primary, 0, 0));
+            em.patch_p2(is_null_addr, first_val);
+            em.emit(Instruction::new(
+                Opcode::Add,
+                agg.primary,
+                arg_reg,
+                agg.primary,
+            ));
+            let goto_after = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+            em.patch_p2(goto_after, after);
+            em.place(first_val);
+            em.emit(Instruction::new(Opcode::Copy, arg_reg, agg.primary, 0));
+            em.place(after);
+            if let Some(aux) = agg.aux {
+                em.emit(Instruction::new(Opcode::Add, aux, one_reg, aux));
+            }
+            em.place(skip);
+        }
+        AggKind::Min | AggKind::Max => {
+            let arg_reg = arg_reg.ok_or_else(|| CodegenError::Unsupported {
+                reason: "min/max require a single argument".to_string(),
+            })?;
+            let skip = em.new_label();
+            let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
+            em.patch_p2(addr, skip);
+            let do_copy = em.new_label();
+            let after = em.new_label();
+            let is_null_addr = em.emit(Instruction::new(Opcode::IsNull, agg.primary, 0, 0));
+            em.patch_p2(is_null_addr, do_copy);
+            let cmp_op = if agg.kind == AggKind::Min {
+                Opcode::Lt
+            } else {
+                Opcode::Gt
+            };
+            let cmp_addr = em.emit(Instruction::new(cmp_op, arg_reg, 0, agg.primary));
+            em.patch_p2(cmp_addr, do_copy);
+            let goto_after = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+            em.patch_p2(goto_after, after);
+            em.place(do_copy);
+            em.emit(Instruction::new(Opcode::Copy, arg_reg, agg.primary, 0));
+            em.place(after);
+            em.place(skip);
+        }
+    }
+    Ok(())
+}
+
+/// Finalizes and emits one grouped output row via `sink`, applying
+/// `HAVING`/`LIMIT`/`OFFSET` exactly as the ungrouped scans do. Builds a
+/// synthetic record — the group's snapshot column values (from the last
+/// row seen) followed by each aggregate's finalized value — and opens a
+/// fresh pseudo cursor over it, so `select.columns`/`having` (with
+/// aggregate calls rewritten to reference the synthetic record's
+/// trailing fields via [`substitute_aggregates`]) compile through the
+/// ordinary `compile_row_values`/`compile_cond` machinery unchanged.
+#[allow(clippy::too_many_arguments)]
+fn flush_group<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    catalog: &[TableSchema],
+    snapshot_regs: &[i32],
+    agg_slots: &[AggSlot],
+    limit: Option<&LimitState>,
+    end_label: Label,
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let synthetic_names: Vec<String> = (0..agg_slots.len()).map(|i| format!("__agg{i}")).collect();
+
+    let mut synthetic_columns = schema.columns.clone();
+    synthetic_columns.extend(synthetic_names.iter().cloned());
+    let mut synthetic_types = schema.column_types.clone();
+    synthetic_types.extend(synthetic_names.iter().map(|_| String::new()));
+    let synthetic_schema = TableSchema {
+        name: schema.name.clone(),
+        root_page: 0,
+        columns: synthetic_columns,
+        without_rowid: schema.without_rowid,
+        strict: false,
+        column_types: synthetic_types,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: Vec::new(),
+    };
+
+    // Allocate one fresh, contiguous register per snapshot/aggregate
+    // field up front — `reg.alloc()` bump-allocates sequentially, so as
+    // long as nothing else allocates in between, `dests` is guaranteed
+    // contiguous for `MakeRecord`.
+    let synthetic_count = snapshot_regs.len().saturating_add(agg_slots.len());
+    let dests: Vec<i32> = (0..synthetic_count).map(|_| reg.alloc()).collect();
+    let synthetic_first = dests.first().copied().unwrap_or_else(|| reg.alloc());
+    for (&snap, &dest) in snapshot_regs.iter().zip(&dests) {
+        em.emit(Instruction::new(Opcode::Copy, snap, dest, 0));
+    }
+    let agg_dests = dests.get(snapshot_regs.len()..).unwrap_or(&[]);
+    for (agg, &dest) in agg_slots.iter().zip(agg_dests) {
+        if let Some(aux) = agg.aux.filter(|_| agg.kind == AggKind::Avg) {
+            // `Divide`: r[P3] = r[P2] / r[P1] — dividend in P2, divisor
+            // in P1. `aux` (the non-null count) is 0 exactly when
+            // `primary` (the running sum) is still NULL, so a
+            // zero-count group divides `Null / 0` and yields `Null`
+            // via the same null-propagation `Divide` already gives any
+            // other NULL operand — no separate zero-guard needed.
+            //
+            // SQLite's `avg()` always yields a REAL, unlike a bare `/`
+            // between two integers (which truncates) — force the sum
+            // to REAL affinity first so `Divide` computes in floating
+            // point. `apply_affinity` leaves a NULL sum untouched, so
+            // the zero-count case above still divides through to NULL.
+            em.emit(Instruction::new(Opcode::RealAffinity, agg.primary, 0, 0));
+            em.emit(Instruction::new(Opcode::Divide, aux, agg.primary, dest));
+        } else {
+            em.emit(Instruction::new(Opcode::Copy, agg.primary, dest, 0));
+        }
+    }
+    let record_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::MakeRecord,
+        synthetic_first,
+        i32::try_from(synthetic_count).unwrap_or(0),
+        record_reg,
+    ));
+    let flush_cursor = FLUSH_CURSOR;
+    em.emit(Instruction::new(
+        Opcode::OpenPseudo,
+        flush_cursor,
+        record_reg,
+        0,
+    ));
+
+    let flush_scope = Scope::single(&synthetic_schema, flush_cursor).with_catalog(catalog.to_vec());
+    let skip_label = em.new_label();
+    if let Some(having) = &select.having {
+        let rewritten = substitute_aggregates(having, agg_slots, &synthetic_names);
+        compile_cond(
+            em,
+            reg,
+            &flush_scope,
+            &rewritten,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip_label)),
+        )?;
+    }
+    if let Some(limit) = limit {
+        emit_offset_guard(em, limit, skip_label);
+    }
+
+    let rewritten_columns: Vec<ResultColumn> = select
+        .columns
+        .iter()
+        .map(|col| match col {
+            ResultColumn::Expr { expr, alias } => ResultColumn::Expr {
+                expr: substitute_aggregates(expr, agg_slots, &synthetic_names),
+                alias: alias.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect();
+    let throwaway = Select {
+        distinct: None,
+        columns: rewritten_columns,
+        from: None,
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        span: select.span,
+    };
+    let cols = result_columns(&throwaway, &synthetic_schema);
+    let (proj_first, proj_count) = compile_row_values(
+        em,
+        reg,
+        &synthetic_schema,
+        &cols,
+        flush_cursor,
+        true,
+        catalog,
+    )?;
+    sink(em, reg, proj_first, i32::try_from(proj_count).unwrap_or(0))?;
+    if let Some(limit) = limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+    em.place(skip_label);
+    Ok(())
+}
+
+/// A cursor number for `flush_group`'s synthetic per-group record —
+/// distinct from [`ScanCursors`]'s four numbers (0-3), which stay live
+/// across every `flush_group` call within the same grouped scan.
+const FLUSH_CURSOR: i32 = 4;
