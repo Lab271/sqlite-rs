@@ -42,6 +42,9 @@ impl fmt::Display for Select {
         if let Some(having) = &self.having {
             write!(f, " HAVING {having}")?;
         }
+        for arm in &self.compound {
+            write!(f, " {arm}")?;
+        }
         if !self.order_by.is_empty() {
             write!(f, " ORDER BY ")?;
             for (i, term) in self.order_by.iter().enumerate() {
@@ -56,6 +59,46 @@ impl fmt::Display for Select {
             if let Some(offset) = &limit.offset {
                 write!(f, " OFFSET {offset}")?;
             }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for CompoundSelect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.op {
+            CompoundOp::UnionAll => write!(f, "UNION ALL SELECT")?,
+        }
+        match self.distinct {
+            Some(Distinctness::Distinct) => write!(f, " DISTINCT")?,
+            Some(Distinctness::All) => write!(f, " ALL")?,
+            None => {}
+        }
+        for (i, col) in self.columns.iter().enumerate() {
+            if i == 0 {
+                write!(f, " ")?;
+            } else {
+                write!(f, ", ")?;
+            }
+            write!(f, "{col}")?;
+        }
+        if let Some(from) = &self.from {
+            write!(f, " FROM {from}")?;
+        }
+        if let Some(w) = &self.where_clause {
+            write!(f, " WHERE {w}")?;
+        }
+        if !self.group_by.is_empty() {
+            write!(f, " GROUP BY ")?;
+            for (i, expr) in self.group_by.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{expr}")?;
+            }
+        }
+        if let Some(having) = &self.having {
+            write!(f, " HAVING {having}")?;
         }
         Ok(())
     }

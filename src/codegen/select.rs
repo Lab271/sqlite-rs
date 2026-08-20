@@ -20,8 +20,8 @@ use crate::codegen::expr::{
 };
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target};
 use crate::parser::ast::{
-    BinaryOp, Distinctness, Expr, ExprKind, FunctionArgs, JoinConstraint, JoinOp, Literal,
-    ParamKind, ResultColumn, Select, TableRef,
+    BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FunctionArgs, JoinConstraint, JoinOp,
+    Literal, ParamKind, ResultColumn, Select, TableRef,
 };
 use crate::parser::tokenizer::Span;
 use crate::schema::{rowid_alias_column, TableSchema};
@@ -51,6 +51,15 @@ pub enum CodegenError {
         expected: usize,
         found: usize,
     },
+
+    /// #240: a `UNION ALL` arm projected a different number of result
+    /// columns than the first arm — SQLite rejects this at compile time
+    /// rather than padding/truncating rows.
+    #[error(
+        "SELECTs to the left and right of UNION ALL do not have the same number of result \
+         columns: expected {expected}, found {found}"
+    )]
+    CompoundColumnMismatch { expected: usize, found: usize },
 }
 
 const TABLE_CURSOR: i32 = 0;
@@ -78,6 +87,21 @@ impl ScanCursors {
             sort: SORT_CURSOR,
             pseudo: PSEUDO_CURSOR,
             distinct: DISTINCT_CURSOR,
+        }
+    }
+
+    /// One full, non-colliding cursor set per `UNION ALL` arm (#240) —
+    /// `index` 0 is the compound's first arm, 1.. are `select.compound`
+    /// arms in order. Each arm gets 4 cursor numbers to itself so an
+    /// arm using its own ORDER BY sort cursor or DISTINCT ephemeral
+    /// index never collides with another arm's.
+    const fn for_arm(index: usize) -> Self {
+        let base = (index as i32).saturating_mul(4);
+        Self {
+            table: base,
+            sort: base.saturating_add(1),
+            pseudo: base.saturating_add(2),
+            distinct: base.saturating_add(3),
         }
     }
 }
@@ -110,6 +134,12 @@ pub fn compile_select_with_catalog(
         return Err(CodegenError::Unsupported {
             reason: "this SELECT's FROM clause has a JOIN — call compile_select_joined with \
                      every joined table's schema instead of compile_select"
+                .to_string(),
+        });
+    }
+    if !select.compound.is_empty() {
+        return Err(CodegenError::Unsupported {
+            reason: "this SELECT is a UNION ALL compound — call compile_select_compound instead"
                 .to_string(),
         });
     }
@@ -211,6 +241,134 @@ pub(crate) fn select_result_column_count(select: &Select, schema: &TableSchema) 
     result_columns(select, schema).len()
 }
 
+/// Turns a `UNION ALL` arm into a standalone `Select` so it can be fed
+/// through [`select_result_column_count`]/[`compile_select_scan`] the
+/// same way the compound's first arm is — `order_by`/`limit` are always
+/// empty since those bind to the whole compound statement, not any one
+/// arm (see [`crate::parser::ast::Select::compound`]).
+fn arm_as_select(arm: &CompoundSelect) -> Select {
+    Select {
+        distinct: arm.distinct,
+        columns: arm.columns.clone(),
+        from: arm.from.clone(),
+        where_clause: arm.where_clause.clone(),
+        group_by: arm.group_by.clone(),
+        having: arm.having.clone(),
+        compound: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        span: arm.span,
+    }
+}
+
+/// Compiles a `UNION ALL` compound `SELECT` (#240): `first` against
+/// `first_schema`, then each of `select.compound`'s arms against its
+/// paired schema in `arm_schemas` (same order, one per arm) —
+/// concatenating every arm's rows with no deduplication and no shared
+/// sort/merge step. Each arm gets its own `OpenRead`/scan/`ResultRow`
+/// block with cursor numbers offset by `ScanCursors::for_arm`, so
+/// arms never collide even when an arm itself uses a sort or DISTINCT
+/// cursor. `first`'s `order_by`/`limit` apply to the whole compound
+/// statement, but are not yet implemented here — sorting/limiting a
+/// concatenation of independent scans needs a shared sorter across
+/// arms, which is out of this ticket's scope; callers must reject a
+/// non-empty `order_by`/`limit` before calling this.
+///
+/// Joins/subqueries within any arm are out of scope for this ticket —
+/// every arm's `from` must be a single table with no joins.
+pub fn compile_select_compound(
+    first: &Select,
+    first_schema: &TableSchema,
+    arm_schemas: &[TableSchema],
+    catalog: &[TableSchema],
+) -> Result<Program, CodegenError> {
+    if first
+        .from
+        .as_ref()
+        .is_some_and(|from| !from.joins.is_empty())
+    {
+        return Err(CodegenError::Unsupported {
+            reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
+        });
+    }
+    if first.compound.len() != arm_schemas.len() {
+        return Err(CodegenError::Unsupported {
+            reason: "compile_select_compound: arm_schemas must have one entry per compound arm"
+                .to_string(),
+        });
+    }
+    if !first.order_by.is_empty() || first.limit.is_some() {
+        return Err(CodegenError::Unsupported {
+            reason: "ORDER BY/LIMIT on a UNION ALL compound SELECT is not yet supported"
+                .to_string(),
+        });
+    }
+
+    let expected = select_result_column_count(first, first_schema);
+    let mut arm_selects = Vec::with_capacity(first.compound.len());
+    for (arm, arm_schema) in first.compound.iter().zip(arm_schemas) {
+        if arm.from.as_ref().is_some_and(|from| !from.joins.is_empty()) {
+            return Err(CodegenError::Unsupported {
+                reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
+            });
+        }
+        let arm_select = arm_as_select(arm);
+        let found = select_result_column_count(&arm_select, arm_schema);
+        if found != expected {
+            return Err(CodegenError::CompoundColumnMismatch { expected, found });
+        }
+        arm_selects.push(arm_select);
+    }
+
+    let mut em = Emitter::new();
+    let mut reg = RegAlloc::new();
+
+    let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
+    let body_start = em.new_label();
+    em.place(body_start);
+    em.patch_p2(init_addr, body_start);
+
+    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, reg_first: i32, count: i32| {
+        em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+        Ok(())
+    };
+
+    let mut compile_arm = |em: &mut Emitter,
+                           reg: &mut RegAlloc,
+                           arm_index: usize,
+                           select: &Select,
+                           schema: &TableSchema|
+     -> Result<(), CodegenError> {
+        let cursors = ScanCursors::for_arm(arm_index);
+        em.emit(Instruction::new(
+            Opcode::OpenRead,
+            cursors.table,
+            i32::try_from(schema.root_page).unwrap_or(0),
+            0,
+        ));
+        let arm_end = em.new_label();
+        compile_select_scan(
+            em, reg, select, schema, cursors, arm_end, catalog, &mut sink,
+        )?;
+        em.place(arm_end);
+        Ok(())
+    };
+
+    compile_arm(&mut em, &mut reg, 0, first, first_schema)?;
+    for (i, (arm_select, arm_schema)) in arm_selects.iter().zip(arm_schemas).enumerate() {
+        compile_arm(
+            &mut em,
+            &mut reg,
+            i.saturating_add(1),
+            arm_select,
+            arm_schema,
+        )?;
+    }
+
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+    Ok(em.finish())
+}
+
 /// Compiles a joined `select` (#237: `INNER`/plain `JOIN`, `LEFT
 /// [OUTER] JOIN`, `CROSS JOIN`) against `schemas` — one schema per
 /// table in `select.from`'s order: the first table, then each
@@ -255,6 +413,11 @@ pub fn compile_select_joined(
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         return Err(CodegenError::Unsupported {
             reason: "DISTINCT combined with a JOIN is not yet supported".to_string(),
+        });
+    }
+    if !select.compound.is_empty() {
+        return Err(CodegenError::Unsupported {
+            reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
         });
     }
 
@@ -2069,6 +2232,7 @@ where
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        compound: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         span: select.span,

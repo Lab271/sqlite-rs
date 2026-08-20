@@ -49,9 +49,38 @@ pub struct Select {
     pub where_clause: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
+    /// `UNION ALL` arms (#240) chained after this `Select`'s own
+    /// core (`distinct`/`columns`/`from`/`where_clause`/`group_by`/
+    /// `having`). `order_by`/`limit` below apply to the whole compound
+    /// statement, not to any individual arm — matching SQLite's
+    /// grammar, where only the outermost `select-stmt` carries a
+    /// trailing ORDER BY/LIMIT.
+    pub compound: Vec<CompoundSelect>,
     pub order_by: Vec<OrderingTerm>,
     pub limit: Option<Limit>,
     pub span: Span,
+}
+
+/// One `UNION ALL SELECT ...` arm of a compound `SELECT` (#240). Same
+/// shape as `Select`'s own core, minus `order_by`/`limit` (see
+/// [`Select::compound`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundSelect {
+    pub op: CompoundOp,
+    pub distinct: Option<Distinctness>,
+    pub columns: Vec<ResultColumn>,
+    pub from: Option<FromClause>,
+    pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
+    pub span: Span,
+}
+
+/// Only `UnionAll` is implemented (#240); plain `UNION` (dedup) is
+/// deferred to V4 Phase 2, and `INTERSECT`/`EXCEPT` remain unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    UnionAll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

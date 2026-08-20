@@ -839,6 +839,23 @@ impl Parser {
             return self.unsupported("HAVING without GROUP BY not yet supported");
         }
 
+        let mut compound = Vec::new();
+        loop {
+            if self.at_kw(Keyword::INTERSECT) || self.at_kw(Keyword::EXCEPT) {
+                return self.unsupported("compound SELECT (INTERSECT/EXCEPT) not yet supported");
+            }
+            if !self.at_kw(Keyword::UNION) {
+                break;
+            }
+            let union_start = self.advance().span;
+            if !self.eat_kw(Keyword::ALL) {
+                return self.unsupported(
+                    "compound SELECT (plain UNION, with dedup) not yet supported; use UNION ALL",
+                );
+            }
+            compound.push(self.parse_compound_select_arm(union_start)?);
+        }
+
         let mut order_by = Vec::new();
         if self.eat_kw(Keyword::ORDER) {
             self.expect_kw(Keyword::BY)?;
@@ -874,9 +891,79 @@ impl Parser {
             where_clause,
             group_by,
             having,
+            compound,
             order_by,
             limit,
             span: join_span(start, end),
+        })
+    }
+
+    /// One `UNION ALL SELECT ...` arm (#240): same core shape as
+    /// [`Self::parse_select_stmt`] minus ORDER BY/LIMIT, which bind to
+    /// the whole compound statement rather than any one arm.
+    fn parse_compound_select_arm(&mut self, union_start: Span) -> PResult<CompoundSelect> {
+        if self.at_kw(Keyword::VALUES) {
+            return self.unsupported("UNION ALL VALUES (...) not yet supported");
+        }
+        let start = self.expect_kw(Keyword::SELECT)?;
+
+        let distinct = if self.eat_kw(Keyword::DISTINCT) {
+            Some(Distinctness::Distinct)
+        } else if self.eat_kw(Keyword::ALL) {
+            Some(Distinctness::All)
+        } else {
+            None
+        };
+
+        let mut columns = vec![self.result_column()?];
+        while self.eat_punct(&TokenKind::Comma) {
+            columns.push(self.result_column()?);
+        }
+
+        let from = if self.eat_kw(Keyword::FROM) {
+            Some(self.parse_from_clause()?)
+        } else {
+            None
+        };
+
+        if self.at_kw(Keyword::WINDOW) {
+            return self.unsupported("WINDOW clause not yet supported");
+        }
+
+        let where_clause = if self.eat_kw(Keyword::WHERE) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+
+        let mut group_by = Vec::new();
+        let mut having = None;
+        if self.eat_kw(Keyword::GROUP) {
+            self.expect_kw(Keyword::BY)?;
+            group_by.push(self.expr()?);
+            while self.eat_punct(&TokenKind::Comma) {
+                group_by.push(self.expr()?);
+            }
+            if self.eat_kw(Keyword::HAVING) {
+                having = Some(self.expr()?);
+            }
+        } else if self.at_kw(Keyword::HAVING) {
+            return self.unsupported("HAVING without GROUP BY not yet supported");
+        }
+
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map_or(start, |t| t.span);
+        Ok(CompoundSelect {
+            op: CompoundOp::UnionAll,
+            distinct,
+            columns,
+            from,
+            where_clause,
+            group_by,
+            having,
+            span: join_span(union_start, end),
         })
     }
 

@@ -555,6 +555,44 @@ fn test_group_by_having() {
 }
 
 #[test]
+fn test_unsupported_intersect() {
+    let msg = unsupported("SELECT a FROM t INTERSECT SELECT b FROM u");
+    assert!(msg.contains("INTERSECT"), "message: {msg}");
+}
+
+#[test]
+fn test_unsupported_except() {
+    let msg = unsupported("SELECT a FROM t EXCEPT SELECT b FROM u");
+    assert!(msg.contains("EXCEPT"), "message: {msg}");
+}
+
+/// #240: `UNION ALL` parses into `Select::compound`.
+#[test]
+fn test_accept_union_all() {
+    let select = accept("SELECT a FROM t UNION ALL SELECT b FROM u");
+    assert_eq!(select.compound.len(), 1);
+    assert_eq!(select.compound[0].op, CompoundOp::UnionAll);
+    assert!(select.compound[0].from.is_some());
+}
+
+/// #240: multiple `UNION ALL` arms chain into one `compound` vec.
+#[test]
+fn test_accept_multiple_union_all_arms() {
+    let select = accept("SELECT a FROM t UNION ALL SELECT b FROM u UNION ALL SELECT c FROM v");
+    assert_eq!(select.compound.len(), 2);
+}
+
+/// #240: ORDER BY/LIMIT bind to the whole compound statement, not any
+/// one arm.
+#[test]
+fn test_accept_union_all_with_trailing_order_by_limit() {
+    let select = accept("SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY a LIMIT 1");
+    assert_eq!(select.compound.len(), 1);
+    assert_eq!(select.order_by.len(), 1);
+    assert!(select.limit.is_some());
+}
+
+#[test]
 fn test_scalar_subquery_parses() {
     // #238: scalar subqueries are now a supported expression form.
     let select = accept("SELECT (SELECT 1)");

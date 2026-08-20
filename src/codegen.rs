@@ -23,7 +23,8 @@ pub use drop_index::compile_drop_index;
 pub use drop_table::compile_drop_table;
 pub use insert::compile_insert;
 pub use select::{
-    compile_select, compile_select_joined, compile_select_with_catalog, CodegenError,
+    compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
+    CodegenError,
 };
 pub use update::compile_update;
 
