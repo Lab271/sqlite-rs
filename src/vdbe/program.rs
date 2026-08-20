@@ -55,6 +55,16 @@ pub enum Opcode {
     // from `ALL` (never harvested from a V2 `EXPLAIN`) but still fully
     // dispatched and exhaustiveness-checked.
     NoConflict,
+    // #243: real secondary-index read path for the planner's join
+    // equality-index-selection fast path — like #207's `NoConflict`,
+    // postdates the V2 oracle harvest (no query-time index seek existed
+    // then), so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked. `SeekIndexEq` probes an index b-tree for an
+    // exact key match (jumping P2 on miss); `IdxRowid` reads the trailing
+    // rowid column off the index cursor's currently-seeked entry so
+    // codegen can chain into a `SeekRowid` on the table cursor.
+    SeekIndexEq,
+    IdxRowid,
     // DDL (#215) — schema-mutating statements, each done procedurally in
     // one exec.rs handler rather than decomposed into cursor-driven
     // multi-instruction sequences; never harvested from a V2 oracle
@@ -245,6 +255,8 @@ fn _exhaustive(o: Opcode) {
         | Opcode::NewRowid
         | Opcode::IdxDelete
         | Opcode::NoConflict
+        | Opcode::SeekIndexEq
+        | Opcode::IdxRowid
         | Opcode::CreateTable
         | Opcode::DropTable
         | Opcode::CreateIndex

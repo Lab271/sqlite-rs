@@ -16,7 +16,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete, compile_drop_index,
     compile_drop_table, compile_insert, compile_select_compound, compile_select_joined,
-    compile_select_with_catalog, compile_update, CodegenError,
+    compile_select_with_catalog, compile_update, explain_query_plan, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
@@ -24,7 +24,7 @@ use sqlite_rs::parser::error::{
     parse_create_index, parse_create_table, parse_delete, parse_drop_index, parse_drop_table,
     parse_insert, parse_update,
 };
-use sqlite_rs::parser::{parse_select, ParseOutcome};
+use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
 use sqlite_rs::schema::read_schema;
 use sqlite_rs::vdbe::{execute_with_db, execute_with_writable_db, explain};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
@@ -238,25 +238,57 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
     };
     let path = Path::new(&path);
 
-    let select = match parse_select(&sql) {
-        ParseOutcome::Accepted(select) => *select,
-        ParseOutcome::Unsupported { message, span } => {
-            return fatal(
-                path,
-                &format!(
-                    "not yet supported (line {}, column {}): {message}",
-                    span.line, span.column
-                ),
-            );
+    // #243: `EXPLAIN QUERY PLAN <select>` is parsed by a dedicated entry
+    // point (`parse_explain`, grammar V4) rather than `parse_select` —
+    // only checked when the statement actually starts with `EXPLAIN`,
+    // so an ordinary `SELECT` never pays for the extra parse attempt.
+    let starts_with_explain = sql
+        .trim_start()
+        .get(..7)
+        .is_some_and(|head| head.eq_ignore_ascii_case("explain"));
+    let (select, eqp_mode) = if starts_with_explain {
+        match parse_explain(&sql) {
+            ParseOutcome::Accepted(explain) => (*explain.select, explain.query_plan),
+            ParseOutcome::Unsupported { message, span } => {
+                return fatal(
+                    path,
+                    &format!(
+                        "not yet supported (line {}, column {}): {message}",
+                        span.line, span.column
+                    ),
+                );
+            }
+            ParseOutcome::Invalid { message, span } => {
+                return fatal(
+                    path,
+                    &format!(
+                        "syntax error (line {}, column {}): {message}",
+                        span.line, span.column
+                    ),
+                );
+            }
         }
-        ParseOutcome::Invalid { message, span } => {
-            return fatal(
-                path,
-                &format!(
-                    "syntax error (line {}, column {}): {message}",
-                    span.line, span.column
-                ),
-            );
+    } else {
+        match parse_select(&sql) {
+            ParseOutcome::Accepted(select) => (*select, false),
+            ParseOutcome::Unsupported { message, span } => {
+                return fatal(
+                    path,
+                    &format!(
+                        "not yet supported (line {}, column {}): {message}",
+                        span.line, span.column
+                    ),
+                );
+            }
+            ParseOutcome::Invalid { message, span } => {
+                return fatal(
+                    path,
+                    &format!(
+                        "syntax error (line {}, column {}): {message}",
+                        span.line, span.column
+                    ),
+                );
+            }
         }
     };
     let Some(from) = &select.from else {
@@ -283,6 +315,24 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
     let Some(schema) = find_schema(&from.first.name) else {
         return fatal(path, &format!("no such table: {}", from.first.name));
     };
+
+    if eqp_mode {
+        let mut joined_schemas = vec![schema];
+        for join in &from.joins {
+            let Some(s) = find_schema(&join.table.name) else {
+                return fatal(path, &format!("no such table: {}", join.table.name));
+            };
+            joined_schemas.push(s);
+        }
+        let rows = match explain_query_plan(&select, &joined_schemas) {
+            Ok(rows) => rows,
+            Err(e) => return fatal(path, &e),
+        };
+        for row in rows {
+            println!("{}|{}|{}|{}", row.id, row.parent, row.notused, row.detail);
+        }
+        return ExitCode::SUCCESS;
+    }
 
     let program = if !select.compound.is_empty() {
         let mut arm_schemas = Vec::with_capacity(select.compound.len());

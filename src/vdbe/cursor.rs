@@ -62,6 +62,16 @@ pub(crate) enum CursorSlot {
     IndexWrite {
         root_page: u32,
     },
+    /// A real index b-tree read cursor (#243) opened by `OpenRead` with
+    /// `P5` nonzero — the query-time counterpart to `IndexWrite`. Unlike
+    /// `IndexWrite`, this slot carries the trailing rowid `SeekIndexEq`
+    /// most recently found (`None` before any seek, or after a miss), so
+    /// a following `IdxRowid` can hand it to the table cursor's
+    /// `SeekRowid` without re-decoding the index row.
+    IndexRead {
+        root_page: u32,
+        last_rowid: Option<i64>,
+    },
     Ephemeral(EphemeralState),
     Pseudo {
         register: i32,
@@ -74,6 +84,7 @@ impl CursorSlot {
         match self {
             CursorSlot::Table(_) => "table cursor",
             CursorSlot::IndexWrite { .. } => "index write cursor",
+            CursorSlot::IndexRead { .. } => "index read cursor",
             CursorSlot::Ephemeral(_) => "ephemeral cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
             CursorSlot::Sorter(_) => "sorter cursor",
@@ -200,11 +211,24 @@ fn read_register_range(
 /// `OpenRead`: opens a real read cursor on `P2` (the table's root page)
 /// into cursor slot `P1`, sharing the `Vm`'s attached database page
 /// source (see `Vm::with_db`) with every other open `OpenRead` cursor.
+/// `P5` nonzero (#243, mirroring `OpenWrite`'s own `P5` dispatch) opens a
+/// [`CursorSlot::IndexRead`] instead — a real secondary-index b-tree read
+/// cursor for `SeekIndexEq`, rather than a table cursor.
 pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let root_page = u32::try_from(instr.p2).map_err(|_| ExecError::MalformedInstruction {
         opcode: "OpenRead",
         reason: format!("invalid root page {}", instr.p2),
     })?;
+    if instr.p5 != 0 {
+        vm.set_cursor(
+            instr.p1,
+            CursorSlot::IndexRead {
+                root_page,
+                last_rowid: None,
+            },
+        )?;
+        return Ok(Step::Next);
+    }
     let db = vm.db()?;
     let cursor = TableCursor::new(Rc::clone(&db.source), &db.header, root_page);
     vm.set_cursor(
@@ -448,6 +472,110 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     } else {
         Step::Next
     })
+}
+
+/// `SeekIndexEq` (#243): probes index-read cursor `P1` (opened by
+/// `OpenRead` with `P5` nonzero) for an exact match on the `P4::Int`
+/// count of key columns starting at register `P3`, jumping to `P2` on a
+/// miss. On a hit, decodes the matched index row's trailing rowid column
+/// and records it in the cursor slot for a following `IdxRowid` — the
+/// planner's join equality-index-selection fast path chains
+/// `SeekIndexEq` + `IdxRowid` + `SeekRowid` (on the table cursor) in
+/// place of an unconditional `Rewind`/`Next` full scan.
+pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let count = p4_count(instr, "SeekIndexEq")?;
+    let probe = read_register_range(vm, instr.p3, count, "SeekIndexEq")?;
+    let root_page = match vm.cursor(instr.p1)? {
+        CursorSlot::IndexRead { root_page, .. } => *root_page,
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "SeekIndexEq",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "index read cursor",
+            })
+        }
+    };
+    let db = vm.db()?;
+    let encoding = db.header.text_encoding;
+    let usable_size = db.header.usable_page_size();
+    let mut cursor = IndexCursor::new(Rc::clone(&db.source), usable_size, root_page);
+    let found = cursor
+        .seek(&probe, encoding)
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "SeekIndexEq",
+            reason: e.to_string(),
+        })?;
+    let rowid = match found {
+        Some(row) => {
+            let key = decode_record(&row.payload, encoding).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "SeekIndexEq",
+                    reason: e.to_string(),
+                }
+            })?;
+            let matches = key.len() > probe.len()
+                && key
+                    .iter()
+                    .zip(probe.iter())
+                    .all(|(k, p)| compare(k, p, Collation::Binary).is_eq());
+            if matches {
+                match key.last() {
+                    Some(Value::Integer(rowid)) => Some(*rowid),
+                    other => {
+                        return Err(ExecError::MalformedInstruction {
+                            opcode: "SeekIndexEq",
+                            reason: format!("index row's trailing rowid column is {other:?}"),
+                        })
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    match vm.cursor_mut(instr.p1)? {
+        CursorSlot::IndexRead { last_rowid, .. } => *last_rowid = rowid,
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "SeekIndexEq",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "index read cursor",
+            })
+        }
+    }
+    Ok(if rowid.is_none() {
+        Step::Jump(to_pc(instr.p2))
+    } else {
+        Step::Next
+    })
+}
+
+/// `IdxRowid` (#243): writes index-read cursor `P1`'s most recently
+/// `SeekIndexEq`-matched trailing rowid into register `P2`. Errors if
+/// called without a preceding successful `SeekIndexEq` on this cursor.
+pub fn idx_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let rowid = match vm.cursor(instr.p1)? {
+        CursorSlot::IndexRead { last_rowid, .. } => {
+            last_rowid.ok_or_else(|| ExecError::MalformedInstruction {
+                opcode: "IdxRowid",
+                reason: "no matched row on this index cursor (SeekIndexEq missed or wasn't run)"
+                    .to_string(),
+            })?
+        }
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "IdxRowid",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "index read cursor",
+            })
+        }
+    };
+    vm.set_register(instr.p2, Value::Integer(rowid))?;
+    Ok(Step::Next)
 }
 
 /// `NullRow`: forces cursor `P1` to read as an all-NULL row until its
