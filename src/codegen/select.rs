@@ -1671,7 +1671,9 @@ struct AggSlot {
 /// at all" case can't happen here.
 fn classify_aggregate(expr: &Expr) -> Result<(AggKind, Option<Expr>), CodegenError> {
     let ExprKind::FunctionCall { name, args, .. } = &expr.kind else {
-        unreachable!("classify_aggregate called on a non-call expression")
+        return Err(CodegenError::Unsupported {
+            reason: "classify_aggregate called on a non-call expression".to_string(),
+        });
     };
     let arg = match args {
         FunctionArgs::Star => None,
