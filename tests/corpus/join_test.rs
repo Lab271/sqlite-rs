@@ -459,3 +459,56 @@ fn full_join_matches_oracle_both_sides_unmatched() {
         assert_integrity_check_ok(&oracle, &db);
     }
 }
+
+/// #250's last piece: `ORDER BY` combined with a JOIN, keyed on a column
+/// from the left-hand table.
+#[test]
+fn order_by_matches_oracle_across_a_join() {
+    let db = join_fixture_db("order_by_left");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM a JOIN b ON a.id = b.a_id ORDER BY a.name",
+        "order_by_matches_oracle_across_a_join",
+    );
+}
+
+/// `ORDER BY` keyed on a column from the right-hand (joined) table.
+#[test]
+fn order_by_on_joined_table_column_matches_oracle() {
+    let db = join_fixture_db("order_by_right");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.name, b.tag FROM a JOIN b ON a.id = b.a_id ORDER BY b.tag DESC",
+        "order_by_on_joined_table_column_matches_oracle",
+    );
+}
+
+/// `ORDER BY` + `LIMIT` combined with a JOIN — checks the sort/limit
+/// interaction still picks the correct top-N rows post-sort.
+#[test]
+fn order_by_with_limit_matches_oracle_across_a_join() {
+    let db = join_fixture_db("order_by_limit");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM a JOIN b ON a.id = b.a_id ORDER BY a.name LIMIT 2",
+        "order_by_with_limit_matches_oracle_across_a_join",
+    );
+}
+
+/// `DISTINCT` combined with a JOIN: `a.id=1` matches twice in `b`
+/// (rows 10 and 11), so `DISTINCT a.name` must collapse the duplicate
+/// `alice` down to a single row.
+#[test]
+fn distinct_collapses_duplicate_rows_across_a_join() {
+    let db = join_fixture_db("distinct_join");
+    let output = run_query(&db, "SELECT DISTINCT a.name FROM a JOIN b ON a.id = b.a_id");
+    assert_eq!(
+        output, "alice\n",
+        "a.id=1 matches b twice (rows 10, 11) — DISTINCT must collapse to one `alice` row"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT DISTINCT a.name FROM a JOIN b ON a.id = b.a_id",
+        "distinct_collapses_duplicate_rows_across_a_join",
+    );
+}

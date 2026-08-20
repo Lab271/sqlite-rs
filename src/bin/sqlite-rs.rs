@@ -418,23 +418,23 @@ fn compile_statement(
         "INSERT" => match parse_insert(sql) {
             ParseOutcome::Accepted(insert) => {
                 let schema = find_schema(&insert.table)?;
-                let select_schema = match &insert.source {
-                    sqlite_rs::parser::ast::InsertSource::Select(select) => {
-                        let Some(from) = &select.from else {
-                            return Err(fatal(path, &"SELECT has no FROM clause".to_string()));
-                        };
-                        if !from.joins.is_empty() {
-                            return Err(fatal(
-                                path,
-                                &"INSERT ... SELECT with a JOIN is not yet supported".to_string(),
-                            ));
+                let select_schemas: Option<Vec<sqlite_rs::schema::TableSchema>> =
+                    match &insert.source {
+                        sqlite_rs::parser::ast::InsertSource::Select(select) => {
+                            let Some(from) = &select.from else {
+                                return Err(fatal(path, &"SELECT has no FROM clause".to_string()));
+                            };
+                            let mut joined_schemas = vec![find_schema(&from.first.name)?.clone()];
+                            for join in &from.joins {
+                                joined_schemas.push(find_schema(&join.table.name)?.clone());
+                            }
+                            Some(joined_schemas)
                         }
-                        Some(find_schema(&from.first.name)?)
-                    }
-                    sqlite_rs::parser::ast::InsertSource::Values(_)
-                    | sqlite_rs::parser::ast::InsertSource::DefaultValues => None,
-                };
-                compile_insert(&insert, schema, select_schema).map_err(|e| fatal(path, &e))
+                        sqlite_rs::parser::ast::InsertSource::Values(_)
+                        | sqlite_rs::parser::ast::InsertSource::DefaultValues => None,
+                    };
+                compile_insert(&insert, schema, select_schemas.as_deref())
+                    .map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },

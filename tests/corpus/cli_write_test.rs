@@ -196,6 +196,47 @@ fn insert_select_copies_filtered_rows_into_target_table() {
     }
 }
 
+/// #250: `INSERT ... SELECT` where the `SELECT` itself has a JOIN —
+/// drives `compile_select_joined_scan` instead of the single-table
+/// `compile_select_scan`.
+#[test]
+fn insert_select_with_a_join_copies_joined_rows_into_target_table() {
+    let db = multi_table_db(
+        "insert_select_join",
+        &[
+            "CREATE TABLE a(id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE b(id INTEGER PRIMARY KEY, a_id INTEGER, tag TEXT)",
+            "CREATE TABLE dst(id INTEGER, name TEXT)",
+        ],
+    );
+    assert!(run_exec(&db, "INSERT INTO a VALUES (1,'alice'),(2,'bob')")
+        .status
+        .success());
+    assert!(run_exec(&db, "INSERT INTO b VALUES (10,1,'x'),(11,1,'y')")
+        .status
+        .success());
+
+    let output = run_exec(
+        &db,
+        "INSERT INTO dst SELECT a.id, a.name FROM a JOIN b ON a.id = b.a_id",
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(run_query(&db, "SELECT * FROM dst"), "1|alice\n1|alice\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    } else {
+        skip_no_oracle(
+            "insert_select_with_a_join_copies_joined_rows_into_target_table (oracle cross-check)",
+        );
+    }
+}
+
 /// #208: an explicit target column list re-orders which SELECT column
 /// lands in which target column, exactly like a literal-VALUES INSERT's
 /// column list already does.

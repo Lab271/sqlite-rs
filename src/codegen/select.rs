@@ -241,6 +241,51 @@ pub(crate) fn select_result_column_count(select: &Select, schema: &TableSchema) 
     result_columns(select, schema).len()
 }
 
+/// [`select_result_column_count`]'s joined counterpart (#250's `INSERT
+/// ... SELECT` + JOIN): the number of columns `select` projects against
+/// `schemas` (one per `FROM` table, same order as `table_refs` — the
+/// `FROM` clause's table references, used only to resolve a `table.*`
+/// qualifier to its schema). Known narrower-than-ideal scope: unlike
+/// `compile_select_joined_scan`'s actual projection, this count doesn't
+/// account for NATURAL/USING's `SELECT *` de-duplication (it has no
+/// `dedup_star` to consult — building one here would duplicate
+/// `compile_select_joined_scan`'s join-constraint synthesis just for a
+/// count) — a `SELECT *` combined with `INSERT ... SELECT` across a
+/// NATURAL/USING join may over-count relative to what actually gets
+/// projected. Ordinary `ON`-constrained joins (this ticket's tested
+/// shape) are unaffected.
+pub(crate) fn select_result_column_count_joined(
+    select: &Select,
+    schemas: &[TableSchema],
+    table_refs: &[&TableRef],
+) -> Result<usize, CodegenError> {
+    let mut count = 0usize;
+    for col in &select.columns {
+        match col {
+            ResultColumn::Star => {
+                count = count.saturating_add(schemas.iter().map(|s| s.columns.len()).sum());
+            }
+            ResultColumn::TableStar { table } => {
+                let idx = table_refs
+                    .iter()
+                    .position(|t| {
+                        t.alias
+                            .as_deref()
+                            .unwrap_or(t.name.as_str())
+                            .eq_ignore_ascii_case(table)
+                    })
+                    .ok_or_else(|| CodegenError::UnknownColumn {
+                        name: format!("{table}.*"),
+                    })?;
+                let n = schemas.get(idx).map(|s| s.columns.len()).unwrap_or(0);
+                count = count.saturating_add(n);
+            }
+            ResultColumn::Expr { .. } => count = count.saturating_add(1),
+        }
+    }
+    Ok(count)
+}
+
 /// Turns a `UNION ALL` arm into a standalone `Select` so it can be fed
 /// through [`select_result_column_count`]/[`compile_select_scan`] the
 /// same way the compound's first arm is — `order_by`/`limit` are always
@@ -405,16 +450,6 @@ pub fn compile_select_joined(
             ),
         });
     }
-    if !select.order_by.is_empty() {
-        return Err(CodegenError::Unsupported {
-            reason: "ORDER BY combined with a JOIN is not yet supported".to_string(),
-        });
-    }
-    if matches!(select.distinct, Some(Distinctness::Distinct)) {
-        return Err(CodegenError::Unsupported {
-            reason: "DISTINCT combined with a JOIN is not yet supported".to_string(),
-        });
-    }
     if !select.compound.is_empty() {
         return Err(CodegenError::Unsupported {
             reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
@@ -424,8 +459,17 @@ pub fn compile_select_joined(
     // #250's codegen half: `FULL JOIN` gets its own dedicated two-table
     // emitter (see `compile_full_join_two_table`'s doc comment) rather
     // than participating in the `RIGHT`-reordering scheme below — it's
-    // only supported as the sole join in the `FROM` clause today.
+    // only supported as the sole join in the `FROM` clause today. Its
+    // pass-1/pass-2 shape doesn't (yet) generalize to ORDER BY/DISTINCT
+    // the way the rest of this function's join tree now does, so those
+    // stay rejected for a `FULL JOIN` specifically.
     if from.joins.len() == 1 && from.joins.first().is_some_and(|j| j.op == JoinOp::Full) {
+        if !select.order_by.is_empty() || matches!(select.distinct, Some(Distinctness::Distinct)) {
+            return Err(CodegenError::Unsupported {
+                reason: "ORDER BY/DISTINCT combined with a FULL JOIN is not yet supported"
+                    .to_string(),
+            });
+        }
         return compile_full_join_two_table(select, schemas, from);
     }
     if from.joins.iter().any(|j| j.op == JoinOp::Full) {
@@ -461,6 +505,84 @@ pub fn compile_select_joined(
     let body_start = em.new_label();
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
+
+    let end_label = em.new_label();
+    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, count: i32| {
+        em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
+        Ok(())
+    };
+    compile_select_joined_scan(&mut em, &mut reg, select, schemas, 0, end_label, &mut sink)?;
+
+    em.place(end_label);
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+
+    Ok(em.finish())
+}
+
+/// The scan/filter/project core of [`compile_select_joined`] (INNER/LEFT/
+/// CROSS/NATURAL/USING/RIGHT — `FULL JOIN` stays on its own dedicated
+/// [`compile_full_join_two_table`] path), minus the `Init`/`Halt`
+/// bracketing and with every cursor number offset by `cursor_base` —
+/// factored out, mirroring [`compile_select_scan`]'s relationship to
+/// [`compile_select`], so #250's `INSERT ... SELECT` codegen can drive
+/// the same joined nested-loop scan with its own cursor numbers already
+/// claimed by the target table/its indexes, substituting its own row
+/// sink in place of `ResultRow`.
+///
+/// `ORDER BY` and `DISTINCT` are both supported here now (#250's last
+/// piece): `ORDER BY` routes through a dedicated sort pass1/pass2 (see
+/// [`compile_join_level_for_sort`]) whose pass-2 result-column
+/// reconstruction is restricted to `*`/`table.*`/bare-column result
+/// columns (a computed expression in the `SELECT` list combined with a
+/// joined `ORDER BY` returns a clean `Unsupported` error rather than
+/// silently mis-projecting); `DISTINCT` (without `ORDER BY`) instead
+/// hooks directly into the ordinary nested-loop scan's final-row
+/// emission via an ephemeral-index guard, since it never needs the
+/// sorter at all. The two combined on a JOIN are rejected outright — see
+/// the caller.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_select_joined_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schemas: &[TableSchema],
+    cursor_base: i32,
+    end_label: Label,
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let Some(from) = &select.from else {
+        return Err(CodegenError::NoFromClause);
+    };
+    if !select.order_by.is_empty() && matches!(select.distinct, Some(Distinctness::Distinct)) {
+        return Err(CodegenError::Unsupported {
+            reason: "DISTINCT combined with ORDER BY and a JOIN is not yet supported".to_string(),
+        });
+    }
+    // `FULL JOIN` has its own dedicated two-table emitter
+    // (`compile_full_join_two_table`), reached only through
+    // `compile_select_joined`'s own dispatch above this function — a
+    // caller reaching `compile_select_joined_scan` directly (#250's
+    // `INSERT ... SELECT`, see `insert.rs::compile_insert`) never goes
+    // through that dispatch, so a `FULL JOIN` in `select.from.joins`
+    // here would otherwise silently be treated like an ordinary
+    // inner/left join by the nested-loop machinery below. Rejected
+    // explicitly instead.
+    if from.joins.iter().any(|j| j.op == JoinOp::Full) {
+        return Err(CodegenError::Unsupported {
+            reason: "FULL JOIN combined with INSERT ... SELECT is not yet supported".to_string(),
+        });
+    }
+    let right_count = from.joins.iter().filter(|j| j.op == JoinOp::Right).count();
+    if right_count > 1 {
+        return Err(CodegenError::Unsupported {
+            reason: "RIGHT JOIN codegen only supports a single RIGHT JOIN per FROM clause \
+                     today — a chain with more than one RIGHT JOIN is not yet supported"
+                .to_string(),
+        });
+    }
 
     let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
         .chain(from.joins.iter().map(|j| &j.table))
@@ -604,7 +726,7 @@ pub fn compile_select_joined(
     // cursor number is just its recursion level), and every cursor is
     // `OpenRead` exactly once, in that same order.
     for (pos, &orig) in working_order.iter().enumerate() {
-        let cursor = i32::try_from(pos).unwrap_or(0);
+        let cursor = cursor_base.saturating_add(i32::try_from(pos).unwrap_or(0));
         if let Some(binding) = bindings.get_mut(orig) {
             binding.cursor = cursor;
         }
@@ -673,18 +795,43 @@ pub fn compile_select_joined(
         outer: None,
         dedup_star: dedup_star.clone(),
     };
-    let limit = compile_limit_setup(&mut em, &mut reg, &full_scope, select)?;
+    let table_cursor_count = i32::try_from(n).unwrap_or(0);
 
-    let end_label = em.new_label();
-    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, count: i32| {
-        em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
-        Ok(())
-    };
+    if !select.order_by.is_empty() {
+        let order_by_plans = resolve_join_order_by(select, &full_scope)?;
+        let sort_cursor = cursor_base.saturating_add(table_cursor_count);
+        let pseudo_cursor = sort_cursor.saturating_add(1);
+        return compile_joined_sorted_scan(
+            em,
+            reg,
+            select,
+            &exec_bindings,
+            &bindings,
+            &pos_of,
+            &levels,
+            &dedup_star,
+            schemas,
+            &full_scope,
+            &order_by_plans,
+            sort_cursor,
+            pseudo_cursor,
+            end_label,
+            sink,
+        );
+    }
+
+    let limit = compile_limit_setup(em, reg, &full_scope, select)?;
+    let distinct_cursor = matches!(select.distinct, Some(Distinctness::Distinct)).then(|| {
+        let cursor = cursor_base.saturating_add(table_cursor_count);
+        em.emit(Instruction::new(Opcode::OpenEphemeral, cursor, 0, 0));
+        cursor
+    });
+
     let mut null_mask = vec![false; n];
     let mut matched_regs: Vec<Option<i32>> = vec![None; n];
     compile_join_level(
-        &mut em,
-        &mut reg,
+        em,
+        reg,
         select,
         &exec_bindings,
         &bindings,
@@ -696,14 +843,10 @@ pub fn compile_select_joined(
         0,
         end_label,
         limit.as_ref(),
+        distinct_cursor,
         schemas,
-        &mut sink,
-    )?;
-
-    em.place(end_label);
-    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
-
-    Ok(em.finish())
+        sink,
+    )
 }
 
 /// Builds the [`Scope`] a join-tree node sees at compile time. `bindings`
@@ -910,6 +1053,7 @@ fn compile_join_level<F>(
     level: usize,
     end_label: Label,
     limit: Option<&LimitState>,
+    distinct_cursor: Option<i32>,
     catalog: &[TableSchema],
     sink: &mut F,
 ) -> Result<(), CodegenError>
@@ -918,7 +1062,16 @@ where
 {
     if level == exec_bindings.len() {
         let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-        emit_join_final_row(em, reg, select, &scope, end_label, limit, sink)?;
+        emit_join_final_row(
+            em,
+            reg,
+            select,
+            &scope,
+            end_label,
+            limit,
+            distinct_cursor,
+            sink,
+        )?;
         return Ok(());
     }
 
@@ -983,6 +1136,7 @@ where
         next_level,
         end_label,
         limit,
+        distinct_cursor,
         catalog,
         sink,
     )?;
@@ -1027,6 +1181,7 @@ where
             end.saturating_add(1),
             end_label,
             limit,
+            distinct_cursor,
             catalog,
             sink,
         )?;
@@ -1046,6 +1201,7 @@ where
 /// [`compile_join_level`]'s innermost level so [`compile_full_join_two_table`]
 /// can reuse the exact same sequencing for its own three emission
 /// points (matched, left-nulled, right-unmatched).
+#[allow(clippy::too_many_arguments)]
 fn emit_join_final_row<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -1053,6 +1209,7 @@ fn emit_join_final_row<F>(
     scope: &Scope,
     end_label: Label,
     limit: Option<&LimitState>,
+    distinct_cursor: Option<i32>,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -1068,6 +1225,9 @@ where
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
         )?;
     }
+    if let Some(distinct_cursor) = distinct_cursor {
+        emit_join_distinct_guard(em, reg, select, scope, distinct_cursor, row_skip)?;
+    }
     if let Some(limit) = limit {
         emit_offset_guard(em, limit, row_skip);
     }
@@ -1076,6 +1236,51 @@ where
         emit_limit_guard(em, limit, end_label);
     }
     em.place(row_skip);
+    Ok(())
+}
+
+/// #250: `DISTINCT` combined with a JOIN. Same ephemeral-index dedup
+/// mechanism as the single-table [`emit_distinct_guard`] — `Found`
+/// against `distinct_cursor` skips an already-seen row, `IdxInsert`
+/// records a new one — but keyed by `select`'s result columns projected
+/// against the joined `scope` via [`emit_join_row`] rather than a single
+/// schema. The projection is computed twice (once here to test/record
+/// it, once more via the ordinary [`emit_join_row`] call right after in
+/// [`emit_join_final_row`]) rather than threading the registers through
+/// — both computations are side-effect-free column reads/literal
+/// expressions, so the only cost is a handful of extra bump-allocated
+/// registers, which this compiler already treats as cheap.
+fn emit_join_distinct_guard(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    scope: &Scope,
+    distinct_cursor: i32,
+    skip_label: Label,
+) -> Result<(), CodegenError> {
+    let mut captured: Option<(i32, i32)> = None;
+    emit_join_row(em, reg, select, scope, &mut |_em, _reg, first, count| {
+        captured = Some((first, count));
+        Ok(())
+    })?;
+    let Some((first, count)) = captured else {
+        return Ok(());
+    };
+    let addr = em.emit(Instruction::with_p4(
+        Opcode::Found,
+        distinct_cursor,
+        0,
+        first,
+        P4::Int(i64::from(count)),
+    ));
+    em.patch_p2(addr, skip_label);
+    em.emit(Instruction::with_p4(
+        Opcode::IdxInsert,
+        distinct_cursor,
+        first,
+        0,
+        P4::Int(i64::from(count)),
+    ));
     Ok(())
 }
 
@@ -1257,6 +1462,7 @@ fn compile_full_join_two_table(
         &match_scope,
         end_label,
         limit.as_ref(),
+        None,
         &mut sink,
     )?;
     em.place(b_skip);
@@ -1287,6 +1493,7 @@ fn compile_full_join_two_table(
         &b_null_scope,
         end_label,
         limit.as_ref(),
+        None,
         &mut sink,
     )?;
     em.place(after_null);
@@ -1330,6 +1537,7 @@ fn compile_full_join_two_table(
         &a_null_scope,
         end_label,
         limit.as_ref(),
+        None,
         &mut sink,
     )?;
     em.place(b2_skip);
@@ -1426,6 +1634,572 @@ fn emit_join_column(
         emit_column_read(em, &binding.schema, binding.cursor, idx, r)?;
     }
     Ok(r)
+}
+
+/// The absolute column offset of `scope.tables[binding_idx]`'s own
+/// column block within the flat, all-tables-concatenated row
+/// [`compile_joined_sorted_scan`]'s pass 1 buffers into the sorter (every
+/// binding's *full* schema column set, in `scope.tables` order, `*`-dedup
+/// notwithstanding — the sorter's row is the ORDER BY plan's raw
+/// material, not the final projection).
+fn joined_column_offset(scope: &Scope, binding_idx: usize) -> usize {
+    scope
+        .tables
+        .get(..binding_idx)
+        .unwrap_or(&[])
+        .iter()
+        .map(|b| b.schema.columns.len())
+        .sum()
+}
+
+/// Resolves `table`/`name` (a bare, possibly-qualified column reference)
+/// to `(binding_idx, local_idx)` against `scope.tables` — the same
+/// qualifier-or-ambiguity rule as [`Scope::resolve`], but returning the
+/// binding's position (needed to compute an absolute offset into the
+/// flat joined row) rather than its `cursor`.
+fn resolve_scope_column(
+    scope: &Scope,
+    table: Option<&str>,
+    name: &str,
+) -> Result<(usize, usize), CodegenError> {
+    if let Some(table) = table {
+        let (i, binding) = scope
+            .tables
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.matches_qualifier(table))
+            .ok_or_else(|| CodegenError::UnknownColumn {
+                name: format!("{table}.{name}"),
+            })?;
+        let idx =
+            column_index(&binding.schema, name).ok_or_else(|| CodegenError::UnknownColumn {
+                name: format!("{table}.{name}"),
+            })?;
+        return Ok((i, idx));
+    }
+    let mut found: Option<usize> = None;
+    for (i, binding) in scope.tables.iter().enumerate() {
+        if column_index(&binding.schema, name).is_some() {
+            if found.is_some() {
+                return Err(CodegenError::AmbiguousColumn {
+                    name: name.to_string(),
+                });
+            }
+            found = Some(i);
+        }
+    }
+    let i = found.ok_or_else(|| CodegenError::UnknownColumn {
+        name: name.to_string(),
+    })?;
+    let idx = scope
+        .tables
+        .get(i)
+        .and_then(|b| column_index(&b.schema, name))
+        .unwrap_or(0);
+    Ok((i, idx))
+}
+
+/// Where a joined `ORDER BY` term's sort key comes from: a raw column
+/// already present in the flat, all-bindings-concatenated row
+/// [`compile_joined_sorted_scan`]'s pass 1 buffers (an absolute offset,
+/// per [`joined_column_offset`]), or a genuine expression evaluated
+/// against the *live* join scope during pass 1 and appended as a
+/// trailing sort-only field — mirrors [`OrderByTarget`] for the
+/// single-table case.
+#[derive(Debug, Clone)]
+enum JoinOrderTarget {
+    Offset(usize),
+    Expr(Expr),
+}
+
+struct JoinOrderPlan {
+    target: JoinOrderTarget,
+    descending: bool,
+    collation: Collation,
+    nulls_first: bool,
+}
+
+/// [`resolve_order_by`]'s joined counterpart: resolves each `ORDER BY`
+/// term against the full-join `scope` instead of a single schema. Only
+/// a bare (optionally table-qualified) column or a result-column alias
+/// resolves to [`JoinOrderTarget::Offset`]; anything else (including a
+/// `SELECT *`-relative ordinal — not supported for the joined case,
+/// narrower than the single-table path) becomes a computed
+/// [`JoinOrderTarget::Expr`], evaluated once per candidate row during
+/// pass 1.
+fn resolve_join_order_by(
+    select: &Select,
+    scope: &Scope,
+) -> Result<Vec<JoinOrderPlan>, CodegenError> {
+    let mut plans = Vec::with_capacity(select.order_by.len());
+    for term in &select.order_by {
+        let base_expr = strip_collate(&term.expr);
+        let target = resolve_join_order_by_target(base_expr, select, scope)?;
+        let descending = term.desc.unwrap_or(false);
+        let nulls_first = term
+            .nulls_last
+            .map_or(!descending, |nulls_last| !nulls_last);
+        plans.push(JoinOrderPlan {
+            target,
+            descending,
+            collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
+            nulls_first,
+        });
+    }
+    Ok(plans)
+}
+
+fn resolve_join_order_by_target(
+    expr: &Expr,
+    select: &Select,
+    scope: &Scope,
+) -> Result<JoinOrderTarget, CodegenError> {
+    match &expr.kind {
+        ExprKind::Column { table, name, .. } => {
+            // Result-column aliases take precedence over table columns,
+            // same as the single-table path, but only for an
+            // unqualified reference.
+            if table.is_none() {
+                if let Some(ResultColumn::Expr {
+                    expr: aliased_expr, ..
+                }) = select
+                    .columns
+                    .iter()
+                    .find(|c| matches!(c, ResultColumn::Expr { alias: Some(a), .. } if a == name))
+                {
+                    return resolve_join_order_by_target(aliased_expr, select, scope);
+                }
+            }
+            let (binding_idx, local_idx) = resolve_scope_column(scope, table.as_deref(), name)?;
+            Ok(JoinOrderTarget::Offset(
+                joined_column_offset(scope, binding_idx).saturating_add(local_idx),
+            ))
+        }
+        _ => Ok(JoinOrderTarget::Expr(expr.clone())),
+    }
+}
+
+/// Reads every column of every `scope.tables` binding (in order,
+/// `*`-dedup notwithstanding) into a contiguous register run — the flat
+/// row [`compile_joined_sorted_scan`]'s pass 1 buffers into the sorter.
+/// Returns `None` (no registers allocated) only when `scope` has no
+/// tables at all — not reachable from a real `FROM` clause, but kept
+/// total rather than panicking.
+fn emit_full_joined_row(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    scope: &Scope,
+) -> Result<Option<i32>, CodegenError> {
+    let mut first: Option<i32> = None;
+    for binding in &scope.tables {
+        for idx in 0..binding.schema.columns.len() {
+            let r = emit_join_column(em, reg, binding, idx)?;
+            if first.is_none() {
+                first = Some(r);
+            }
+        }
+    }
+    Ok(first)
+}
+
+/// Reconstructs `select`'s result-column projection from the flat,
+/// all-bindings-concatenated pseudo record `compile_joined_sorted_scan`'s
+/// pass 2 re-opens after sorting — the joined counterpart to
+/// `emit_row_via_sink`/`compile_row_values`'s pseudo-cursor mode.
+/// Restricted to `*`/`table.*`/bare-column result columns: a computed
+/// expression can't be safely re-evaluated against the flat pseudo
+/// record (a bare `Column` maps to one absolute offset, but an arbitrary
+/// expression would need every column reference inside it individually
+/// retargeted — no small task within this ticket's scope), so it
+/// reports a clean `Unsupported` error instead of silently mis-projecting.
+fn emit_joined_pseudo_projection(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    scope: &Scope,
+    pseudo_cursor: i32,
+) -> Result<(i32, usize), CodegenError> {
+    let mut regs = Vec::new();
+    let read_offset = |em: &mut Emitter, reg: &mut RegAlloc, abs: usize| -> i32 {
+        let r = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::Column,
+            pseudo_cursor,
+            i32::try_from(abs).unwrap_or(0),
+            r,
+        ));
+        r
+    };
+    for col in &select.columns {
+        match col {
+            ResultColumn::Star => {
+                for (i, binding) in scope.tables.iter().enumerate() {
+                    let suppressed = scope.dedup_star.get(i);
+                    let base = joined_column_offset(scope, i);
+                    for idx in 0..binding.schema.columns.len() {
+                        let Some(name) = binding.schema.columns.get(idx) else {
+                            continue;
+                        };
+                        if suppressed.is_some_and(|s| s.contains(&name.to_ascii_lowercase())) {
+                            continue;
+                        }
+                        regs.push(read_offset(em, reg, base.saturating_add(idx)));
+                    }
+                }
+            }
+            ResultColumn::TableStar { table } => {
+                let i = scope
+                    .tables
+                    .iter()
+                    .position(|b| b.matches_qualifier(table))
+                    .ok_or_else(|| CodegenError::UnknownColumn {
+                        name: format!("{table}.*"),
+                    })?;
+                let base = joined_column_offset(scope, i);
+                let count = scope
+                    .tables
+                    .get(i)
+                    .map(|b| b.schema.columns.len())
+                    .unwrap_or(0);
+                for idx in 0..count {
+                    regs.push(read_offset(em, reg, base.saturating_add(idx)));
+                }
+            }
+            ResultColumn::Expr {
+                expr:
+                    Expr {
+                        kind: ExprKind::Column { table, name, .. },
+                        ..
+                    },
+                ..
+            } => {
+                let (binding_idx, local_idx) = resolve_scope_column(scope, table.as_deref(), name)?;
+                let abs = joined_column_offset(scope, binding_idx).saturating_add(local_idx);
+                regs.push(read_offset(em, reg, abs));
+            }
+            ResultColumn::Expr { .. } => {
+                return Err(CodegenError::Unsupported {
+                    reason: "ORDER BY combined with a JOIN only supports `*`/`table.*`/bare \
+                             column result columns today — a computed expression in the SELECT \
+                             list can't yet be re-projected from the sorted output"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    let Some(&first) = regs.first() else {
+        return Ok((reg.alloc(), 0));
+    };
+    for (i, r) in regs.iter().enumerate() {
+        let want = first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
+        if *r != want {
+            return Err(CodegenError::Unsupported {
+                reason: "result columns must land in contiguous registers for MakeRecord/\
+                         ResultRow (a function call or other multi-register expression mixed \
+                         with other columns is not yet supported)"
+                    .to_string(),
+            });
+        }
+    }
+    Ok((first, regs.len()))
+}
+
+/// #250: `ORDER BY` combined with a JOIN — the joined counterpart to
+/// [`compile_sorted_scan`]. Pass 1 drives the same nested-loop join as
+/// the unsorted path (via [`compile_join_level_for_sort`], a variant of
+/// [`compile_join_level`] whose innermost emission buffers the full
+/// joined row — every binding's every column, plus a trailing register
+/// per computed `ORDER BY` expression — into the sorter instead of
+/// emitting `ResultRow`), `WHERE`-filtered but pre-LIMIT (LIMIT applies
+/// to the sorted output). Pass 2 walks the sorted buffer via an
+/// `OpenPseudo` cursor over the flat record and re-projects `select`'s
+/// result columns from it (see [`emit_joined_pseudo_projection`]'s
+/// scope restriction), applying LIMIT/OFFSET exactly as the single-table
+/// sorted path does. `DISTINCT` combined with `ORDER BY` on a joined
+/// `SELECT` is rejected by the caller before this function is ever
+/// reached.
+#[allow(clippy::too_many_arguments)]
+fn compile_joined_sorted_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    exec_bindings: &[TableBinding],
+    orig_bindings: &[TableBinding],
+    pos_of: &[usize],
+    levels: &[LevelPlan],
+    dedup_star: &[std::collections::HashSet<String>],
+    catalog: &[TableSchema],
+    full_scope: &Scope,
+    order_by_plans: &[JoinOrderPlan],
+    sort_cursor: i32,
+    pseudo_cursor: i32,
+    end_label: Label,
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let sorter_open_addr = em.emit(Instruction::with_p4(
+        Opcode::SorterOpen,
+        sort_cursor,
+        0,
+        0,
+        P4::None,
+    ));
+
+    let mut null_mask = vec![false; exec_bindings.len()];
+    let mut matched_regs: Vec<Option<i32>> = vec![None; exec_bindings.len()];
+    compile_join_level_for_sort(
+        em,
+        reg,
+        select,
+        exec_bindings,
+        orig_bindings,
+        pos_of,
+        levels,
+        dedup_star,
+        &mut null_mask,
+        &mut matched_regs,
+        0,
+        catalog,
+        order_by_plans,
+        sort_cursor,
+        sorter_open_addr,
+    )?;
+
+    let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, sort_cursor, 0, 0));
+    em.patch_p2(sort_addr, end_label);
+
+    let limit = compile_limit_setup(em, reg, full_scope, select)?;
+
+    let sorted_loop = em.new_label();
+    em.place(sorted_loop);
+    let sorter_data_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::SorterData,
+        sort_cursor,
+        sorter_data_reg,
+        0,
+    ));
+    em.emit(Instruction::new(
+        Opcode::OpenPseudo,
+        pseudo_cursor,
+        sorter_data_reg,
+        0,
+    ));
+
+    let row_skip = em.new_label();
+    // The pseudo scope's own bindings' cursor numbers don't matter for
+    // `emit_joined_pseudo_projection` (it always reads `pseudo_cursor`
+    // directly at an absolute offset) — `full_scope` is passed through
+    // purely for its `tables`/`dedup_star` structure.
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    let (first, count) = emit_joined_pseudo_projection(em, reg, select, full_scope, pseudo_cursor)?;
+    sink(em, reg, first, i32::try_from(count).unwrap_or(0))?;
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+
+    em.place(row_skip);
+    let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, sort_cursor, 0, 0));
+    em.patch_p2(sorted_next, sorted_loop);
+    Ok(())
+}
+
+/// [`compile_join_level`]'s variant for the `ORDER BY`+JOIN sorted path
+/// (#250): identical nested-loop/outer-join structure (LEFT/RIGHT
+/// null-extension bookkeeping is unaffected by sorting — it decides
+/// which rows exist at all, before they're ever buffered), but the
+/// innermost level buffers the full joined row plus `ORDER BY` sort keys
+/// into `sort_cursor` (see [`emit_full_joined_row`]) instead of applying
+/// `LIMIT` and projecting `select.columns` via [`emit_join_row`]. Only
+/// `WHERE` still applies at this innermost point — `LIMIT`/`DISTINCT`
+/// apply to the sorted output in [`compile_joined_sorted_scan`]'s pass 2
+/// instead.
+#[allow(clippy::too_many_arguments)]
+fn compile_join_level_for_sort(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    exec_bindings: &[TableBinding],
+    orig_bindings: &[TableBinding],
+    pos_of: &[usize],
+    levels: &[LevelPlan],
+    dedup_star: &[std::collections::HashSet<String>],
+    null_mask: &mut Vec<bool>,
+    matched_regs: &mut Vec<Option<i32>>,
+    level: usize,
+    catalog: &[TableSchema],
+    order_by_plans: &[JoinOrderPlan],
+    sort_cursor: i32,
+    sorter_open_addr: usize,
+) -> Result<(), CodegenError> {
+    if level == exec_bindings.len() {
+        let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+        let row_skip = em.new_label();
+        if let Some(where_expr) = &select.where_clause {
+            compile_cond(
+                em,
+                reg,
+                &scope,
+                where_expr,
+                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
+            )?;
+        }
+        let Some(first) = emit_full_joined_row(em, reg, &scope)? else {
+            em.place(row_skip);
+            return Ok(());
+        };
+        let mut sort_keys = Vec::with_capacity(order_by_plans.len());
+        for plan in order_by_plans {
+            let index = match &plan.target {
+                JoinOrderTarget::Offset(off) => *off,
+                JoinOrderTarget::Expr(expr) => {
+                    let r = compile_value(em, reg, &scope, expr)?;
+                    usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+                }
+            };
+            sort_keys.push(SortKeyColumn {
+                index,
+                descending: plan.descending,
+                collation: plan.collation,
+                nulls_first: plan.nulls_first,
+            });
+        }
+        em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
+
+        let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
+        let record_reg = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::MakeRecord,
+            first,
+            i32::try_from(count).unwrap_or(0),
+            record_reg,
+        ));
+        em.emit(Instruction::new(
+            Opcode::SorterInsert,
+            sort_cursor,
+            record_reg,
+            0,
+        ));
+        em.place(row_skip);
+        return Ok(());
+    }
+
+    let Some(binding) = exec_bindings.get(level) else {
+        return Err(CodegenError::Unsupported {
+            reason: "join level out of range".to_string(),
+        });
+    };
+    let cursor = binding.cursor;
+    let plan = levels.get(level).cloned().unwrap_or_default();
+
+    if plan.null_span.is_some() {
+        let matched = reg.alloc();
+        em.emit(Instruction::new(Opcode::Integer, 0, matched, 0));
+        if let Some(slot) = matched_regs.get_mut(level) {
+            *slot = Some(matched);
+        }
+    }
+
+    let rewind_end = em.new_label();
+    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
+    em.patch_p2(rewind_addr, rewind_end);
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
+    let skip = em.new_label();
+    for check in &plan.checks {
+        if let Some(constraint) = &check.constraint {
+            let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+            compile_cond(
+                em,
+                reg,
+                &scope,
+                constraint,
+                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
+            )?;
+        }
+        if let Some(outer_level) = check.sets_matched {
+            let target = matched_regs
+                .get(outer_level)
+                .copied()
+                .flatten()
+                .ok_or_else(|| CodegenError::Unsupported {
+                    reason: "join level plan referenced an unallocated matched register"
+                        .to_string(),
+                })?;
+            em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
+        }
+    }
+    let next_level = level.saturating_add(1);
+    compile_join_level_for_sort(
+        em,
+        reg,
+        select,
+        exec_bindings,
+        orig_bindings,
+        pos_of,
+        levels,
+        dedup_star,
+        null_mask,
+        matched_regs,
+        next_level,
+        catalog,
+        order_by_plans,
+        sort_cursor,
+        sorter_open_addr,
+    )?;
+    em.place(skip);
+    let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    em.place(rewind_end);
+
+    if let Some((start, end)) = plan.null_span {
+        let matched = matched_regs.get(level).copied().flatten().ok_or_else(|| {
+            CodegenError::Unsupported {
+                reason: "join level plan missing matched register for outer join".to_string(),
+            }
+        })?;
+        let do_null = em.new_label();
+        let after_null = em.new_label();
+        let addr = em.emit(Instruction::new(Opcode::IfNot, matched, 0, 0));
+        em.patch_p2(addr, do_null);
+        em.goto(after_null);
+
+        em.place(do_null);
+        for lv in start..=end {
+            if let Some(slot) = null_mask.get_mut(lv) {
+                *slot = true;
+            }
+        }
+        compile_join_level_for_sort(
+            em,
+            reg,
+            select,
+            exec_bindings,
+            orig_bindings,
+            pos_of,
+            levels,
+            dedup_star,
+            null_mask,
+            matched_regs,
+            end.saturating_add(1),
+            catalog,
+            order_by_plans,
+            sort_cursor,
+            sorter_open_addr,
+        )?;
+        for lv in start..=end {
+            if let Some(slot) = null_mask.get_mut(lv) {
+                *slot = false;
+            }
+        }
+        em.place(after_null);
+    }
+    Ok(())
 }
 
 /// Where an ORDER BY term's sort key comes from: a raw table column
