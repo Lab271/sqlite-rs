@@ -514,9 +514,44 @@ fn test_unsupported_compound_select() {
 }
 
 #[test]
-fn test_unsupported_group_by() {
-    let msg = unsupported("SELECT a FROM t GROUP BY a");
-    assert!(msg.contains("GROUP BY"), "message: {msg}");
+fn test_unsupported_having_without_group_by() {
+    // Parses (`HAVING` alone isn't a syntax error), but this V4 slice
+    // only accepts `HAVING` paired with `GROUP BY` — see #239.
+    let msg = unsupported("SELECT count(*) FROM t HAVING count(*) > 1");
+    assert!(msg.contains("HAVING"), "message: {msg}");
+}
+
+#[test]
+fn test_group_by_single_column() {
+    let select = accept("SELECT a FROM t GROUP BY a");
+    assert_eq!(select.group_by.len(), 1);
+    assert!(select.having.is_none());
+}
+
+#[test]
+fn test_group_by_multiple_columns() {
+    let select = accept("SELECT a, b FROM t GROUP BY a, b");
+    assert_eq!(select.group_by.len(), 2);
+}
+
+#[test]
+fn test_group_by_with_expression() {
+    let select = accept("SELECT a FROM t GROUP BY a + 1");
+    assert_eq!(select.group_by.len(), 1);
+    assert!(matches!(
+        select.group_by[0].kind,
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_group_by_having() {
+    let select = accept("SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1");
+    assert_eq!(select.group_by.len(), 1);
+    assert!(select.having.is_some());
 }
 
 #[test]

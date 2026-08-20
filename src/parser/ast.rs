@@ -1,19 +1,21 @@
 //! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
-//! 002-parser Requirements 2-4), plus the V4 join slice (#237).
+//! 002-parser Requirements 2-4), plus the V4 join slice (#237), the V4
+//! subquery-expression slice (#238), and the V4 GROUP BY/HAVING slice
+//! (#239).
 //!
 //! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`/
 //! `(* V4 *)`-tagged rules: SELECT with an INNER/LEFT [OUTER]/CROSS join
 //! chain (`FromClause`/`Join`/`JoinOp`/`JoinConstraint`, #237), WHERE,
-//! ORDER BY, LIMIT/OFFSET, the V2 expression grammar, INSERT/UPDATE/
-//! DELETE, and CREATE/DROP TABLE/INDEX, plus the V4 subquery-expression
-//! slice (#238, including correlated subqueries): scalar subqueries
-//! (`ExprKind::Subquery`), `IN (SELECT ...)` (`ExprKind::InSubquery`),
-//! and `EXISTS (SELECT ...)` (`ExprKind::Exists`) — correlation is
-//! resolved at codegen time (`Scope::with_outer`), not represented
-//! differently in the AST. NATURAL/RIGHT/FULL joins, `USING`,
-//! comma-style joins, subqueries in FROM, `ANY`/`ALL`/`SOME` quantified
-//! comparisons, and multi-column `IN` do not exist here at all, nor does
-//! GROUP BY/HAVING/FOREIGN KEY/REFERENCES (V8).
+//! GROUP BY, HAVING (#239), ORDER BY, LIMIT/OFFSET, the V2 expression
+//! grammar, INSERT/UPDATE/DELETE, and CREATE/DROP TABLE/INDEX, plus the
+//! V4 subquery-expression slice (#238, including correlated
+//! subqueries): scalar subqueries (`ExprKind::Subquery`), `IN (SELECT
+//! ...)` (`ExprKind::InSubquery`), and `EXISTS (SELECT ...)`
+//! (`ExprKind::Exists`) — correlation is resolved at codegen time
+//! (`Scope::with_outer`), not represented differently in the AST.
+//! NATURAL/RIGHT/FULL joins, `USING`, comma-style joins, subqueries in
+//! FROM, `ANY`/`ALL`/`SOME` quantified comparisons, and multi-column
+//! `IN` do not exist here at all, nor does FOREIGN KEY/REFERENCES (V8).
 //!
 //! Every node carries a [`Span`] (Requirement 3: "AST completeness") and
 //! parenthesized expressions are preserved explicitly via `ExprKind::Paren`
@@ -45,6 +47,8 @@ pub struct Select {
     pub columns: Vec<ResultColumn>,
     pub from: Option<FromClause>,
     pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
     pub order_by: Vec<OrderingTerm>,
     pub limit: Option<Limit>,
     pub span: Span,

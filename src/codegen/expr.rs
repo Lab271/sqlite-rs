@@ -625,7 +625,7 @@ pub(crate) fn emit_column_read(
 /// (`func.c`'s aggregate registry). `max`/`min` are overloaded: the
 /// one-argument form is the aggregate, but `max(a, b)` is an ordinary
 /// scalar function, so arity — not the name alone — decides.
-fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> bool {
+pub(crate) fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionArgs) -> bool {
     let arity = match args {
         crate::parser::ast::FunctionArgs::Star => 0,
         crate::parser::ast::FunctionArgs::List(list) => list.len(),

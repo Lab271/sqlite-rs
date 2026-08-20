@@ -582,3 +582,179 @@ fn rowid_equality_against_bound_parameter_seeks() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// #239: `GROUP BY` / `HAVING` fixture — `cat` groups rows unevenly (2
+/// `"x"`, 1 `"y"`, 3 `"z"`) with an interspersed `NULL` `val`, exercising
+/// `count`/`sum`/`avg`/`min`/`max`, multi-column grouping, `HAVING`, and
+/// `GROUP BY` over a computed expression.
+fn group_by_fixture(label: &str) -> (PathBuf, TableSchema) {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_group_by_test_{}_{}.db",
+        std::process::id(),
+        label
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(cat TEXT, sub TEXT, val INTEGER); \
+             INSERT INTO t VALUES \
+             ('x', 'p', 1), ('x', 'p', 2), \
+             ('y', 'p', 10), \
+             ('z', 'q', 100), ('z', 'q', NULL), ('z', 'r', 5);",
+        )
+        .status()
+        .expect("creating GROUP BY fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["cat".to_string(), "sub".to_string(), "val".to_string()],
+        column_types: vec![
+            "TEXT".to_string(),
+            "TEXT".to_string(),
+            "INTEGER".to_string(),
+        ],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    (path, schema)
+}
+
+#[test]
+fn group_by_single_column_count_matches_oracle() {
+    let (path, schema) = group_by_fixture("single_count");
+    // #239 doesn't compile GROUP BY combined with ORDER BY in one
+    // `SELECT`; sort the expected rows in Rust instead of pushing that
+    // combination through codegen.
+    let mut rows = our_rows(&path, &schema, "SELECT cat, count(*) FROM t GROUP BY cat;")
+        .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Text("x".to_string()), Value::Integer(2)],
+            vec![Value::Text("y".to_string()), Value::Integer(1)],
+            vec![Value::Text("z".to_string()), Value::Integer(3)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn group_by_aggregates_sum_avg_min_max() {
+    let (path, schema) = group_by_fixture("aggregates");
+    let mut rows = our_rows(
+        &path,
+        &schema,
+        "SELECT cat, sum(val), avg(val), min(val), max(val) FROM t GROUP BY cat;",
+    )
+    .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("x".to_string()),
+                Value::Integer(3),
+                Value::Real(1.5),
+                Value::Integer(1),
+                Value::Integer(2),
+            ],
+            vec![
+                Value::Text("y".to_string()),
+                Value::Integer(10),
+                Value::Real(10.0),
+                Value::Integer(10),
+                Value::Integer(10),
+            ],
+            // `z` has a NULL `val` row: sum/avg/min/max all ignore it,
+            // matching SQL's null-skipping aggregate semantics.
+            vec![
+                Value::Text("z".to_string()),
+                Value::Integer(105),
+                Value::Real(52.5),
+                Value::Integer(5),
+                Value::Integer(100),
+            ],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn group_by_multiple_columns() {
+    let (path, schema) = group_by_fixture("multi_column");
+    let mut rows = our_rows(
+        &path,
+        &schema,
+        "SELECT cat, sub, count(*) FROM t GROUP BY cat, sub;",
+    )
+    .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("x".to_string()),
+                Value::Text("p".to_string()),
+                Value::Integer(2)
+            ],
+            vec![
+                Value::Text("y".to_string()),
+                Value::Text("p".to_string()),
+                Value::Integer(1)
+            ],
+            vec![
+                Value::Text("z".to_string()),
+                Value::Text("q".to_string()),
+                Value::Integer(2)
+            ],
+            vec![
+                Value::Text("z".to_string()),
+                Value::Text("r".to_string()),
+                Value::Integer(1)
+            ],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn group_by_having_filters_groups() {
+    let (path, schema) = group_by_fixture("having");
+    let mut rows = our_rows(
+        &path,
+        &schema,
+        "SELECT cat, count(*) FROM t GROUP BY cat HAVING count(*) > 1;",
+    )
+    .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Text("x".to_string()), Value::Integer(2)],
+            vec![Value::Text("z".to_string()), Value::Integer(3)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn group_by_expression() {
+    let (path, schema) = group_by_fixture("expression");
+    let mut rows = our_rows(
+        &path,
+        &schema,
+        "SELECT length(cat), count(*) FROM t GROUP BY length(cat);",
+    )
+    .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    // Every `cat` value in the fixture is a single character, so
+    // `length(cat)` groups all six rows into one bucket.
+    assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(6)]]);
+    let _ = std::fs::remove_file(&path);
+}

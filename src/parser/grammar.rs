@@ -814,12 +814,6 @@ impl Parser {
             None
         };
 
-        if self.at_kw(Keyword::GROUP) {
-            return self.unsupported("GROUP BY not yet supported");
-        }
-        if self.at_kw(Keyword::HAVING) {
-            return self.unsupported("HAVING not yet supported");
-        }
         if self.at_kw(Keyword::WINDOW) {
             return self.unsupported("WINDOW clause not yet supported");
         }
@@ -829,6 +823,21 @@ impl Parser {
         } else {
             None
         };
+
+        let mut group_by = Vec::new();
+        let mut having = None;
+        if self.eat_kw(Keyword::GROUP) {
+            self.expect_kw(Keyword::BY)?;
+            group_by.push(self.expr()?);
+            while self.eat_punct(&TokenKind::Comma) {
+                group_by.push(self.expr()?);
+            }
+            if self.eat_kw(Keyword::HAVING) {
+                having = Some(self.expr()?);
+            }
+        } else if self.at_kw(Keyword::HAVING) {
+            return self.unsupported("HAVING without GROUP BY not yet supported");
+        }
 
         let mut order_by = Vec::new();
         if self.eat_kw(Keyword::ORDER) {
@@ -863,6 +872,8 @@ impl Parser {
             columns,
             from,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
             span: join_span(start, end),

@@ -42,21 +42,26 @@ sql-stmt        ::= select-stmt        (* V2 *)
                   (* V4+: compound selects, CTEs, views -- see Future blocks;
                      #237 landed the INNER/LEFT/CROSS JOIN subset, see from-clause *)
 
-(* ===================== SELECT (V2 slice, FROM/JOIN V4 slice) =====================
+(* ===================== SELECT (V2 slice, FROM/JOIN + GROUP BY/HAVING V4 slice) =====================
  * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :750 from, :925 orderby_opt, :967 limit_opt, :1002 where_opt]
- * V2 restrictions vs full parse.y: no GROUP BY/HAVING (V4), no compound
- * ops (V4), no window clause (V9). The FROM clause itself (`from-clause`
- * below) is now the V4 INNER/LEFT [OUTER]/CROSS `JOIN ... ON` slice
- * (#237) rather than V2's single-table-only restriction — NATURAL/
- * RIGHT/FULL joins, `USING (...)`, comma-style `FROM a, b`, and
- * subqueries in FROM (#238) remain future-block stubs, see below.
+ * V2 restrictions vs full parse.y: no compound ops (V4), no window
+ * clause (V9). The FROM clause itself (`from-clause` below) is now the
+ * V4 INNER/LEFT [OUTER]/CROSS `JOIN ... ON` slice (#237) rather than
+ * V2's single-table-only restriction — NATURAL/RIGHT/FULL joins,
+ * `USING (...)`, comma-style `FROM a, b`, and subqueries in FROM (#238)
+ * remain future-block stubs, see below. `group-by-clause` below is the
+ * V4 GROUP BY/HAVING slice (#239).
  *)
 
 select-stmt     ::= "SELECT" [ "DISTINCT" | "ALL" ] result-column { "," result-column }
                      [ "FROM" from-clause ]
                      [ "WHERE" expr ]
+                     [ group-by-clause ]
                      [ "ORDER" "BY" ordering-term { "," ordering-term } ]
-                     [ "LIMIT" expr [ ( "OFFSET" | "," ) expr ] ] ;   (* V2 *)
+                     [ "LIMIT" expr [ ( "OFFSET" | "," ) expr ] ] ;   (* V2/V4 *)
+
+group-by-clause ::= "GROUP" "BY" expr { "," expr } [ "HAVING" expr ] ;
+                     (* V4 [parse.y:950 groupby_opt, :955 having_opt] *)
 
 result-column   ::= "*"                                   (* V2 [parse.y:717 selcollist] *)
                   | table-name "." "*"                    (* V2 [parse.y selcollist nm DOT STAR] *)
@@ -246,8 +251,9 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      correlated ones -- see equality-tail/primary-expr above;
  *      correlation is resolved at codegen time via a scope fallback, not
  *      a distinct grammar production), compound-select
- *      (UNION/INTERSECT/EXCEPT), GROUP BY / HAVING, WITH/CTEs (incl.
- *      RECURSIVE), CREATE VIEW, aggregate fns
+ *      (UNION/INTERSECT/EXCEPT), WITH/CTEs (incl. RECURSIVE), CREATE VIEW
+ *      (GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
+ *      above)
  * V5:  BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE
  * V7:  PRAGMA, EXPLAIN [QUERY PLAN], ANALYZE
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),

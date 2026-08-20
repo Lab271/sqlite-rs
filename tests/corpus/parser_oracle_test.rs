@@ -46,7 +46,11 @@ const CASES: &[(&str, Outcome)] = &[
         Outcome::Accept,
     ),
     ("SELECT * FROM t, t AS t2", Outcome::Unsupported),
-    ("SELECT a FROM t GROUP BY a", Outcome::Unsupported),
+    ("SELECT a FROM t GROUP BY a", Outcome::Accept),
+    (
+        "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1",
+        Outcome::Accept,
+    ),
     (
         "SELECT a FROM t UNION SELECT b FROM t",
         Outcome::Unsupported,
