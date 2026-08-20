@@ -135,21 +135,31 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ## V4 — Multi-Table SQL
 
-**Value:** The relational model. Joins, subqueries, aggregates, compound selects, CTEs, views. This is the bulk of the code generator (~35K lines in C) and the block where the query planner earns its keep.
+**Value:** The relational model. Joins, subqueries, aggregates, compound selects, non-recursive CTEs. This is the bulk of the code generator (~35K lines in C) and the block where the query planner earns its keep.
 
-**Scope:**
+**Scope (slimmed — see Deferred below):**
 
 | Layer | Subset |
 |-------|--------|
-| Parser | JOIN grammar (all variants), subqueries, `IN (SELECT)`, EXISTS, compound (UNION/INTERSECT/EXCEPT), GROUP BY/HAVING, WITH/CTEs (incl. recursive), CREATE VIEW |
+| Parser | JOIN grammar (INNER, LEFT, CROSS), subqueries (scalar, IN, EXISTS), GROUP BY/HAVING, UNION/UNION ALL, non-recursive WITH/CTE |
 | Planner | Join ordering, index selection, WHERE-clause analysis |
 | Codegen | Nested-loop joins, coroutines/materialization for subqueries, aggregate compilation |
-| VDBE | AggStep/AggFinal, OpenEphemeral, sorter, remaining ~100 opcodes |
-| Functions | Aggregates: `count`, `sum`, `avg`, `min`, `max`, `group_concat` |
+| VDBE | AggStep/AggFinal, OpenEphemeral, sorter |
+| Functions | Aggregates: `count`, `sum`, `avg`, `min`, `max` |
 
-**Grammar slice:** +~70 productions.
+**Grammar slice:** +~50 productions (slimmed from ~70).
 
-**Corpus:** `join*.test`, `select2-8.test`, `subquery*.test`, `with*.test`, `view.test`, `aggnested.test`; the bulk of sqllogictest (its 7.2M cases are mostly multi-table SELECTs — this block unlocks running the full set).
+**Deferred to V5+:**
+
+| Feature | Target | Rationale |
+|---------|--------|-----------|
+| Recursive CTEs | V6 | Complex, rarely used in basic apps |
+| Views (CREATE VIEW) | V6 | Syntactic sugar over subqueries |
+| INTERSECT / EXCEPT | V6 | UNION covers 90% of use cases |
+| group_concat | V6 | Exotic aggregate |
+| Advanced join reordering | Perf epic #111 | Optimization, not correctness |
+
+**Corpus:** `join*.test`, `select2-8.test`, `subquery*.test`, `with*.test` (non-recursive slice), `aggnested.test`; the bulk of sqllogictest (its 7.2M cases are mostly multi-table SELECTs — this block unlocks running the full set).
 
 **Demo:** run the sqllogictest suite; report pass percentage as the public progress metric.
 
@@ -349,7 +359,7 @@ Parallelizable pairs: V4 ∥ V5 (planner track vs pager track), V8 ∥ V9 ∥ V1
 | V1 | 0 (minimal DDL reader) | 0% |
 | V2 | ~40 | 20% |
 | V3 | ~90 | 45% |
-| V4 | ~160 | 80% |
+| V4 | ~140 | 70% |
 | V5 | ~170 | 85% |
 | V6–V7 | ~175 | 88% |
 | V8 | ~190 | 95% |
