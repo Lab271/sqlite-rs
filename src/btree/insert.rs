@@ -364,29 +364,9 @@ fn root_split(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::vfs::MemoryVfs;
     use std::path::Path;
 
-    /// A one-page, empty-leaf-root database: just enough header bytes for
-    /// `DatabaseHeader::parse` and `Pager::open` to accept it.
-    fn minimal_db(page_size: u32) -> (MemoryVfs, DatabaseHeader) {
-        let mut page1 = vec![0u8; page_size as usize];
-        page1[0..16].copy_from_slice(b"SQLite format 3\0");
-        page1[16..18].copy_from_slice(&(page_size as u16).to_be_bytes());
-        page1[18] = 1;
-        page1[19] = 1;
-        page1[28..32].copy_from_slice(&1u32.to_be_bytes());
-        page1[56..60].copy_from_slice(&1u32.to_be_bytes());
-        write_leaf_page(&mut page1, 100, 1, &[]).unwrap();
-
-        let mut header_bytes = [0u8; 100];
-        header_bytes.copy_from_slice(&page1[..100]);
-        let header = DatabaseHeader::parse(&header_bytes).unwrap();
-
-        let mut vfs = MemoryVfs::new();
-        vfs.insert("/test.db", page1);
-        (vfs, header)
-    }
+    use super::super::test_minimal_db as minimal_db;
 
     /// 006-btree Requirement 8's duplicate-rowid scenario: inserting a
     /// rowid that already exists in the leaf must error, not silently

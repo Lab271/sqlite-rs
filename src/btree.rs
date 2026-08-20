@@ -974,6 +974,33 @@ fn decode_cell_head(
     ))
 }
 
+/// A one-page, empty-leaf-root database: just enough header bytes for
+/// `DatabaseHeader::parse` and `Pager::open` to accept it. Shared by the
+/// `#[cfg(test)]` modules of `delete.rs`, `ddl.rs`, `insert.rs` and
+/// `master.rs`, which all built this same fixture independently before.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+pub(crate) fn test_minimal_db(
+    page_size: u32,
+) -> (crate::vfs::MemoryVfs, crate::header::DatabaseHeader) {
+    let mut page1 = vec![0u8; page_size as usize];
+    page1[0..16].copy_from_slice(b"SQLite format 3\0");
+    page1[16..18].copy_from_slice(&(page_size as u16).to_be_bytes());
+    page1[18] = 1;
+    page1[19] = 1;
+    page1[28..32].copy_from_slice(&1u32.to_be_bytes());
+    page1[56..60].copy_from_slice(&1u32.to_be_bytes());
+    write_leaf_page(&mut page1, 100, 1, &[]).unwrap();
+
+    let mut header_bytes = [0u8; 100];
+    header_bytes.copy_from_slice(&page1[..100]);
+    let header = crate::header::DatabaseHeader::parse(&header_bytes).unwrap();
+
+    let mut vfs = crate::vfs::MemoryVfs::new();
+    vfs.insert("/test.db", page1);
+    (vfs, header)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
