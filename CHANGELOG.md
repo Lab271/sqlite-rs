@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+VDBE `AggStep`/`AggFinal` opcodes (#241, V4 phase 1 epic #235): a
+`count`/`sum` accumulator registry dispatched by a `"name(arity)"` P4
+descriptor, mirroring the existing `Function` opcode's registry-dispatch
+shape, plus a per-slot aggregate-context table on `Vm` addressed the
+same way `cursors` is. `avg`/`min`/`max` (#242) extend the same
+registry. Not wired into GROUP BY codegen — #239 (merged first) took a
+different, opcode-free approach for `count`/`sum`/`avg`/`min`/`max`
+(reusing existing arithmetic/compare opcodes), so `AggStep`/`AggFinal`
+currently have no caller in `src/codegen/`; they stand as tested,
+spec-backed (spec 009 Requirement 12) VM primitives for future use.
+
 `GROUP BY` / `HAVING` (#239, V4 phase 1 epic #235): parser accepts
 `GROUP BY` (single/multi-column, arbitrary expressions) and `HAVING`.
 Codegen groups via the existing `Sorter*` opcode machinery

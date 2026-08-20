@@ -89,6 +89,11 @@ pub enum Opcode {
     Cast,
     // function
     Function,
+    // aggregate (#241) — postdates the V2 oracle harvest (no GROUP BY
+    // codegen existed then), so excluded from `ALL` like the other V3
+    // opcodes above, but fully dispatched and exhaustiveness-checked.
+    AggStep,
+    AggFinal,
     // result
     Integer,
     Int64,
@@ -264,6 +269,8 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Concat
         | Opcode::Cast
         | Opcode::Function
+        | Opcode::AggStep
+        | Opcode::AggFinal
         | Opcode::Integer
         | Opcode::Int64
         | Opcode::Real

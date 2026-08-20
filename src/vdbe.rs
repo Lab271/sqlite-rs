@@ -4,6 +4,7 @@
 //! evaluation, no parser coupling. See spec 008.
 
 mod affinity;
+mod aggregate;
 mod arithmetic;
 mod cast;
 mod coerce;
