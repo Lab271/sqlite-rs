@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+`UNION ALL` compound `SELECT` (#240, V4 phase 1 epic #235): parser
+chains `SELECT ... UNION ALL SELECT ...` arms into `Select::compound`,
+with `ORDER BY`/`LIMIT` binding to the whole compound statement rather
+than any one arm. Codegen emits each arm's scan/`ResultRow` block back
+to back with per-arm cursor numbers (`ScanCursors::for_arm`),
+concatenating with no deduplication and no shared sort/merge step. A
+column-count mismatch between arms is rejected at compile time. Plain
+`UNION` (dedup)/`INTERSECT`/`EXCEPT`, joins/subqueries within an arm,
+and `ORDER BY`/`LIMIT` on the compound statement remain out of scope
+(deferred to V4 phase 2 or later).
+
 VDBE `AggStep`/`AggFinal` opcodes (#241, V4 phase 1 epic #235): a
 `count`/`sum` accumulator registry dispatched by a `"name(arity)"` P4
 descriptor, mirroring the existing `Function` opcode's registry-dispatch
