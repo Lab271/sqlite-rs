@@ -6,11 +6,15 @@
 //! modeled as a plain enum rather than an opaque blob since every
 //! accumulator shape is known up front).
 //!
-//! `count`/`sum` are implemented here to prove the opcode mechanism
-//! end-to-end; `avg`/`min`/`max` are #242's scope, added to this same
-//! registry rather than a new mechanism.
+//! `count`/`sum` were implemented first to prove the opcode mechanism
+//! end-to-end; `avg`/`min`/`max` (#242) are added to this same registry
+//! rather than a new mechanism.
+
+use std::cmp::Ordering;
 
 use crate::record::Value;
+use crate::vdbe::collation::Collation;
+use crate::vdbe::compare::compare;
 use crate::vdbe::functions::FunctionError;
 
 /// One aggregate's running accumulator state, addressed by
@@ -33,6 +37,21 @@ pub enum AggState {
         saw_real: bool,
         saw_any: bool,
     },
+    /// `avg(x)`: same integer/real promotion as `Sum`, plus a row count
+    /// so `finalize` can divide — SQLite's `avg()` is always REAL (or
+    /// NULL on zero non-null rows), never an exact integer.
+    Avg {
+        int_total: i128,
+        real_total: f64,
+        saw_real: bool,
+        count: i64,
+    },
+    /// `min(x)`/`max(x)`: the running extremum, compared with
+    /// [`compare`] under SQLite's type-ordering rules (NULL <
+    /// INTEGER/REAL < TEXT < BLOB). NULL args are skipped, matching
+    /// count(x)'s NULL handling.
+    Min(Option<Value>),
+    Max(Option<Value>),
 }
 
 impl AggState {
@@ -45,6 +64,14 @@ impl AggState {
                 saw_real: false,
                 saw_any: false,
             }),
+            "avg" => Ok(AggState::Avg {
+                int_total: 0,
+                real_total: 0.0,
+                saw_real: false,
+                count: 0,
+            }),
+            "min" => Ok(AggState::Min(None)),
+            "max" => Ok(AggState::Max(None)),
             other => Err(FunctionError::Unknown {
                 name: other.to_string(),
                 arity: 1,
@@ -90,12 +117,49 @@ pub fn step(
                 *saw_real = true;
                 *real_total += *r;
             }
-            // Text/blob inputs to sum() are non-numeric here (no
+            // Text/blob inputs to sum()/avg() are non-numeric here (no
             // numeric-text coercion) — out of scope for this ticket's
-            // minimal count/sum proof; #242 can extend this match arm
-            // if full sum() semantics are needed before then.
+            // minimal count/sum proof.
             Some(Value::Text(_) | Value::Blob(_)) => {}
         },
+        AggState::Avg {
+            int_total,
+            real_total,
+            saw_real,
+            count,
+        } => match args.first() {
+            None | Some(Value::Null) => {}
+            Some(Value::Integer(i)) => {
+                *count = count.saturating_add(1);
+                *int_total = int_total.saturating_add(i128::from(*i));
+            }
+            Some(Value::Real(r)) => {
+                *count = count.saturating_add(1);
+                *saw_real = true;
+                *real_total += *r;
+            }
+            Some(Value::Text(_) | Value::Blob(_)) => {}
+        },
+        AggState::Min(current) => {
+            if let Some(v) = args.first().filter(|v| !matches!(v, Value::Null)) {
+                if current
+                    .as_ref()
+                    .is_none_or(|c| compare(v, c, Collation::Binary) == Ordering::Less)
+                {
+                    *current = Some(v.clone());
+                }
+            }
+        }
+        AggState::Max(current) => {
+            if let Some(v) = args.first().filter(|v| !matches!(v, Value::Null)) {
+                if current
+                    .as_ref()
+                    .is_none_or(|c| compare(v, c, Collation::Binary) == Ordering::Greater)
+                {
+                    *current = Some(v.clone());
+                }
+            }
+        }
     }
     Ok(state)
 }
@@ -109,7 +173,7 @@ pub fn finalize(name: &str, state: Option<&AggState>) -> Result<Value, FunctionE
     match state {
         None => match name.to_ascii_lowercase().as_str() {
             "count" => Ok(Value::Integer(0)),
-            "sum" => Ok(Value::Null),
+            "sum" | "avg" | "min" | "max" => Ok(Value::Null),
             other => Err(FunctionError::Unknown {
                 name: other.to_string(),
                 arity: 1,
@@ -134,6 +198,25 @@ pub fn finalize(name: &str, state: Option<&AggState>) -> Result<Value, FunctionE
                     .map_err(|_| FunctionError::IntegerOverflow)
             }
         }
+        Some(AggState::Avg {
+            int_total,
+            real_total,
+            saw_real,
+            count,
+        }) => {
+            if *count == 0 {
+                return Ok(Value::Null);
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let total = if *saw_real {
+                *real_total + *int_total as f64
+            } else {
+                *int_total as f64
+            };
+            #[allow(clippy::cast_precision_loss)]
+            Ok(Value::Real(total / *count as f64))
+        }
+        Some(AggState::Min(v)) | Some(AggState::Max(v)) => Ok(v.clone().unwrap_or(Value::Null)),
     }
 }
 
@@ -193,6 +276,76 @@ mod tests {
         assert_eq!(finalize("sum", None).unwrap(), Value::Null);
         let state = step("sum", None, &[Value::Null]).unwrap();
         assert_eq!(finalize("sum", Some(&state)).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn avg_of_integers_divides_to_real() {
+        let mut state = None;
+        for v in [1i64, 2, 3] {
+            state = Some(step("avg", state, &[Value::Integer(v)]).unwrap());
+        }
+        assert_eq!(finalize("avg", state.as_ref()).unwrap(), Value::Real(2.0));
+    }
+
+    #[test]
+    fn avg_promotes_to_real_once_any_real_input_seen() {
+        let mut state = None;
+        state = Some(step("avg", state, &[Value::Integer(1)]).unwrap());
+        state = Some(step("avg", state, &[Value::Real(3.0)]).unwrap());
+        assert_eq!(finalize("avg", state.as_ref()).unwrap(), Value::Real(2.0));
+    }
+
+    #[test]
+    fn avg_skips_null_and_finalizes_null_on_zero_rows() {
+        assert_eq!(finalize("avg", None).unwrap(), Value::Null);
+        let state = step("avg", None, &[Value::Null]).unwrap();
+        assert_eq!(finalize("avg", Some(&state)).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn min_tracks_running_minimum_and_skips_null() {
+        let mut state = None;
+        for v in [
+            Value::Integer(5),
+            Value::Null,
+            Value::Integer(2),
+            Value::Integer(9),
+        ] {
+            state = Some(step("min", state, &[v]).unwrap());
+        }
+        assert_eq!(finalize("min", state.as_ref()).unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn max_tracks_running_maximum_and_skips_null() {
+        let mut state = None;
+        for v in [
+            Value::Integer(5),
+            Value::Null,
+            Value::Integer(2),
+            Value::Integer(9),
+        ] {
+            state = Some(step("max", state, &[v]).unwrap());
+        }
+        assert_eq!(finalize("max", state.as_ref()).unwrap(), Value::Integer(9));
+    }
+
+    #[test]
+    fn min_max_use_type_ordering_for_mixed_types() {
+        let mut state = None;
+        for v in [Value::Integer(1), Value::Text("a".into())] {
+            state = Some(step("max", state, &[v]).unwrap());
+        }
+        assert_eq!(
+            finalize("max", state.as_ref()).unwrap(),
+            Value::Text("a".into())
+        );
+    }
+
+    #[test]
+    fn min_max_with_zero_rows_finalizes_null() {
+        assert_eq!(finalize("min", None).unwrap(), Value::Null);
+        assert_eq!(finalize("max", None).unwrap(), Value::Null);
     }
 
     #[test]
