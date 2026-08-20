@@ -420,6 +420,30 @@ pub fn compile_select_joined(
             reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
         });
     }
+    // Stopgap for #250's codegen half (parser-only in this PR): the
+    // parser now accepts NATURAL joins, RIGHT/FULL JOIN, and USING (...)
+    // (#250), but this compiler still only implements INNER/LEFT/CROSS
+    // with an ON constraint (#237). Reject the new forms here with a
+    // clean `Unsupported` error instead of silently mis-compiling them
+    // (e.g. `is_left` below would otherwise treat RIGHT/FULL as INNER).
+    // Remove this block once RIGHT/FULL/NATURAL/USING codegen lands.
+    for join in &from.joins {
+        if join.natural {
+            return Err(CodegenError::Unsupported {
+                reason: "NATURAL JOIN codegen is not yet supported".to_string(),
+            });
+        }
+        if matches!(join.op, JoinOp::Right | JoinOp::Full) {
+            return Err(CodegenError::Unsupported {
+                reason: "RIGHT/FULL JOIN codegen is not yet supported".to_string(),
+            });
+        }
+        if matches!(join.constraint, Some(JoinConstraint::Using(_))) {
+            return Err(CodegenError::Unsupported {
+                reason: "USING (...) join codegen is not yet supported".to_string(),
+            });
+        }
+    }
 
     let mut em = Emitter::new();
     let mut reg = RegAlloc::new();
@@ -454,7 +478,12 @@ pub fn compile_select_joined(
     let constraints: Vec<Option<Expr>> = from
         .joins
         .iter()
-        .map(|j| j.constraint.as_ref().map(|JoinConstraint::On(e)| e.clone()))
+        .map(|j| match &j.constraint {
+            Some(JoinConstraint::On(e)) => Some(e.clone()),
+            // Guarded above: `USING (...)` joins are rejected before
+            // this point, so `constraints` never needs to represent one.
+            Some(JoinConstraint::Using(_)) | None => None,
+        })
         .collect();
 
     let full_scope = Scope {

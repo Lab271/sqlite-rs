@@ -499,7 +499,13 @@ fn query_unsupported_sql_fails_cleanly_and_says_so() {
     let output = Command::new(CLI)
         .arg("query")
         .arg(&db)
-        .arg("SELECT a FROM t, t2")
+        // A comma-join (`FROM a, b`) used to be a still-unsupported
+        // construct, but #250 gave it real grammar (CROSS JOIN sugar),
+        // so it now parses and instead fails on table lookup. A
+        // subquery in FROM is still parser-`unsupported(..)` regardless
+        // of what tables exist, so it's used here as the generic
+        // "unsupported construct fails cleanly" vehicle instead.
+        .arg("SELECT a FROM (SELECT a FROM t) AS sub")
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);

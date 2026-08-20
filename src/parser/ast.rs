@@ -114,32 +114,43 @@ pub struct FromClause {
     pub joins: Vec<Join>,
 }
 
-/// One `<join_op> <table> [ON <expr>]` step of a [`FromClause`].
+/// One `[NATURAL] <join_op> <table> [ON <expr> | USING (col, ...)]` step
+/// of a [`FromClause`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     pub op: JoinOp,
     pub table: TableRef,
-    /// `None` only for [`JoinOp::Cross`] (and a bare `JOIN`/`INNER JOIN`
-    /// with no `ON` — rejected by the parser, since this V4 slice
-    /// requires an explicit condition for INNER/LEFT).
+    /// `None` for [`JoinOp::Cross`] with no `ON`/`USING`, for
+    /// `natural: true` joins (the matching columns are resolved from
+    /// same-named columns in both tables — semantic resolution deferred
+    /// to codegen), and for a bare `JOIN`/`INNER JOIN` with no `ON` —
+    /// rejected by the parser, since this V4 slice requires an explicit
+    /// condition for non-natural INNER/LEFT/RIGHT/FULL.
     pub constraint: Option<JoinConstraint>,
+    /// `true` for `NATURAL [INNER|LEFT|RIGHT|FULL] JOIN` (#250).
+    /// `NATURAL CROSS JOIN` is rejected by the parser (not legal SQLite
+    /// grammar); comma-style joins (`FROM a, b`) are synthesized as
+    /// `natural: false` `JoinOp::Cross` joins, per #250's design.
+    pub natural: bool,
 }
 
-/// `INNER`/plain `JOIN`, `LEFT [OUTER] JOIN`, and `CROSS JOIN` — the V4
-/// slice (#237). `NATURAL`/`RIGHT`/`FULL` and comma-style joins are still
-/// parse-time `unsupported(..)` errors (see `grammar.rs::from_clause`).
+/// `INNER`/plain `JOIN`, `LEFT [OUTER] JOIN`, `CROSS JOIN` (#237), and
+/// `RIGHT [OUTER] JOIN`/`FULL [OUTER] JOIN` (#250).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinOp {
     Inner,
     Left,
     Cross,
+    Right,
+    Full,
 }
 
-/// The join's matching condition. `USING (...)` is out of scope for this
-/// slice — only `ON <expr>` is represented.
+/// The join's matching condition: `ON <expr>` (#237) or
+/// `USING (col, ...)` (#250, at least one column).
 #[derive(Debug, Clone, PartialEq)]
 pub enum JoinConstraint {
     On(Expr),
+    Using(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

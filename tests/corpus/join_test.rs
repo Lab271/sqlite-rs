@@ -220,16 +220,37 @@ fn star_expands_across_every_joined_table() {
     );
 }
 
-/// Still-unsupported constructs (USING, NATURAL, comma-join, RIGHT/
-/// FULL) must fail cleanly as "unsupported", not panic or silently
-/// mis-parse.
+/// #250 gave the parser real grammar for comma-style joins, so
+/// `FROM a, b` now parses AND compiles (it's synthesized as an
+/// unconstrained CROSS JOIN, which codegen already supports) — this is
+/// a full cartesian product, same shape as `cross_join_is_the_full_cartesian_product`.
+#[test]
+fn comma_join_is_cross_join_sugar() {
+    let db = join_fixture_db("comma");
+    let output = run_query(&db, "SELECT a.id, b.id FROM a, b");
+    assert_eq!(
+        output.lines().count(),
+        3 * 3,
+        "3 rows in `a` x 3 rows in `b` = 9 rows; got: {output}"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT a.id, b.id FROM a, b",
+        "comma_join_is_cross_join_sugar",
+    );
+}
+
+/// Still-unsupported *codegen* constructs (USING, NATURAL, RIGHT/FULL)
+/// now parse cleanly (#250) but must still fail cleanly at the codegen
+/// stage as "not yet supported" — via the interim guard in
+/// `src/codegen/select.rs::compile_select_joined` — not panic or
+/// silently mis-compile.
 #[test]
 fn still_unsupported_join_forms_fail_cleanly() {
     let db = join_fixture_db("unsupported");
     for sql in [
         "SELECT * FROM a JOIN b USING (id)",
         "SELECT * FROM a NATURAL JOIN b",
-        "SELECT * FROM a, b",
         "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id",
         "SELECT * FROM a FULL JOIN b ON a.id = b.a_id",
     ] {
