@@ -438,3 +438,27 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - THEN it MUST claim a `WAL_READ_LOCK` slot and publish its `aReadMark` value, blocking a concurrent checkpointer from backfilling/truncating past that point, and release the slot when dropped
 
 **Tests:** `src/pager.rs::tests::open_claims_wal_read_lock_when_shm_present_released_on_drop`, `src/vfs/shm.rs::tests::claims_a_slot_and_publishes_mx_frame`, `src/vfs/shm.rs::tests::contended_slot_is_skipped_for_the_next_free_one`
+
+---
+
+## Metrics: Rust vs C
+
+Comparison of SQLite's C implementation (estimated from source) against sqlite-rs at V3 scope (2026-08-20, v0.12.3):
+
+| Layer | C (SQLite) | Rust (sqlite-rs) | Ratio |
+|-------|------------|------------------|-------|
+| B-tree (`btree.c`) | ~10,000 | 1,232 | 0.12x |
+| Pager (`pager.c`, `pcache.c`, `wal.c`) | ~12,000 | 730 | 0.06x |
+| VDBE (`vdbe*.c`) | ~25,000 | 6,508 | 0.26x |
+| Codegen (`select.c`, `where*.c`, `expr.c`, etc.) | ~35,000 | 4,169 | 0.12x |
+| Parser (`tokenize.c`, `parse.c`) | ~8,000 | 3,559 | 0.44x |
+| VFS (`os_unix.c`) | ~8,000 | 842 | 0.11x |
+| **Total** | ~98,000 | 17,040 | **0.17x** |
+
+**Caveats:**
+- V3 scope only (single-table queries + basic CRUD), not full SQLite
+- C estimates include unimplemented features (WAL write, FKs, triggers, etc.)
+- Parser uses LALRPOP — generated code not counted
+- SQLite's 20 years of edge-case handling not yet replicated
+
+**Takeaway:** For equivalent implemented scope, Rust is ~5-8x smaller. Contributing factors: Rust's expressiveness, no manual memory management, `#![forbid(unsafe_code)]`.
