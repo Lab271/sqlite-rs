@@ -47,6 +47,8 @@ help: ## Show this help
 # === Test ===
 
 test: ## Run every test except the corpus oracle diffs (unit, public-API, proptest, doctests — see test-corpus)
+	@# Build lock_probe helper binary first — cargo test doesn't build [[bin]] targets automatically
+	cargo build --locked --bin lock_probe
 	cargo test --locked
 
 # Shortcuts for tight inner loops. Deliberately NOT dependencies of `test`:
