@@ -4,6 +4,32 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.12.3] - 2026-08-20
+
+`ORDER BY` of a rowid-alias column crashed ("Rowid: cursor slot 2 is a
+pseudo cursor, not a table cursor") — `emit_column_read` always emitted
+`Opcode::Rowid` for the rowid-alias column, valid only against a real
+table cursor, but `ORDER BY`'s second pass re-reads each row from a
+materialized `OpenPseudo` cursor. Fixed in both call paths that hit it
+(`compile_row_values`'s `Column` and `Expr` arms), by reading the
+already-resolved rowid value back via `Opcode::Column` instead when the
+cursor is the post-sort pseudo cursor. Found via a new full-lifecycle
+regression test (`tests/corpus/cli_write_test.rs`) exercising the CLI
+end to end: schema -> insert -> update -> delete -> select -> export.
+
+Also fixed a genuine compile break in `tests/sqllogictest/runner.rs`
+(non-exhaustive `CodegenError` match missing the `RowShapeMismatch`
+variant #195 added) that meant `make sqllogictest` never actually
+built — fixing it let `select1.test` run for the first time.
+
+Assurance tooling: `make mutants` (cargo-mutants scoped to
+`src/{record,btree,vdbe}/*.rs`, reporting to `target/mutants.out`) and
+`make verify` (`coverage-gate` + `deny` + `mvl-limit` + `mod-files`
+chained, recording the passing commit to `target/verify.json`) are now
+wired into `tools/assurance.py`'s Evidence/Verification sections —
+mutation score and a commits-since-last-verify staleness signal, same
+"read the cache, never run it yourself" discipline as line coverage.
+
 ## [0.12.2] - 2026-08-20
 
 V03 write-path parity mirror (#72): `tests/parity/v03.rs`'s stub

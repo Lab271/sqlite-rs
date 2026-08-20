@@ -216,7 +216,12 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
         Err(
             CodegenError::NoFromClause
             | CodegenError::UnknownColumn { .. }
-            | CodegenError::Unsupported { .. },
+            | CodegenError::Unsupported { .. }
+            // `compile_select` never actually returns this — it's an
+            // INSERT-only variant (#195) — but `CodegenError` is a
+            // shared enum, so this match must stay exhaustive as new
+            // variants are added for other statement kinds.
+            | CodegenError::RowShapeMismatch { .. },
         ) => return Outcome::Skip,
     };
 

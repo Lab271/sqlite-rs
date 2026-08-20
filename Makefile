@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version-pin mod-files verification fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -198,6 +198,25 @@ coverage-gate: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MI
 	  p = json.load(open('target/llvm-cov.json'))['data'][0]['totals']['lines']['percent']; \
 	  print(f'Line coverage: {p:.2f}% (threshold: $(COVERAGE_MIN)%)'); \
 	  sys.exit(0 if p >= $(COVERAGE_MIN) else 1)"
+
+verify: coverage-gate deny mvl-limit mod-files ## Full verification gate (coverage-gate + deny + mvl-limit + mod-files), cached to target/verify.json
+	@mkdir -p target
+	@echo "{\"commit\": \"$$(git rev-parse HEAD)\", \"timestamp\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > target/verify.json
+	@echo "make verify: all gates passed, recorded at $$(git rev-parse --short HEAD)"
+
+# Scoped, not full-crate: a whole-crate mutation run is a documented V1
+# exit-gate deliverable (epic #5, .openspec/plan.md) still out of scope —
+# see the v0.12.0 changelog entry. MUTANTS_FILE defaults to the core
+# logic modules a prior scoped run already covered (record decode,
+# b-tree write path, VDBE write-opcode dispatch); override for a
+# different slice, e.g. `make mutants MUTANTS_FILE='src/codegen/*.rs'`.
+MUTANTS_FILE ?= src/{record,btree,vdbe}/*.rs
+mutants: ## Run cargo-mutants over $(MUTANTS_FILE), report to target/mutants.out (scoped — see comment above)
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+	  echo "error: cargo-mutants not found."; \
+	  echo "install: cargo install cargo-mutants"; \
+	  exit 1; }
+	cargo mutants --output target -f "$(MUTANTS_FILE)"
 
 # === Fuzz ===
 
