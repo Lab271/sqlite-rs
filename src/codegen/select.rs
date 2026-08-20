@@ -348,6 +348,7 @@ fn compile_row_values(
     schema: &TableSchema,
     cols: &[ResultColumnPlan],
     cursor: i32,
+    pseudo: bool,
 ) -> Result<(i32, usize), CodegenError> {
     // Each column is compiled into whatever register the bump
     // allocator hands out next (not pre-reserved), since a compound
@@ -369,17 +370,78 @@ fn compile_row_values(
                         name: (*name).to_string(),
                     })?;
                 let r = reg.alloc();
-                // Must go through `emit_column_read`, not a bare
-                // `Column`: this is the `*` / `tbl.*` expansion path, and
-                // an `INTEGER PRIMARY KEY` column is a NULL placeholder
-                // in the record. Emitting `Column` here is why
-                // `SELECT * FROM t` answered NULL for the rowid alias
-                // while `SELECT id FROM t` (which routes through
-                // `compile_value`) answered correctly.
-                emit_column_read(em, schema, cursor, idx, r)?;
+                if pseudo && rowid_alias_column(schema) == Some(idx) {
+                    // `cursor` is a post-`ORDER BY` `OpenPseudo` re-read
+                    // of an already-materialized record (see
+                    // `compile_sorted_scan`'s pass 1), not a live table
+                    // cursor — there is no rowid to fetch via
+                    // `Opcode::Rowid` (it isn't a table cursor at all).
+                    // Pass 1 built this record via `emit_column_read`
+                    // against the *real* cursor, which already resolved
+                    // the rowid alias into an ordinary field at this
+                    // same position — so a plain `Column` read recovers
+                    // it here.
+                    em.emit(Instruction::new(
+                        Opcode::Column,
+                        cursor,
+                        i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                            reason: format!("column index {idx} does not fit in a P2 operand"),
+                        })?,
+                        r,
+                    ));
+                } else {
+                    // Must go through `emit_column_read`, not a bare
+                    // `Column`: this is the `*` / `tbl.*` expansion path, and
+                    // an `INTEGER PRIMARY KEY` column is a NULL placeholder
+                    // in the record. Emitting `Column` here is why
+                    // `SELECT * FROM t` answered NULL for the rowid alias
+                    // while `SELECT id FROM t` (which routes through
+                    // `compile_value`) answered correctly.
+                    emit_column_read(em, schema, cursor, idx, r)?;
+                }
                 r
             }
-            ResultColumnPlan::Expr(expr) => compile_value(em, reg, schema, cursor, expr)?,
+            ResultColumnPlan::Expr(expr) => {
+                // A bare `name`/`tbl.name` reference — e.g. plain
+                // `SELECT id FROM t ORDER BY id` — compiles as an `Expr`
+                // here, not the `Column` variant above (that one is
+                // reserved for `*`/`tbl.*` expansion), so it needs the
+                // same pseudo-cursor rowid-alias special case: `Rowid`
+                // only works against a real table cursor, and `cursor`
+                // here may be the post-`ORDER BY` pseudo cursor instead.
+                // A compound expression that merely *references* the
+                // rowid alias (`id + 1`) isn't covered by this — falls
+                // through to `compile_value`, matching this crate's
+                // existing register-reuse limitations for compound
+                // result-column expressions.
+                if let ExprKind::Column {
+                    name,
+                    table: None,
+                    catalog: None,
+                } = &expr.kind
+                {
+                    let pseudo_rowid_idx = pseudo
+                        .then(|| column_index(schema, name))
+                        .flatten()
+                        .filter(|idx| rowid_alias_column(schema) == Some(*idx));
+                    if let Some(idx) = pseudo_rowid_idx {
+                        let r = reg.alloc();
+                        em.emit(Instruction::new(
+                            Opcode::Column,
+                            cursor,
+                            i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                                reason: format!("column index {idx} does not fit in a P2 operand"),
+                            })?,
+                            r,
+                        ));
+                        r
+                    } else {
+                        compile_value(em, reg, schema, cursor, expr)?
+                    }
+                } else {
+                    compile_value(em, reg, schema, cursor, expr)?
+                }
+            }
         };
         regs.push(r);
     }
@@ -415,13 +477,14 @@ fn emit_row_via_sink<F>(
     select: &Select,
     schema: &TableSchema,
     cursor: i32,
+    pseudo: bool,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     let cols = result_columns(select, schema);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor)?;
+    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo)?;
     sink(em, reg, first, i32::try_from(count).unwrap_or(0))
 }
 
@@ -432,6 +495,7 @@ fn emit_distinct_guard(
     select: &Select,
     schema: &TableSchema,
     cursor: i32,
+    pseudo: bool,
     distinct_cursor: i32,
     skip_label: Label,
 ) -> Result<(), CodegenError> {
@@ -439,7 +503,7 @@ fn emit_distinct_guard(
         return Ok(());
     }
     let cols = result_columns(select, schema);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor)?;
+    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo)?;
     let count = i32::try_from(count).unwrap_or(0);
     let addr = em.emit(Instruction::with_p4(
         Opcode::Found,
@@ -615,7 +679,7 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
@@ -673,13 +737,14 @@ where
         select,
         schema,
         cursors.table,
+        false,
         cursors.distinct,
         row_skip,
     )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
@@ -762,6 +827,7 @@ where
             .map(|c| ResultColumnPlan::Column(c.clone()))
             .collect::<Vec<_>>(),
         cursors.table,
+        false,
     )?;
 
     // Compute every genuine-expression sort key into its own register,
@@ -847,13 +913,14 @@ where
         select,
         schema,
         cursors.pseudo,
+        true,
         cursors.distinct,
         row_skip,
     )?;
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, sink)?;
+    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }

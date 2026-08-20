@@ -461,3 +461,105 @@ fn exec_malformed_or_unrecognized_statements_fail_cleanly() {
         );
     }
 }
+
+/// Full lifecycle in one test, driven entirely through the CLI: create
+/// schema, insert, update, delete, select, export — mirroring what a
+/// real user session against `sqlite-rs` looks like end to end, rather
+/// than each verb tested in isolation.
+#[test]
+fn full_lifecycle_schema_to_export_round_trips() {
+    let db = seed_db("lifecycle");
+
+    // 1. Create schema — a second table, distinct from seed_db's own
+    // bootstrap table, so this test's assertions aren't coupled to it.
+    assert!(
+        run_exec(
+            &db,
+            "CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, age INTEGER)"
+        )
+        .status
+        .success(),
+        "CREATE TABLE failed"
+    );
+
+    // 2. Create records.
+    assert!(
+        run_exec(
+            &db,
+            "INSERT INTO people(id, name, age) VALUES \
+             (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Carol', 40)"
+        )
+        .status
+        .success(),
+        "INSERT failed"
+    );
+    assert_eq!(
+        run_query(&db, "SELECT * FROM people"),
+        "1|Alice|30\n2|Bob|25\n3|Carol|40\n"
+    );
+
+    // 3. Update records.
+    assert!(
+        run_exec(&db, "UPDATE people SET age = 31 WHERE name = 'Alice'")
+            .status
+            .success(),
+        "UPDATE failed"
+    );
+    assert_eq!(
+        run_query(&db, "SELECT age FROM people WHERE name = 'Alice'"),
+        "31\n"
+    );
+
+    // 4. Delete records.
+    assert!(
+        run_exec(&db, "DELETE FROM people WHERE name = 'Bob'")
+            .status
+            .success(),
+        "DELETE failed"
+    );
+    assert_eq!(
+        run_query(&db, "SELECT name FROM people ORDER BY id"),
+        "Alice\nCarol\n"
+    );
+
+    // 5. Select records — final state, ordered for a stable assertion.
+    assert_eq!(
+        run_query(&db, "SELECT id, name, age FROM people ORDER BY id"),
+        "1|Alice|31\n3|Carol|40\n"
+    );
+
+    // 6. Export records — `export`'s CSV output, one file per table,
+    // written as a sibling of the database file.
+    let output = Command::new(CLI)
+        .arg("export")
+        .arg(&db)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} export {}: {e}", db.display()));
+    assert!(
+        output.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let csv_path = db.with_file_name(format!(
+        "people_{}.csv",
+        db.file_stem().unwrap().to_string_lossy()
+    ));
+    let csv = std::fs::read_to_string(&csv_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", csv_path.display()));
+    assert_eq!(
+        csv, "id,name,age\r\n1,Alice,31\r\n3,Carol,40\r\n",
+        "exported CSV mismatch"
+    );
+
+    // Cross-check the final state against stock sqlite3, when available.
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+        assert_eq!(
+            oracle_select(&oracle, &db, "SELECT id, name, age FROM people ORDER BY id"),
+            "1|Alice|31\n3|Carol|40\n"
+        );
+    } else {
+        skip_no_oracle("full_lifecycle_schema_to_export_round_trips (oracle cross-check)");
+    }
+}
