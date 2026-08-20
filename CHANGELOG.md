@@ -17,16 +17,20 @@ column-count mismatch between arms is rejected at compile time. Plain
 and `ORDER BY`/`LIMIT` on the compound statement remain out of scope
 (deferred to V4 phase 2 or later).
 
-VDBE `AggStep`/`AggFinal` opcodes (#241, V4 phase 1 epic #235): a
-`count`/`sum` accumulator registry dispatched by a `"name(arity)"` P4
-descriptor, mirroring the existing `Function` opcode's registry-dispatch
-shape, plus a per-slot aggregate-context table on `Vm` addressed the
-same way `cursors` is. `avg`/`min`/`max` (#242) extend the same
-registry. Not wired into GROUP BY codegen — #239 (merged first) took a
-different, opcode-free approach for `count`/`sum`/`avg`/`min`/`max`
-(reusing existing arithmetic/compare opcodes), so `AggStep`/`AggFinal`
-currently have no caller in `src/codegen/`; they stand as tested,
-spec-backed (spec 009 Requirement 12) VM primitives for future use.
+VDBE `AggStep`/`AggFinal` opcodes (#241/#242, V4 phase 1 epic #235): a
+`count`/`sum`/`avg`/`min`/`max` accumulator registry dispatched by a
+`"name(arity)"` P4 descriptor, mirroring the existing `Function`
+opcode's registry-dispatch shape, plus a per-slot aggregate-context
+table on `Vm` addressed the same way `cursors` is. `avg` mirrors
+`sum`'s integer/real promotion and always finalizes REAL (or NULL on
+zero non-null rows); `min`/`max` compare via `vdbe::compare::compare`
+under SQLite's type-ordering rules (NULL < INTEGER/REAL < TEXT <
+BLOB), skipping NULL args like `count(x)`. Not wired into GROUP BY
+codegen — #239 (merged first) took a different, opcode-free approach
+for `count`/`sum`/`avg`/`min`/`max` (reusing existing arithmetic/compare
+opcodes), so `AggStep`/`AggFinal` currently have no caller in
+`src/codegen/`; they stand as tested, spec-backed (spec 009 Requirement
+12) VM primitives for future use.
 
 `GROUP BY` / `HAVING` (#239, V4 phase 1 epic #235): parser accepts
 `GROUP BY` (single/multi-column, arbitrary expressions) and `HAVING`.
