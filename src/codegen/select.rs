@@ -16,16 +16,21 @@
 use thiserror::Error;
 
 use crate::codegen::expr::{
-    collation_of, column_index, compile_cond, compile_value, emit_column_read, is_aggregate_call,
+    collation_of, column_index, compile_cond, compile_value, emit_column_read, expr_affinity,
+    is_aggregate_call,
 };
-use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target};
+use crate::codegen::{
+    p4_coll_seq, CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target,
+};
 use crate::parser::ast::{
     BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
     JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef, TableRefKind,
 };
 use crate::parser::tokenizer::Span;
 use crate::schema::{rowid_alias_column, IndexSchema, TableSchema};
-use crate::vdbe::{Collation, Instruction, Opcode, Program, SortKeyColumn, P4};
+use crate::vdbe::{
+    comparison_affinity, Collation, Instruction, Opcode, Program, SortKeyColumn, P4,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CodegenError {
