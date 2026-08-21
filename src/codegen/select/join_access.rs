@@ -549,11 +549,11 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    let (first, count) = emit_joined_pseudo_projection(em, reg, select, full_scope, pseudo_cursor)?;
-    sink(em, reg, first, i32::try_from(count).unwrap_or(0))?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
+    let (first, count) = emit_joined_pseudo_projection(em, reg, select, full_scope, pseudo_cursor)?;
+    sink(em, reg, first, i32::try_from(count).unwrap_or(0))?;
 
     em.place(row_skip);
     let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, sort_cursor, 0, 0));

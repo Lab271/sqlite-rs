@@ -511,6 +511,34 @@ fn order_by_alias_to_computed_expression_matches_oracle() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// `LIMIT 0` must return zero rows on every scan shape this compiler
+/// has: the plain direct scan, the `ORDER BY` sorted scan, and the
+/// `WHERE rowid = <literal>` `SeekRowid` fast path (#137). The old
+/// per-row `DecrJumpZero` guard ran *after* emitting a row, so a `LIMIT
+/// 0` counter (starting at 0) never got a chance to stop anything
+/// before the first row already leaked through — caught while
+/// benchmarking #129, unrelated to that ticket's own sorter change.
+#[test]
+fn limit_zero_returns_no_rows_on_every_scan_shape() {
+    let (path, schema) = scratch_fixture_labeled("limit_zero");
+    assert_eq!(
+        our_rows(&path, &schema, "SELECT a FROM t LIMIT 0;").expect("compiles"),
+        Vec::<Vec<Value>>::new(),
+        "direct scan"
+    );
+    assert_eq!(
+        our_rows(&path, &schema, "SELECT a FROM t ORDER BY a LIMIT 0;").expect("compiles"),
+        Vec::<Vec<Value>>::new(),
+        "sorted scan"
+    );
+    assert_eq!(
+        our_rows(&path, &schema, "SELECT a FROM t WHERE rowid = 1 LIMIT 0;").expect("compiles"),
+        Vec::<Vec<Value>>::new(),
+        "SeekRowid fast path"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 /// #155: a computed ORDER BY expression composes with LIMIT/OFFSET and
 /// a second, plain-column sort key.
 #[test]

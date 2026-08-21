@@ -951,10 +951,10 @@ where
     if let Some(limit) = limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_join_row(em, reg, select, scope, sink)?;
     if let Some(limit) = limit {
         emit_limit_guard(em, limit, end_label);
     }
+    emit_join_row(em, reg, select, scope, sink)?;
     em.place(row_skip);
     Ok(())
 }

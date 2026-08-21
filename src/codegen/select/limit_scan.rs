@@ -39,12 +39,27 @@ pub(super) fn emit_offset_guard(em: &mut Emitter, limit: &LimitState, row_skip: 
     }
 }
 
-/// Emits the LIMIT stop-guard (jumping to `end_label` once `limit_reg`
-/// reaches zero) — call once per row actually emitted.
+/// Emits the LIMIT stop-guard: call once per row *before* emitting it
+/// (mirroring `emit_offset_guard`'s check-before-act shape, not
+/// `emit_row_via_sink`'s old post-emit position). `IfNotZero` decrements
+/// `limit_reg` only while it's positive and jumps whenever it's
+/// nonzero — a negative `LIMIT` (SQLite's "no limit" convention) never
+/// reaches zero and always falls into that jump, staying unbounded —
+/// then a `Goto` reached only when `limit_reg` has hit exactly zero
+/// stops the scan before this row is ever emitted.
+///
+/// This ordering matters for `LIMIT 0`: the old post-emit
+/// `DecrJumpZero` never got a chance to run before the *first* row was
+/// already emitted, so `LIMIT 0` emitted every row instead of none
+/// (#129's benchmarking incidentally caught this pre-existing bug).
 pub(super) fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: Label) {
     if let Some(limit_reg) = limit.limit_reg {
-        let addr = em.emit(Instruction::new(Opcode::DecrJumpZero, limit_reg, 0, 0));
-        em.patch_p2(addr, end_label);
+        let has_budget_addr = em.emit(Instruction::new(Opcode::IfNotZero, limit_reg, 0, 0));
+        let stop_addr = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(stop_addr, end_label);
+        let continue_label = em.new_label();
+        em.patch_p2(has_budget_addr, continue_label);
+        em.place(continue_label);
     }
 }
 
@@ -160,10 +175,10 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
     em.place(row_skip);
     Ok(true)
 }
@@ -228,10 +243,10 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
 
     em.place(row_skip);
     let next_addr = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
@@ -407,10 +422,10 @@ where
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
     }
-    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, catalog, sink)?;
     if let Some(limit) = &limit {
         emit_limit_guard(em, limit, end_label);
     }
+    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, catalog, sink)?;
 
     em.place(row_skip);
     let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
