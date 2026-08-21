@@ -14,9 +14,9 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_create_index, compile_create_table, compile_delete, compile_drop_index,
+    compile_create_index, compile_create_table, compile_delete_with_catalog, compile_drop_index,
     compile_drop_table, compile_insert, compile_select_compound, compile_select_joined,
-    compile_select_with_catalog, compile_update, explain_query_plan, CodegenError,
+    compile_select_with_catalog, compile_update_with_catalog, explain_query_plan, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
@@ -491,14 +491,14 @@ fn compile_statement(
         "UPDATE" => match parse_update(sql) {
             ParseOutcome::Accepted(update) => {
                 let schema = find_schema(&update.table)?;
-                compile_update(&update, schema).map_err(|e| fatal(path, &e))
+                compile_update_with_catalog(&update, schema, schemas).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },
         "DELETE" => match parse_delete(sql) {
             ParseOutcome::Accepted(delete) => {
                 let schema = find_schema(&delete.table)?;
-                compile_delete(&delete, schema).map_err(|e| fatal(path, &e))
+                compile_delete_with_catalog(&delete, schema, schemas).map_err(|e| fatal(path, &e))
             }
             other => Err(fatal(path, &format!("{other:?}"))),
         },

@@ -43,8 +43,22 @@ const CHECK_CURSOR: i32 = 1;
 const FIRST_INDEX_CURSOR: i32 = 2;
 
 /// Compiles `update` against `schema` (the resolved target table) into
-/// a `Program`.
+/// a `Program`. `catalog = [schema]` — no cross-table subquery support
+/// in `SET`/`WHERE` expressions; use [`compile_update_with_catalog`] for
+/// that (#251).
 pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, CodegenError> {
+    compile_update_with_catalog(update, schema, std::slice::from_ref(schema))
+}
+
+/// [`compile_update`], plus `catalog` — the full table catalog, used to
+/// resolve a scalar/`IN`/`EXISTS` subquery expression in a `SET` value
+/// or `WHERE` clause when it names a table other than `schema` itself
+/// (#251).
+pub fn compile_update_with_catalog(
+    update: &Update,
+    schema: &TableSchema,
+    catalog: &[TableSchema],
+) -> Result<Program, CodegenError> {
     if schema.without_rowid {
         return Err(CodegenError::Unsupported {
             reason: "WITHOUT ROWID tables are not supported by UPDATE codegen yet".to_string(),
@@ -116,7 +130,7 @@ pub fn compile_update(update: &Update, schema: &TableSchema) -> Result<Program, 
     let loop_start = em.new_label();
     em.place(loop_start);
 
-    let scope = crate::codegen::Scope::single(schema, TABLE_CURSOR);
+    let scope = crate::codegen::Scope::single(schema, TABLE_CURSOR).with_catalog(catalog.to_vec());
     let row_skip = em.new_label();
     if let Some(where_expr) = &update.where_clause {
         compile_cond(

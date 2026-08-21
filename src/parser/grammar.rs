@@ -1315,6 +1315,9 @@ impl Parser {
     }
 
     fn equality_expr(&mut self) -> PResult<Expr> {
+        if let Some(multi_in) = self.try_tuple_in_subquery()? {
+            return Ok(multi_in);
+        }
         let mut lhs = self.binary_expr(1)?;
         loop {
             lhs = match self.peek().kind.clone() {
@@ -1470,6 +1473,125 @@ impl Parser {
             },
             span,
         })
+    }
+
+    /// Cheap, non-allocating lookahead: does the parenthesized group
+    /// starting at `self.pos` (a `(`) contain a top-level (depth-0
+    /// relative to this group) comma, and is its matching `)`
+    /// immediately followed by `IN`/`NOT IN`? Gates
+    /// [`Self::try_tuple_in_subquery`]'s much more expensive speculative
+    /// parse: without this, every `(` — including each level of a
+    /// deeply nested plain grouping expression — would recursively
+    /// parse its entire contents twice (once speculatively, once for
+    /// real), turning `MAX_EXPR_DEPTH`'s already-bounded-but-nested
+    /// pathological-input test (#118, 10,000 nested parens) quadratic.
+    /// A token-index scan costs nothing next to that.
+    fn looks_like_tuple_in(&self) -> bool {
+        let mut idx = self.pos.saturating_add(1);
+        let mut depth: u32 = 0;
+        let mut saw_top_comma = false;
+        loop {
+            let kind = match self.tokens.get(idx) {
+                Some(t) => &t.kind,
+                None => return false,
+            };
+            match kind {
+                TokenKind::Eof => return false,
+                TokenKind::LParen => depth = depth.saturating_add(1),
+                TokenKind::RParen => {
+                    if depth == 0 {
+                        let after_in = matches!(
+                            self.tokens.get(idx.saturating_add(1)).map(|t| &t.kind),
+                            Some(TokenKind::Keyword(Keyword::IN))
+                        );
+                        let after_not_in = matches!(
+                            self.tokens.get(idx.saturating_add(1)).map(|t| &t.kind),
+                            Some(TokenKind::Keyword(Keyword::NOT))
+                        ) && matches!(
+                            self.tokens.get(idx.saturating_add(2)).map(|t| &t.kind),
+                            Some(TokenKind::Keyword(Keyword::IN))
+                        );
+                        return saw_top_comma && (after_in || after_not_in);
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                TokenKind::Comma if depth == 0 => saw_top_comma = true,
+                _ => {}
+            }
+            idx = idx.saturating_add(1);
+        }
+    }
+
+    /// `(a, b, ...) IN (SELECT ...)` / `... NOT IN (SELECT ...)` (#251) —
+    /// the multi-column form. A bare parenthesized expr-list isn't valid
+    /// SQLite expression syntax anywhere else, so this speculatively
+    /// parses `"(" expr-list ")"` and only commits (returning `Some`) if
+    /// the list has arity >= 2 *and* is immediately followed by `IN`/
+    /// `NOT IN (SELECT ...)`; any other shape rewinds `self.pos` and
+    /// returns `None`, leaving the normal single-expr/grouping-paren path
+    /// (`primary_expr`'s `LParen` arm) to parse it as before.
+    /// [`Self::looks_like_tuple_in`] gates entry so this expensive path
+    /// only ever runs when a top-level comma + trailing `IN` are
+    /// actually present.
+    fn try_tuple_in_subquery(&mut self) -> PResult<Option<Expr>> {
+        if !matches!(self.peek().kind, TokenKind::LParen) || !self.looks_like_tuple_in() {
+            return Ok(None);
+        }
+        let start_pos = self.pos;
+        let start_span = self.peek().span;
+        self.advance();
+        let list = match self.expr_list() {
+            Ok(list) => list,
+            Err(_) => {
+                self.pos = start_pos;
+                return Ok(None);
+            }
+        };
+        if self.expect_punct(TokenKind::RParen, "')'").is_err() {
+            self.pos = start_pos;
+            return Ok(None);
+        }
+        let negated = if self.at_kw(Keyword::IN) {
+            self.advance();
+            false
+        } else if self.at_kw(Keyword::NOT)
+            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::IN))
+        {
+            self.advance();
+            self.advance();
+            true
+        } else {
+            self.pos = start_pos;
+            return Ok(None);
+        };
+        if list.len() < 2 {
+            self.pos = start_pos;
+            return Ok(None);
+        }
+        self.expect_punct(TokenKind::LParen, "'(' after IN")?;
+        if !self.at_kw(Keyword::SELECT) {
+            return self
+                .unsupported("multi-column IN requires a SELECT subquery on the right-hand side");
+        }
+        let subquery = self.parse_select_stmt()?;
+        if matches!(
+            self.peek().kind,
+            TokenKind::Keyword(Keyword::UNION)
+                | TokenKind::Keyword(Keyword::INTERSECT)
+                | TokenKind::Keyword(Keyword::EXCEPT)
+        ) {
+            return self.unsupported("compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported");
+        }
+        let end = self.expect_punct(TokenKind::RParen, "')' to close IN subquery")?;
+        let span = join_span(start_span, end);
+        Ok(Some(Expr {
+            kind: ExprKind::InSubqueryMulti {
+                exprs: list,
+                subquery: Box::new(subquery),
+                negated,
+            },
+            span,
+        }))
     }
 
     fn in_tail(&mut self, lhs: Expr, negated: bool) -> PResult<Expr> {

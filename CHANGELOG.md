@@ -6,6 +6,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+`UPDATE`/`DELETE` subquery catalog threading + multi-column `IN` (#251,
+V4 phase 1 epic #235): `compile_update`/`compile_delete` gained
+`_with_catalog` variants (mirroring `compile_select_with_catalog`'s
+shape) so a subquery in a `SET` value or `WHERE` clause that references
+a table other than the statement's own target now resolves instead of
+failing at codegen time with an empty catalog. Also lands multi-column
+`IN` (`(a, b) IN (SELECT x, y FROM t)`): a new `ExprKind::InSubqueryMulti`,
+parsed via a token-scan-gated speculative lookahead (so the
+tuple-vs-grouping-paren ambiguity doesn't regress parser performance on
+deeply nested plain expressions), and codegen generalizing the existing
+single-column `IN`'s ephemeral-index machinery to an N-column key.
+`ANY`/`ALL`/`SOME` quantified comparisons, originally also scoped into
+#251, were dropped entirely — verified against the pinned oracle that
+SQLite has never implemented that syntax (Postgres/MySQL/standard-SQL
+only); subqueries in `FROM` split off to a follow-up (#257).
+
 ## [0.13.0] - 2026-08-21
 
 JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what
