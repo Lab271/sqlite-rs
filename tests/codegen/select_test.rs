@@ -64,6 +64,40 @@ fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
     (path, schema)
 }
 
+/// Same `t(a, b, name)` shape as [`scratch_fixture_labeled`], but with
+/// zero rows — for #287's empty-table aggregate edge case
+/// (`count(*)` = 0, other aggregates NULL).
+fn empty_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_test_{}_{}.db",
+        std::process::id(),
+        label
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg("CREATE TABLE t(a INTEGER, b INTEGER, name TEXT);")
+        .status()
+        .expect("creating empty scratch fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
+        column_types: vec![
+            "INTEGER".to_string(),
+            "INTEGER".to_string(),
+            "TEXT".to_string(),
+        ],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    (path, schema)
+}
+
 fn our_rows(path: &Path, schema: &TableSchema, sql: &str) -> Option<Vec<Vec<Value>>> {
     let select = match parse_select(sql) {
         ParseOutcome::Accepted(s) => *s,
@@ -1012,19 +1046,89 @@ fn group_by_having_filters_out_every_group() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// #268: this codebase has no "implicit whole-table group" path —
-/// `compile_value`'s `is_aggregate_call` guard (`src/codegen/expr.rs`)
-/// rejects any aggregate call outside a `GROUP BY`-driven scan
-/// (`src/codegen/select/entry.rs` only routes into
-/// `compile_grouped_scan` when `group_by` is non-empty), so even
-/// `count(*)` with no `GROUP BY` at all is `Unsupported` today —
-/// against a populated table and (separately) an empty one. Documents
-/// the current rejection rather than a real answer; tracked as a
-/// follow-on feature gap, not fixed here.
+/// #287: `SELECT count(*) FROM t;` (and friends) with no `GROUP BY` at
+/// all now compiles against the implicit whole-table group —
+/// `src/codegen/select/entry.rs` routes into `compile_grouped_scan`
+/// (`src/codegen/select/aggregate.rs`) with an empty `GROUP BY` key
+/// whenever the SELECT list/HAVING has an aggregate call, even though
+/// `select.group_by` is empty. Checks both a populated table and
+/// (separately) an empty one, where `count(*)` is 0 and the other
+/// aggregates are NULL rather than erroring. Previously (#268) this
+/// was `aggregate_without_group_by_is_still_unsupported`, asserting
+/// the clean rejection that predated this feature.
 #[test]
-fn aggregate_without_group_by_is_still_unsupported() {
+fn aggregate_without_group_by_implicit_whole_table_group() {
+    // #287: no GROUP BY at all — the whole table is one implicit
+    // group, on both a populated table (a: 1, 2, 3) and an empty one.
     let (path, schema) = scratch_fixture_labeled("aggregate_no_group_by");
-    assert_eq!(our_rows(&path, &schema, "SELECT count(*) FROM t;"), None);
+    let rows = our_rows(&path, &schema, "SELECT count(*) FROM t;")
+        .expect("count(*) with no GROUP BY should compile and execute");
+    assert_eq!(rows, vec![vec![Value::Integer(3)]]);
+
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT count(*), sum(a), avg(a), min(a), max(a) FROM t;",
+    )
+    .expect("mixed aggregates with no GROUP BY should compile and execute");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Integer(3),
+            Value::Integer(6),
+            Value::Real(2.0),
+            Value::Integer(1),
+            Value::Integer(3),
+        ]]
+    );
+    let _ = std::fs::remove_file(&path);
+
+    let (path, schema) = empty_fixture_labeled("aggregate_no_group_by_empty");
+    let rows = our_rows(&path, &schema, "SELECT count(*) FROM t;")
+        .expect("count(*) over an empty table should compile and execute");
+    assert_eq!(rows, vec![vec![Value::Integer(0)]]);
+
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT count(*), sum(a), avg(a), min(a), max(a) FROM t;",
+    )
+    .expect("mixed aggregates over an empty table should compile and execute");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Integer(0),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn having_without_group_by_filters_the_implicit_group() {
+    // #287: HAVING with no GROUP BY filters the single implicit
+    // whole-table group's aggregate result.
+    let (path, schema) = scratch_fixture_labeled("having_no_group_by_pass");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT count(*) FROM t HAVING count(*) > 1;",
+    )
+    .expect("HAVING without GROUP BY should compile and execute");
+    assert_eq!(rows, vec![vec![Value::Integer(3)]]);
+    let _ = std::fs::remove_file(&path);
+
+    let (path, schema) = scratch_fixture_labeled("having_no_group_by_fail");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT count(*) FROM t HAVING count(*) > 10;",
+    )
+    .expect("HAVING without GROUP BY should compile and execute");
+    assert_eq!(rows, Vec::<Vec<Value>>::new());
     let _ = std::fs::remove_file(&path);
 }
 

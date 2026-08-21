@@ -599,11 +599,13 @@ fn test_unsupported_compound_select() {
 }
 
 #[test]
-fn test_unsupported_having_without_group_by() {
-    // Parses (`HAVING` alone isn't a syntax error), but this V4 slice
-    // only accepts `HAVING` paired with `GROUP BY` — see #239.
-    let msg = unsupported("SELECT count(*) FROM t HAVING count(*) > 1");
-    assert!(msg.contains("HAVING"), "message: {msg}");
+fn test_having_without_group_by_is_accepted() {
+    // #287: `HAVING` with no `GROUP BY` now filters the implicit
+    // whole-table group's aggregate result — previously (#239) this
+    // V4 slice only accepted `HAVING` paired with `GROUP BY`.
+    let select = accept("SELECT count(*) FROM t HAVING count(*) > 1");
+    assert!(select.group_by.is_empty());
+    assert!(select.having.is_some());
 }
 
 #[test]

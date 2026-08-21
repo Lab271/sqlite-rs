@@ -63,9 +63,12 @@ const CASES: &[(&str, Outcome)] = &[
     ("SELECT * FROM t WHERE a IN u", Outcome::Unsupported),
     ("SELECT * FROM (SELECT 1 AS a) AS x", Outcome::Accept),
     ("VALUES(2)", Outcome::Unsupported),
+    // #287: HAVING without GROUP BY now filters the implicit
+    // whole-table group's aggregate result — previously (#239)
+    // Unsupported.
     (
         "SELECT count(*) FROM t HAVING count(*) >= 4",
-        Outcome::Unsupported,
+        Outcome::Accept,
     ),
     ("SELECT * FROM t NOT INDEXED", Outcome::Unsupported),
     ("SELECT * FROM main.t", Outcome::Unsupported),

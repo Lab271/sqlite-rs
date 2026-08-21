@@ -860,8 +860,11 @@ impl Parser {
             if self.eat_kw(Keyword::HAVING) {
                 having = Some(self.expr()?);
             }
-        } else if self.at_kw(Keyword::HAVING) {
-            return self.unsupported("HAVING without GROUP BY not yet supported");
+        } else if self.eat_kw(Keyword::HAVING) {
+            // #287: HAVING with no GROUP BY filters the single
+            // implicit whole-table group's aggregate result — accepted
+            // at the grammar level now that codegen supports it.
+            having = Some(self.expr()?);
         }
 
         let mut compound = Vec::new();
