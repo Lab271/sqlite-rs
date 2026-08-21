@@ -98,7 +98,7 @@ jobs:
       # three CSV bugs reached main unnoticed (#55). Build the pin instead.
       - name: Cache pinned sqlite3 oracle
         id: cache-sqlite
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: ~/.local/sqlite-oracle
           key: sqlite-oracle-${{ env.SQLITE_ORACLE_VERSION }}-${{ runner.os }}
@@ -137,7 +137,7 @@ jobs:
       # reached main (#90 lifetimes/dyn, v0.6.6's debug_assert).
       - name: Cache cargo-mvl-limit
         id: cache-mvl
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: ~/.cargo/bin/cargo-mvl-limit
           key: cargo-mvl-limit-${{ runner.os }}-${{ env.MVL_RUST_REV }}
