@@ -8,7 +8,11 @@
 //! with the same `Rewind`/`Last`/`Next`/`Column`/`Rowid`/`Insert` opcodes
 //! a real table cursor uses, and a single-row pseudo-cursor (`OpenPseudo`)
 //! that lets `Column` read an already-computed record (the sorter's
-//! output row) without a special case.
+//! output row) without a special case. A real secondary-index read
+//! cursor (`OpenRead` with `P5` nonzero) supports both a one-shot point
+//! lookup (`SeekIndexEq`/`IdxRowid`, #243) and a full sequential walk
+//! (`IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev`, #296) for an
+//! index-ordered `ORDER BY` scan — see [`IndexReadState`]'s doc.
 //!
 //! Register/cursor-slot conventions used by this module's opcodes (this
 //! ticket's own choice — codegen, #91, is what will actually decide
@@ -69,14 +73,11 @@ pub(crate) enum CursorSlot {
     },
     /// A real index b-tree read cursor (#243) opened by `OpenRead` with
     /// `P5` nonzero — the query-time counterpart to `IndexWrite`. Unlike
-    /// `IndexWrite`, this slot carries the trailing rowid `SeekIndexEq`
-    /// most recently found (`None` before any seek, or after a miss), so
-    /// a following `IdxRowid` can hand it to the table cursor's
-    /// `SeekRowid` without re-decoding the index row.
-    IndexRead {
-        root_page: u32,
-        last_rowid: Option<i64>,
-    },
+    /// `IndexWrite`, this slot carries real traversal state (#296
+    /// extended it beyond #243's original one-shot `SeekIndexEq` probe
+    /// to a full persisted [`IndexCursor`]) — see [`IndexReadState`]'s
+    /// own doc.
+    IndexRead(IndexReadState),
     Ephemeral(EphemeralState),
     /// An in-memory ephemeral **table** cursor (#257) — opened by
     /// `OpenEphemeral` with `P5` nonzero, unlike the index-mode
@@ -98,7 +99,7 @@ impl CursorSlot {
         match self {
             CursorSlot::Table(_) => "table cursor",
             CursorSlot::IndexWrite { .. } => "index write cursor",
-            CursorSlot::IndexRead { .. } => "index read cursor",
+            CursorSlot::IndexRead(_) => "index read cursor",
             CursorSlot::Ephemeral(_) => "ephemeral cursor",
             CursorSlot::EphemeralTable(_) => "ephemeral table cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
@@ -130,6 +131,31 @@ impl std::fmt::Debug for TableCursorState {
         f.debug_struct("TableCursorState")
             .field("current", &self.current)
             .field("forced_null", &self.forced_null)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A real secondary-index b-tree read cursor (#243), extended by #296 to
+/// also carry a persistent [`IndexCursor`] traversal position — `current`
+/// is the row `SeekIndexEq`/`IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` most
+/// recently positioned on (`None` before any positioning call, on a
+/// `SeekIndexEq` miss, or once a scan is exhausted), the same shape
+/// `TableCursorState::current` uses for a table cursor. `IdxRowid` reads
+/// the trailing rowid column out of `current`'s decoded key — for an
+/// ordinary secondary index that column is always the referenced table's
+/// rowid (see [`IndexRow`]'s doc); this cursor is never used against a
+/// `WITHOUT ROWID` table's own storage, where that wouldn't hold.
+pub(crate) struct IndexReadState {
+    root_page: u32,
+    cursor: IndexCursor<Rc<dyn crate::vfs::PageSource>>,
+    current: Option<crate::btree::IndexRow>,
+}
+
+impl std::fmt::Debug for IndexReadState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexReadState")
+            .field("root_page", &self.root_page)
+            .field("current", &self.current)
             .finish_non_exhaustive()
     }
 }
@@ -294,17 +320,20 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         opcode: "OpenRead",
         reason: format!("invalid root page {}", instr.p2),
     })?;
+    let db = vm.db()?;
     if instr.p5 != 0 {
+        let usable_size = db.header.usable_page_size();
+        let cursor = IndexCursor::new(Rc::clone(&db.source), usable_size, root_page);
         vm.set_cursor(
             instr.p1,
-            CursorSlot::IndexRead {
+            CursorSlot::IndexRead(IndexReadState {
                 root_page,
-                last_rowid: None,
-            },
+                cursor,
+                current: None,
+            }),
         )?;
         return Ok(Step::Next);
     }
-    let db = vm.db()?;
     let cursor = TableCursor::new(Rc::clone(&db.source), &db.header, root_page);
     vm.set_cursor(
         instr.p1,
@@ -648,7 +677,7 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     let count = p4_count(instr, "SeekIndexEq")?;
     let probe = read_register_range(vm, instr.p3, count, "SeekIndexEq")?;
     let root_page = match vm.cursor(instr.p1)? {
-        CursorSlot::IndexRead { root_page, .. } => *root_page,
+        CursorSlot::IndexRead(state) => state.root_page,
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode: "SeekIndexEq",
@@ -661,6 +690,10 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     let db = vm.db()?;
     let encoding = db.header.text_encoding;
     let usable_size = db.header.usable_page_size();
+    // A fresh, one-shot `IndexCursor` rather than the slot's own
+    // persisted traversal cursor: `SeekIndexEq` is a point lookup (#243),
+    // unrelated to the sequential position `IdxRewind`/`IdxNext`/etc.
+    // (#296) maintain in `state.cursor` for an index-ordered scan.
     let mut cursor = IndexCursor::new(Rc::clone(&db.source), usable_size, root_page);
     let found = cursor
         .seek(&probe, encoding)
@@ -668,7 +701,7 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             opcode: "SeekIndexEq",
             reason: e.to_string(),
         })?;
-    let rowid = match found {
+    let matched = match &found {
         Some(row) => {
             let key = decode_record(&row.payload, encoding).map_err(|e| {
                 ExecError::MalformedInstruction {
@@ -676,29 +709,17 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
                     reason: e.to_string(),
                 }
             })?;
-            let matches = key.len() > probe.len()
+            key.len() > probe.len()
                 && key
                     .iter()
                     .zip(probe.iter())
-                    .all(|(k, p)| compare(k, p, Collation::Binary).is_eq());
-            if matches {
-                match key.last() {
-                    Some(Value::Integer(rowid)) => Some(*rowid),
-                    other => {
-                        return Err(ExecError::MalformedInstruction {
-                            opcode: "SeekIndexEq",
-                            reason: format!("index row's trailing rowid column is {other:?}"),
-                        })
-                    }
-                }
-            } else {
-                None
-            }
+                    .all(|(k, p)| compare(k, p, Collation::Binary).is_eq())
         }
-        None => None,
+        None => false,
     };
+    let current = if matched { found } else { None };
     match vm.cursor_mut(instr.p1)? {
-        CursorSlot::IndexRead { last_rowid, .. } => *last_rowid = rowid,
+        CursorSlot::IndexRead(state) => state.current = current.clone(),
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode: "SeekIndexEq",
@@ -708,7 +729,143 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             })
         }
     }
-    Ok(if rowid.is_none() {
+    Ok(if current.is_none() {
+        Step::Jump(to_pc(instr.p2))
+    } else {
+        Step::Next
+    })
+}
+
+/// Decodes index-read cursor `P1`'s current row (an ordinary secondary
+/// index entry — its decoded record's trailing column is always the
+/// referenced table's rowid) into an `i64` rowid, for [`idx_rowid`] and
+/// the `IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` scan opcodes' shared
+/// "have we got a row, and what's its rowid" question.
+fn index_read_current_rowid(
+    vm: &Vm,
+    slot: i32,
+    opcode: &'static str,
+) -> Result<Option<i64>, ExecError> {
+    let current = match vm.cursor(slot)? {
+        CursorSlot::IndexRead(state) => &state.current,
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "index read cursor",
+            })
+        }
+    };
+    let Some(row) = current else {
+        return Ok(None);
+    };
+    let encoding = vm.db()?.header.text_encoding;
+    let key =
+        decode_record(&row.payload, encoding).map_err(|e| ExecError::MalformedInstruction {
+            opcode,
+            reason: e.to_string(),
+        })?;
+    match key.last() {
+        Some(Value::Integer(rowid)) => Ok(Some(*rowid)),
+        other => Err(ExecError::MalformedInstruction {
+            opcode,
+            reason: format!("index row's trailing rowid column is {other:?}"),
+        }),
+    }
+}
+
+fn index_read_state_mut<'a>(
+    vm: &'a mut Vm,
+    slot: i32,
+    opcode: &'static str,
+) -> Result<&'a mut IndexReadState, ExecError> {
+    match vm.cursor_mut(slot)? {
+        CursorSlot::IndexRead(state) => Ok(state),
+        other => Err(ExecError::CursorTypeMismatch {
+            opcode,
+            slot,
+            found: other.type_name(),
+            expected: "index read cursor",
+        }),
+    }
+}
+
+/// `IdxRewind` (#296): positions index-read cursor `P1` (opened by
+/// `OpenRead` with `P5` nonzero) at its first entry in ascending key
+/// order, jumping to `P2` if the index is empty — the index-cursor
+/// counterpart to `Rewind`, used by an index-ordered scan walking a
+/// matching index forward.
+pub fn idx_rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = index_read_state_mut(vm, instr.p1, "IdxRewind")?;
+    state.current = state
+        .cursor
+        .first()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "IdxRewind",
+            reason: e.to_string(),
+        })?;
+    Ok(if state.current.is_some() {
+        Step::Next
+    } else {
+        Step::Jump(to_pc(instr.p2))
+    })
+}
+
+/// `IdxLast` (#296): positions index-read cursor `P1` at its last entry
+/// (descending key order from here on), jumping to `P2` if the index is
+/// empty — the index-cursor counterpart to `Last`, used by an
+/// index-ordered scan walking a matching index backward (`ORDER BY ...
+/// DESC` over an ascending index, or vice versa).
+pub fn idx_last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = index_read_state_mut(vm, instr.p1, "IdxLast")?;
+    state.current = state
+        .cursor
+        .last()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "IdxLast",
+            reason: e.to_string(),
+        })?;
+    Ok(if state.current.is_some() {
+        Step::Next
+    } else {
+        Step::Jump(to_pc(instr.p2))
+    })
+}
+
+/// `IdxNext` (#296): advances index-read cursor `P1` forward, jumping to
+/// `P2` (typically back to the loop body's start) if another entry was
+/// found — falls through once exhausted. Mirrors `Next`'s jump-on-found
+/// shape; pairs with `IdxRewind`.
+pub fn idx_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = index_read_state_mut(vm, instr.p1, "IdxNext")?;
+    state.current = state
+        .cursor
+        .next()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "IdxNext",
+            reason: e.to_string(),
+        })?;
+    Ok(if state.current.is_some() {
+        Step::Jump(to_pc(instr.p2))
+    } else {
+        Step::Next
+    })
+}
+
+/// `IdxPrev` (#296): advances index-read cursor `P1` backward, jumping to
+/// `P2` if another entry was found — falls through once exhausted. Pairs
+/// with `IdxLast`, the same way `IdxNext` pairs with `IdxRewind`.
+pub fn idx_prev(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = index_read_state_mut(vm, instr.p1, "IdxPrev")?;
+    state.current = state
+        .cursor
+        .prev()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "IdxPrev",
+            reason: e.to_string(),
+        })?;
+    Ok(if state.current.is_some() {
         Step::Jump(to_pc(instr.p2))
     } else {
         Step::Next
@@ -719,23 +876,14 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
 /// `SeekIndexEq`-matched trailing rowid into register `P2`. Errors if
 /// called without a preceding successful `SeekIndexEq` on this cursor.
 pub fn idx_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let rowid = match vm.cursor(instr.p1)? {
-        CursorSlot::IndexRead { last_rowid, .. } => {
-            last_rowid.ok_or_else(|| ExecError::MalformedInstruction {
-                opcode: "IdxRowid",
-                reason: "no matched row on this index cursor (SeekIndexEq missed or wasn't run)"
-                    .to_string(),
-            })?
+    let rowid = index_read_current_rowid(vm, instr.p1, "IdxRowid")?.ok_or_else(|| {
+        ExecError::MalformedInstruction {
+            opcode: "IdxRowid",
+            reason: "no current row on this index cursor (SeekIndexEq missed, or no \
+                         positioning opcode was run)"
+                .to_string(),
         }
-        other => {
-            return Err(ExecError::CursorTypeMismatch {
-                opcode: "IdxRowid",
-                slot: instr.p1,
-                found: other.type_name(),
-                expected: "index read cursor",
-            })
-        }
-    };
+    })?;
     vm.set_register(instr.p2, Value::Integer(rowid))?;
     Ok(Step::Next)
 }

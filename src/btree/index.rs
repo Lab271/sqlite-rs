@@ -108,6 +108,25 @@ impl<P: PageSource> IndexCursor<P> {
         self.advance()
     }
 
+    /// Positions the cursor at the last entry (descending key order from
+    /// here on) and returns it, or `None` if the index is empty. Resets
+    /// any prior traversal position. Used by #296's index-ordered scan
+    /// for a `ORDER BY <indexed col> DESC`/reverse walk — the same b-tree
+    /// [`Self::first`]/[`Self::next`] already read forward, just visited
+    /// high-to-low.
+    pub fn last(&mut self) -> Result<Option<IndexRow>, BtreeError> {
+        self.stack.clear();
+        self.pages_visited = 0;
+        self.push_page_desc(self.root_page)?;
+        self.advance_desc()
+    }
+
+    /// Advances to the previous entry (descending key order) and returns
+    /// it, or `None` once exhausted. Call [`Self::last`] first.
+    pub fn prev(&mut self) -> Result<Option<IndexRow>, BtreeError> {
+        self.advance_desc()
+    }
+
     /// Returns the first entry (in ascending key order) whose decoded key
     /// is not less than `target`, or `None` if every entry is less than
     /// `target`. A linear scan from the first entry — see the module doc
@@ -218,6 +237,82 @@ impl<P: PageSource> IndexCursor<P> {
                 // match), so step >= 1 and this never underflows.
                 return self
                     .decode_interior_entry(top, step.saturating_sub(1) / 2)
+                    .map(Some);
+            }
+        }
+    }
+
+    /// [`Self::push_page`]'s mirror for descending traversal: same frame
+    /// shape, just with `step` initialized so [`Self::advance_desc`] walks
+    /// it high-to-low instead of low-to-high (see that method's doc for
+    /// the shared even/odd action encoding this relies on).
+    fn push_page_desc(&mut self, page_num: u32) -> Result<(), BtreeError> {
+        self.push_page(page_num)?;
+        let Some(frame) = self.stack.last_mut() else {
+            return Ok(());
+        };
+        frame.step = if frame.is_interior {
+            frame.num_cells.saturating_mul(2).saturating_add(1)
+        } else {
+            frame.num_cells
+        };
+        Ok(())
+    }
+
+    /// [`Self::advance`]'s mirror for descending traversal (`Last`/`Prev`,
+    /// #296): visits the same leaf/interior cells `advance` does, in the
+    /// exact opposite order. A leaf frame's `step` counts *down* from
+    /// `num_cells` (0 means exhausted, `step - 1` is the next cell to
+    /// yield). An interior frame's `step` counts down from `2 * num_cells
+    /// + 1`; writing `a = step - 1`: an even `a` means "descend child
+    /// `a / 2`" (child index `num_cells` denotes the rightmost pointer —
+    /// the same encoding `advance`'s ascending walk uses, just visited
+    /// from `a = total_steps` down to `a = 0` instead of `0` up to
+    /// `total_steps`); an odd `a` means "yield entry `(a - 1) / 2`". This
+    /// symmetry is why no separate reversed encoding is needed: `advance`
+    /// and `advance_desc` differ only in which direction `step` moves.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
+    )]
+    fn advance_desc(&mut self) -> Result<Option<IndexRow>, BtreeError> {
+        loop {
+            let top = match self.stack.len() {
+                0 => return Ok(None),
+                n => n.saturating_sub(1),
+            };
+            let (is_interior, step, num_cells, rightmost) = {
+                let f = &self.stack[top];
+                (f.is_interior, f.step, f.num_cells, f.rightmost)
+            };
+
+            if !is_interior {
+                if step == 0 {
+                    self.stack.pop();
+                    continue;
+                }
+                let idx = step.saturating_sub(1);
+                self.stack[top].step = idx;
+                return self.decode_leaf_entry(top, idx).map(Some);
+            }
+
+            if step == 0 {
+                self.stack.pop();
+                continue;
+            }
+            let a = step.saturating_sub(1);
+            self.stack[top].step = a;
+            if a % 2 == 0 {
+                let child_index = a / 2;
+                if child_index == num_cells {
+                    self.push_page_desc(rightmost)?;
+                } else {
+                    let child = self.read_interior_child(top, child_index)?;
+                    self.push_page_desc(child)?;
+                }
+            } else {
+                return self
+                    .decode_interior_entry(top, a.saturating_sub(1) / 2)
                     .map(Some);
             }
         }
@@ -649,6 +744,32 @@ mod tests {
             let cur = decode_record(&rows[i].payload, TextEncoding::Utf8).unwrap();
             assert_ne!(compare_keys(&prev, &cur), Ordering::Greater);
         }
+    }
+
+    #[test]
+    fn secondary_index_last_prev_matches_reversed_forward_walk() {
+        // #296: `Last`/`Prev` must yield exactly the reverse of
+        // `first`/`next`'s ascending walk over the same index b-tree.
+        let mut forward = open_cursor("index.db", 3);
+        let mut forward_rows = Vec::new();
+        let mut row = forward.first().unwrap();
+        while let Some(r) = row {
+            forward_rows.push(r);
+            row = forward.next().unwrap();
+        }
+
+        let mut backward = open_cursor("index.db", 3);
+        let mut backward_rows = Vec::new();
+        let mut row = backward.last().unwrap();
+        while let Some(r) = row {
+            backward_rows.push(r);
+            row = backward.prev().unwrap();
+        }
+
+        assert_eq!(backward_rows.len(), forward_rows.len());
+        let mut reversed_forward = forward_rows.clone();
+        reversed_forward.reverse();
+        assert_eq!(backward_rows, reversed_forward);
     }
 
     #[test]
