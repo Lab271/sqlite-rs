@@ -48,7 +48,7 @@ fn as_text(v: &Value) -> String {
         Value::Null => String::new(),
         Value::Integer(i) => i.to_string(),
         Value::Real(r) => format_real(*r),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => s.to_string(),
         Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),
     }
 }
@@ -65,7 +65,7 @@ fn length(args: &[Value]) -> Result<Value, FunctionError> {
 fn upper(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(match &args[0] {
         Value::Null => Value::Null,
-        Value::Text(s) => Value::Text(s.to_ascii_uppercase()),
+        Value::Text(s) => Value::Text(s.to_ascii_uppercase().into()),
         other => other.clone(),
     })
 }
@@ -73,7 +73,7 @@ fn upper(args: &[Value]) -> Result<Value, FunctionError> {
 fn lower(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(match &args[0] {
         Value::Null => Value::Null,
-        Value::Text(s) => Value::Text(s.to_ascii_lowercase()),
+        Value::Text(s) => Value::Text(s.to_ascii_lowercase().into()),
         other => other.clone(),
     })
 }
@@ -152,11 +152,11 @@ fn substr(args: &[Value]) -> Result<Value, FunctionError> {
     if let Some(b) = blob {
         let start = p1.min(b.len());
         let end = start.saturating_add(p2).min(b.len());
-        Ok(Value::Blob(b[start..end].to_vec()))
+        Ok(Value::Blob(b[start..end].to_vec().into()))
     } else {
         let text = as_text(&args[0]);
         let out: String = text.chars().skip(p1).take(p2).collect();
-        Ok(Value::Text(out))
+        Ok(Value::Text(out.into()))
     }
 }
 
@@ -166,7 +166,7 @@ fn substr(args: &[Value]) -> Result<Value, FunctionError> {
 /// via `env!` at compile time here: `env!` is outside `src/`'s
 /// qualified-subset allowlist (`make mvl-limit`).
 fn sqlite_version(_args: &[Value]) -> Result<Value, FunctionError> {
-    Ok(Value::Text("3.53.4".to_string()))
+    Ok(Value::Text("3.53.4".to_string().into()))
 }
 
 fn abs(args: &[Value]) -> Result<Value, FunctionError> {
@@ -210,19 +210,19 @@ fn typeof_fn(args: &[Value]) -> Result<Value, FunctionError> {
         Value::Text(_) => "text",
         Value::Blob(_) => "blob",
     };
-    Ok(Value::Text(s.to_string()))
+    Ok(Value::Text(s.to_string().into()))
 }
 
 fn hex(args: &[Value]) -> Result<Value, FunctionError> {
     let bytes: Vec<u8> = match &args[0] {
-        Value::Blob(b) => b.clone(),
+        Value::Blob(b) => b.to_vec(),
         other => as_text(other).into_bytes(),
     };
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for b in bytes {
         out.push_str(&format!("{b:02X}"));
     }
-    Ok(Value::Text(out))
+    Ok(Value::Text(out.into()))
 }
 
 fn hex_digit(c: u8) -> Option<u8> {
@@ -250,7 +250,7 @@ fn unhex(args: &[Value]) -> Result<Value, FunctionError> {
         };
         out.push((hi << 4) | lo);
     }
-    Ok(Value::Blob(out))
+    Ok(Value::Blob(out.into()))
 }
 
 fn sql_quote_text(s: &str) -> String {
@@ -268,11 +268,11 @@ fn sql_quote_text(s: &str) -> String {
 
 fn quote(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(Value::Text(match &args[0] {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(i) => i.to_string(),
-        Value::Real(r) => format_real(*r),
-        Value::Text(s) => sql_quote_text(s),
-        Value::Blob(b) => format_blob(b),
+        Value::Null => "NULL".to_string().into(),
+        Value::Integer(i) => i.to_string().into(),
+        Value::Real(r) => format_real(*r).into(),
+        Value::Text(s) => sql_quote_text(s).into(),
+        Value::Blob(b) => format_blob(b).into(),
     }))
 }
 
@@ -354,7 +354,7 @@ fn instr(args: &[Value]) -> Result<Value, FunctionError> {
     let pos = if let Value::Blob(hay) = &args[0] {
         let needle = match &args[1] {
             Value::Blob(b) => b.clone(),
-            other => as_text(other).into_bytes(),
+            other => as_text(other).into_bytes().into(),
         };
         find_bytes(hay, &needle)
     } else {
@@ -389,7 +389,7 @@ fn trim_fn(args: &[Value]) -> Result<Value, FunctionError> {
     let charset: Vec<char> = trim_charset(args).chars().collect();
     let s = as_text(&args[0]);
     Ok(Value::Text(
-        s.trim_matches(|c| charset.contains(&c)).to_string(),
+        s.trim_matches(|c| charset.contains(&c)).to_string().into(),
     ))
 }
 
@@ -400,7 +400,9 @@ fn ltrim_fn(args: &[Value]) -> Result<Value, FunctionError> {
     let charset: Vec<char> = trim_charset(args).chars().collect();
     let s = as_text(&args[0]);
     Ok(Value::Text(
-        s.trim_start_matches(|c| charset.contains(&c)).to_string(),
+        s.trim_start_matches(|c| charset.contains(&c))
+            .to_string()
+            .into(),
     ))
 }
 
@@ -411,7 +413,9 @@ fn rtrim_fn(args: &[Value]) -> Result<Value, FunctionError> {
     let charset: Vec<char> = trim_charset(args).chars().collect();
     let s = as_text(&args[0]);
     Ok(Value::Text(
-        s.trim_end_matches(|c| charset.contains(&c)).to_string(),
+        s.trim_end_matches(|c| charset.contains(&c))
+            .to_string()
+            .into(),
     ))
 }
 
@@ -423,9 +427,9 @@ fn replace_fn(args: &[Value]) -> Result<Value, FunctionError> {
     let from = as_text(&args[1]);
     let to = as_text(&args[2]);
     if from.is_empty() {
-        return Ok(Value::Text(s));
+        return Ok(Value::Text(s.into()));
     }
-    Ok(Value::Text(s.replace(&from, &to)))
+    Ok(Value::Text(s.replace(&from, &to).into()))
 }
 
 /// SQLite's default `SQLITE_MAX_LENGTH` — the largest blob/string this
@@ -436,7 +440,7 @@ const MAX_BLOB_LEN: i64 = 1_000_000_000;
 #[allow(clippy::cast_sign_loss)]
 fn zeroblob(args: &[Value]) -> Result<Value, FunctionError> {
     let n = value_int(&args[0]).clamp(0, MAX_BLOB_LEN);
-    Ok(Value::Blob(vec![0u8; n as usize]))
+    Ok(Value::Blob(vec![0u8; n as usize].into()))
 }
 
 fn iif(args: &[Value]) -> Result<Value, FunctionError> {
@@ -695,11 +699,11 @@ mod tests {
     #[test]
     fn length_counts_chars_for_text_bytes_for_blob() {
         assert_eq!(
-            v("length", &[Value::Text("héllo".to_string())]),
+            v("length", &[Value::Text("héllo".to_string().into())]),
             Value::Integer(5)
         );
         assert_eq!(
-            v("length", &[Value::Blob(vec![0, 1, 2])]),
+            v("length", &[Value::Blob(vec![0, 1, 2].into())]),
             Value::Integer(3)
         );
         assert_eq!(v("length", &[Value::Integer(12345)]), Value::Integer(5));
@@ -709,12 +713,12 @@ mod tests {
     #[test]
     fn upper_lower_are_ascii_only() {
         assert_eq!(
-            v("upper", &[Value::Text("café".to_string())]),
-            Value::Text("CAFé".to_string())
+            v("upper", &[Value::Text("café".to_string().into())]),
+            Value::Text("CAFé".to_string().into())
         );
         assert_eq!(
-            v("lower", &[Value::Text("CAFÉ".to_string())]),
-            Value::Text("cafÉ".to_string())
+            v("lower", &[Value::Text("CAFÉ".to_string().into())]),
+            Value::Text("cafÉ".to_string().into())
         );
     }
 
@@ -723,38 +727,38 @@ mod tests {
         assert_eq!(
             v(
                 "substr",
-                &[Value::Text("hello".to_string()), Value::Integer(-3)]
+                &[Value::Text("hello".to_string().into()), Value::Integer(-3)]
             ),
-            Value::Text("llo".to_string())
+            Value::Text("llo".to_string().into())
         );
         assert_eq!(
             v(
                 "substr",
-                &[Value::Text("hello".to_string()), Value::Integer(0)]
+                &[Value::Text("hello".to_string().into()), Value::Integer(0)]
             ),
-            Value::Text("hello".to_string())
+            Value::Text("hello".to_string().into())
         );
         assert_eq!(
             v(
                 "substr",
                 &[
-                    Value::Text("hello".to_string()),
+                    Value::Text("hello".to_string().into()),
                     Value::Integer(2),
                     Value::Integer(-1)
                 ]
             ),
-            Value::Text("h".to_string())
+            Value::Text("h".to_string().into())
         );
         assert_eq!(
             v(
                 "substr",
                 &[
-                    Value::Text("hello".to_string()),
+                    Value::Text("hello".to_string().into()),
                     Value::Integer(-100),
                     Value::Integer(2)
                 ]
             ),
-            Value::Text(String::new())
+            Value::Text(String::new().into())
         );
     }
 
@@ -792,31 +796,37 @@ mod tests {
     #[test]
     fn quote_escapes_single_quotes_and_renders_blob_hex() {
         assert_eq!(
-            v("quote", &[Value::Text("it's".to_string())]),
-            Value::Text("'it''s'".to_string())
+            v("quote", &[Value::Text("it's".to_string().into())]),
+            Value::Text("'it''s'".to_string().into())
         );
         assert_eq!(
-            v("quote", &[Value::Blob(vec![0x00, 0x11])]),
-            Value::Text("X'0011'".to_string())
+            v("quote", &[Value::Blob(vec![0x00, 0x11].into())]),
+            Value::Text("X'0011'".to_string().into())
         );
-        assert_eq!(v("quote", &[Value::Null]), Value::Text("NULL".to_string()));
+        assert_eq!(
+            v("quote", &[Value::Null]),
+            Value::Text("NULL".to_string().into())
+        );
     }
 
     #[test]
     fn hex_and_unhex_roundtrip() {
         assert_eq!(
-            v("hex", &[Value::Text("AB".to_string())]),
-            Value::Text("4142".to_string())
+            v("hex", &[Value::Text("AB".to_string().into())]),
+            Value::Text("4142".to_string().into())
         );
         assert_eq!(
             v("hex", &[Value::Integer(5)]),
-            Value::Text("35".to_string())
+            Value::Text("35".to_string().into())
         );
         assert_eq!(
-            v("unhex", &[Value::Text("4142".to_string())]),
-            Value::Blob(vec![0x41, 0x42])
+            v("unhex", &[Value::Text("4142".to_string().into())]),
+            Value::Blob(vec![0x41, 0x42].into())
         );
-        assert_eq!(v("unhex", &[Value::Text("xyz".to_string())]), Value::Null);
+        assert_eq!(
+            v("unhex", &[Value::Text("xyz".to_string().into())]),
+            Value::Null
+        );
     }
 
     #[test]
@@ -834,13 +844,16 @@ mod tests {
                 "iif",
                 &[
                     Value::Integer(1),
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string())
+                    Value::Text("a".to_string().into()),
+                    Value::Text("b".to_string().into())
                 ]
             ),
-            Value::Text("a".to_string())
+            Value::Text("a".to_string().into())
         );
-        assert_eq!(v("typeof", &[Value::Null]), Value::Text("null".to_string()));
+        assert_eq!(
+            v("typeof", &[Value::Null]),
+            Value::Text("null".to_string().into())
+        );
     }
 
     #[test]
@@ -849,12 +862,12 @@ mod tests {
             v(
                 "iif",
                 &[
-                    Value::Text("0.0".to_string()),
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string())
+                    Value::Text("0.0".to_string().into()),
+                    Value::Text("a".to_string().into()),
+                    Value::Text("b".to_string().into())
                 ]
             ),
-            Value::Text("b".to_string())
+            Value::Text("b".to_string().into())
         );
     }
 
@@ -873,12 +886,15 @@ mod tests {
             panic!("expected blob");
         };
         assert_eq!(b.len() as i64, MAX_BLOB_LEN);
-        assert_eq!(v("zeroblob", &[Value::Integer(-1)]), Value::Blob(vec![]));
+        assert_eq!(
+            v("zeroblob", &[Value::Integer(-1)]),
+            Value::Blob(vec![].into())
+        );
     }
 
     #[test]
     fn like_and_glob_match_oracle_semantics() {
-        let t = |s: &str| Value::Text(s.to_string());
+        let t = |s: &str| Value::Text(s.to_string().into());
         // LIKE is ASCII case-insensitive; GLOB is case-sensitive.
         assert_eq!(v("like", &[t("abc"), t("ABC")]), Value::Integer(1));
         assert_eq!(v("glob", &[t("abc"), t("ABC")]), Value::Integer(0));
@@ -930,8 +946,8 @@ mod tests {
             v(
                 "instr",
                 &[
-                    Value::Text("hello world".to_string()),
-                    Value::Text("world".to_string())
+                    Value::Text("hello world".to_string().into()),
+                    Value::Text("world".to_string().into())
                 ]
             ),
             Value::Integer(7)
@@ -940,8 +956,8 @@ mod tests {
             v(
                 "instr",
                 &[
-                    Value::Text("hello".to_string()),
-                    Value::Text("xyz".to_string())
+                    Value::Text("hello".to_string().into()),
+                    Value::Text("xyz".to_string().into())
                 ]
             ),
             Value::Integer(0)
@@ -949,12 +965,15 @@ mod tests {
         assert_eq!(
             v(
                 "instr",
-                &[Value::Blob(vec![1, 2, 3, 4]), Value::Blob(vec![3, 4])]
+                &[
+                    Value::Blob(vec![1, 2, 3, 4].into()),
+                    Value::Blob(vec![3, 4].into())
+                ]
             ),
             Value::Integer(3)
         );
         assert_eq!(
-            v("instr", &[Value::Null, Value::Text("x".to_string())]),
+            v("instr", &[Value::Null, Value::Text("x".to_string().into())]),
             Value::Null
         );
     }
@@ -962,26 +981,26 @@ mod tests {
     #[test]
     fn trim_ltrim_rtrim_default_to_whitespace_or_use_given_charset() {
         assert_eq!(
-            v("trim", &[Value::Text("  hi  ".to_string())]),
-            Value::Text("hi".to_string())
+            v("trim", &[Value::Text("  hi  ".to_string().into())]),
+            Value::Text("hi".to_string().into())
         );
         assert_eq!(
-            v("ltrim", &[Value::Text("  hi  ".to_string())]),
-            Value::Text("hi  ".to_string())
+            v("ltrim", &[Value::Text("  hi  ".to_string().into())]),
+            Value::Text("hi  ".to_string().into())
         );
         assert_eq!(
-            v("rtrim", &[Value::Text("  hi  ".to_string())]),
-            Value::Text("  hi".to_string())
+            v("rtrim", &[Value::Text("  hi  ".to_string().into())]),
+            Value::Text("  hi".to_string().into())
         );
         assert_eq!(
             v(
                 "trim",
                 &[
-                    Value::Text("xxhixx".to_string()),
-                    Value::Text("x".to_string())
+                    Value::Text("xxhixx".to_string().into()),
+                    Value::Text("x".to_string().into())
                 ]
             ),
-            Value::Text("hi".to_string())
+            Value::Text("hi".to_string().into())
         );
         assert_eq!(v("trim", &[Value::Null]), Value::Null);
     }
@@ -992,31 +1011,31 @@ mod tests {
             v(
                 "replace",
                 &[
-                    Value::Text("banana".to_string()),
-                    Value::Text("a".to_string()),
-                    Value::Text("o".to_string())
+                    Value::Text("banana".to_string().into()),
+                    Value::Text("a".to_string().into()),
+                    Value::Text("o".to_string().into())
                 ]
             ),
-            Value::Text("bonono".to_string())
+            Value::Text("bonono".to_string().into())
         );
         assert_eq!(
             v(
                 "replace",
                 &[
-                    Value::Text("hi".to_string()),
-                    Value::Text("".to_string()),
-                    Value::Text("x".to_string())
+                    Value::Text("hi".to_string().into()),
+                    Value::Text("".to_string().into()),
+                    Value::Text("x".to_string().into())
                 ]
             ),
-            Value::Text("hi".to_string())
+            Value::Text("hi".to_string().into())
         );
         assert_eq!(
             v(
                 "replace",
                 &[
                     Value::Null,
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string())
+                    Value::Text("a".to_string().into()),
+                    Value::Text("b".to_string().into())
                 ]
             ),
             Value::Null

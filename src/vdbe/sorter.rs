@@ -115,7 +115,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
         }
     };
     let state = vm.sorter_mut(instr.p1, "SorterInsert")?;
-    state.buffer.push(blob);
+    state.buffer.push(blob.to_vec());
     state.sorted = false;
     Ok(Step::Next)
 }
@@ -218,7 +218,7 @@ pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             })?
             .clone()
     };
-    vm.set_register(instr.p2, Value::Blob(bytes))?;
+    vm.set_register(instr.p2, Value::Blob(bytes.into()))?;
     Ok(Step::Next)
 }
 
@@ -246,7 +246,7 @@ mod tests {
 
     fn insert_row(vm: &mut Vm, cursor: i32, values: &[Value]) {
         let blob = encode_record(values, TextEncoding::Utf8);
-        vm.set_register(0, Value::Blob(blob)).unwrap();
+        vm.set_register(0, Value::Blob(blob.into())).unwrap();
         sorter_insert(vm, &Instruction::new(Opcode::SorterInsert, cursor, 0, 0)).unwrap();
     }
 

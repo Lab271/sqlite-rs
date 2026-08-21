@@ -109,7 +109,7 @@ fn value_to_oracle_text(v: &Value) -> String {
                 r.to_string()
             }
         }
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => s.to_string(),
         Value::Blob(_) => "<blob>".to_string(),
     }
 }
@@ -215,9 +215,9 @@ fn coalesce_and_ifnull_result_columns_do_not_collide() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Integer(1), Value::Text("aa".to_string())],
-            vec![Value::Integer(2), Value::Text("bb".to_string())],
-            vec![Value::Integer(3), Value::Text("cc".to_string())],
+            vec![Value::Integer(1), Value::Text("aa".to_string().into())],
+            vec![Value::Integer(2), Value::Text("bb".to_string().into())],
+            vec![Value::Integer(3), Value::Text("cc".to_string().into())],
         ]
     );
     let _ = std::fs::remove_file(&path);
@@ -423,9 +423,9 @@ fn order_by_collate_nocase_is_case_insensitive() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Text("AA".to_string())],
-            vec![Value::Text("bb".to_string())],
-            vec![Value::Text("cc".to_string())],
+            vec![Value::Text("AA".to_string().into())],
+            vec![Value::Text("bb".to_string().into())],
+            vec![Value::Text("cc".to_string().into())],
         ]
     );
     let _ = std::fs::remove_file(&path);
@@ -480,9 +480,9 @@ fn order_by_function_call_matches_oracle() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Text("cc".to_string())],
-            vec![Value::Text("bb".to_string())],
-            vec![Value::Text("aa".to_string())],
+            vec![Value::Text("cc".to_string().into())],
+            vec![Value::Text("bb".to_string().into())],
+            vec![Value::Text("aa".to_string().into())],
         ]
     );
     let _ = std::fs::remove_file(&path);
@@ -568,7 +568,7 @@ fn rowid_equality_seeks_and_matches_oracle() {
             vec![vec![
                 Value::Integer(2),
                 Value::Integer(5),
-                Value::Text("bb".to_string())
+                Value::Text("bb".to_string().into())
             ]]
         );
     }
@@ -618,7 +618,10 @@ fn rowid_equality_against_bound_parameter_seeks() {
     .expect("executes");
     assert_eq!(
         result,
-        vec![vec![Value::Integer(3), Value::Text("cc".to_string())]]
+        vec![vec![
+            Value::Integer(3),
+            Value::Text("cc".to_string().into())
+        ]]
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -676,9 +679,9 @@ fn group_by_single_column_count_matches_oracle() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Text("x".to_string()), Value::Integer(2)],
-            vec![Value::Text("y".to_string()), Value::Integer(1)],
-            vec![Value::Text("z".to_string()), Value::Integer(3)],
+            vec![Value::Text("x".to_string().into()), Value::Integer(2)],
+            vec![Value::Text("y".to_string().into()), Value::Integer(1)],
+            vec![Value::Text("z".to_string().into()), Value::Integer(3)],
         ]
     );
     let _ = std::fs::remove_file(&path);
@@ -782,14 +785,14 @@ fn group_by_aggregates_sum_avg_min_max() {
         rows,
         vec![
             vec![
-                Value::Text("x".to_string()),
+                Value::Text("x".to_string().into()),
                 Value::Integer(3),
                 Value::Real(1.5),
                 Value::Integer(1),
                 Value::Integer(2),
             ],
             vec![
-                Value::Text("y".to_string()),
+                Value::Text("y".to_string().into()),
                 Value::Integer(10),
                 Value::Real(10.0),
                 Value::Integer(10),
@@ -798,7 +801,7 @@ fn group_by_aggregates_sum_avg_min_max() {
             // `z` has a NULL `val` row: sum/avg/min/max all ignore it,
             // matching SQL's null-skipping aggregate semantics.
             vec![
-                Value::Text("z".to_string()),
+                Value::Text("z".to_string().into()),
                 Value::Integer(105),
                 Value::Real(52.5),
                 Value::Integer(5),
@@ -823,23 +826,23 @@ fn group_by_multiple_columns() {
         rows,
         vec![
             vec![
-                Value::Text("x".to_string()),
-                Value::Text("p".to_string()),
+                Value::Text("x".to_string().into()),
+                Value::Text("p".to_string().into()),
                 Value::Integer(2)
             ],
             vec![
-                Value::Text("y".to_string()),
-                Value::Text("p".to_string()),
+                Value::Text("y".to_string().into()),
+                Value::Text("p".to_string().into()),
                 Value::Integer(1)
             ],
             vec![
-                Value::Text("z".to_string()),
-                Value::Text("q".to_string()),
+                Value::Text("z".to_string().into()),
+                Value::Text("q".to_string().into()),
                 Value::Integer(2)
             ],
             vec![
-                Value::Text("z".to_string()),
-                Value::Text("r".to_string()),
+                Value::Text("z".to_string().into()),
+                Value::Text("r".to_string().into()),
                 Value::Integer(1)
             ],
         ]
@@ -860,8 +863,8 @@ fn group_by_having_filters_groups() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Text("x".to_string()), Value::Integer(2)],
-            vec![Value::Text("z".to_string()), Value::Integer(3)],
+            vec![Value::Text("x".to_string().into()), Value::Integer(2)],
+            vec![Value::Text("z".to_string().into()), Value::Integer(3)],
         ]
     );
     let _ = std::fs::remove_file(&path);

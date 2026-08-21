@@ -109,7 +109,7 @@ fn find_rowid_by_text_column(
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if let Some(Value::Text(s)) = values.get(key_column) {
-            if s == key {
+            if s.as_ref() == key {
                 return Ok(Some(r.rowid));
             }
         }
@@ -131,11 +131,11 @@ pub fn insert_master_row(
         .unwrap_or(0)
         .saturating_add(1);
     let values = [
-        Value::Text(entry.kind.clone()),
-        Value::Text(entry.name.clone()),
-        Value::Text(entry.tbl_name.clone()),
+        Value::Text(entry.kind.as_str().into()),
+        Value::Text(entry.name.as_str().into()),
+        Value::Text(entry.tbl_name.as_str().into()),
         Value::Integer(entry.rootpage as i64),
-        Value::Text(entry.sql.clone()),
+        Value::Text(entry.sql.as_str().into()),
     ];
     let payload = encode_record(&values, header.text_encoding);
     super::insert_row(pager, header, SQLITE_MASTER_ROOT_PAGE, next_rowid, &payload)
@@ -213,7 +213,7 @@ fn find_master_rootpage(
     while let Some(r) = row {
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(rp))) = (values.get(1), values.get(3)) {
-            if n == name {
+            if n.as_ref() == name {
                 let rootpage = u32::try_from(*rp).map_err(|_| BtreeError::InvalidRootPage {
                     name: name.to_string(),
                     rootpage: *rp,
@@ -253,7 +253,7 @@ pub fn update_sequence(
     while let Some(r) = row {
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(seq))) = (values.first(), values.get(1)) {
-            if n == table_name {
+            if n.as_ref() == table_name {
                 existing = Some((r.rowid, *seq));
                 break;
             }
@@ -266,13 +266,13 @@ pub fn update_sequence(
             let next_rowid = max_rowid(pager, header, seq_root)?
                 .unwrap_or(0)
                 .saturating_add(1);
-            let values = [Value::Text(table_name.to_string()), Value::Integer(rowid)];
+            let values = [Value::Text(table_name.into()), Value::Integer(rowid)];
             let payload = encode_record(&values, header.text_encoding);
             super::insert_row(pager, header, seq_root, next_rowid, &payload)?;
         }
         Some((row_rowid, current_seq)) if rowid > current_seq => {
             super::delete_row(pager, header, seq_root, row_rowid)?;
-            let values = [Value::Text(table_name.to_string()), Value::Integer(rowid)];
+            let values = [Value::Text(table_name.into()), Value::Integer(rowid)];
             let payload = encode_record(&values, header.text_encoding);
             super::insert_row(pager, header, seq_root, row_rowid, &payload)?;
         }
@@ -300,11 +300,11 @@ mod tests {
         // stock MasterEntry (rootpage: u32) can never produce, but a
         // corrupted/malicious .db file can.
         let values = [
-            Value::Text("table".to_string()),
-            Value::Text("evil".to_string()),
-            Value::Text("evil".to_string()),
+            Value::Text("table".to_string().into()),
+            Value::Text("evil".to_string().into()),
+            Value::Text("evil".to_string().into()),
             Value::Integer(-1),
-            Value::Text(String::new()),
+            Value::Text(String::new().into()),
         ];
         let payload = encode_record(&values, header.text_encoding);
         super::super::insert_row(&mut pager, &header, SQLITE_MASTER_ROOT_PAGE, 1, &payload)
@@ -354,7 +354,7 @@ mod tests {
         let mut cursor = crate::btree::TableCursor::new(&pager, &header, SQLITE_MASTER_ROOT_PAGE);
         let row = cursor.first().unwrap().unwrap();
         let values = decode_record(&row.payload, header.text_encoding).unwrap();
-        assert_eq!(values[1], Value::Text("t".to_string()));
+        assert_eq!(values[1], Value::Text("t".to_string().into()));
         assert_eq!(values[3], Value::Integer(2));
 
         delete_master_row(&mut pager, &header, "t").unwrap();
@@ -386,7 +386,7 @@ mod tests {
         let mut cursor = crate::btree::TableCursor::new(&pager, &header, seq_root);
         let row = cursor.first().unwrap().unwrap();
         let values = decode_record(&row.payload, header.text_encoding).unwrap();
-        assert_eq!(values[0], Value::Text("t".to_string()));
+        assert_eq!(values[0], Value::Text("t".to_string().into()));
         assert_eq!(values[1], Value::Integer(5));
     }
 

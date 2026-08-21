@@ -37,9 +37,9 @@ pub fn cast_to(value: &Value, target: Affinity) -> Value {
 fn cast_to_text(value: &Value) -> Value {
     match value {
         Value::Text(_) => value.clone(),
-        Value::Integer(i) => Value::Text(i.to_string()),
-        Value::Real(r) => Value::Text(format_real(*r)),
-        Value::Blob(bytes) => Value::Text(String::from_utf8_lossy(bytes).into_owned()),
+        Value::Integer(i) => Value::Text(i.to_string().into()),
+        Value::Real(r) => Value::Text(format_real(*r).into()),
+        Value::Blob(bytes) => Value::Text(String::from_utf8_lossy(bytes).into_owned().into()),
         Value::Null => Value::Null,
     }
 }
@@ -51,9 +51,9 @@ fn cast_to_text(value: &Value) -> Value {
 fn cast_to_blob(value: &Value) -> Value {
     match value {
         Value::Blob(_) => value.clone(),
-        Value::Text(s) => Value::Blob(s.clone().into_bytes()),
-        Value::Integer(i) => Value::Blob(i.to_string().into_bytes()),
-        Value::Real(r) => Value::Blob(format_real(*r).into_bytes()),
+        Value::Text(s) => Value::Blob(s.as_bytes().into()),
+        Value::Integer(i) => Value::Blob(i.to_string().into_bytes().into()),
+        Value::Real(r) => Value::Blob(format_real(*r).into_bytes().into()),
         Value::Null => Value::Null,
     }
 }
@@ -157,7 +157,7 @@ mod tests {
     use super::*;
 
     fn text(s: &str) -> Value {
-        Value::Text(s.to_string())
+        Value::Text(s.into())
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
             Value::Integer(-3)
         );
         assert_eq!(
-            cast_to(&Value::Blob(vec![0x41, 0x42]), Affinity::Integer),
+            cast_to(&Value::Blob(vec![0x41, 0x42].into()), Affinity::Integer),
             Value::Integer(0)
         );
         assert_eq!(
@@ -212,7 +212,7 @@ mod tests {
         // text, not just falling back to 0 (oracle: `CAST(x'3435' AS
         // INTEGER)` = `45`, the bytes "45").
         assert_eq!(
-            cast_to(&Value::Blob(vec![0x34, 0x35]), Affinity::Integer),
+            cast_to(&Value::Blob(vec![0x34, 0x35].into()), Affinity::Integer),
             Value::Integer(45)
         );
     }
@@ -226,7 +226,7 @@ mod tests {
             Value::Real(5.0)
         );
         assert_eq!(
-            cast_to(&Value::Blob(vec![0x41, 0x42]), Affinity::Real),
+            cast_to(&Value::Blob(vec![0x41, 0x42].into()), Affinity::Real),
             Value::Real(0.0)
         );
         assert_eq!(cast_to(&Value::Null, Affinity::Real), Value::Null);
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(cast_to(&Value::Integer(5), Affinity::Text), text("5"));
         assert_eq!(cast_to(&Value::Real(5.5), Affinity::Text), text("5.5"));
         assert_eq!(
-            cast_to(&Value::Blob(vec![0x41, 0x42]), Affinity::Text),
+            cast_to(&Value::Blob(vec![0x41, 0x42].into()), Affinity::Text),
             text("AB")
         );
         assert_eq!(cast_to(&Value::Null, Affinity::Text), Value::Null);
@@ -247,11 +247,11 @@ mod tests {
     fn cast_to_blob_matches_oracle_truth_table() {
         assert_eq!(
             cast_to(&text("abc"), Affinity::Blob),
-            Value::Blob(b"abc".to_vec())
+            Value::Blob(b"abc".to_vec().into())
         );
         assert_eq!(
             cast_to(&Value::Integer(5), Affinity::Blob),
-            Value::Blob(b"5".to_vec())
+            Value::Blob(b"5".to_vec().into())
         );
         assert_eq!(cast_to(&Value::Null, Affinity::Blob), Value::Null);
     }
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(cast_to(&text("5"), Affinity::Numeric), Value::Integer(5));
         assert_eq!(cast_to(&text("abc"), Affinity::Numeric), Value::Integer(0));
         assert_eq!(
-            cast_to(&Value::Blob(vec![0x41, 0x42]), Affinity::Numeric),
+            cast_to(&Value::Blob(vec![0x41, 0x42].into()), Affinity::Numeric),
             Value::Integer(0)
         );
         assert_eq!(cast_to(&Value::Null, Affinity::Numeric), Value::Null);

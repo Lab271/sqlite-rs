@@ -259,7 +259,7 @@ fn as_text(v: &Value) -> String {
         Value::Null => String::new(),
         Value::Integer(i) => i.to_string(),
         Value::Real(r) => format_real(*r),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => s.to_string(),
         Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),
     }
 }
@@ -268,7 +268,7 @@ fn as_text(v: &Value) -> String {
 /// propagation is handled by the caller (`arithmetic::binary_op`), same
 /// as every other binary opcode.
 pub fn concat(a: &Value, b: &Value) -> Value {
-    Value::Text(format!("{}{}", as_text(a), as_text(b)))
+    Value::Text(format!("{}{}", as_text(a), as_text(b)).into())
 }
 
 #[cfg(test)]
@@ -292,15 +292,21 @@ mod tests {
     #[test]
     fn arithmetic_matches_oracle_coercion_vectors() {
         assert_eq!(
-            checked_add(&Value::Text("123abc".to_string()), &Value::Integer(1)),
+            checked_add(
+                &Value::Text("123abc".to_string().into()),
+                &Value::Integer(1)
+            ),
             Value::Integer(124)
         );
         assert_eq!(
-            checked_add(&Value::Text("  123  ".to_string()), &Value::Integer(1)),
+            checked_add(
+                &Value::Text("  123  ".to_string().into()),
+                &Value::Integer(1)
+            ),
             Value::Integer(124)
         );
         assert_eq!(
-            checked_add(&Value::Text("abc".to_string()), &Value::Integer(1)),
+            checked_add(&Value::Text("abc".to_string().into()), &Value::Integer(1)),
             Value::Integer(1)
         );
     }
@@ -323,10 +329,16 @@ mod tests {
         assert_eq!(cast_to_integer(&Value::Real(3.9)), 3);
         assert_eq!(cast_to_integer(&Value::Real(-3.9)), -3);
         assert_eq!(cast_to_integer(&Value::Integer(7)), 7);
-        assert_eq!(cast_to_integer(&Value::Text("12abc".to_string())), 12);
-        assert_eq!(cast_to_integer(&Value::Text("3.9abc".to_string())), 3);
+        assert_eq!(
+            cast_to_integer(&Value::Text("12abc".to_string().into())),
+            12
+        );
+        assert_eq!(
+            cast_to_integer(&Value::Text("3.9abc".to_string().into())),
+            3
+        );
         assert_eq!(cast_to_integer(&Value::Null), 0);
-        assert_eq!(cast_to_integer(&Value::Blob(vec![1, 2, 3])), 0);
+        assert_eq!(cast_to_integer(&Value::Blob(vec![1, 2, 3].into())), 0);
     }
 
     #[test]
@@ -406,14 +418,14 @@ mod tests {
     fn concat_coerces_to_text_and_propagates_no_null_itself() {
         assert_eq!(
             concat(
-                &Value::Text("apple".to_string()),
-                &Value::Text("x".to_string())
+                &Value::Text("apple".to_string().into()),
+                &Value::Text("x".to_string().into())
             ),
-            Value::Text("applex".to_string())
+            Value::Text("applex".to_string().into())
         );
         assert_eq!(
             concat(&Value::Integer(1), &Value::Real(2.5)),
-            Value::Text("12.5".to_string())
+            Value::Text("12.5".to_string().into())
         );
     }
 

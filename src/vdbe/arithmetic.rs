@@ -211,8 +211,8 @@ mod tests {
             (Value::Integer(0), Value::Integer(1)),
             (Value::Integer(7), Value::Integer(0)),
             (Value::Real(0.0), Value::Integer(1)),
-            (Value::Text("0".to_string()), Value::Integer(1)),
-            (Value::Text("abc".to_string()), Value::Integer(1)),
+            (Value::Text("0".to_string().into()), Value::Integer(1)),
+            (Value::Text("abc".to_string().into()), Value::Integer(1)),
             (Value::Null, Value::Null),
         ] {
             let mut vm = vm_with(vec![input.clone()]);
@@ -246,12 +246,15 @@ mod tests {
         assert_eq!(*vm.register(2).unwrap(), Value::Integer(2));
 
         let mut vm = vm_with(vec![
-            Value::Text("x".to_string()),
-            Value::Text("apple".to_string()),
+            Value::Text("x".to_string().into()),
+            Value::Text("apple".to_string().into()),
         ]);
         let instr = Instruction::new(Opcode::Concat, 0, 1, 2);
         concat(&mut vm, &instr).unwrap();
-        assert_eq!(*vm.register(2).unwrap(), Value::Text("applex".to_string()));
+        assert_eq!(
+            *vm.register(2).unwrap(),
+            Value::Text("applex".to_string().into())
+        );
     }
 
     #[test]

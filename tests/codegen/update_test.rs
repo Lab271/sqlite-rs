@@ -178,7 +178,7 @@ fn where_filtered_update_touches_only_matching_rows_mid_scan() {
     let texts: Vec<(i64, String)> = got
         .into_iter()
         .map(|(rowid, values)| match &values[1] {
-            Value::Text(s) => (rowid, s.clone()),
+            Value::Text(s) => (rowid, s.to_string()),
             other => panic!("expected TEXT, got {other:?}"),
         })
         .collect();
@@ -215,7 +215,10 @@ fn unassigned_columns_are_preserved() {
     let got = rows(&path, &header, page_size, 1);
     assert_eq!(
         got,
-        vec![(1, vec![Value::Integer(42), Value::Text("keep".to_string())])]
+        vec![(
+            1,
+            vec![Value::Integer(42), Value::Text("keep".to_string().into())]
+        )]
     );
 }
 
@@ -251,7 +254,7 @@ fn rowid_alias_reassignment_changes_the_stored_rowid() {
     let got = rows(&path, &header, page_size, 1);
     assert_eq!(
         got,
-        vec![(100, vec![Value::Null, Value::Text("x".to_string())])]
+        vec![(100, vec![Value::Null, Value::Text("x".to_string().into())])]
     );
 }
 
@@ -280,7 +283,10 @@ fn not_null_violation_halts_and_leaves_the_row_unchanged() {
 
     assert_eq!(
         rows(&path, &header, page_size, 1),
-        vec![(1, vec![Value::Integer(1), Value::Text("x".to_string())])]
+        vec![(
+            1,
+            vec![Value::Integer(1), Value::Text("x".to_string().into())]
+        )]
     );
 }
 

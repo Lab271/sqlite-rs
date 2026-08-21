@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn return_rejects_non_integer_register() {
-        let vm = vm_with(vec![Value::Text("x".to_string())]);
+        let vm = vm_with(vec![Value::Text("x".to_string().into())]);
         let instr = Instruction::new(Opcode::Return, 0, 0, 0);
         assert!(matches!(
             r#return(&vm, &instr),
@@ -374,15 +374,15 @@ mod tests {
 
     #[test]
     fn is_falsy_text_numeric_coercion() {
-        assert!(is_falsy(&Value::Text("0".to_string())));
-        assert!(is_falsy(&Value::Text("0.0".to_string())));
-        assert!(!is_falsy(&Value::Text("1".to_string())));
-        assert!(is_falsy(&Value::Text("abc".to_string())));
+        assert!(is_falsy(&Value::Text("0".to_string().into())));
+        assert!(is_falsy(&Value::Text("0.0".to_string().into())));
+        assert!(!is_falsy(&Value::Text("1".to_string().into())));
+        assert!(is_falsy(&Value::Text("abc".to_string().into())));
     }
 
     #[test]
     fn is_falsy_blob_is_never_falsy() {
-        assert!(is_falsy(&Value::Blob(vec![1, 2, 3])));
+        assert!(is_falsy(&Value::Blob(vec![1, 2, 3].into())));
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn must_be_int_converts_integer_text_in_place() {
-        let mut vm = vm_with(vec![Value::Text(" 7 ".to_string())]);
+        let mut vm = vm_with(vec![Value::Text(" 7 ".to_string().into())]);
         let instr = Instruction::new(Opcode::MustBeInt, 0, 0, 0);
         assert_eq!(must_be_int(&mut vm, &instr).unwrap(), Step::Next);
         assert_eq!(*vm.register(0).unwrap(), Value::Integer(7));
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn must_be_int_jumps_when_p2_set_and_conversion_fails() {
-        let mut vm = vm_with(vec![Value::Text("not a number".to_string())]);
+        let mut vm = vm_with(vec![Value::Text("not a number".to_string().into())]);
         let instr = Instruction::new(Opcode::MustBeInt, 0, 9, 0);
         assert_eq!(must_be_int(&mut vm, &instr).unwrap(), Step::Jump(9));
     }
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn register_as_i64_rejects_non_integer() {
-        let mut vm = vm_with(vec![Value::Text("x".to_string())]);
+        let mut vm = vm_with(vec![Value::Text("x".to_string().into())]);
         let instr = Instruction::new(Opcode::IfPos, 0, 20, 2);
         assert!(matches!(
             if_pos(&mut vm, &instr),
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(value_kind(&Value::Null), "NULL");
         assert_eq!(value_kind(&Value::Integer(1)), "INTEGER");
         assert_eq!(value_kind(&Value::Real(1.0)), "REAL");
-        assert_eq!(value_kind(&Value::Text("x".to_string())), "TEXT");
-        assert_eq!(value_kind(&Value::Blob(vec![])), "BLOB");
+        assert_eq!(value_kind(&Value::Text("x".to_string().into())), "TEXT");
+        assert_eq!(value_kind(&Value::Blob(vec![].into())), "BLOB");
     }
 }

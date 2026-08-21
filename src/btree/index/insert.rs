@@ -446,7 +446,7 @@ mod tests {
     }
 
     fn key(a: &str, rowid: i64) -> Vec<Value> {
-        vec![Value::Text(a.to_string()), Value::Integer(rowid)]
+        vec![Value::Text(a.to_string().into()), Value::Integer(rowid)]
     }
 
     #[test]
@@ -472,7 +472,7 @@ mod tests {
         let (vfs, header) = minimal_index_db(page_size);
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
 
-        let big = vec![Value::Text("x".repeat(2000)), Value::Integer(1)];
+        let big = vec![Value::Text("x".repeat(2000).into()), Value::Integer(1)];
         insert_entry(&mut pager, &header, 1, &big, TextEncoding::Utf8).unwrap();
 
         let raw = pager.get_page_mut(1).unwrap().clone();
@@ -530,7 +530,7 @@ mod tests {
         let texts: Vec<&str> = cells
             .iter()
             .map(|(k, _)| match &k[0] {
-                Value::Text(s) => s.as_str(),
+                Value::Text(s) => s.as_ref(),
                 _ => panic!("expected text"),
             })
             .collect();

@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn secondary_index_seek_matches_oracle() {
         let mut cursor = open_cursor("index.db", 3);
-        let target = [Value::Text("row number 100".to_string())];
+        let target = [Value::Text("row number 100".to_string().into())];
         let row = cursor.seek(&target, TextEncoding::Utf8).unwrap().unwrap();
         let key = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(text(&key[0]), "row number 100");

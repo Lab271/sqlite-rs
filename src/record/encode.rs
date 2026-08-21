@@ -118,7 +118,7 @@ fn serial_type_and_body(value: &Value, encoding: TextEncoding) -> (u64, Vec<u8>)
             (st, integer_body(*i, st))
         }
         Value::Real(r) => (7, r.to_be_bytes().to_vec()),
-        Value::Blob(b) => (blob_serial_type(b.len()), b.clone()),
+        Value::Blob(b) => (blob_serial_type(b.len()), b.to_vec()),
         Value::Text(s) => {
             let body = encode_text(s, encoding);
             (text_serial_type(body.len()), body)
@@ -179,10 +179,10 @@ mod tests {
             Value::Integer(i64::MAX),
             Value::Integer(i64::MIN),
             Value::Real(1.5),
-            Value::Text("hello".to_string()),
-            Value::Text(String::new()),
-            Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
-            Value::Blob(Vec::new()),
+            Value::Text("hello".to_string().into()),
+            Value::Text(String::new().into()),
+            Value::Blob(vec![0xde, 0xad, 0xbe, 0xef].into()),
+            Value::Blob(Vec::new().into()),
         ];
         let payload = encode_record(&values, TextEncoding::Utf8);
         assert_eq!(decode_record(&payload, TextEncoding::Utf8), Ok(values));
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn matches_spec_003_header_shape_for_a_multi_column_row() {
         // Mirrors the decoder's own fixture-construction convention.
-        let values = vec![Value::Integer(42), Value::Text("abc".to_string())];
+        let values = vec![Value::Integer(42), Value::Text("abc".to_string().into())];
         let payload = encode_record(&values, TextEncoding::Utf8);
         // header_len(1) + serial_type(42 -> type 1, 1 byte) + serial_type(abc -> 13+2*3=19, 1 byte) = 3
         assert_eq!(payload[0], 3);

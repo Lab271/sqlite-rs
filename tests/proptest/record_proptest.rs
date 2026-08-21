@@ -188,7 +188,7 @@ proptest! {
         let payload = record_bytes(&[(serial_type, &bytes)]);
         prop_assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
-            Ok(vec![Value::Blob(bytes.clone())])
+            Ok(vec![Value::Blob(bytes.clone().into())])
         );
     }
 
@@ -200,7 +200,7 @@ proptest! {
         let payload = record_bytes(&[(serial_type, bytes)]);
         prop_assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
-            Ok(vec![Value::Text(s.clone())])
+            Ok(vec![Value::Text(s.clone().into())])
         );
     }
 }

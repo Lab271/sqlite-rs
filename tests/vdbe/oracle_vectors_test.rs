@@ -49,7 +49,7 @@ fn expect_value(type_: &str, value_quoted: &str) -> Value {
         "null" => Value::Null,
         "integer" => Value::Integer(value_quoted.parse().unwrap()),
         "real" => Value::Real(value_quoted.parse().unwrap()),
-        "text" => Value::Text(value_quoted.to_string()),
+        "text" => Value::Text(value_quoted.to_string().into()),
         other => panic!("unhandled vector type {other}"),
     }
 }
