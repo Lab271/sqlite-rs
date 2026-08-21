@@ -191,18 +191,28 @@ where
         })
         .collect::<Result<_, CodegenError>>()?;
 
+    let group_key_p4s: Vec<P4> = select
+        .group_by
+        .iter()
+        .map(|expr| {
+            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let affinity = comparison_affinity(expr_affinity(&table_scope, expr), None);
+            p4_coll_seq(collation, affinity)
+        })
+        .collect();
+
     let boundary_label = em.new_label();
     let not_boundary_label = em.new_label();
     let first_row_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
     em.patch_p2(first_row_check, boundary_label);
-    for (&cur, &prev) in cur_key_regs.iter().zip(&prev_key_regs) {
+    for ((&cur, &prev), p4) in cur_key_regs.iter().zip(&prev_key_regs).zip(&group_key_p4s) {
         let a_null = em.new_label();
         let same_col = em.new_label();
         let a_null_addr = em.emit(Instruction::new(Opcode::IsNull, cur, 0, 0));
         em.patch_p2(a_null_addr, a_null);
         let b_null_addr = em.emit(Instruction::new(Opcode::IsNull, prev, 0, 0));
         em.patch_p2(b_null_addr, boundary_label);
-        let eq_addr = em.emit(Instruction::new(Opcode::Eq, cur, 0, prev));
+        let eq_addr = em.emit(Instruction::with_p4(Opcode::Eq, cur, 0, prev, p4.clone()));
         em.patch_p2(eq_addr, same_col);
         let goto_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
         em.patch_p2(goto_boundary, boundary_label);
@@ -546,6 +556,11 @@ pub(super) fn accumulate_agg(
             em.place(skip);
         }
         AggKind::Min | AggKind::Max => {
+            let arg_expr = agg.arg.as_ref().ok_or_else(|| CodegenError::Unsupported {
+                reason: "min/max require a single argument".to_string(),
+            })?;
+            let collation = collation_of(arg_expr);
+            let affinity = comparison_affinity(expr_affinity(scope, arg_expr), None);
             let arg_reg = arg_reg.ok_or_else(|| CodegenError::Unsupported {
                 reason: "min/max require a single argument".to_string(),
             })?;
@@ -561,7 +576,8 @@ pub(super) fn accumulate_agg(
             } else {
                 Opcode::Gt
             };
-            let cmp_addr = em.emit(Instruction::new(cmp_op, arg_reg, 0, agg.primary));
+            let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);
+            let cmp_addr = em.emit(Instruction::with_p4(cmp_op, arg_reg, 0, agg.primary, p4));
             em.patch_p2(cmp_addr, do_copy);
             let goto_after = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
             em.patch_p2(goto_after, after);

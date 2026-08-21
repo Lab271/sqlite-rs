@@ -684,6 +684,90 @@ fn group_by_single_column_count_matches_oracle() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// #265: `MIN`/`MAX` over `x COLLATE NOCASE` must compare
+/// case-insensitively rather than falling back to BINARY — ASCII
+/// binary order always puts every uppercase letter before every
+/// lowercase one, so `{'B', 'a', 'C'}` distinguishes the two: BINARY
+/// MIN/MAX pick `'B'`/`'a'`, NOCASE MIN/MAX pick `'a'`/`'C'`.
+#[test]
+fn min_max_aggregate_honours_collate_nocase() {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_agg_collate_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg("CREATE TABLE t(name TEXT); INSERT INTO t VALUES ('B'), ('a'), ('C');")
+        .status()
+        .expect("creating agg collate fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["name".to_string()],
+        column_types: vec!["TEXT".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT min(name COLLATE NOCASE), max(name COLLATE NOCASE) FROM t GROUP BY 'g';",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Text("a".to_string()),
+            Value::Text("C".to_string()),
+        ]]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #265: `GROUP BY x COLLATE NOCASE`'s boundary detection must compare
+/// case-insensitively too — otherwise rows the sorter placed adjacent
+/// under NOCASE (sort keys were already collation-aware) still split
+/// into separate groups.
+#[test]
+fn group_by_boundary_honours_collate_nocase() {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_group_by_collate_test_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg("CREATE TABLE t(name TEXT); INSERT INTO t VALUES ('Aa'), ('aa'), ('B');")
+        .status()
+        .expect("creating group by collate fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["name".to_string()],
+        column_types: vec!["TEXT".to_string()],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    let mut rows = our_rows(
+        &path,
+        &schema,
+        "SELECT count(*) FROM t GROUP BY name COLLATE NOCASE;",
+    )
+    .expect("query should compile and execute");
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn group_by_aggregates_sum_avg_min_max() {
     let (path, schema) = group_by_fixture("aggregates");

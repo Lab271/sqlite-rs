@@ -652,7 +652,7 @@ pub(crate) fn is_aggregate_call(name: &str, args: &crate::parser::ast::FunctionA
 /// its inner expression. Every other expression (literals, function
 /// calls, arithmetic) has no affinity of its own — matching SQLite,
 /// where only columns and casts do.
-fn expr_affinity(scope: &Scope, expr: &Expr) -> Option<Affinity> {
+pub(crate) fn expr_affinity(scope: &Scope, expr: &Expr) -> Option<Affinity> {
     match &expr.kind {
         ExprKind::Column { table, name, .. } => {
             let (_, idx, schema, _) = scope.resolve(table.as_deref(), name).ok()?;
