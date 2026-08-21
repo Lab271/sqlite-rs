@@ -843,7 +843,7 @@ cursor machinery is introduced by this requirement.
 
 **Implementation:** `src/vdbe/exec.rs::agg_step`, `src/vdbe/exec.rs::agg_final`,
 `src/vdbe/aggregate.rs` (registry: `count`/`sum`/`avg`/`min`/`max`),
-`src/codegen/select/aggregate.rs::emit_agg_step` (GROUP BY/plain-aggregate codegen, #263)
+`src/codegen/select/aggregate/accum.rs::emit_agg_step` (GROUP BY/plain-aggregate codegen, #263)
 
 #### Scenario: AggStep accumulates across repeated calls into the same context slot
 
