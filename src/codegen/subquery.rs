@@ -100,16 +100,16 @@ fn multi_result_exprs(subselect: &Select) -> Result<Vec<&Expr>, CodegenError> {
 /// Compiles each of `exprs` into a value register, requiring the
 /// results land in a contiguous range (mirrors `select.rs`'s
 /// `MakeRecord` contiguity check) — returns `(first register, count)`.
-fn compile_contiguous<'e>(
+fn compile_contiguous(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     scope: &Scope,
-    exprs: impl IntoIterator<Item = &'e Expr>,
+    exprs: impl IntoIterator<Item = impl std::borrow::Borrow<Expr>>,
     what: &str,
 ) -> Result<(i32, i32), CodegenError> {
     let mut regs = Vec::new();
     for e in exprs {
-        regs.push(compile_value(em, reg, scope, e)?);
+        regs.push(compile_value(em, reg, scope, e.borrow())?);
     }
     let Some(&first) = regs.first() else {
         return Err(CodegenError::Unsupported {
