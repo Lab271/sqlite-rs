@@ -131,6 +131,41 @@
       "ours_ns": 350312771.0,
       "oracle_ns": 129876166.5,
       "ratio_ours_over_oracle": 2.697282961458521
+    },
+    {
+      "scenario": "correlated_subquery",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 1497924375.0,
+      "oracle_ns": 2014133.3399999999,
+      "ratio_ours_over_oracle": 743.7066579713139
+    },
+    {
+      "scenario": "agg_subquery",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 61011333.0,
+      "oracle_ns": 268407.233058608,
+      "ratio_ours_over_oracle": 227.30882586415947
+    },
+    {
+      "scenario": "agg_subquery",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 2924027812.5,
+      "oracle_ns": 14412526.125,
+      "ratio_ours_over_oracle": 202.8810069199441
+    },
+    {
+      "scenario": "in_subquery_agg_outer",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 5691282.388888889,
+      "oracle_ns": 389562.252787068,
+      "ratio_ours_over_oracle": 14.609429810438291
+    },
+    {
+      "scenario": "in_subquery_agg_outer",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 275862125.0,
+      "oracle_ns": 25890354.25,
+      "ratio_ours_over_oracle": 10.655015467777927
     }
   ],
   "tier2_cli": []
