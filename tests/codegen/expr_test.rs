@@ -225,10 +225,7 @@ fn multi_arg_function_call_compiles_with_contiguous_registers() {
 fn zero_arg_function_call_compiles() {
     let (path, schema) = one_row_fixture();
     let out = run_select(&path, &schema, "SELECT sqlite_version() FROM t");
-    assert_eq!(
-        out,
-        vec![vec![Value::Text(env!("ORACLE_VERSION").to_string())]]
-    );
+    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string())]]);
 }
 
 #[test]
@@ -243,10 +240,7 @@ fn from_less_select_compiles_a_bare_expression_list() {
     };
     let program = compile_select(&select, &schema).unwrap();
     let out = execute(&program).unwrap();
-    assert_eq!(
-        out,
-        vec![vec![Value::Text(env!("ORACLE_VERSION").to_string())]]
-    );
+    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string())]]);
 }
 
 #[test]
