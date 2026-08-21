@@ -125,6 +125,16 @@ const SCENARIOS: &[(&str, &str)] = &[
         "agg_subquery",
         "SELECT count(*) FROM bench_data WHERE x > (SELECT avg(x) FROM bench_data)",
     ),
+    // #323: the `IN (SELECT ...)` counterpart of `agg_subquery` above —
+    // same `compile_grouped_scan` hoist gap (#322), different subquery
+    // shape. `hoist_uncorrelated_where_subqueries` already recognizes
+    // `InSubquery` conjuncts, so #322's fix covers this shape too with
+    // no further codegen change.
+    (
+        "in_subquery_agg_outer",
+        "SELECT count(*) FROM bench_data \
+         WHERE bucket IN (SELECT code FROM bench_lookup WHERE code < 10)",
+    ),
 ];
 
 /// Aborts the bench run on a setup/execution failure. A bare `panic!` is

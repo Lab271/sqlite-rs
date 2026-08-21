@@ -38,6 +38,8 @@ TIER1_SCENARIOS = [
     "correlated_subquery",
     # #322: uncorrelated aggregate subquery inside an aggregate outer query.
     "agg_subquery",
+    # #323: IN (SELECT ...) subquery inside an aggregate outer query.
+    "in_subquery_agg_outer",
 ]
 FIXTURES = ["bench_1mb.db", "bench_50mb.db"]
 

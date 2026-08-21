@@ -344,6 +344,32 @@ fn uncorrelated_aggregate_subquery_where_clause_hoists_before_outer_rewind() {
     );
 }
 
+/// #323 regression: same root cause as #322 above (`compile_grouped_scan`
+/// never getting #306's hoist wiring), but for the `IN (SELECT ...)`
+/// shape instead of a scalar/aggregate comparison — confirmed to blow
+/// the VDBE step cap on a real-sized table before this fix, in exactly
+/// the way `tests/performance/engine.rs`'s `subquery` scenario comment
+/// already predicted for the `IN` form. `hoist_uncorrelated_where_subqueries`
+/// already handles `InSubquery` conjuncts generically (`try_hoist_conjunct`),
+/// so the `compile_grouped_scan` wiring added for #322 fixes this shape
+/// too, with no further codegen change — this test only proves that.
+#[test]
+fn uncorrelated_in_subquery_where_clause_hoists_before_outer_rewind_in_aggregate_scan() {
+    let db = subquery_fixture_db("hoist_agg_in_subquery");
+    let program = explain(
+        &db,
+        "SELECT count(*) FROM t WHERE id IN (SELECT a_id FROM other)",
+    );
+    let eph_addr =
+        first_opcode_line(&program, "OpenEphemeral").expect("expected an OpenEphemeral opcode");
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        eph_addr < rewind_addr,
+        "expected the IN-subquery's OpenEphemeral (addr {eph_addr}) to be hoisted before the \
+         outer aggregate scan's Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}
+
 /// A correlated subquery (referencing the enclosing query's `t.id`
 /// from inside the subquery's own WHERE clause) must fail cleanly with
 /// this pass's documented "correlated subqueries are not yet
