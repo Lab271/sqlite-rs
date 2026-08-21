@@ -68,6 +68,9 @@ pub enum ExecError {
     #[error("program exceeded the maximum step count ({MAX_STEPS}) without halting")]
     StepLimitExceeded,
 
+    #[error("{opcode}: ephemeral table/index exceeded the maximum row count ({limit})")]
+    EphemeralRowLimitExceeded { opcode: &'static str, limit: usize },
+
     #[error("statement halted with SQLite result code {code}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Halted { code: i32, message: Option<String> },
 
