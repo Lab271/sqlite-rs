@@ -78,14 +78,14 @@ fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
 
 fn row_payload(b: &str) -> Vec<u8> {
     encode_record(
-        &[Value::Null, Value::Text(b.to_string())],
+        &[Value::Null, Value::Text(b.to_string().into())],
         TextEncoding::Utf8,
     )
 }
 
 fn row_payload_blob(len: usize) -> Vec<u8> {
     encode_record(
-        &[Value::Null, Value::Blob(vec![0xab; len])],
+        &[Value::Null, Value::Blob(vec![0xab; len].into())],
         TextEncoding::Utf8,
     )
 }

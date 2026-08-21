@@ -81,7 +81,7 @@ fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
 /// convention `src/btree.rs` documents on the read side).
 fn row_payload(b: &str) -> Vec<u8> {
     encode_record(
-        &[Value::Null, Value::Text(b.to_string())],
+        &[Value::Null, Value::Text(b.to_string().into())],
         TextEncoding::Utf8,
     )
 }
@@ -351,11 +351,11 @@ fn insert_into_page_one_root_preserves_the_file_header_across_a_split() {
             let sql = format!("CREATE TRIGGER {name} AFTER INSERT ON t BEGIN SELECT 1; END");
             let payload = encode_record(
                 &[
-                    Value::Text("trigger".to_string()),
-                    Value::Text(name.clone()),
-                    Value::Text("t".to_string()),
+                    Value::Text("trigger".to_string().into()),
+                    Value::Text(name.clone().into()),
+                    Value::Text("t".to_string().into()),
                     Value::Integer(0),
-                    Value::Text(sql),
+                    Value::Text(sql.into()),
                 ],
                 TextEncoding::Utf8,
             );
