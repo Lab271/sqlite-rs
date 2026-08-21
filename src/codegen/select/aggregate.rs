@@ -386,12 +386,23 @@ where
         .iter()
         .map(|expr| order_by_target_for_expr(expr, schema))
         .collect::<Result<_, _>>()?;
-    if group_targets
+    // Every target must be a bare column — a computed GROUP BY
+    // expression has no corresponding index column to match against.
+    // Collected into `group_col_indices` up front (rather than
+    // re-matching `OrderByTarget::Column` inside the per-row loop
+    // below) so that loop has no "already-rejected, can't happen"
+    // branch to justify with an `unreachable!` the qualified-subset
+    // gate (`make mvl-limit`) doesn't allow.
+    let Some(group_col_indices): Option<Vec<usize>> = group_targets
         .iter()
-        .any(|t| matches!(t, OrderByTarget::Expr(_)))
-    {
+        .map(|t| match t {
+            OrderByTarget::Column(idx) => Some(*idx),
+            OrderByTarget::Expr(_) => None,
+        })
+        .collect()
+    else {
         return Ok(false);
-    }
+    };
     let plans: Vec<OrderByPlan> = select
         .group_by
         .iter()
@@ -476,16 +487,13 @@ where
     em.patch_p2(table_seek_addr, row_skip);
 
     // Compute this row's GROUP BY key straight off the table cursor —
-    // every target here is `OrderByTarget::Column` (checked above), so
-    // this is always a plain column read, never `compile_value`.
-    let cur_key_regs: Vec<i32> = group_targets
+    // `group_col_indices` (checked above) means this is always a plain
+    // column read, never `compile_value`.
+    let cur_key_regs: Vec<i32> = group_col_indices
         .iter()
-        .map(|target| {
-            let OrderByTarget::Column(idx) = target else {
-                unreachable!("non-column GROUP BY target already rejected above");
-            };
+        .map(|&idx| {
             let r = reg.alloc();
-            read_pseudo_column(em, schema, cursors.table, *idx, r)?;
+            read_pseudo_column(em, schema, cursors.table, idx, r)?;
             Ok(r)
         })
         .collect::<Result<_, CodegenError>>()?;
