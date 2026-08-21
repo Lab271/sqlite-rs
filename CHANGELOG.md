@@ -6,6 +6,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+test: assert an aggregate in tier3's joins-and-aggregates stub (#267).
+`t3_multi_table_joins_and_aggregates` claimed aggregate coverage by name
+and ignore-reason but exercised only JOIN + ORDER BY/DISTINCT/
+`INSERT ... SELECT`. Added a `GROUP BY` + `count(*)` assertion; aggregate
+functions combined with a JOIN aren't supported by codegen yet, so it
+runs against a single table rather than the joined query — tracked as a
+known coverage gap in #268.
+
 refactor: consolidate aggregate codegen onto `AggStep`/`AggFinal` (#263,
 ADR-0019). `src/codegen/select/aggregate.rs`'s `GROUP BY`/plain-aggregate
 compilation (`compile_grouped_scan`) now emits `Opcode::AggStep`/
