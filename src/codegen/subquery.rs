@@ -762,11 +762,6 @@ fn walk_expr_for_correlation(
     if *correlated {
         return;
     }
-    macro_rules! walk {
-        ($e:expr) => {
-            walk_expr_for_correlation($e, schema, own_qualifiers, correlated)
-        };
-    }
     match &expr.kind {
         ExprKind::Column { table, name, .. } => {
             let qualifier_ok = match table {
@@ -781,7 +776,7 @@ fn walk_expr_for_correlation(
         ExprKind::FunctionCall { args, .. } => {
             if let FunctionArgs::List(list) = args {
                 for a in list {
-                    walk!(a);
+                    walk_expr_for_correlation(a, schema, own_qualifiers, correlated);
                 }
             }
         }
@@ -789,22 +784,22 @@ fn walk_expr_for_correlation(
         | ExprKind::IsNull { expr: e, .. }
         | ExprKind::Cast { expr: e, .. }
         | ExprKind::Collate { expr: e, .. }
-        | ExprKind::Paren(e) => walk!(e),
+        | ExprKind::Paren(e) => walk_expr_for_correlation(e, schema, own_qualifiers, correlated),
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::Is { lhs, rhs, .. } => {
-            walk!(lhs);
-            walk!(rhs);
+            walk_expr_for_correlation(lhs, schema, own_qualifiers, correlated);
+            walk_expr_for_correlation(rhs, schema, own_qualifiers, correlated);
         }
         ExprKind::Between {
             expr: e, lo, hi, ..
         } => {
-            walk!(e);
-            walk!(lo);
-            walk!(hi);
+            walk_expr_for_correlation(e, schema, own_qualifiers, correlated);
+            walk_expr_for_correlation(lo, schema, own_qualifiers, correlated);
+            walk_expr_for_correlation(hi, schema, own_qualifiers, correlated);
         }
         ExprKind::In { expr: e, list, .. } => {
-            walk!(e);
+            walk_expr_for_correlation(e, schema, own_qualifiers, correlated);
             for item in list {
-                walk!(item);
+                walk_expr_for_correlation(item, schema, own_qualifiers, correlated);
             }
         }
         ExprKind::Like {
@@ -813,10 +808,10 @@ fn walk_expr_for_correlation(
             escape,
             ..
         } => {
-            walk!(e);
-            walk!(pattern);
+            walk_expr_for_correlation(e, schema, own_qualifiers, correlated);
+            walk_expr_for_correlation(pattern, schema, own_qualifiers, correlated);
             if let Some(esc) = escape {
-                walk!(esc);
+                walk_expr_for_correlation(esc, schema, own_qualifiers, correlated);
             }
         }
         ExprKind::Case {
@@ -825,14 +820,14 @@ fn walk_expr_for_correlation(
             else_,
         } => {
             if let Some(o) = operand {
-                walk!(o);
+                walk_expr_for_correlation(o, schema, own_qualifiers, correlated);
             }
             for (w, t) in whens {
-                walk!(w);
-                walk!(t);
+                walk_expr_for_correlation(w, schema, own_qualifiers, correlated);
+                walk_expr_for_correlation(t, schema, own_qualifiers, correlated);
             }
             if let Some(e) = else_ {
-                walk!(e);
+                walk_expr_for_correlation(e, schema, own_qualifiers, correlated);
             }
         }
         // Nested subquery-bearing expressions: conservatively correlated
@@ -895,28 +890,38 @@ fn top_level_and_conjuncts(expr: &Expr) -> Vec<&Expr> {
 /// Recognizes and materializes one hoistable conjunct: a top-level
 /// `expr IN (SELECT ...)`, or a top-level comparison with a scalar
 /// subquery operand — the two shapes #306's reproduction actually hits.
-/// Returns the subquery's own `Select` (for the caller to key the
-/// returned map by [`select_id`]) plus what got precomputed, or `None`
-/// if `conjunct` doesn't match either shape or its subquery turns out to
-/// be correlated (in which case nothing is emitted and the caller's
-/// existing per-row path handles it unchanged).
-fn try_hoist_conjunct<'e>(
+/// Returns the subquery's own [`select_id`] (for the caller to key the
+/// returned map) plus what got precomputed, or `None` if `conjunct`
+/// doesn't match either shape or its subquery turns out to be
+/// correlated (in which case nothing is emitted and the caller's
+/// existing per-row path handles it unchanged). Returns the `usize` key
+/// rather than the `&Select` itself — `conjunct`/`outer_scope` are two
+/// independent borrowed parameters, so the qualified subset's ban on
+/// explicit lifetimes has no elidable shape that could tie an `&Select`
+/// return to `conjunct`'s borrow alone.
+fn try_hoist_conjunct(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     outer_scope: &Scope,
-    conjunct: &'e Expr,
-) -> Result<Option<(&'e Select, HoistedSubquery)>, CodegenError> {
+    conjunct: &Expr,
+) -> Result<Option<(usize, HoistedSubquery)>, CodegenError> {
     match &conjunct.kind {
         ExprKind::InSubquery { subquery, .. } if subquery_hoistable(subquery, outer_scope) => {
             let eph_cursor = materialize_in_subquery_index(em, reg, outer_scope, subquery)?;
-            Ok(Some((subquery, HoistedSubquery::In { eph_cursor })))
+            Ok(Some((
+                select_id(subquery),
+                HoistedSubquery::In { eph_cursor },
+            )))
         }
         ExprKind::Binary { op, lhs, rhs } if is_comparison_op(*op) => {
             for side in [lhs.as_ref(), rhs.as_ref()] {
                 if let ExprKind::Subquery(subquery) = &side.kind {
                     if subquery_hoistable(subquery, outer_scope) {
                         let dest = compile_scalar_subquery(em, reg, outer_scope, subquery)?;
-                        return Ok(Some((subquery, HoistedSubquery::Scalar { reg: dest })));
+                        return Ok(Some((
+                            select_id(subquery),
+                            HoistedSubquery::Scalar { reg: dest },
+                        )));
                     }
                 }
             }
@@ -956,8 +961,8 @@ pub(crate) fn hoist_uncorrelated_where_subqueries(
 ) -> Result<HashMap<usize, HoistedSubquery>, CodegenError> {
     let mut out = HashMap::new();
     for conjunct in top_level_and_conjuncts(where_clause) {
-        if let Some((subquery, hoisted)) = try_hoist_conjunct(em, reg, outer_scope, conjunct)? {
-            out.insert(select_id(subquery), hoisted);
+        if let Some((key, hoisted)) = try_hoist_conjunct(em, reg, outer_scope, conjunct)? {
+            out.insert(key, hoisted);
         }
     }
     Ok(out)
