@@ -11,7 +11,7 @@
 help: ## List targets in this Makefile
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
-point-lookup: ## Quick wall-clock demo: SeekRowid vs full scan (#137, no criterion/oracle needed)
+point-lookup: ## Quick wall-clock demos: SeekRowid vs full scan (#137), indexed vs unindexed JOIN lookup (V4) — no criterion/oracle needed
 	cargo test --locked --manifest-path ../../Cargo.toml --test point_lookup_perf -- --nocapture
 
 # The criterion bench (engine.rs) needs the pinned-oracle-linked rusqlite
