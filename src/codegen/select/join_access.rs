@@ -206,44 +206,18 @@ pub(super) fn joined_column_offset(scope: &Scope, binding_idx: usize) -> usize {
 }
 
 /// Resolves `table`/`name` (a bare, possibly-qualified column reference)
-/// to `(binding_idx, local_idx)` against `scope.tables` — the same
-/// qualifier-or-ambiguity rule as [`Scope::resolve`], but returning the
-/// binding's position (needed to compute an absolute offset into the
-/// flat joined row) rather than its `cursor`.
+/// to `(binding_idx, local_idx)` against `scope.tables` — delegates the
+/// qualifier-match/ambiguity rule itself to
+/// [`Scope::resolve_own_binding_index`] (the same logic
+/// [`Scope::resolve`] uses), only adding the binding-local column index
+/// [`Scope::resolve`] doesn't need (its `cursor`-based callers read
+/// through a per-binding cursor instead of an absolute offset).
 pub(super) fn resolve_scope_column(
     scope: &Scope,
     table: Option<&str>,
     name: &str,
 ) -> Result<(usize, usize), CodegenError> {
-    if let Some(table) = table {
-        let (i, binding) = scope
-            .tables
-            .iter()
-            .enumerate()
-            .find(|(_, b)| b.matches_qualifier(table))
-            .ok_or_else(|| CodegenError::UnknownColumn {
-                name: format!("{table}.{name}"),
-            })?;
-        let idx =
-            column_index(&binding.schema, name).ok_or_else(|| CodegenError::UnknownColumn {
-                name: format!("{table}.{name}"),
-            })?;
-        return Ok((i, idx));
-    }
-    let mut found: Option<usize> = None;
-    for (i, binding) in scope.tables.iter().enumerate() {
-        if column_index(&binding.schema, name).is_some() {
-            if found.is_some() {
-                return Err(CodegenError::AmbiguousColumn {
-                    name: name.to_string(),
-                });
-            }
-            found = Some(i);
-        }
-    }
-    let i = found.ok_or_else(|| CodegenError::UnknownColumn {
-        name: name.to_string(),
-    })?;
+    let i = scope.resolve_own_binding_index(table, name)?;
     let idx = scope
         .tables
         .get(i)
