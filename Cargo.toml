@@ -114,7 +114,7 @@ path = "tests/proptest/btree_proptest.rs"
 
 [dev-dependencies]
 proptest = "1"
-criterion = "0.5"
+criterion = "0.8"
 
 # Deliberately no `bundled` feature: the point of tier-1 benching is
 # comparing against the *pinned* oracle (same one gen_fixtures.sh and the
