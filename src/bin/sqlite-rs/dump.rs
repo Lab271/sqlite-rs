@@ -2,6 +2,7 @@
 //! table dump to stdout (`-list`-style, LF-terminated) and per-table CSV
 //! export to disk, both through [`dump_database`].
 
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,12 +18,20 @@ pub fn run_dump(path: &Path) -> ExitCode {
         Err(e) => return fatal(path, &e),
     };
 
+    let mut out = BufWriter::new(io::stdout().lock());
     for table in &result.tables {
-        println!("{}", table.sql);
+        if let Err(e) = writeln!(out, "{}", table.sql) {
+            return fatal(path, &e);
+        }
         for row in &table.rows {
             let rendered: Vec<String> = row.iter().map(format_list_value).collect();
-            println!("{}", rendered.join("|"));
+            if let Err(e) = writeln!(out, "{}", rendered.join("|")) {
+                return fatal(path, &e);
+            }
         }
+    }
+    if let Err(e) = out.flush() {
+        return fatal(path, &e);
     }
 
     for warning in &result.warnings {

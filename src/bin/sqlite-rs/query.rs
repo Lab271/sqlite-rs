@@ -227,11 +227,13 @@ fn finish_query(
         Err(e) => return fatal(path, &e),
     };
 
-    let mut stdout = io::stdout().lock();
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
     for row in &rows {
         if csv {
             let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
-            print!("{}{CSV_ROW_TERMINATOR}", rendered.join(","));
+            if let Err(e) = write!(stdout, "{}{CSV_ROW_TERMINATOR}", rendered.join(",")) {
+                return fatal(path, &e);
+            }
         } else {
             // `-list` mode: raw blob bytes may not be valid UTF-8, so this
             // writes bytes directly rather than going through `String`.
@@ -240,6 +242,9 @@ fn finish_query(
                 return fatal(path, &e);
             }
         }
+    }
+    if let Err(e) = stdout.flush() {
+        return fatal(path, &e);
     }
     ExitCode::SUCCESS
 }
