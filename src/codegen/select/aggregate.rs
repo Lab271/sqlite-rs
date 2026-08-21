@@ -640,6 +640,9 @@ where
     if let Some(limit) = limit {
         emit_offset_guard(em, limit, skip_label);
     }
+    if let Some(limit) = limit {
+        emit_limit_guard(em, limit, end_label);
+    }
 
     let rewritten_columns: Vec<ResultColumn> = select
         .columns
@@ -675,9 +678,6 @@ where
         catalog,
     )?;
     sink(em, reg, proj_first, i32::try_from(proj_count).unwrap_or(0))?;
-    if let Some(limit) = limit {
-        emit_limit_guard(em, limit, end_label);
-    }
     em.place(skip_label);
     Ok(())
 }

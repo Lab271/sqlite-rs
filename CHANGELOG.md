@@ -25,6 +25,18 @@ committed `tools/sqllogictest-status.json` baseline had gone stale
 while this runner was broken, silently, since CI's own `sqllogictest`
 step is `continue-on-error: true` (informational, not a gate).
 
+fix: `LIMIT 0` returned every matching row instead of none. Every
+scan shape's LIMIT counter (`src/codegen/select/limit_scan.rs`'s
+`emit_limit_guard`, reused by joins, aggregates, and the `SeekRowid`
+fast path) checked `DecrJumpZero` *after* emitting a row, so a `LIMIT
+0` counter — starting at exactly `0` — could never stop anything
+before the first row already leaked through. Restructured as a
+check-before-act guard (mirroring `emit_offset_guard`'s existing
+shape): `IfNotZero` gates whether a row is emitted at all, decrementing
+only while positive, so a negative `LIMIT` (SQLite's "no limit"
+convention) still falls through unbounded exactly as before. Caught
+while benchmarking #129, unrelated to that ticket's sorter change.
+
 chore: cap ephemeral table/index materialization at 1M rows (#269).
 `EphemeralTableState.rows`/`EphemeralState.entries` (`src/vdbe/cursor.rs`)
 backed a plain in-memory `Vec`/`BTreeMap` with no ceiling — a
