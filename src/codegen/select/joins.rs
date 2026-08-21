@@ -7,6 +7,7 @@ use super::join_full::compile_full_join_two_table;
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard, LimitState};
 use super::order_by::SYNTHETIC_SPAN;
 use super::*;
+use crate::parser::ast::Join;
 /// Compiles a joined `select` (#237: `INNER`/plain `JOIN`, `LEFT
 /// [OUTER] JOIN`, `CROSS JOIN`) against `schemas` — one schema per
 /// table in `select.from`'s order: the first table, then each
@@ -242,43 +243,7 @@ where
             .ok_or_else(|| CodegenError::Unsupported {
                 reason: "join level out of range".to_string(),
             })?;
-        let constraint = match &join.constraint {
-            Some(JoinConstraint::On(e)) => Some(e.clone()),
-            Some(JoinConstraint::Using(cols)) => {
-                let (expr, shared) = synthesize_equality_constraint(left, right, cols, true)?;
-                if let Some(slot) = dedup_star.get_mut(right_idx) {
-                    slot.extend(shared);
-                }
-                expr
-            }
-            None if join.natural => {
-                let shared_names: Vec<String> = right
-                    .schema
-                    .columns
-                    .iter()
-                    .filter(|name| {
-                        left.iter().any(|b| {
-                            b.schema
-                                .columns
-                                .iter()
-                                .any(|c| c.eq_ignore_ascii_case(name))
-                        })
-                    })
-                    .cloned()
-                    .collect();
-                if shared_names.is_empty() {
-                    None
-                } else {
-                    let (expr, shared) =
-                        synthesize_equality_constraint(left, right, &shared_names, false)?;
-                    if let Some(slot) = dedup_star.get_mut(right_idx) {
-                        slot.extend(shared);
-                    }
-                    expr
-                }
-            }
-            None => None,
-        };
+        let constraint = resolve_join_constraint(join, left, right, right_idx, &mut dedup_star)?;
         constraints.push(constraint);
     }
 
@@ -607,6 +572,61 @@ pub(super) fn synthesize_equality_constraint(
     Ok((acc, shared))
 }
 
+/// Resolves one `Join`'s constraint into an `ON`-equivalent `Expr` (or
+/// `None` for an unconditional `CROSS`/no-shared-column `NATURAL` join):
+/// an explicit `ON` clause is used as-is, `USING (...)`/`NATURAL` both
+/// route through [`synthesize_equality_constraint`] (`NATURAL` first
+/// computing its own shared-column-name list), and either populates
+/// `dedup_star[right_idx]` with the columns `SELECT *` must dedup.
+/// Shared by [`compile_select_joined_scan`]'s N-way join-level loop and
+/// [`compile_full_join_two_table`]'s dedicated two-table path — both used
+/// to hand-fork this same match/dedup-bookkeeping block.
+pub(super) fn resolve_join_constraint(
+    join: &Join,
+    left: &[TableBinding],
+    right: &TableBinding,
+    right_idx: usize,
+    dedup_star: &mut [std::collections::HashSet<String>],
+) -> Result<Option<Expr>, CodegenError> {
+    match &join.constraint {
+        Some(JoinConstraint::On(e)) => Ok(Some(e.clone())),
+        Some(JoinConstraint::Using(cols)) => {
+            let (expr, shared) = synthesize_equality_constraint(left, right, &cols[..], true)?;
+            if let Some(slot) = dedup_star.get_mut(right_idx) {
+                slot.extend(shared);
+            }
+            Ok(expr)
+        }
+        None if join.natural => {
+            let shared_names: Vec<String> = right
+                .schema
+                .columns
+                .iter()
+                .filter(|name| {
+                    left.iter().any(|b| {
+                        b.schema
+                            .columns
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(name))
+                    })
+                })
+                .cloned()
+                .collect();
+            if shared_names.is_empty() {
+                Ok(None)
+            } else {
+                let (expr, shared) =
+                    synthesize_equality_constraint(left, right, &shared_names, false)?;
+                if let Some(slot) = dedup_star.get_mut(right_idx) {
+                    slot.extend(shared);
+                }
+                Ok(expr)
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 /// One constraint checked while iterating `exec_bindings[check_level]`'s
 /// own loop (see [`compile_join_level`]): `constraint` gates whether
 /// recursion continues to the next level (`None` means unconditional —
@@ -689,19 +709,66 @@ pub(super) fn compile_join_level<F>(
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
+    compile_join_level_traverse(
+        em,
+        reg,
+        exec_bindings,
+        orig_bindings,
+        pos_of,
+        levels,
+        dedup_star,
+        null_mask,
+        matched_regs,
+        level,
+        catalog,
+        &mut |em, reg, scope| {
+            emit_join_final_row(
+                em,
+                reg,
+                select,
+                scope,
+                end_label,
+                limit,
+                distinct_cursor,
+                sink,
+            )
+        },
+    )
+}
+
+/// Shared nested-loop/outer-join traversal behind both [`compile_join_level`]
+/// (the unsorted path) and [`super::join_access::compile_join_level_for_sort`]
+/// (#250's `ORDER BY`+JOIN sorted path) — every level's `Rewind`/`Next` loop,
+/// `ON`-condition checks, `#243` single-check-access seek optimization, and
+/// `LEFT`/`RIGHT` "matched"-register/null-extension bookkeeping lives here
+/// exactly once, so the sorted path can no longer silently miss the seek
+/// optimization the unsorted path gets (the bug this extraction fixes: the
+/// two paths used to be hand-forked copies, and only one of them ever grew
+/// the #243 seek). `leaf` is invoked once per candidate combination (i.e.
+/// once `level == exec_bindings.len()`) with the fully-resolved [`Scope`];
+/// each caller supplies its own innermost emission (direct row emit for the
+/// unsorted path, sort-buffer write for the sorted path) via `leaf`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_join_level_traverse<L>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    exec_bindings: &[TableBinding],
+    orig_bindings: &[TableBinding],
+    pos_of: &[usize],
+    levels: &[LevelPlan],
+    dedup_star: &[std::collections::HashSet<String>],
+    null_mask: &mut Vec<bool>,
+    matched_regs: &mut Vec<Option<i32>>,
+    level: usize,
+    catalog: &[TableSchema],
+    leaf: &mut L,
+) -> Result<(), CodegenError>
+where
+    L: FnMut(&mut Emitter, &mut RegAlloc, &Scope) -> Result<(), CodegenError>,
+{
     if level == exec_bindings.len() {
         let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-        emit_join_final_row(
-            em,
-            reg,
-            select,
-            &scope,
-            end_label,
-            limit,
-            distinct_cursor,
-            sink,
-        )?;
-        return Ok(());
+        return leaf(em, reg, &scope);
     }
 
     let Some(binding) = exec_bindings.get(level) else {
@@ -788,10 +855,9 @@ where
                 em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
             }
             let next_level = level.saturating_add(1);
-            compile_join_level(
+            compile_join_level_traverse(
                 em,
                 reg,
-                select,
                 exec_bindings,
                 orig_bindings,
                 pos_of,
@@ -800,11 +866,8 @@ where
                 null_mask,
                 matched_regs,
                 next_level,
-                end_label,
-                limit,
-                distinct_cursor,
                 catalog,
-                sink,
+                leaf,
             )?;
             em.place(miss);
         }
@@ -840,10 +903,9 @@ where
                 }
             }
             let next_level = level.saturating_add(1);
-            compile_join_level(
+            compile_join_level_traverse(
                 em,
                 reg,
-                select,
                 exec_bindings,
                 orig_bindings,
                 pos_of,
@@ -852,11 +914,8 @@ where
                 null_mask,
                 matched_regs,
                 next_level,
-                end_label,
-                limit,
-                distinct_cursor,
                 catalog,
-                sink,
+                leaf,
             )?;
             em.place(skip);
             let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
@@ -887,10 +946,9 @@ where
                 *slot = true;
             }
         }
-        compile_join_level(
+        compile_join_level_traverse(
             em,
             reg,
-            select,
             exec_bindings,
             orig_bindings,
             pos_of,
@@ -899,11 +957,8 @@ where
             null_mask,
             matched_regs,
             end.saturating_add(1),
-            end_label,
-            limit,
-            distinct_cursor,
             catalog,
-            sink,
+            leaf,
         )?;
         for lv in start..=end {
             if let Some(slot) = null_mask.get_mut(lv) {

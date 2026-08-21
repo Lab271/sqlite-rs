@@ -547,6 +547,10 @@ pub(crate) fn compile_exists(
 /// that `NULL IN (<empty subquery result>)` is definitely false — this
 /// matches the literal-list `IN` form's own documented NULL-handling
 /// shape in this compiler.
+///
+/// A strict N=1 case of [`compile_in_subquery_multi`] — this is a thin
+/// wrapper over it with a one-element LHS tuple, so both forms share the
+/// exact same ephemeral-index/`Found` codegen.
 pub(crate) fn compile_in_subquery(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -556,90 +560,15 @@ pub(crate) fn compile_in_subquery(
     negated: bool,
     targets: CondTargets,
 ) -> Result<(), CodegenError> {
-    let catalog = outer_scope.catalog.clone();
-    let resolved = resolve_subquery_schema(subselect, &catalog)?;
-    let Some(schema) = resolved else {
-        return Err(CodegenError::Unsupported {
-            reason: "IN (SELECT ...) requires a FROM clause".to_string(),
-        });
-    };
-    let col_expr = single_result_expr(subselect)?;
-    let sub_cursor = reg.alloc_cursor();
-    let sub_scope = Scope::single(&schema, sub_cursor)
-        .with_catalog(catalog)
-        .with_outer(outer_scope.clone());
-
-    let l = compile_value(em, reg, outer_scope, lhs)?;
-
-    let eph_cursor = reg.alloc_cursor();
-    em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
-
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        sub_cursor,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
-    let scan_end = em.new_label();
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
-    em.patch_p2(rewind_addr, scan_end);
-    let loop_start = em.new_label();
-    em.place(loop_start);
-
-    let skip = em.new_label();
-    if let Some(where_expr) = &subselect.where_clause {
-        compile_cond(
-            em,
-            reg,
-            &sub_scope,
-            where_expr,
-            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
-        )?;
-    }
-    let v = compile_value(em, reg, &sub_scope, col_expr)?;
-    em.emit(Instruction::with_p4(
-        Opcode::IdxInsert,
-        eph_cursor,
-        v,
-        0,
-        P4::Int(1),
-    ));
-    em.place(skip);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, sub_cursor, 0, 0));
-    em.patch_p2(next_addr, loop_start);
-    em.place(scan_end);
-
-    let (true_label, true_is_new) = crate::codegen::expr::ensure_label(em, targets.on_true);
-    let (false_label, false_is_new) = crate::codegen::expr::ensure_label(em, targets.on_false);
-    let (found_label, notfound_label) = if negated {
-        (false_label, true_label)
-    } else {
-        (true_label, false_label)
-    };
-    let null_label = match targets.on_null {
-        NullTarget::True => true_label,
-        NullTarget::False => false_label,
-    };
-
-    let null_addr = em.emit(Instruction::new(Opcode::IsNull, l, 0, 0));
-    em.patch_p2(null_addr, null_label);
-    let found_addr = em.emit(Instruction::with_p4(
-        Opcode::Found,
-        eph_cursor,
-        0,
-        l,
-        P4::Int(1),
-    ));
-    em.patch_p2(found_addr, found_label);
-    em.goto(notfound_label);
-
-    if false_is_new {
-        em.place(false_label);
-    }
-    if true_is_new {
-        em.place(true_label);
-    }
-    Ok(())
+    compile_in_subquery_multi(
+        em,
+        reg,
+        outer_scope,
+        std::slice::from_ref(lhs),
+        subselect,
+        negated,
+        targets,
+    )
 }
 
 /// Compiles `(a, b, ...) IN (SELECT ...)`/`... NOT IN (SELECT ...)`

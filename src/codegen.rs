@@ -435,40 +435,65 @@ impl Scope {
         table: Option<&str>,
         name: &str,
     ) -> Result<(i32, usize, &crate::schema::TableSchema, bool), select::CodegenError> {
+        let binding_idx = self.resolve_own_binding_index(table, name)?;
+        let binding =
+            self.tables
+                .get(binding_idx)
+                .ok_or_else(|| select::CodegenError::UnknownColumn {
+                    name: name.to_string(),
+                })?;
+        let idx = expr::column_index(&binding.schema, name).unwrap_or(0);
+        Ok((binding.cursor, idx, &binding.schema, binding.forced_null))
+    }
+
+    /// The qualifier-match-or-ambiguity rule behind [`Scope::resolve_own`]:
+    /// `table: Some(_)` matches the alias-or-name qualifier exactly
+    /// against `self.tables` (see [`TableBinding::matches_qualifier`]);
+    /// `table: None` searches every binding and rejects more than one
+    /// match as ambiguous. Returns the matching binding's *position*
+    /// within `self.tables` rather than its `cursor` — needed by callers
+    /// (e.g. `select/join_access.rs::resolve_scope_column`) that must
+    /// compute an offset into a flat, all-bindings-concatenated row
+    /// rather than read through a per-binding cursor.
+    pub(crate) fn resolve_own_binding_index(
+        &self,
+        table: Option<&str>,
+        name: &str,
+    ) -> Result<usize, select::CodegenError> {
         if let Some(table) = table {
-            let binding = self
+            let idx = self
                 .tables
                 .iter()
-                .find(|b| b.matches_qualifier(table))
+                .position(|b| b.matches_qualifier(table))
                 .ok_or_else(|| select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
                 })?;
-            let idx = expr::column_index(&binding.schema, name).ok_or_else(|| {
+            let binding =
+                self.tables
+                    .get(idx)
+                    .ok_or_else(|| select::CodegenError::UnknownColumn {
+                        name: format!("{table}.{name}"),
+                    })?;
+            expr::column_index(&binding.schema, name).ok_or_else(|| {
                 select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
                 }
             })?;
-            return Ok((binding.cursor, idx, &binding.schema, binding.forced_null));
+            return Ok(idx);
         }
-        let mut found: Option<&TableBinding> = None;
-        for binding in &self.tables {
+        let mut found: Option<usize> = None;
+        for (i, binding) in self.tables.iter().enumerate() {
             if expr::column_index(&binding.schema, name).is_some() {
                 if found.is_some() {
                     return Err(select::CodegenError::AmbiguousColumn {
                         name: name.to_string(),
                     });
                 }
-                found = Some(binding);
+                found = Some(i);
             }
         }
-        let binding = found.ok_or_else(|| select::CodegenError::UnknownColumn {
+        found.ok_or_else(|| select::CodegenError::UnknownColumn {
             name: name.to_string(),
-        })?;
-        // Re-resolve rather than reuse the index found above: the loop
-        // only needed presence to detect ambiguity, and re-deriving it
-        // here (cheap — a short linear scan) avoids holding a second
-        // mutable/immutable borrow shape just to carry the index out.
-        let idx = expr::column_index(&binding.schema, name).unwrap_or(0);
-        Ok((binding.cursor, idx, &binding.schema, binding.forced_null))
+        })
     }
 }
