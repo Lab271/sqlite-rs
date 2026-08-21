@@ -6,6 +6,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,
+V4 phase 1 epic #235). Registers `sqlite_version()` as SQLite's real
+zero-arity scalar function, exercising codegen's previously-untested
+`FunctionCall` zero-arg branch through a real compiled query.
+`compile_select_no_from` (`src/codegen/select.rs`) adds FROM-less
+`SELECT <expr>[, ...]` support — the normal way built-ins like
+`sqlite_version()` are called (`SELECT sqlite_version();`) — compiling
+the column list once against an empty schema and emitting exactly one
+row with no cursor/scan bracketing; `*`/`tbl.*` and any clause
+presuming a table (WHERE/GROUP BY/HAVING/ORDER BY/LIMIT/DISTINCT/
+compound) is rejected as unsupported. Wired into the `sqlite-rs` CLI's
+`query` subcommand too, which previously hard-refused any FROM-less
+`SELECT` before ever reaching codegen.
+
 `UPDATE`/`DELETE` subquery catalog threading + multi-column `IN` (#251,
 V4 phase 1 epic #235): `compile_update`/`compile_delete` gained
 `_with_catalog` variants (mirroring `compile_select_with_catalog`'s
