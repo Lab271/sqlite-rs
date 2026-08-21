@@ -2446,8 +2446,11 @@ mod tests {
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
         for i in 0..MAX_EPHEMERAL_ROWS as i64 {
             vm.set_register(20, Value::Integer(i)).unwrap();
-            idx_insert(&mut vm, &Instruction::with_p4(Opcode::IdxInsert, 0, 20, 0, P4::Int(1)))
-                .unwrap();
+            idx_insert(
+                &mut vm,
+                &Instruction::with_p4(Opcode::IdxInsert, 0, 20, 0, P4::Int(1)),
+            )
+            .unwrap();
         }
         vm.set_register(20, Value::Integer(MAX_EPHEMERAL_ROWS as i64))
             .unwrap();

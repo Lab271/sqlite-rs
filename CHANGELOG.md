@@ -6,6 +6,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+chore: cap ephemeral table/index materialization at 1M rows (#269).
+`EphemeralTableState.rows`/`EphemeralState.entries` (`src/vdbe/cursor.rs`)
+backed a plain in-memory `Vec`/`BTreeMap` with no ceiling — a
+subquery-in-FROM (#257) or a correlated `IN (SELECT ...)` rebuilding its
+ephemeral index per outer row (`compile_in_subquery`) could grow memory
+without limit. Adds `ExecError::EphemeralRowLimitExceeded` and a
+`MAX_EPHEMERAL_ROWS` constant checked at both insert sites, following the
+existing hardcoded-limit pattern (`MAX_REGISTERS`, `MAX_STEPS`) rather
+than a new configurable-limits mechanism.
+
 test: assert an aggregate in tier3's joins-and-aggregates stub (#267).
 `t3_multi_table_joins_and_aggregates` claimed aggregate coverage by name
 and ignore-reason but exercised only JOIN + ORDER BY/DISTINCT/
