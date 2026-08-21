@@ -1,128 +1,137 @@
 {
   "oracle_version": "3.53.4",
   "hardware": {
-    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
-    "cpu": "Apple M2",
-    "cpu_count": 8
+    "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+    "cpu": "Apple M4 Pro",
+    "cpu_count": 12
   },
   "tier1_engine": [
     {
       "scenario": "full_scan",
       "fixture": "bench_1mb.db",
-      "ours_ns": 14499494.75,
-      "oracle_ns": 4149919.846153846,
-      "ratio_ours_over_oracle": 3.4939216388572327
+      "ours_ns": 10970833.4,
+      "oracle_ns": 2968405.647058823,
+      "ratio_ours_over_oracle": 3.6958673120940193
     },
     {
       "scenario": "full_scan",
       "fixture": "bench_50mb.db",
-      "ours_ns": 718728541.5,
-      "oracle_ns": 223701396.0,
-      "ratio_ours_over_oracle": 3.212892518113745
+      "ours_ns": 545076249.5,
+      "oracle_ns": 159884812.5,
+      "ratio_ours_over_oracle": 3.4091809032831057
     },
     {
       "scenario": "point_lookup",
       "fixture": "bench_1mb.db",
-      "ours_ns": 3290026.03125,
-      "oracle_ns": 3923.362203734645,
-      "ratio_ours_over_oracle": 838.5731065355698
+      "ours_ns": 1904.0990400903445,
+      "oracle_ns": 3021.0674338387394,
+      "ratio_ours_over_oracle": 0.6302735975909312
     },
     {
       "scenario": "point_lookup",
       "fixture": "bench_50mb.db",
-      "ours_ns": 161790562.0,
-      "oracle_ns": 3946.1414856583588,
-      "ratio_ours_over_oracle": 40999.686044710455
+      "ours_ns": 2222.4829892570624,
+      "oracle_ns": 3020.876912960306,
+      "ratio_ours_over_oracle": 0.7357078932021569
     },
     {
       "scenario": "filter_scan",
       "fixture": "bench_1mb.db",
-      "ours_ns": 10205620.8,
-      "oracle_ns": 3693174.1071428573,
-      "ratio_ours_over_oracle": 2.763373863220154
+      "ours_ns": 8279309.083333334,
+      "oracle_ns": 2803811.3333333335,
+      "ratio_ours_over_oracle": 2.952876673585027
     },
     {
       "scenario": "filter_scan",
       "fixture": "bench_50mb.db",
-      "ours_ns": 516069187.0,
-      "oracle_ns": 588292083.5,
-      "ratio_ours_over_oracle": 0.8772329281225149
+      "ours_ns": 415186854.5,
+      "oracle_ns": 481845187.0,
+      "ratio_ours_over_oracle": 0.8616602711858156
     },
     {
       "scenario": "order_by_limit",
       "fixture": "bench_1mb.db",
-      "ours_ns": 24989000.0,
-      "oracle_ns": 45127.065926535084,
-      "ratio_ours_over_oracle": 553.7475013483264
+      "ours_ns": 223871.48617511522,
+      "oracle_ns": 31408.32638888889,
+      "ratio_ours_over_oracle": 7.127775081142582
     },
     {
       "scenario": "order_by_limit",
       "fixture": "bench_50mb.db",
-      "ours_ns": 1431540875.0,
-      "oracle_ns": 52221.3880833035,
-      "ratio_ours_over_oracle": 27412.922703556014
+      "ours_ns": 317218.5826612903,
+      "oracle_ns": 39484.86324786325,
+      "ratio_ours_over_oracle": 8.033928867119903
     },
     {
       "scenario": "expr_heavy",
       "fixture": "bench_1mb.db",
-      "ours_ns": 15638312.5,
-      "oracle_ns": 2486696.875,
-      "ratio_ours_over_oracle": 6.288789219634983
+      "ours_ns": 14080682.375,
+      "oracle_ns": 1631146.861111111,
+      "ratio_ours_over_oracle": 8.632381737477928
     },
     {
       "scenario": "expr_heavy",
       "fixture": "bench_50mb.db",
-      "ours_ns": 772586812.5,
-      "oracle_ns": 140127541.5,
-      "ratio_ours_over_oracle": 5.513454416097066
+      "ours_ns": 702115791.5,
+      "oracle_ns": 92408666.5,
+      "ratio_ours_over_oracle": 7.597943116082083
     },
     {
       "scenario": "prepare_only",
       "fixture": "bench_1mb.db",
-      "ours_ns": 3018.0224007314528,
-      "oracle_ns": 1400.9414838603377,
-      "ratio_ours_over_oracle": 2.1542815567251234
+      "ours_ns": 10174.208238987008,
+      "oracle_ns": 1057.2192826466835,
+      "ratio_ours_over_oracle": 9.623555307765956
     },
     {
       "scenario": "prepare_only",
       "fixture": "bench_50mb.db",
-      "ours_ns": 2992.452694581991,
-      "oracle_ns": 1403.5713698271775,
-      "ratio_ours_over_oracle": 2.1320274543292044
+      "ours_ns": 10077.734789419621,
+      "oracle_ns": 1061.8310795387408,
+      "ratio_ours_over_oracle": 9.490902068714533
+    },
+    {
+      "scenario": "join",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 31843802.0,
+      "oracle_ns": 2013875.0192307692,
+      "ratio_ours_over_oracle": 15.812203684895616
+    },
+    {
+      "scenario": "join",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 1558294625.0,
+      "oracle_ns": 108155812.5,
+      "ratio_ours_over_oracle": 14.407867584555383
+    },
+    {
+      "scenario": "group_by_agg",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 41773448.0,
+      "oracle_ns": 1574920.238095238,
+      "ratio_ours_over_oracle": 26.52416737657916
+    },
+    {
+      "scenario": "group_by_agg",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 2071805959.0,
+      "oracle_ns": 115352104.5,
+      "ratio_ours_over_oracle": 17.960712272917394
+    },
+    {
+      "scenario": "subquery",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 22499493.0,
+      "oracle_ns": 1299181.1098961183,
+      "ratio_ours_over_oracle": 17.318211316818672
+    },
+    {
+      "scenario": "subquery",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 1116523021.5,
+      "oracle_ns": 71659792.0,
+      "ratio_ours_over_oracle": 15.580885603184559
     }
   ],
-  "tier2_cli": [
-    {
-      "comparison": "dump_bench_1mb",
-      "ours_command": "sqlite-rs dump (bench_1mb.db)",
-      "oracle_command": "sqlite3 .dump (bench_1mb.db)",
-      "ours_mean_s": 0.0184474034288889,
-      "oracle_mean_s": 0.01403014234,
-      "ratio_ours_over_oracle": 1.314840789340766
-    },
-    {
-      "comparison": "dump_bench_50mb",
-      "ours_command": "sqlite-rs dump (bench_50mb.db)",
-      "oracle_command": "sqlite3 .dump (bench_50mb.db)",
-      "ours_mean_s": 0.83694185008,
-      "oracle_mean_s": 0.5988368000800002,
-      "ratio_ours_over_oracle": 1.39761258821801
-    },
-    {
-      "comparison": "query_bench_1mb",
-      "ours_command": "sqlite-rs query (bench_1mb.db)",
-      "oracle_command": "sqlite3 query (bench_1mb.db)",
-      "ours_mean_s": 0.018782710236258996,
-      "oracle_mean_s": 0.00972511368749005,
-      "ratio_ours_over_oracle": 1.9313615079297461
-    },
-    {
-      "comparison": "query_bench_50mb",
-      "ours_command": "sqlite-rs query (bench_50mb.db)",
-      "oracle_command": "sqlite3 query (bench_50mb.db)",
-      "ours_mean_s": 0.8893444110400001,
-      "oracle_mean_s": 0.6852028816400002,
-      "ratio_ours_over_oracle": 1.2979285914726408
-    }
-  ]
+  "tier2_cli": []
 }

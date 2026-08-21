@@ -94,14 +94,15 @@ CREATE TABLE bench_data(
   n INTEGER,
   x INTEGER,
   f REAL,
-  s TEXT
+  s TEXT,
+  bucket INTEGER
 );
 WITH RECURSIVE seq(i) AS (
   SELECT 1
   UNION ALL
   SELECT i + 1 FROM seq WHERE i < $fixture_rows
 )
-INSERT INTO bench_data(id, n, x, f, s)
+INSERT INTO bench_data(id, n, x, f, s, bucket)
 SELECT
   i,
   (i * 2654435761) % 1000000,
@@ -113,9 +114,24 @@ SELECT
          1 + (i % 40),
          10 + (i % 40)
        ) || '-' || i
-  END
+  END,
+  i % 1000
 FROM seq;
 CREATE INDEX bench_data_x ON bench_data(x);
+
+-- Small dimension table (#301, V4 join/subquery bench scenarios): fixed
+-- size regardless of fixture scale, joined against bench_data.bucket.
+CREATE TABLE bench_lookup(
+  code INTEGER PRIMARY KEY,
+  label TEXT
+);
+WITH RECURSIVE seq(i) AS (
+  SELECT 0
+  UNION ALL
+  SELECT i + 1 FROM seq WHERE i < 999
+)
+INSERT INTO bench_lookup(code, label)
+SELECT i, 'lookup-' || i FROM seq;
 SQL
     echo "wrote $fixture_out ($fixture_rows rows, $(du -h "$fixture_out" | cut -f1))"
   }
