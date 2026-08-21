@@ -33,6 +33,7 @@ pub mod wal;
 pub use error::PagerError;
 pub use freelist::TrunkPage;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,79 @@ use journal::{JournalError, JournalWriter};
 /// journal_mode=PERSIST`'s post-commit zeroing, or a short/empty file) is
 /// not hot — it is safe to open the main file alongside it.
 const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+
+/// [`PageCache`]'s bound, on the order of SQLite's own `cache_size` pragma
+/// default (#320) — a deliberate, named constant rather than a silent
+/// hard-coded number, matching #269's `MAX_EPHEMERAL_ROWS` precedent.
+const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
+
+/// A small, bounded, hand-rolled LRU over physical page bytes (#320),
+/// keyed by page number. Deliberately hand-rolled rather than a
+/// dependency (`hashlink`'s `LruCache` is only a transitive *dev*
+/// dependency today, via `rusqlite`, not vetted for `src/`) — the logic
+/// is small enough not to justify promoting one through `cargo vet`.
+///
+/// Only ever holds pages that came from [`Pager`]'s own `source.read_page`
+/// call — never a `dirty`/WAL-overlay page, both of which are already
+/// correct and disjoint from the physical file's own pages (see
+/// [`Pager::read_page`]/[`Pager::get_page_mut`]).
+///
+/// Recency is tracked via a monotonic tick stamped on each entry, rather
+/// than a `Vec`/`VecDeque` reordered on every touch: a b-tree's root/
+/// interior pages are read on nearly every cursor seek, so a cache hit
+/// (the overwhelmingly common case once warm) must be O(1) — an
+/// `O(capacity)` `retain`-based reorder on every hit was tried first and
+/// measurably *regressed* the `join` tier-1 benchmark (millions of
+/// `SeekRowid` calls each re-touching the same handful of hot pages).
+/// Eviction (an `O(capacity)` scan for the smallest tick) only runs on
+/// a miss that pushes the cache over capacity, which is rare once the
+/// working set is warm.
+struct PageCache {
+    capacity: usize,
+    entries: HashMap<u32, (Vec<u8>, u64)>,
+    tick: u64,
+}
+
+impl PageCache {
+    fn new(capacity: usize) -> Self {
+        PageCache {
+            capacity,
+            entries: HashMap::new(),
+            tick: 0,
+        }
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    fn get(&mut self, page_num: u32) -> Option<&Vec<u8>> {
+        let tick = self.next_tick();
+        let entry = self.entries.get_mut(&page_num)?;
+        entry.1 = tick;
+        Some(&entry.0)
+    }
+
+    fn insert(&mut self, page_num: u32, bytes: Vec<u8>) {
+        let tick = self.next_tick();
+        self.entries.insert(page_num, (bytes, tick));
+        if self.entries.len() > self.capacity {
+            if let Some(&oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(page_num, _)| page_num)
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn invalidate(&mut self, page_num: u32) {
+        self.entries.remove(&page_num);
+    }
+}
 
 /// A source of whole database pages, refusing to open a database with a
 /// hot rollback journal rather than risk serving pre-rollback pages as
@@ -79,6 +153,13 @@ pub struct Pager {
     /// unflushed write is visible to a subsequent read through the same
     /// `Pager`.
     dirty: HashMap<u32, Vec<u8>>,
+    /// Caches physical pages read via `self.source.read_page` (#320) —
+    /// never a `dirty`/WAL-overlay page. `RefCell`, not a plain field:
+    /// [`PageSource::read_page`] takes `&self`, so populating/touching the
+    /// LRU on a read needs interior mutability (same pattern ADR-0017
+    /// already established for a writable `Pager` shared as
+    /// `Rc<RefCell<Pager>>`).
+    page_cache: RefCell<PageCache>,
     /// The page size this database was opened with (#167) — needed by
     /// [`Pager::allocate_page`] to size a freshly-extended page and by
     /// [`Pager::deallocate_page`] to compute a trunk page's leaf capacity,
@@ -173,6 +254,7 @@ impl Pager {
             source,
             wal_pages,
             dirty: HashMap::new(),
+            page_cache: RefCell::new(PageCache::new(DEFAULT_PAGE_CACHE_CAPACITY)),
             page_size,
             vfs: AnyVfs::new(vfs.clone()),
             journal_path,
@@ -184,6 +266,11 @@ impl Pager {
     /// subsequent [`PageSource::read_page`] calls on this same `Pager`
     /// immediately, but only reach disk once [`Pager::flush`] runs.
     pub fn get_page_mut(&mut self, page_num: u32) -> Result<&mut Vec<u8>, PagerError> {
+        // Must happen before `dirty` shadows this page number (#320): once
+        // a page is dirty, `read_page` never falls through to the cache
+        // for it anyway, but a *stale* cached copy of its pre-write bytes
+        // must not survive to be served after a later `flush`/reopen.
+        self.page_cache.borrow_mut().invalidate(page_num);
         match self.dirty.entry(page_num) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -451,7 +538,15 @@ impl PageSource for Pager {
         if let Some(page) = self.dirty.get(&page_num) {
             return Ok(page.clone());
         }
-        read_page(&self.wal_pages, &self.source, page_num)
+        if let Some(page) = self.wal_pages.get(&page_num) {
+            return Ok(page.clone());
+        }
+        if let Some(cached) = self.page_cache.borrow_mut().get(page_num) {
+            return Ok(cached.clone());
+        }
+        let bytes = self.source.read_page(page_num)?;
+        self.page_cache.borrow_mut().insert(page_num, bytes.clone());
+        Ok(bytes)
     }
 }
 
@@ -704,6 +799,55 @@ mod tests {
         let reopened = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
         assert_eq!(reopened.read_page(2).unwrap(), vec![9u8; 512]);
         assert_eq!(reopened.read_page(1).unwrap(), vec![1u8; 512]);
+    }
+
+    /// #320: a page cached by an earlier `read_page` must not survive a
+    /// later `get_page_mut` write to the same page — without the
+    /// `invalidate` call in `get_page_mut`, this would return the stale
+    /// pre-write bytes from the cache instead of the flushed new ones.
+    #[test]
+    fn cached_page_is_invalidated_by_a_later_write() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![1u8; 512]);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        // Populate the cache with page 1's original bytes.
+        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512]);
+
+        pager.get_page_mut(1).unwrap().fill(9u8);
+        pager.flush().unwrap();
+
+        assert_eq!(pager.read_page(1).unwrap(), vec![9u8; 512]);
+    }
+
+    #[test]
+    fn page_cache_hit_returns_the_same_bytes_as_the_original_read() {
+        let mut cache = PageCache::new(2);
+        assert_eq!(cache.get(1), None);
+        cache.insert(1, vec![1u8; 4]);
+        assert_eq!(cache.get(1), Some(&vec![1u8; 4]));
+    }
+
+    #[test]
+    fn page_cache_evicts_least_recently_used_at_capacity() {
+        let mut cache = PageCache::new(2);
+        cache.insert(1, vec![1u8]);
+        cache.insert(2, vec![2u8]);
+        // Touch page 1 so page 2 becomes the least-recently-used entry.
+        assert_eq!(cache.get(1), Some(&vec![1u8]));
+        cache.insert(3, vec![3u8]);
+
+        assert_eq!(cache.get(1), Some(&vec![1u8]));
+        assert_eq!(cache.get(2), None, "page 2 should have been evicted");
+        assert_eq!(cache.get(3), Some(&vec![3u8]));
+    }
+
+    #[test]
+    fn page_cache_invalidate_removes_the_entry() {
+        let mut cache = PageCache::new(2);
+        cache.insert(1, vec![1u8]);
+        cache.invalidate(1);
+        assert_eq!(cache.get(1), None);
     }
 
     #[test]
