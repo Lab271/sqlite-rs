@@ -161,19 +161,22 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 /// #239 fixed the two `GROUP BY` cases, taking it to 5. The remainder, all
 /// valid SQL real sqlite3 accepts:
 ///
-/// - single-quoted aliases, `... AS 'm'` (x3) — SQLite accepts a string
+/// - single-quoted aliases, `... AS 'm'` (x5) — SQLite accepts a string
 ///   literal where an alias identifier is expected. #240 (`UNION ALL`)
 ///   made a 3rd occurrence of this same pre-existing bug reachable (a
-///   quoted alias on a compound arm), not a new bug class.
+///   quoted alias on a compound arm); #257 (subqueries in FROM) made a
+///   4th and 5th occurrence reachable (a quoted alias inside a
+///   FROM-subquery, both standalone and joined) — same pre-existing bug
+///   class, not a new one.
 /// - `temp.sqlite_master` — schema-qualified name with a keyword schema
 /// - `SELECT (VALUES(1),(2))` — VALUES in expression position
 /// - `SELECT release FROM savepoint` — non-reserved keywords used as
 ///   identifiers (SQLite's `%fallback ID`)
 ///
 /// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
-/// never raise it without a documented cause like the #240 bump above. A
+/// never raise it without a documented cause like the #240/#257 bumps above. A
 /// raise means a regression that reclassified valid SQL as malformed.
-const SELECT_INVALID_BASELINE: usize = 6;
+const SELECT_INVALID_BASELINE: usize = 8;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

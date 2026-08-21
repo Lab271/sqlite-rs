@@ -13,9 +13,10 @@
 //! ...)` (`ExprKind::InSubquery`), and `EXISTS (SELECT ...)`
 //! (`ExprKind::Exists`) — correlation is resolved at codegen time
 //! (`Scope::with_outer`), not represented differently in the AST.
-//! NATURAL/RIGHT/FULL joins, `USING`, comma-style joins, subqueries in
-//! FROM, `ANY`/`ALL`/`SOME` quantified comparisons, and multi-column
-//! `IN` do not exist here at all, nor does FOREIGN KEY/REFERENCES (V8).
+//! NATURAL/RIGHT/FULL joins, `USING`, comma-style joins, `ANY`/`ALL`/
+//! `SOME` quantified comparisons, and multi-column `IN` do not exist here
+//! at all, nor does FOREIGN KEY/REFERENCES (V8). Subqueries in FROM
+//! (#257) are `TableRefKind::Subquery`.
 //!
 //! Every node carries a [`Span`] (Requirement 3: "AST completeness") and
 //! parenthesized expressions are preserved explicitly via `ExprKind::Paren`
@@ -109,11 +110,32 @@ pub enum ResultColumn {
     Expr { expr: Expr, alias: Option<String> },
 }
 
+/// A `FROM`-clause table entry (#237): either a real catalog table by
+/// name, or (#257) a parenthesized `select-stmt` materialized at codegen
+/// time into an ephemeral table — `SELECT * FROM (SELECT ...) AS sub`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableRefKind {
+    Name(String),
+    Subquery(Box<Select>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRef {
-    pub name: String,
+    pub kind: TableRefKind,
     pub alias: Option<String>,
     pub span: Span,
+}
+
+impl TableRef {
+    /// The catalog name to resolve this table against, or `None` for a
+    /// subquery (which has no catalog entry — codegen materializes it
+    /// instead).
+    pub fn name(&self) -> Option<&str> {
+        match &self.kind {
+            TableRefKind::Name(name) => Some(name),
+            TableRefKind::Subquery(_) => None,
+        }
+    }
 }
 
 /// A `FROM` clause (#237): the first table plus zero or more joins,

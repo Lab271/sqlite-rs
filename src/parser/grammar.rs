@@ -1185,14 +1185,38 @@ impl Parser {
         Ok(FromClause { first, joins })
     }
 
-    /// A single `table-name [AS alias]` — shared by the FROM clause's
-    /// first table and every join's right-hand table. Schema-qualified
-    /// names, subqueries, table-valued functions, and `INDEXED BY`/`NOT
-    /// INDEXED` stay explicit `unsupported(..)` errors.
+    /// A single `table-name [AS alias]` or (#257) `"(" select-stmt ")"
+    /// [AS] identifier` — shared by the FROM clause's first table and
+    /// every join's right-hand table. Schema-qualified names,
+    /// table-valued functions, and `INDEXED BY`/`NOT INDEXED` stay
+    /// explicit `unsupported(..)` errors. A subquery's alias is
+    /// mandatory here (unlike a plain table's) — this codebase's column
+    /// resolution needs a qualifier to refer to the subquery's columns,
+    /// and SQLite itself always names one in practice.
     fn table_ref(&mut self) -> PResult<TableRef> {
         if matches!(self.peek().kind, TokenKind::LParen) {
-            return self
-                .unsupported("table-valued functions / subqueries in FROM not yet supported");
+            let start = self.peek().span;
+            self.advance();
+            if !self.at_kw(Keyword::SELECT) {
+                return self.unsupported(
+                    "table-valued functions in FROM not yet supported (only a SELECT subquery is)",
+                );
+            }
+            let subquery = self.parse_select_stmt()?;
+            self.expect_punct(TokenKind::RParen, "')' to close FROM subquery")?;
+            let alias = self.opt_alias()?;
+            let Some(alias) = alias else {
+                return self.unsupported("a subquery in FROM requires an alias");
+            };
+            let end = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map_or(start, |t| t.span);
+            return Ok(TableRef {
+                kind: TableRefKind::Subquery(Box::new(subquery)),
+                alias: Some(alias),
+                span: join_span(start, end),
+            });
         }
         let (name, start) = self.identifier()?;
         if matches!(self.peek().kind, TokenKind::Dot) {
@@ -1220,11 +1244,14 @@ impl Parser {
             return self.unsupported("NOT INDEXED not yet supported");
         }
         if matches!(self.peek().kind, TokenKind::LParen) {
-            return self
-                .unsupported("table-valued functions / subqueries in FROM not yet supported");
+            return self.unsupported("table-valued functions in FROM not yet supported");
         }
 
-        Ok(TableRef { name, alias, span })
+        Ok(TableRef {
+            kind: TableRefKind::Name(name),
+            alias,
+            span,
+        })
     }
 
     fn ordering_term(&mut self) -> PResult<OrderingTerm> {

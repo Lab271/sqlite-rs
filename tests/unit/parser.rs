@@ -153,7 +153,7 @@ fn invalid(src: &str) -> String {
 fn test_accept_select_star() {
     let select = accept("SELECT * FROM t");
     assert_eq!(select.columns, vec![ResultColumn::Star]);
-    assert_eq!(select.from.unwrap().first.name, "t");
+    assert_eq!(select.from.unwrap().first.name(), Some("t"));
 }
 
 /// Requirement 3, "Preserve column aliases" scenario.
@@ -424,7 +424,7 @@ fn test_accept_comma_join() {
     assert_eq!(from.joins[0].op, JoinOp::Cross);
     assert!(from.joins[0].constraint.is_none());
     assert!(!from.joins[0].natural);
-    assert_eq!(from.joins[0].table.name, "b");
+    assert_eq!(from.joins[0].table.name(), Some("b"));
 }
 
 #[test]
@@ -445,10 +445,10 @@ fn test_accept_comma_join_mixed_with_explicit_join() {
 fn test_accept_inner_join_with_on() {
     let select = accept("SELECT * FROM a JOIN b ON a.x = b.y");
     let from = select.from.unwrap();
-    assert_eq!(from.first.name, "a");
+    assert_eq!(from.first.name(), Some("a"));
     assert_eq!(from.joins.len(), 1);
     assert_eq!(from.joins[0].op, JoinOp::Inner);
-    assert_eq!(from.joins[0].table.name, "b");
+    assert_eq!(from.joins[0].table.name(), Some("b"));
     assert!(matches!(
         from.joins[0].constraint,
         Some(JoinConstraint::On(_))
@@ -490,9 +490,9 @@ fn test_accept_multi_way_join_chain() {
     let from = select.from.unwrap();
     assert_eq!(from.joins.len(), 2);
     assert_eq!(from.joins[0].op, JoinOp::Inner);
-    assert_eq!(from.joins[0].table.name, "b");
+    assert_eq!(from.joins[0].table.name(), Some("b"));
     assert_eq!(from.joins[1].op, JoinOp::Left);
-    assert_eq!(from.joins[1].table.name, "c");
+    assert_eq!(from.joins[1].table.name(), Some("c"));
 }
 
 #[test]
@@ -907,8 +907,30 @@ fn test_compound_select_inside_subquery_is_unsupported_not_invalid() {
 }
 
 #[test]
-fn test_subqueries_in_from_still_unsupported() {
-    unsupported("SELECT * FROM (SELECT * FROM t) AS sub");
+fn test_subquery_in_from_parses() {
+    let select = accept("SELECT * FROM (SELECT id FROM t WHERE x > 0) AS sub");
+    let from = select.from.unwrap();
+    assert_eq!(from.first.alias.as_deref(), Some("sub"));
+    match &from.first.kind {
+        TableRefKind::Subquery(subquery) => {
+            assert_eq!(subquery.columns.len(), 1);
+            assert!(subquery.where_clause.is_some());
+            let inner_from = subquery.from.as_ref().unwrap();
+            assert_eq!(inner_from.first.name(), Some("t"));
+        }
+        other => panic!("expected a subquery TableRef, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_subquery_in_from_without_alias_is_unsupported() {
+    let msg = unsupported("SELECT * FROM (SELECT * FROM t)");
+    assert!(msg.contains("alias"), "message: {msg}");
+}
+
+#[test]
+fn test_table_valued_function_in_from_still_unsupported() {
+    unsupported("SELECT * FROM pragma_table_info('t')");
 }
 
 #[test]

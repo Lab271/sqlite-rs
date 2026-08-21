@@ -16,7 +16,8 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_create_index, compile_create_table, compile_delete_with_catalog, compile_drop_index,
     compile_drop_table, compile_insert, compile_select_compound, compile_select_joined,
-    compile_select_with_catalog, compile_update_with_catalog, explain_query_plan, CodegenError,
+    compile_select_with_catalog, compile_update_with_catalog, explain_query_plan,
+    resolve_from_table_schema, CodegenError,
 };
 use sqlite_rs::dump::{self, dump_database};
 use sqlite_rs::format::{csv_quote, format_csv_value, format_list_value, format_query_value};
@@ -302,13 +303,9 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         Ok(s) => s,
         Err(e) => return fatal(path, &e),
     };
-    let find_schema = |name: &str| {
-        schemas
-            .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
-            .cloned()
+    let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
+        resolve_from_table_schema(table_ref, &schemas)
     };
-
     // A FROM-less SELECT (#260, e.g. `SELECT sqlite_version();`) has no
     // table to resolve at all — `compile_select_with_catalog` handles
     // this itself once `select.from` is `None`, so this path skips
@@ -339,15 +336,17 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         return finish_query(path, &program, source, header, explain_flag, csv);
     };
 
-    let Some(schema) = find_schema(&from.first.name) else {
-        return fatal(path, &format!("no such table: {}", from.first.name));
+    let schema = match resolve_table(&from.first) {
+        Ok(s) => s,
+        Err(e) => return fatal(path, &e),
     };
 
     if eqp_mode {
         let mut joined_schemas = vec![schema];
         for join in &from.joins {
-            let Some(s) = find_schema(&join.table.name) else {
-                return fatal(path, &format!("no such table: {}", join.table.name));
+            let s = match resolve_table(&join.table) {
+                Ok(s) => s,
+                Err(e) => return fatal(path, &e),
             };
             joined_schemas.push(s);
         }
@@ -367,8 +366,9 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
             let Some(arm_from) = &arm.from else {
                 return fatal(path, &CodegenError::NoFromClause);
             };
-            let Some(s) = find_schema(&arm_from.first.name) else {
-                return fatal(path, &format!("no such table: {}", arm_from.first.name));
+            let s = match resolve_table(&arm_from.first) {
+                Ok(s) => s,
+                Err(e) => return fatal(path, &e),
             };
             arm_schemas.push(s);
         }
@@ -384,12 +384,13 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
     } else {
         let mut joined_schemas = vec![schema];
         for join in &from.joins {
-            let Some(s) = find_schema(&join.table.name) else {
-                return fatal(path, &format!("no such table: {}", join.table.name));
+            let s = match resolve_table(&join.table) {
+                Ok(s) => s,
+                Err(e) => return fatal(path, &e),
             };
             joined_schemas.push(s);
         }
-        match compile_select_joined(&select, &joined_schemas) {
+        match compile_select_joined(&select, &joined_schemas, &schemas) {
             Ok(p) => p,
             Err(e) => return fatal(path, &e),
         }
@@ -514,9 +515,14 @@ fn compile_statement(
                             let Some(from) = &select.from else {
                                 return Err(fatal(path, &"SELECT has no FROM clause".to_string()));
                             };
-                            let mut joined_schemas = vec![find_schema(&from.first.name)?.clone()];
+                            let mut joined_schemas =
+                                vec![resolve_from_table_schema(&from.first, schemas)
+                                    .map_err(|e| fatal(path, &e))?];
                             for join in &from.joins {
-                                joined_schemas.push(find_schema(&join.table.name)?.clone());
+                                joined_schemas.push(
+                                    resolve_from_table_schema(&join.table, schemas)
+                                        .map_err(|e| fatal(path, &e))?,
+                                );
                             }
                             Some(joined_schemas)
                         }

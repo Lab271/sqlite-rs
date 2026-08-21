@@ -61,7 +61,7 @@ const CASES: &[(&str, Outcome)] = &[
         Outcome::Unsupported,
     ),
     ("SELECT * FROM t WHERE a IN u", Outcome::Unsupported),
-    ("SELECT * FROM (SELECT 1 AS a) AS x", Outcome::Unsupported),
+    ("SELECT * FROM (SELECT 1 AS a) AS x", Outcome::Accept),
     ("VALUES(2)", Outcome::Unsupported),
     (
         "SELECT count(*) FROM t HAVING count(*) >= 4",

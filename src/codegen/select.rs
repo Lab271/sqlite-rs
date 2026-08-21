@@ -21,7 +21,7 @@ use crate::codegen::expr::{
 use crate::codegen::{CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target};
 use crate::parser::ast::{
     BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
-    JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef,
+    JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef, TableRefKind,
 };
 use crate::parser::tokenizer::Span;
 use crate::schema::{rowid_alias_column, IndexSchema, TableSchema};
@@ -110,8 +110,10 @@ impl ScanCursors {
 /// a `Program`. Single-table only — a `select.from` with a non-empty
 /// `joins` list (#237) has more than one table to resolve schemas for,
 /// which this single-`schema` signature has no way to accept; use
-/// [`compile_select_joined`] instead. Subqueries in `FROM` (#238)
-/// aren't represented in the AST at all yet.
+/// [`compile_select_joined`] instead. A `FROM` table that's a subquery
+/// (#257) is materialized into an ephemeral table — `schema` in that
+/// case must be the caller-resolved synthetic schema describing the
+/// subquery's own projected columns, not a catalog lookup.
 pub fn compile_select(select: &Select, schema: &TableSchema) -> Result<Program, CodegenError> {
     compile_select_with_catalog(select, schema, std::slice::from_ref(schema))
 }
@@ -153,12 +155,25 @@ pub fn compile_select_with_catalog(
     em.patch_p2(init_addr, body_start);
 
     let cursors = ScanCursors::for_standalone_select();
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        cursors.table,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
+    match &from.first.kind {
+        TableRefKind::Name(_) => {
+            em.emit(Instruction::new(
+                Opcode::OpenRead,
+                cursors.table,
+                i32::try_from(schema.root_page).unwrap_or(0),
+                0,
+            ));
+        }
+        TableRefKind::Subquery(subquery) => {
+            crate::codegen::subquery::materialize_from_subquery(
+                &mut em,
+                &mut reg,
+                subquery,
+                catalog,
+                cursors.table,
+            )?;
+        }
+    }
 
     let end_label = em.new_label();
     let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, count: i32| {
@@ -340,7 +355,8 @@ pub(crate) fn select_result_column_count_joined(
                     .position(|t| {
                         t.alias
                             .as_deref()
-                            .unwrap_or(t.name.as_str())
+                            .or(t.name())
+                            .unwrap_or("")
                             .eq_ignore_ascii_case(table)
                     })
                     .ok_or_else(|| CodegenError::UnknownColumn {
@@ -502,9 +518,20 @@ pub fn compile_select_compound(
 /// generalizing them to a multi-table `Scope` was out of this
 /// ticket's bounded scope. `WHERE`/`LIMIT`/`OFFSET`/projections
 /// (including `*`/`table.*`) all work across the join.
+///
+/// `full_catalog` (#257) is only consulted when a `FROM` slot is a
+/// subquery — to resolve *its own* `FROM` table(s), which need not be
+/// among `schemas` (the outer query's own joined tables). It's
+/// deliberately separate from the `Scope::catalog` a scalar/`IN`/
+/// `EXISTS` subquery *expression* inside this JOIN's `WHERE` resolves
+/// against (still just `schemas`, unchanged, per the existing scope
+/// limitation this function's own doc doesn't relitigate here).
+/// `compile_full_join_two_table`'s dedicated path does not accept a
+/// subquery-in-FROM (not yet supported there).
 pub fn compile_select_joined(
     select: &Select,
     schemas: &[TableSchema],
+    full_catalog: &[TableSchema],
 ) -> Result<Program, CodegenError> {
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
@@ -580,7 +607,16 @@ pub fn compile_select_joined(
         em.emit(Instruction::new(Opcode::ResultRow, first, count, 0));
         Ok(())
     };
-    compile_select_joined_scan(&mut em, &mut reg, select, schemas, 0, end_label, &mut sink)?;
+    compile_select_joined_scan(
+        &mut em,
+        &mut reg,
+        select,
+        schemas,
+        full_catalog,
+        0,
+        end_label,
+        &mut sink,
+    )?;
 
     em.place(end_label);
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
@@ -615,6 +651,7 @@ pub(crate) fn compile_select_joined_scan<F>(
     reg: &mut RegAlloc,
     select: &Select,
     schemas: &[TableSchema],
+    full_catalog: &[TableSchema],
     cursor_base: i32,
     end_label: Label,
     sink: &mut F,
@@ -667,7 +704,7 @@ where
     for (table_ref, schema) in table_refs.iter().zip(schemas.iter()) {
         bindings.push(TableBinding {
             alias: table_ref.alias.clone(),
-            name: table_ref.name.clone(),
+            name: table_binding_name(table_ref),
             schema: schema.clone(),
             cursor: 0,
             forced_null: false,
@@ -793,17 +830,32 @@ where
 
     // Cursor numbers follow execution order (simplest: a table's
     // cursor number is just its recursion level), and every cursor is
-    // `OpenRead` exactly once, in that same order.
+    // opened exactly once, in that same order — `OpenRead` for a real
+    // table, or (#257) materialized into an ephemeral table when this
+    // FROM slot is a subquery.
     for (pos, &orig) in working_order.iter().enumerate() {
         let cursor = cursor_base.saturating_add(i32::try_from(pos).unwrap_or(0));
         if let Some(binding) = bindings.get_mut(orig) {
             binding.cursor = cursor;
         }
-        let root_page = bindings
-            .get(orig)
-            .map(|b| i32::try_from(b.schema.root_page).unwrap_or(0))
-            .unwrap_or(0);
-        em.emit(Instruction::new(Opcode::OpenRead, cursor, root_page, 0));
+        match table_refs.get(orig).map(|t| &t.kind) {
+            Some(TableRefKind::Subquery(subquery)) => {
+                crate::codegen::subquery::materialize_from_subquery(
+                    em,
+                    reg,
+                    subquery,
+                    full_catalog,
+                    cursor,
+                )?;
+            }
+            _ => {
+                let root_page = bindings
+                    .get(orig)
+                    .map(|b| i32::try_from(b.schema.root_page).unwrap_or(0))
+                    .unwrap_or(0);
+                em.emit(Instruction::new(Opcode::OpenRead, cursor, root_page, 0));
+            }
+        }
     }
 
     let exec_bindings: Vec<TableBinding> = working_order
@@ -1491,7 +1543,7 @@ fn compile_full_join_two_table(
         ));
         bindings.push(TableBinding {
             alias: table_ref.alias.clone(),
-            name: table_ref.name.clone(),
+            name: table_binding_name(table_ref),
             schema: schema.clone(),
             cursor,
             forced_null: false,
@@ -1729,10 +1781,22 @@ pub struct EqpRow {
 /// `name AS alias` when aliased, `name` otherwise -- matching how a
 /// `Column` reference would need to qualify it.
 fn eqp_display_name(table_ref: &TableRef) -> String {
+    let name = table_ref.name().unwrap_or("(subquery)");
     match &table_ref.alias {
-        Some(alias) => format!("{} AS {alias}", table_ref.name),
-        None => table_ref.name.clone(),
+        Some(alias) => format!("{name} AS {alias}"),
+        None => name.to_string(),
     }
+}
+
+/// The identifier a [`TableBinding`] tracks alongside its `alias` —
+/// a subquery-in-FROM (#257) has no catalog name of its own, so this
+/// falls back to its (mandatory) alias.
+fn table_binding_name(table_ref: &TableRef) -> String {
+    table_ref
+        .name()
+        .map(str::to_string)
+        .or_else(|| table_ref.alias.clone())
+        .unwrap_or_default()
 }
 
 /// Builds `EXPLAIN QUERY PLAN`'s output for `select` (#243): one row per
@@ -1777,7 +1841,7 @@ pub fn explain_query_plan(
         .enumerate()
         .map(|(i, (table_ref, schema))| TableBinding {
             alias: table_ref.alias.clone(),
-            name: table_ref.name.clone(),
+            name: table_binding_name(table_ref),
             schema: schema.clone(),
             cursor: i32::try_from(i).unwrap_or(0),
             forced_null: false,

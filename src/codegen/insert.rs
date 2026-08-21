@@ -406,10 +406,17 @@ pub fn compile_insert(
                 // source-table cursor itself, unlike the single-table
                 // `compile_select_scan` path below, which expects its
                 // one cursor already open).
+                // `select_schemas` doubles as the full catalog for a
+                // subquery-in-FROM to resolve its own inner FROM table(s)
+                // against (#257) — narrower than `compile_select_joined`'s
+                // own full-database catalog, so `INSERT ... SELECT` with
+                // both a JOIN and a FROM-subquery whose own table isn't
+                // among the SELECT's joined tables isn't supported yet.
                 compile_select_joined_scan(
                     &mut em,
                     &mut reg,
                     select,
+                    select_schemas,
                     select_schemas,
                     select_table_cursor,
                     end_label,

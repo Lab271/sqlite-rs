@@ -122,7 +122,10 @@ impl fmt::Display for ResultColumn {
 
 impl fmt::Display for TableRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)?;
+        match &self.kind {
+            TableRefKind::Name(name) => write!(f, "{name}")?,
+            TableRefKind::Subquery(select) => write!(f, "({select})")?,
+        }
         if let Some(alias) = &self.alias {
             write!(f, " AS {alias}")?;
         }
