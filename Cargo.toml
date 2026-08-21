@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 nix = { version = "0.31.3", features = ["fs"] }
-thiserror = "1"
+thiserror = "2"
 
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a
