@@ -29,6 +29,10 @@ TIER1_SCENARIOS = [
     "order_by_limit",
     "expr_heavy",
     "prepare_only",
+    # #301: V4 join/aggregate/subquery scenarios.
+    "join",
+    "group_by_agg",
+    "subquery",
 ]
 FIXTURES = ["bench_1mb.db", "bench_50mb.db"]
 
