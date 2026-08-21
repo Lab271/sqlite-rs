@@ -6,6 +6,8 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-21
+
 feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,
 V4 phase 1 epic #235). Registers `sqlite_version()` as SQLite's real
 zero-arity scalar function, exercising codegen's previously-untested
@@ -50,8 +52,6 @@ FROM t`. `emit_branch_into` (`src/codegen/expr.rs`) now accepts
 arbitrary CASE branch expressions the same way, and `FunctionCall`
 argument compilation gained the identical reserve-and-copy fallback
 for the same underlying contiguity check under a different name.
-
-## [0.13.0] - 2026-08-21
 
 JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what
 #237 deferred. Parser: `NATURAL` joins, `RIGHT`/`FULL [OUTER] JOIN`,
@@ -155,6 +155,12 @@ aggregate calls into synthetic column references, reusing
 combined with `ORDER BY`/`DISTINCT` in the same `SELECT`, and
 aggregates beyond `count`/`sum`/`avg`/`min`/`max`, are out of scope for
 this ticket.
+
+Pre-tag `/review` of the full v0.12.3..v0.13.0 diff (epic #235) found no
+tag-blocking issues; follow-ups filed as #265–#271 (MIN/MAX collation,
+subquery-in-FROM text-encoding, tier3 aggregate-stub gap, edge-case test
+coverage, ephemeral-materialization sizing, join/subquery codegen dedupe,
+scope-gap tracking confirmation).
 
 ## [0.12.3] - 2026-08-20
 
