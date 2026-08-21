@@ -817,27 +817,33 @@ to produce NULL, not only 0/1.
 
 `AggStep` and `AggFinal` MUST NOT contain any aggregate-specific logic
 themselves — same no-VDBE-layer-logic discipline as `Function`
-(Requirement 7) — dispatching instead by a P4 `"name(arity)"`
-descriptor into a shared aggregate registry (`src/vdbe/aggregate.rs`).
-`AggStep` folds a contiguous run of argument registers (starting at
-`P2`) into an aggregate-context slot addressed by `P1`, creating a
-fresh accumulator on that slot's first `AggStep`. `AggFinal` reads
-context slot `P1` and writes the finalized result to register `P3`,
-without erroring when the slot was never stepped — an empty group is a
-legitimate zero-row result (`count` finalizes to 0, `sum` to NULL), not
-a malformed program. Both opcodes postdate the V2 oracle harvest (no
-GROUP BY codegen existed at harvest time), so they are excluded from
-`Opcode::ALL` like the other V3 opcodes (`Insert`, `Copy`, …) — new
-enum variants, fully dispatched and exhaustiveness-checked, but not
-part of the harvested-opcode denominator.
+(Requirement 7) — dispatching instead into a shared aggregate registry
+(`src/vdbe/aggregate.rs`) by a P4 descriptor: `AggFinal` uses a plain
+`"name(arity)"` string (arity unused, since finalizing performs no
+comparison); `AggStep` uses `P4::AggFunc { name, arity, collation }`
+(#263, ADR-0019) so `min`/`max` compare under the aggregated argument's
+declared collation instead of always BINARY. `AggStep` folds a
+contiguous run of argument registers (starting at `P2`) into an
+aggregate-context slot addressed by `P1`, creating a fresh accumulator
+on that slot's first `AggStep` — or on any `AggStep` whose `P5` is
+nonzero, which discards the slot's prior state before folding (#263's
+mechanism for starting a new `GROUP BY` group on a reused slot number,
+without a dedicated reset opcode). `AggFinal` reads context slot `P1`
+and writes the finalized result to register `P3`, without erroring
+when the slot was never stepped — an empty group is a legitimate
+zero-row result (`count` finalizes to 0, `sum` to NULL), not a
+malformed program. Both opcodes are part of the harvested/frozen
+`Opcode::ALL` set (ADR-0018) — the "postdate the V2 harvest, excluded
+from `Opcode::ALL`" state this requirement originally described was
+superseded when ADR-0018's re-harvest added them.
 
 `OpenEphemeral`'s existing in-memory ephemeral-table support (Requirement
 4) is reused as the GROUP BY grouping-table backing store — no new
 cursor machinery is introduced by this requirement.
 
 **Implementation:** `src/vdbe/exec.rs::agg_step`, `src/vdbe/exec.rs::agg_final`,
-`src/vdbe/aggregate.rs` (registry; `count`/`sum` implemented, `avg`/`min`/`max`
-tracked separately)
+`src/vdbe/aggregate.rs` (registry: `count`/`sum`/`avg`/`min`/`max`),
+`src/codegen/select/aggregate.rs::emit_agg_step` (GROUP BY/plain-aggregate codegen, #263)
 
 #### Scenario: AggStep accumulates across repeated calls into the same context slot
 
@@ -865,6 +871,25 @@ tracked separately)
 
 **Tests:** `src/vdbe/exec.rs::tests::distinct_agg_context_slots_do_not_alias`
 
+#### Scenario: AggStep's P5 discards prior state before folding
+
+- GIVEN a context slot already stepped once with `sum(1)`
+- WHEN `AggStep` runs again with `P5` nonzero
+- THEN the slot's prior state is discarded first — `AggFinal` reads only
+  the post-reset call's contribution, not the sum of both
+
+**Tests:** `src/vdbe/exec.rs::tests::agg_step_with_nonzero_p5_discards_prior_state_before_folding`
+
+#### Scenario: AggStep's min/max compare under the P4 collation
+
+- GIVEN `AggStep("min(1)")` with `P4::AggFunc`'s `collation` set to
+  `NOCASE`, run over the text values `'B'` then `'a'`
+- THEN `AggFinal` yields `'a'` — under BINARY, `'B'` (ASCII 66) would
+  have stayed the minimum since it sorts below every lowercase letter
+
+**Tests:** `src/vdbe/exec.rs::tests::agg_step_min_honours_a_nocase_collation`,
+`tests/codegen/select_test.rs::min_max_aggregate_honours_collate_nocase`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made
@@ -878,8 +903,12 @@ opcode's dispatch (`src/vdbe/exec.rs`), and the `EXPLAIN` printer
 active too: #241 added the two opcodes plus a minimal `count`/`sum`
 aggregate registry (`src/vdbe/aggregate.rs`), reusing Requirement 4's
 existing `OpenEphemeral` support as the grouping-table backing store;
-GROUP BY codegen integration and the remaining `avg`/`min`/`max`
-aggregates are tracked separately (#239, #242).
+#242 added the remaining `avg`/`min`/`max` aggregates to that registry.
+#239/#242 initially shipped GROUP BY codegen via a separate hand-rolled
+register-arithmetic scheme rather than these opcodes; #263 (ADR-0019)
+rerouted that codegen onto `AggStep`/`AggFinal` and retired the
+register-arithmetic scheme, fixing a collation gap and adding the `P5`
+reset mechanism along the way.
 
 `tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s

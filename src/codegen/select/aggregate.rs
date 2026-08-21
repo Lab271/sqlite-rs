@@ -139,24 +139,24 @@ where
     let aggs = collect_aggregates(select)?;
     let zero_reg = reg.alloc();
     em.emit(Instruction::new(Opcode::Integer, 0, zero_reg, 0));
-    let one_reg = reg.alloc();
-    em.emit(Instruction::new(Opcode::Integer, 1, one_reg, 0));
     let have_group_reg = reg.alloc();
     em.emit(Instruction::new(Opcode::Integer, 0, have_group_reg, 0));
 
     let prev_key_regs: Vec<i32> = group_targets.iter().map(|_| reg.alloc()).collect();
     let snapshot_regs: Vec<i32> = schema.columns.iter().map(|_| reg.alloc()).collect();
-    let mut agg_slots: Vec<AggSlot> = aggs
+    // Aggregate-context slots (`Vm::agg_contexts`) are a disjoint table
+    // from the register file, addressed by their own small integer
+    // space — a bare 0-based counter here, not `reg.alloc()`.
+    let agg_slots: Vec<AggSlot> = aggs
         .into_iter()
-        .map(|(call, kind, arg)| {
-            let primary = reg.alloc();
-            let aux = matches!(kind, AggKind::Avg).then(|| reg.alloc());
+        .enumerate()
+        .map(|(slot, (call, name, arg))| {
+            let slot = i32::try_from(slot).unwrap_or(0);
             AggSlot {
                 call,
-                kind,
+                name,
                 arg,
-                primary,
-                aux,
+                slot,
             }
         })
         .collect();
@@ -245,14 +245,24 @@ where
         em.emit(Instruction::new(Opcode::Copy, cur, prev, 0));
     }
     em.emit(Instruction::new(Opcode::Integer, 1, have_group_reg, 0));
+    // This is a *new* group's first row: fold it in with `reset: true`
+    // so a slot number reused from the previous group starts a fresh
+    // accumulator rather than continuing the old one — then skip the
+    // plain (non-reset) fold below, which is only for a group's
+    // second-and-later rows.
     for agg in &agg_slots {
-        reset_agg(em, agg);
+        emit_agg_step(em, reg, &pseudo_scope, agg, true)?;
     }
+    let after_accumulate = em.new_label();
+    let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_after_accumulate, after_accumulate);
 
     em.place(not_boundary_label);
-    for agg in &mut agg_slots {
-        accumulate_agg(em, reg, &pseudo_scope, agg, zero_reg, one_reg)?;
+    for agg in &agg_slots {
+        emit_agg_step(em, reg, &pseudo_scope, agg, false)?;
     }
+
+    em.place(after_accumulate);
     read_row_columns_into(em, schema, cursors.pseudo, &snapshot_regs)?;
 
     let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
@@ -279,28 +289,27 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AggKind {
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
+/// One aggregate call's `AggStep`/`AggFinal` binding (#263): `name`
+/// selects the accumulator kind in `crate::vdbe::aggregate`, `arg` is
+/// its single argument expression (`None` only for `count(*)`), and
+/// `slot` is this call's aggregate-context slot number — the `AggStep`/
+/// `AggFinal` analogue of the old `AggSlot`'s `primary` register, but
+/// addressing `Vm::agg_contexts` (a disjoint table from the register
+/// file) instead.
 pub(super) struct AggSlot {
     call: Expr,
-    kind: AggKind,
+    name: String,
     arg: Option<Expr>,
-    primary: i32,
-    aux: Option<i32>,
+    slot: i32,
 }
 
 /// Recognizes `expr` as an aggregate call this compiler can accumulate,
 /// or reports why not. Only called on expressions [`find_aggregates`]
 /// already identified as `is_aggregate_call`, so the "not an aggregate
-/// at all" case can't happen here.
-pub(super) fn classify_aggregate(expr: &Expr) -> Result<(AggKind, Option<Expr>), CodegenError> {
+/// at all" case can't happen here. Only `count`/`sum`/`avg`/`min`/`max`
+/// have a `crate::vdbe::aggregate::AggState` accumulator today — same
+/// set the old register-arithmetic scheme supported.
+pub(super) fn classify_aggregate(expr: &Expr) -> Result<(String, Option<Expr>), CodegenError> {
     let ExprKind::FunctionCall { name, args, .. } = &expr.kind else {
         return Err(CodegenError::Unsupported {
             reason: "classify_aggregate called on a non-call expression".to_string(),
@@ -318,19 +327,22 @@ pub(super) fn classify_aggregate(expr: &Expr) -> Result<(AggKind, Option<Expr>),
             })
         }
     };
-    let kind = match name.to_ascii_lowercase().as_str() {
-        "count" => AggKind::Count,
-        "sum" => AggKind::Sum,
-        "avg" => AggKind::Avg,
-        "min" => AggKind::Min,
-        "max" => AggKind::Max,
+    let name = name.to_ascii_lowercase();
+    match name.as_str() {
+        "count" => {}
+        "sum" | "avg" | "min" | "max" if arg.is_some() => {}
+        "sum" | "avg" | "min" | "max" => {
+            return Err(CodegenError::Unsupported {
+                reason: format!("{name}() requires a single argument"),
+            })
+        }
         other => {
             return Err(CodegenError::Unsupported {
                 reason: format!("aggregate function {other} not yet supported in GROUP BY"),
             })
         }
-    };
-    Ok((kind, arg))
+    }
+    Ok((name, arg))
 }
 
 /// Finds every aggregate-call sub-expression reachable from `select`'s
@@ -340,7 +352,7 @@ pub(super) fn classify_aggregate(expr: &Expr) -> Result<(AggKind, Option<Expr>),
 /// a call with a `count(*)` result column accumulates into one slot.
 pub(super) fn collect_aggregates(
     select: &Select,
-) -> Result<Vec<(Expr, AggKind, Option<Expr>)>, CodegenError> {
+) -> Result<Vec<(Expr, String, Option<Expr>)>, CodegenError> {
     let mut found: Vec<Expr> = Vec::new();
     for col in &select.columns {
         if let ResultColumn::Expr { expr, .. } = col {
@@ -353,8 +365,8 @@ pub(super) fn collect_aggregates(
     found
         .into_iter()
         .map(|call| {
-            let (kind, arg) = classify_aggregate(&call)?;
-            Ok((call, kind, arg))
+            let (name, arg) = classify_aggregate(&call)?;
+            Ok((call, name, arg))
         })
         .collect()
 }
@@ -476,117 +488,59 @@ pub(super) fn read_row_columns_into(
     Ok(())
 }
 
-pub(super) fn reset_agg(em: &mut Emitter, agg: &AggSlot) {
-    match agg.kind {
-        AggKind::Count => {
-            em.emit(Instruction::new(Opcode::Integer, 0, agg.primary, 0));
-        }
-        AggKind::Sum | AggKind::Min | AggKind::Max => {
-            em.emit(Instruction::new(Opcode::Null, 0, agg.primary, 0));
-        }
-        AggKind::Avg => {
-            em.emit(Instruction::new(Opcode::Null, 0, agg.primary, 0));
-            if let Some(aux) = agg.aux {
-                em.emit(Instruction::new(Opcode::Integer, 0, aux, 0));
-            }
-        }
-    }
-}
-
-pub(super) fn accumulate_agg(
+/// Emits one `AggStep` for `agg`'s slot (#263): compiles `agg.arg` (if
+/// any) into a fresh register and folds it via `Opcode::AggStep`,
+/// exactly the shape `crate::vdbe::exec::agg_step` expects — a
+/// contiguous argument-register run starting at `P2`, arity/name via
+/// `P4::AggFunc`. `reset` sets `P5`, which discards this slot's prior
+/// state before folding (`Vm`'s "start a fresh accumulator" behavior)
+/// — the group-boundary row for a reused slot number passes `true`;
+/// every other row in the same group passes `false`.
+///
+/// `min`/`max` compare under `agg.arg`'s collation (an explicit
+/// `COLLATE` wrapper only, same resolution `collation_of` gives the
+/// scalar comparison path — see #265). Unlike that scalar path, this
+/// does not also apply a comparison *affinity* first:
+/// `crate::vdbe::aggregate::step`'s `compare` call has no affinity
+/// parameter to feed one to, a pre-existing gap in the `AggStep`/
+/// `AggFinal` opcode contract (not introduced by this ticket, and not
+/// regressed from the old register-arithmetic scheme, which also had
+/// no affinity handling on its `Lt`/`Gt` compares before #265's
+/// collation-only fix).
+pub(super) fn emit_agg_step(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     scope: &Scope,
-    agg: &mut AggSlot,
-    zero_reg: i32,
-    one_reg: i32,
+    agg: &AggSlot,
+    reset: bool,
 ) -> Result<(), CodegenError> {
-    let arg_reg = match &agg.arg {
-        Some(expr) => Some(compile_value(em, reg, scope, expr)?),
-        None => None,
+    let (arg_reg, arity, collation) = match &agg.arg {
+        Some(expr) => {
+            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            (
+                Some(compile_value(em, reg, scope, expr)?),
+                1usize,
+                collation,
+            )
+        }
+        None => (None, 0usize, Collation::Binary),
     };
-    match agg.kind {
-        AggKind::Count => {
-            let _ = zero_reg;
-            if let Some(arg_reg) = arg_reg {
-                let skip = em.new_label();
-                let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
-                em.patch_p2(addr, skip);
-                em.emit(Instruction::new(
-                    Opcode::Add,
-                    agg.primary,
-                    one_reg,
-                    agg.primary,
-                ));
-                em.place(skip);
-            } else {
-                em.emit(Instruction::new(
-                    Opcode::Add,
-                    agg.primary,
-                    one_reg,
-                    agg.primary,
-                ));
-            }
-        }
-        AggKind::Sum | AggKind::Avg => {
-            let arg_reg = arg_reg.ok_or_else(|| CodegenError::Unsupported {
-                reason: "sum/avg require a single argument".to_string(),
-            })?;
-            let skip = em.new_label();
-            let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
-            em.patch_p2(addr, skip);
-            let first_val = em.new_label();
-            let after = em.new_label();
-            let is_null_addr = em.emit(Instruction::new(Opcode::IsNull, agg.primary, 0, 0));
-            em.patch_p2(is_null_addr, first_val);
-            em.emit(Instruction::new(
-                Opcode::Add,
-                agg.primary,
-                arg_reg,
-                agg.primary,
-            ));
-            let goto_after = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
-            em.patch_p2(goto_after, after);
-            em.place(first_val);
-            em.emit(Instruction::new(Opcode::Copy, arg_reg, agg.primary, 0));
-            em.place(after);
-            if let Some(aux) = agg.aux {
-                em.emit(Instruction::new(Opcode::Add, aux, one_reg, aux));
-            }
-            em.place(skip);
-        }
-        AggKind::Min | AggKind::Max => {
-            let arg_expr = agg.arg.as_ref().ok_or_else(|| CodegenError::Unsupported {
-                reason: "min/max require a single argument".to_string(),
-            })?;
-            let collation = collation_of(arg_expr);
-            let affinity = comparison_affinity(expr_affinity(scope, arg_expr), None);
-            let arg_reg = arg_reg.ok_or_else(|| CodegenError::Unsupported {
-                reason: "min/max require a single argument".to_string(),
-            })?;
-            let skip = em.new_label();
-            let addr = em.emit(Instruction::new(Opcode::IsNull, arg_reg, 0, 0));
-            em.patch_p2(addr, skip);
-            let do_copy = em.new_label();
-            let after = em.new_label();
-            let is_null_addr = em.emit(Instruction::new(Opcode::IsNull, agg.primary, 0, 0));
-            em.patch_p2(is_null_addr, do_copy);
-            let cmp_op = if agg.kind == AggKind::Min {
-                Opcode::Lt
-            } else {
-                Opcode::Gt
-            };
-            let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);
-            let cmp_addr = em.emit(Instruction::with_p4(cmp_op, arg_reg, 0, agg.primary, p4));
-            em.patch_p2(cmp_addr, do_copy);
-            let goto_after = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
-            em.patch_p2(goto_after, after);
-            em.place(do_copy);
-            em.emit(Instruction::new(Opcode::Copy, arg_reg, agg.primary, 0));
-            em.place(after);
-            em.place(skip);
-        }
+    let p2 = arg_reg.unwrap_or(0);
+    let mut instr = Instruction::with_p4(
+        Opcode::AggStep,
+        agg.slot,
+        p2,
+        0,
+        P4::AggFunc {
+            name: agg.name.clone(),
+            arity,
+            collation,
+        },
+    );
+    if reset {
+        instr.p5 = 1;
     }
+    em.emit(instr);
     Ok(())
 }
 
@@ -644,24 +598,17 @@ where
     }
     let agg_dests = dests.get(snapshot_regs.len()..).unwrap_or(&[]);
     for (agg, &dest) in agg_slots.iter().zip(agg_dests) {
-        if let Some(aux) = agg.aux.filter(|_| agg.kind == AggKind::Avg) {
-            // `Divide`: r[P3] = r[P2] / r[P1] — dividend in P2, divisor
-            // in P1. `aux` (the non-null count) is 0 exactly when
-            // `primary` (the running sum) is still NULL, so a
-            // zero-count group divides `Null / 0` and yields `Null`
-            // via the same null-propagation `Divide` already gives any
-            // other NULL operand — no separate zero-guard needed.
-            //
-            // SQLite's `avg()` always yields a REAL, unlike a bare `/`
-            // between two integers (which truncates) — force the sum
-            // to REAL affinity first so `Divide` computes in floating
-            // point. `apply_affinity` leaves a NULL sum untouched, so
-            // the zero-count case above still divides through to NULL.
-            em.emit(Instruction::new(Opcode::RealAffinity, agg.primary, 0, 0));
-            em.emit(Instruction::new(Opcode::Divide, aux, agg.primary, dest));
-        } else {
-            em.emit(Instruction::new(Opcode::Copy, agg.primary, dest, 0));
-        }
+        // `avg()`'s sum/count division now happens inside
+        // `crate::vdbe::aggregate::finalize` — `AggFinal` just reads
+        // the slot's already-finalized value straight into `dest`.
+        let arity = usize::from(agg.arg.is_some());
+        em.emit(Instruction::with_p4(
+            Opcode::AggFinal,
+            agg.slot,
+            0,
+            dest,
+            P4::Str(format!("{}({arity})", agg.name)),
+        ));
     }
     let record_reg = reg.alloc();
     em.emit(Instruction::new(

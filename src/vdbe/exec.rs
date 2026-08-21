@@ -549,27 +549,32 @@ fn function(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
-/// `AggStep` (spec 009, Requirement 12, #241): folds the argument
-/// registers (a contiguous run starting at `P2`, per `P4`'s
-/// `"name(arity)"` descriptor — same shape as `Function`'s `P4`) into
-/// the aggregate-context slot `P1`, creating a fresh accumulator on the
-/// slot's first `AggStep`. No result is produced here — `AggFinal`
+/// `AggStep` (spec 009, Requirement 12, #241; collation/reset #263):
+/// folds the argument registers (a contiguous run starting at `P2`,
+/// per `P4`'s `AggFunc { name, arity, collation }` descriptor — same
+/// register-window shape as `Function`'s `P4::Str`, plus the
+/// collation `min`/`max` compares under) into the aggregate-context
+/// slot `P1`, creating a fresh accumulator on the slot's first
+/// `AggStep` — or whenever `P5` is nonzero, which discards any prior
+/// state for this slot before folding, the same "start a fresh
+/// accumulator" behavior as a never-stepped slot. Codegen uses this to
+/// begin a new GROUP BY group on a reused slot number without a
+/// dedicated reset opcode. No result is produced here — `AggFinal`
 /// reads the accumulated state once the group is done.
 fn agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let descriptor = match &instr.p4 {
-        P4::Str(s) => s.as_str(),
+    let (name, arity, collation) = match &instr.p4 {
+        P4::AggFunc {
+            name,
+            arity,
+            collation,
+        } => (name.as_str(), *arity, *collation),
         other => {
             return Err(ExecError::MalformedInstruction {
                 opcode: "AggStep",
-                reason: format!("expected a \"name(arity)\" string P4, got {other:?}"),
+                reason: format!("expected an AggFunc P4, got {other:?}"),
             })
         }
     };
-    let (name, arity) =
-        parse_function_descriptor(descriptor).ok_or_else(|| ExecError::MalformedInstruction {
-            opcode: "AggStep",
-            reason: format!("malformed aggregate descriptor {descriptor:?}"),
-        })?;
     let mut args = Vec::with_capacity(arity);
     for i in 0..arity {
         let reg = instr
@@ -586,8 +591,12 @@ fn agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             })?;
         args.push(vm.register(reg)?.clone());
     }
-    let current = vm.agg_context(instr.p1)?.cloned();
-    let updated = crate::vdbe::aggregate::step(name, current, &args).map_err(|e| {
+    let current = if instr.p5 == 0 {
+        vm.agg_context(instr.p1)?.cloned()
+    } else {
+        None
+    };
+    let updated = crate::vdbe::aggregate::step(name, current, &args, collation).map_err(|e| {
         ExecError::MalformedInstruction {
             opcode: "AggStep",
             reason: e.to_string(),
@@ -755,6 +764,17 @@ mod tests {
     use super::*;
     use crate::vdbe::program::Instruction;
 
+    /// `AggStep`'s `P4` for `name(arity)` under BINARY collation —
+    /// the common case for hand-assembled tests that aren't
+    /// specifically exercising collation.
+    fn agg_p4(name: &str, arity: usize) -> P4 {
+        P4::AggFunc {
+            name: name.to_string(),
+            arity,
+            collation: Collation::Binary,
+        }
+    }
+
     #[test]
     fn register_persists_across_unrelated_instructions() {
         let mut vm = Vm::new();
@@ -903,7 +923,7 @@ mod tests {
             vm.set_register(0, v).unwrap();
             agg_step(
                 &mut vm,
-                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("sum(1)".to_string())),
+                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, agg_p4("sum", 1)),
             )
             .unwrap();
         }
@@ -939,17 +959,17 @@ mod tests {
         vm.set_register(0, Value::Integer(1)).unwrap();
         agg_step(
             &mut vm,
-            &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("count(1)".to_string())),
+            &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, agg_p4("count", 1)),
         )
         .unwrap();
         agg_step(
             &mut vm,
-            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, P4::Str("count(1)".to_string())),
+            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, agg_p4("count", 1)),
         )
         .unwrap();
         agg_step(
             &mut vm,
-            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, P4::Str("count(1)".to_string())),
+            &Instruction::with_p4(Opcode::AggStep, 1, 0, 0, agg_p4("count", 1)),
         )
         .unwrap();
         agg_final(
@@ -985,12 +1005,71 @@ mod tests {
         assert!(matches!(
             agg_step(
                 &mut vm,
-                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, P4::Str("median(1)".to_string())),
+                &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, agg_p4("median", 1)),
             ),
             Err(ExecError::MalformedInstruction {
                 opcode: "AggStep",
                 ..
             })
         ));
+    }
+
+    /// #263: `P5 != 0` discards any prior state for the slot before
+    /// folding — codegen's mechanism for starting a new GROUP BY group
+    /// on a reused slot number, without a dedicated reset opcode.
+    #[test]
+    fn agg_step_with_nonzero_p5_discards_prior_state_before_folding() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(10)).unwrap();
+        agg_step(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggStep, 0, 0, 0, agg_p4("sum", 1)),
+        )
+        .unwrap();
+        vm.set_register(0, Value::Integer(5)).unwrap();
+        let mut reset_instr = Instruction::with_p4(Opcode::AggStep, 0, 0, 0, agg_p4("sum", 1));
+        reset_instr.p5 = 1;
+        agg_step(&mut vm, &reset_instr).unwrap();
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 0, 0, 1, P4::Str("sum(1)".to_string())),
+        )
+        .unwrap();
+        // Had the prior `sum(1)` of 10 not been discarded, this would
+        // finalize to 15, not 5.
+        assert_eq!(*vm.register(1).unwrap(), Value::Integer(5));
+    }
+
+    /// #263: `min`/`max` compare under the `AggFunc` P4's collation —
+    /// ASCII binary order puts every uppercase letter before every
+    /// lowercase one, so a NOCASE `min` over `{'B', 'a'}` must pick
+    /// `'a'`, not `'B'`.
+    #[test]
+    fn agg_step_min_honours_a_nocase_collation() {
+        let mut vm = Vm::new();
+        for v in [Value::Text("B".into()), Value::Text("a".into())] {
+            vm.set_register(0, v).unwrap();
+            agg_step(
+                &mut vm,
+                &Instruction::with_p4(
+                    Opcode::AggStep,
+                    0,
+                    0,
+                    0,
+                    P4::AggFunc {
+                        name: "min".to_string(),
+                        arity: 1,
+                        collation: Collation::NoCase,
+                    },
+                ),
+            )
+            .unwrap();
+        }
+        agg_final(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AggFinal, 0, 0, 1, P4::Str("min(1)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Text("a".into()));
     }
 }
