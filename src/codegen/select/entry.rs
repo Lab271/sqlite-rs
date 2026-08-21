@@ -1,4 +1,6 @@
-use super::aggregate::{compile_grouped_scan, select_has_aggregate};
+use super::aggregate::{
+    compile_grouped_scan, select_has_aggregate, try_compile_index_ordered_group_by,
+};
 use super::index_scan::try_compile_index_ordered_scan;
 use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
 use super::order_by::resolve_order_by;
@@ -188,6 +190,11 @@ where
             return Err(CodegenError::Unsupported {
                 reason: "GROUP BY combined with DISTINCT not yet supported".to_string(),
             });
+        }
+        if try_compile_index_ordered_group_by(
+            em, reg, select, schema, cursors, end_label, catalog, false, sink,
+        )? {
+            return Ok(());
         }
         return compile_grouped_scan(
             em, reg, select, schema, cursors, end_label, catalog, false, sink,
