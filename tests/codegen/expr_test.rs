@@ -231,16 +231,16 @@ fn zero_arg_function_call_compiles() {
 #[test]
 fn from_less_select_compiles_a_bare_expression_list() {
     let (_path, schema) = one_row_fixture();
-    // A single column only — a multi-column list mixing computed
-    // expressions hits the pre-existing register-contiguity limitation
-    // tracked separately by #141/#260's sibling ticket, not this one.
-    let select = match parse_select("SELECT sqlite_version()") {
+    let select = match parse_select("SELECT sqlite_version(), 1 + 1") {
         ParseOutcome::Accepted(s) => *s,
         other => panic!("expected parse, got {other:?}"),
     };
     let program = compile_select(&select, &schema).unwrap();
     let out = execute(&program).unwrap();
-    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string())]]);
+    assert_eq!(
+        out,
+        vec![vec![Value::Text("3.53.4".to_string()), Value::Integer(2)]]
+    );
 }
 
 #[test]
