@@ -104,14 +104,16 @@ fn t3_multi_table_joins_and_aggregates() {
         "alice+bob, deduplicated: {distinct}"
     );
 
-    // GROUP BY + aggregate over the multi-table dataset above (`b`'s rows
-    // fan out 2/1 across `a`'s two matched ids). Aggregate functions
-    // combined with a JOIN aren't supported yet (src/codegen/expr.rs),
-    // so this runs against `b` alone rather than the joined query.
-    let aggregated = run_query(&db, "SELECT a_id, count(*) FROM b GROUP BY a_id");
+    // GROUP BY + aggregate over the multi-table dataset above, with the
+    // aggregate combined with the JOIN itself (#333) — `a`'s two
+    // matched ids fan out 2/1 across `b`'s rows.
+    let aggregated = run_query(
+        &db,
+        "SELECT a.name, count(*) FROM a JOIN b ON a.id = b.a_id GROUP BY a.name",
+    );
     let mut aggregated_lines: Vec<&str> = aggregated.lines().collect();
     aggregated_lines.sort_unstable();
-    assert_eq!(aggregated_lines, ["1|2", "2|1"]);
+    assert_eq!(aggregated_lines, ["alice|2", "bob|1"]);
 
     // INSERT ... SELECT with a JOIN on the SELECT side.
     assert!(run_exec(&db, "CREATE TABLE dst(name TEXT, tag TEXT)")

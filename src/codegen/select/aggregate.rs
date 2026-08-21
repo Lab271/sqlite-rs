@@ -1,4 +1,5 @@
 mod accum;
+mod join;
 
 use super::limit_scan::compile_limit_setup;
 use super::order_by::{order_by_target_for_expr, OrderByPlan, OrderByTarget};
@@ -10,6 +11,7 @@ pub(super) use accum::{
     collect_aggregates, emit_agg_step, flush_group, read_pseudo_column, read_row_columns_into,
     AggSlot,
 };
+pub(crate) use join::compile_joined_grouped_scan;
 
 /// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
 /// sort-then-group `select.c` shape rather than a hash table, since the

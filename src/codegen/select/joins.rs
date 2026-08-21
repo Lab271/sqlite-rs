@@ -1,5 +1,6 @@
 mod level;
 
+use super::aggregate::{compile_joined_grouped_scan, select_has_aggregate};
 use super::eqp::table_binding_name;
 use super::join_access::{compile_joined_sorted_scan, resolve_join_order_by};
 use super::join_full::compile_full_join_two_table;
@@ -402,6 +403,45 @@ where
         ..Scope::default()
     };
     let table_cursor_count = i32::try_from(n).unwrap_or(0);
+
+    if !select.group_by.is_empty() || select_has_aggregate(select) {
+        if !select.order_by.is_empty() {
+            return Err(CodegenError::Unsupported {
+                reason: "GROUP BY/aggregate combined with ORDER BY and a JOIN is not yet \
+                         supported"
+                    .to_string(),
+            });
+        }
+        if select.distinct.is_some() {
+            return Err(CodegenError::Unsupported {
+                reason: "GROUP BY/aggregate combined with DISTINCT and a JOIN is not yet \
+                         supported"
+                    .to_string(),
+            });
+        }
+        let implicit_group = select.group_by.is_empty();
+        let sort_cursor = cursor_base.saturating_add(table_cursor_count);
+        let pseudo_cursor = sort_cursor.saturating_add(1);
+        let flush_cursor = pseudo_cursor.saturating_add(1);
+        return compile_joined_grouped_scan(
+            em,
+            reg,
+            select,
+            &exec_bindings,
+            &bindings,
+            &pos_of,
+            &levels,
+            &dedup_star,
+            schemas,
+            &full_scope,
+            sort_cursor,
+            pseudo_cursor,
+            flush_cursor,
+            end_label,
+            implicit_group,
+            sink,
+        );
+    }
 
     if !select.order_by.is_empty() {
         let order_by_plans = resolve_join_order_by(select, &full_scope)?;

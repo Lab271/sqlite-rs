@@ -850,3 +850,79 @@ fn explain_query_plan_reports_full_scan_fallback() {
     );
     assert_eq!(output, "0|0|0|SCAN a\n1|0|0|SCAN b\n");
 }
+
+/// #333: `GROUP BY` + `count(*)` combined with a JOIN — `a.id=1`
+/// matches `b` twice (rows 10, 11), `a.id=2` no longer matches
+/// (`a_id=99` in the fixture), so the group counts fan out 2/0.
+#[test]
+fn group_by_count_matches_oracle_across_a_join() {
+    let db = join_fixture_db("group_by_count");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.name, count(*) FROM a JOIN b ON a.id = b.a_id GROUP BY a.name",
+        "group_by_count_matches_oracle_across_a_join",
+    );
+}
+
+/// #333: `sum`/`min`/`max` (not just `count`) combined with `GROUP BY`
+/// and a JOIN, keyed on the joined (right-hand) table's column.
+#[test]
+fn group_by_sum_min_max_matches_oracle_across_a_join() {
+    let db = join_fixture_db("group_by_sum_min_max");
+    assert_matches_oracle(
+        &db,
+        "SELECT b.a_id, sum(b.id), min(b.id), max(b.id) FROM a JOIN b ON a.id = b.a_id GROUP BY b.a_id",
+        "group_by_sum_min_max_matches_oracle_across_a_join",
+    );
+}
+
+/// #333: no explicit `GROUP BY` at all — the implicit whole-table
+/// aggregate (#287) combined with a JOIN.
+#[test]
+fn implicit_whole_table_aggregate_matches_oracle_across_a_join() {
+    let db = join_fixture_db("implicit_group_join");
+    assert_matches_oracle(
+        &db,
+        "SELECT count(*) FROM a JOIN b ON a.id = b.a_id",
+        "implicit_whole_table_aggregate_matches_oracle_across_a_join",
+    );
+}
+
+/// #333: `GROUP BY`/aggregate combined with a JOIN across a three-way
+/// join chain, not just a two-table one.
+#[test]
+fn group_by_count_matches_oracle_across_a_three_way_join() {
+    let db = join_fixture_db("group_by_three_way");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.name, count(*) FROM a JOIN b ON a.id = b.a_id JOIN c ON b.id = c.b_id GROUP BY a.name",
+        "group_by_count_matches_oracle_across_a_three_way_join",
+    );
+}
+
+/// #333: `INSERT ... SELECT` with a `GROUP BY`/aggregate on the
+/// `SELECT` side of a JOIN — the write path that originally surfaced
+/// the cursor-collision bug in the fix (`FLUSH_CURSOR` colliding with
+/// the offset `pseudo_cursor` once the source scan's cursor numbers
+/// aren't fixed at 0..3, as they are for a standalone `SELECT`).
+#[test]
+fn insert_select_group_by_aggregate_matches_oracle_across_a_join() {
+    let db = join_fixture_db("insert_select_group_by");
+    assert!(run_exec(&db, "CREATE TABLE dst(name TEXT, total INTEGER)")
+        .status
+        .success());
+    let output = run_exec(
+        &db,
+        "INSERT INTO dst SELECT a.name, count(*) FROM a JOIN b ON a.id = b.a_id GROUP BY a.name",
+    );
+    assert!(
+        output.status.success(),
+        "INSERT ... SELECT with a joined GROUP BY aggregate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM dst ORDER BY name",
+        "insert_select_group_by_aggregate_matches_oracle_across_a_join",
+    );
+}
