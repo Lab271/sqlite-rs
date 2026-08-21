@@ -90,7 +90,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
         with:
-          tool: cargo-deny,cargo-semver-checks,cargo-udeps,cargo-vet
+          # cargo-vet pinned to 0.10.2: a newer release changed
+          # supply-chain/imports.lock's schema (added a required
+          # `publisher.user-id` field), breaking CI against the
+          # committed file without any change to this repo — pin so a
+          # tool release can't silently break the gate again; bump
+          # deliberately alongside a regenerated imports.lock.
+          tool: cargo-deny,cargo-semver-checks,cargo-udeps,cargo-vet@0.10.2
 
       # ubuntu-latest ships its own sqlite3, but never the pinned version,
       # and a mismatched oracle is worse than none: the Apple/system builds
