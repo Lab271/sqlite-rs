@@ -23,6 +23,18 @@ full design and rejected alternatives (a dedicated reset opcode,
 threading comparison affinity through as well, folding in plain
 non-`GROUP BY` aggregate support).
 
+fix: EphemeralTable `Insert` decode uses the database's real text
+encoding (#266). `src/vdbe/cursor.rs`'s subquery-in-FROM materialization
+path hardcoded `TextEncoding::Utf8` instead of `db.header.text_encoding`
+like every other decode site in the file; a UTF-16 database queried
+with a subquery in FROM would misdecode text or surface a generic
+`MalformedInstruction`. Falls back to UTF-8 only when no db is attached
+(pure in-memory ephemeral use, e.g. DISTINCT). Regression test added
+directly against the opcode handler, since building a real UTF-16
+fixture through the SQL engine isn't possible yet — `MakeRecord`
+(`src/vdbe/result.rs`) still hardcodes UTF-8 on the encode side, a
+separate, wider-scope gap left for a follow-up ticket.
+
 refactor: tighten `src/btree` and `src/codegen` module layout (#273,
 #276). Pure module reorganization, no behavior change: `src/btree/`
 groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
