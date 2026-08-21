@@ -164,6 +164,176 @@ byte-for-byte against the pinned 3.53.4 oracle. `temp.`-prefixed temp
 tables remain deferred (needs the V3+ write path's temp-database
 support).
 
+refactor: split `src/bin/sqlite-rs.rs` into modules, move dispatch into
+the library (#292). `src/codegen/dispatch.rs`'s `compile_statement`/
+`leading_keywords` now return a library `DispatchError` instead of an
+`ExitCode`, so they're usable without depending on the binary crate;
+the CLI itself splits into per-command modules
+(`src/bin/sqlite-rs/{main,dump,tables,query,exec,common}.rs`) behind a
+thin `main.rs` dispatcher. No behavior change. Spend: matched estimate
+(small).
+
+refactor: dedupe join/subquery codegen (#270, #308). Four independent,
+behavior-preserving extractions: `compile_join_level_traverse`
+(`src/codegen/select/joins.rs`) factors the shared nested-loop/
+outer-join traversal out of `compile_join_level` and
+`compile_join_level_for_sort` (#250's `ORDER BY`+JOIN sorted path),
+parameterized over row emission via a `leaf` closure;
+`compile_in_subquery` becomes a thin one-element wrapper around
+`compile_in_subquery_multi`; NATURAL/USING join-constraint synthesis is
+unified into one `resolve_join_constraint` helper shared by
+`compile_select_joined_scan` and `compile_full_join_two_table`.
+**Latent-bug fix surfaced along the way:** `compile_join_level_for_sort`
+had silently diverged from `compile_join_level` and never gained #243's
+seek optimization — a joined query with `ORDER BY` downgraded an
+otherwise-seekable `SeekRowid`/`SeekIndexEq` point lookup to a full
+`Rewind`/`Next` scan. Both paths now share one traversal, so the
+optimization applies unconditionally; verified via a new
+`EXPLAIN QUERY PLAN` regression test.
+
+perf: index-ordered scan for `ORDER BY ... LIMIT` (#296, #309,
+ADR-0020). `find_ordering_index` (`src/codegen/select/index_scan.rs`)
+looks for a single index on the FROM table whose column order is a
+prefix match (forward or exactly-reversed) for the requested `ORDER BY`
+terms — `BINARY` collation only, and an explicit `NULLS FIRST`/`LAST`
+must agree with the direction's default. When found,
+`try_compile_index_ordered_scan` walks the index directly (new
+`IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` opcodes + `IdxRowid` +
+`SeekRowid`) with `LIMIT`/`OFFSET` as an early-exit guard — no
+buffering, no sorter — ahead of the existing `compile_sorted_scan`
+fallback. `IndexCursor` gained `last()`/`prev()`, the mirror of its
+existing `first()`/`next()`.
+
+feat: `ORDER BY` and `DISTINCT` combined with `FULL JOIN` (#288, #307).
+Extends `compile_full_join_two_table`'s two-pass emitter: `DISTINCT`
+threads a `distinct_cursor` through all three emission sites (matched,
+left-nulled, right-unmatched), reusing the existing ephemeral-index
+dedup guard; `ORDER BY` routes all three through a new
+`emit_full_join_sort_row`, buffering into a sorter cursor (mirroring
+the ordinary join tree's `compile_joined_sorted_scan` split) with a
+fourth pass draining the sorter and applying `LIMIT`/`OFFSET`
+post-sort. `DISTINCT` + `ORDER BY` together remains rejected, matching
+the ordinary join tree's existing restriction. Spend: ~2x estimate —
+needed sorter-buffering plumbing in the two-pass emitter rather than a
+config flag.
+
+fix: correlated subquery inside a `FROM`-subquery's own `SELECT` list
+(#289, #311). `materialize_from_subquery`'s single-table (non-join)
+path compiled the subquery's `SELECT` list against a `Scope` catalog
+limited to its own resolved `FROM` schema(s) instead of the full outer
+catalog, so any nested subquery referencing another table hit a
+catalog-visibility rejection — the already-correct joined-FROM path
+was unaffected. Spend: matched estimate (medium).
+
+feat: aggregates with no `GROUP BY` (#287, #313). `SELECT count(*)/sum/
+avg/min/max FROM t;` (no `GROUP BY`) now compiles and executes on both
+populated and empty tables, as a thin extension of the existing
+sort-then-group machinery (`compile_grouped_scan`): every row belongs
+to one synthetic implicit group, and a new `implicit_group: bool`
+parameter ensures a zero-row table still flushes exactly one result
+row (`count(*) = 0`, other aggregates `NULL`) rather than zero rows.
+`HAVING` without `GROUP BY` is now accepted too, filtering that single
+implicit group. `.openspec/grammar/sqlite.ebnf` corrected: `HAVING` is
+parse.y's own independent `having_opt`, not nested under
+`groupby_opt`. `total`/`group_concat` remain unsupported (no `AggState`
+accumulator yet); the joined-select path is untouched. Spend: matched
+estimate (medium).
+
+bench: add V4 join/aggregate/subquery scenarios to the tier-1 engine
+bench (#301). Extends `tests/performance/engine.rs` with `join`,
+`group_by_agg`, and `subquery` scenarios now that V4 phase 1 landed
+(#235), plus a fixed-size `bench_lookup` dimension table and
+`bench_data.bucket` column in `gen_fixtures.sh --bench`.
+`compile_ours` now dispatches single-table vs `JOIN` the same way
+`src/bin/sqlite-rs/query.rs` does. First measured ratios
+(`bench-status.json`) surfaced two follow-ups, filed rather than fixed
+here per this ticket's scope: an uncorrelated subquery re-executed
+(and its ephemeral index rebuilt, for `IN`) on every outer row instead
+of once (#306), and `join`/`GROUP BY` ratios (14-26x) exceeding #111's
+1.5-3x calibration (#310). Spend: roughly matched the 120k token
+estimate.
+
+fix: hoist uncorrelated `WHERE`-clause subquery out of the outer scan
+loop (#306, #315). A scalar or single-column `IN (SELECT ...)`
+subquery in a single-table `WHERE` clause was re-materialized on every
+outer row even when uncorrelated — severe enough to hit the 50M-step
+VDBE guard rail on large tables (#301's bench run). Adds a static,
+conservative correlation check (`subquery_is_correlated`/
+`walk_expr_for_correlation` — anything uncertain is treated as
+correlated, which only ever suppresses the optimization) plus a hoist
+pass: an uncorrelated top-level `WHERE` conjunct materializes once,
+before the scan's `Rewind`, via a new pointer-identity-keyed
+`Scope::hoisted` map, instead of inline per row. Deliberately narrow —
+only an exact `expr IN (SELECT ...)` or scalar-subquery comparison
+conjunct is recognized; `OR`/`NOT`/deeper nesting, multi-column `IN`,
+correlated subqueries, and the joined-query `WHERE` path all fall
+through unchanged. (A follow-up commit fixed an `unreachable!`-adjacent
+`make mvl-limit` gate violation the hoist's correlation-walk helper
+introduced.) Spend: roughly matched the ~200k token estimate.
+
+chore: design note + benchmark for correlated-subquery
+rematerialization cost (#303, ADR-0021). ADR-0021 documents deferring
+a full coroutine rewrite in favor of a scoped follow-up (memoize a
+correlated subquery's result keyed on its outer-referenced value(s),
+reusing #306's correlation walk). Adds a `correlated_subquery` bench
+scenario to `tests/performance/engine.rs` demonstrating the current
+per-outer-row re-materialization cost, guarded to `bench_1mb.db` only —
+it blows the VDBE step cap against `bench_50mb.db`, itself evidence of
+the unbounded cost. No fix in this ticket, per its own acceptance
+criteria.
+
+feat: aggregate function inside a scalar/correlated subquery (#304,
+#318). `SELECT (SELECT max(x) FROM t) FROM t LIMIT 1` (and the
+correlated form) previously failed with "unsupported: aggregate
+function max" — a scalar subquery's projected expression compiled
+through `compile_value`'s plain, aggregate-rejecting path instead of
+#287's aggregate machinery. `compile_scalar_subquery` now detects an
+aggregate call in the subquery's projection and routes through
+`compile_grouped_scan` as an implicit whole-table group, capturing the
+result via a `Copy` into the destination register;
+`compile_grouped_scan` gained an `outer_scope: Option<&Scope>`
+parameter so a correlated subquery's `WHERE` clause still resolves
+against the enclosing scope. **Bug fix found along the way:**
+`AggFinal` never cleared its `agg_contexts` slot after finalizing —
+invisible for a top-level query (compiled once), but a correlated
+aggregate subquery reuses the same slot per outer row, so a zero-row
+invocation finalized against the *previous* row's leftover accumulator
+instead of a fresh NULL/0 (`Vm::clear_agg_context` added). Spend:
+within estimate (medium).
+
+perf: index-ordered scan for `GROUP BY` (#310, #316). `compile_grouped_scan`
+always buffered the whole `WHERE`-matching table into a sorter before
+aggregating, even when the `GROUP BY` columns already had a covering
+index producing rows in the right order (#301's bench found 14-26x
+tier-1 ratios on `group_by_agg`). `try_compile_index_ordered_group_by`
+mirrors #296's `ORDER BY` MVP: walks a matching index directly
+(`IdxRewind`/`IdxNext` or `IdxLast`/`IdxPrev` + `IdxRowid` +
+`SeekRowid`), feeding the same boundary-detection/accumulate/flush
+logic `compile_grouped_scan`'s pass 2 already has — no sorter, no
+`MakeRecord`, no buffering. Guardrails mirror #296's own MVP: no
+`WHERE` clause, an ordinary rowid table, every `GROUP BY` term a bare
+column. (A follow-up commit precomputed `group_col_indices` up front to
+satisfy a `make mvl-limit` gate the per-row loop's `unreachable!()`
+branch had violated.) Closes the `group_by_agg` half of #310 only —
+the `join` per-row dispatch-overhead half is split into #317. Spend:
+roughly matched the ~150k token estimate.
+
+docs: ADR-0022 — profile #317's join ratio, find the missing page
+cache. #317's own scope was profiling, not fixing. Instrumenting
+(rather than accepting the provisional "per-row VDBE dispatch
+overhead" hypothesis from #310/#317) found the real cause:
+`Pager`/`VfsPageSource` have no page cache at all — every `read_page`
+does a fresh syscall + allocation, unconditionally, and `join`'s
+per-row `SeekRowid` re-descends the b-tree from the root on every
+outer row, re-reading the same root/interior pages hundreds of
+thousands of times on the 830k-row fixture. Ruled out the
+dispatch-overhead hypothesis via direct instruction-count comparison:
+`full_scan`'s per-row body has *more* instructions than `join`'s yet
+the *better* ratio (~3.4x vs ~14-16x). No code fix in this ticket
+(matches #317's own acceptance criteria); filed #320 as the scoped,
+fully-designed follow-up ("add a bounded page cache to `Pager`'s read
+path"). Spend: roughly matched the profiling-scope estimate.
+
 ## [0.13.0] - 2026-08-21
 
 feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,
