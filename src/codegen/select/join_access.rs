@@ -246,6 +246,24 @@ pub(super) struct JoinOrderPlan {
     nulls_first: bool,
 }
 
+impl JoinOrderPlan {
+    /// #333's `GROUP BY`+JOIN pass 1 needs to build a `JoinOrderPlan`
+    /// list from scratch (a `GROUP BY` key sorted ascending, not an
+    /// actual `ORDER BY` clause) to drive the shared
+    /// [`compile_join_level_for_sort`] traversal — this constructor is
+    /// that module's only way in, since the fields above stay private
+    /// to keep [`resolve_join_order_by`] the sole source of truth for
+    /// an actual `ORDER BY` clause's own plans.
+    pub(super) fn ascending_offset(offset: usize, collation: Collation) -> Self {
+        JoinOrderPlan {
+            target: JoinOrderTarget::Offset(offset),
+            descending: false,
+            collation,
+            nulls_first: true,
+        }
+    }
+}
+
 /// [`resolve_order_by`]'s joined counterpart: resolves each `ORDER BY`
 /// term against the full-join `scope` instead of a single schema. Only
 /// a bare (optionally table-qualified) column or a result-column alias

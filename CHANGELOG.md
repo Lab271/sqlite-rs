@@ -6,6 +6,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-22
+
+fix: aggregate functions (`count`/`sum`/`avg`/`min`/`max`) combined
+with a JOIN — `SELECT a.name, count(*) FROM a JOIN b ON ... GROUP BY
+a.name` previously failed with `unsupported: aggregate function
+count`, despite this exact combination being the V4 epic's (#234)
+stated acceptance gate. Generalizes `compile_grouped_scan`'s
+sort-then-group codegen shape to a joined `Scope`, the same way #250
+generalized `ORDER BY`/`DISTINCT`. Bounded MVP: `GROUP BY`
+terms/aggregate arguments must be bare columns, result columns must be
+`*`/`table.*`/a bare column/a whole aggregate call, and `HAVING`
+combined with a JOIN stays unsupported. Fixes
+`tests/tiers/tier3.rs::t3_multi_table_joins_and_aggregates` (previously
+routed around the gap instead of testing it) and activates
+`tests/parity/v04.rs` (#333, #335).
+
 ## [0.13.1] - 2026-08-21
 
 chore: `make lint` now covers `[[test]] test = false` targets
