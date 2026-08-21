@@ -643,35 +643,24 @@ fn left_right_full_join_where_is_null_anti_join_matches_oracle() {
     assert_eq!(right, "12|z\n");
 }
 
-/// #268: `FULL JOIN` combined with `ORDER BY`/`DISTINCT`/`LIMIT` — only
-/// INNER JOIN gets these combinator tests elsewhere in this file. Turns
-/// out this combination is itself unsupported today (a real,
-/// previously-untested gap this coverage pass surfaced, not fixed
-/// here): `src/codegen/select.rs::compile_full_join_two_table`'s
-/// doc-commented "single two-table FULL JOIN only" limitation also
-/// covers ORDER BY/DISTINCT layered on top (LIMIT rides on ORDER BY's
-/// codegen path, so it fails the same way).
+/// #288: `FULL JOIN` combined with `ORDER BY` — #268 originally found
+/// this combination unsupported; `compile_full_join_two_table` now
+/// routes all three of its emission points (matched, left-nulled,
+/// right-unmatched) through a sorter pass, so null-extended rows sort
+/// correctly alongside matched ones. The `full` fixture's `a` (id=2
+/// bob, id=3 carol) has no matching `b` row, and `b`'s `id=12` row
+/// (a_id=99) has no matching `a` row, so this exercises both
+/// null-extension directions at once.
 #[test]
-fn full_join_order_by_distinct_limit_are_still_unsupported() {
-    let db = join_fixture_db("full_combinators");
-    for sql in [
-        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id",
-        "SELECT DISTINCT a.id FROM a FULL JOIN b ON a.id = b.a_id",
-        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id LIMIT 2",
-    ] {
-        let output = Command::new(CLI)
-            .arg("query")
-            .arg(&db)
-            .arg(sql)
-            .output()
-            .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "expected {sql:?} to fail");
-        assert!(
-            stderr.contains("not yet supported"),
-            "expected an unsupported-construct diagnostic for {sql:?}; got: {stderr}"
-        );
-        assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+fn full_join_order_by_matches_oracle_both_sides_unmatched() {
+    let db = join_fixture_db("full");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id, b.id",
+        "full_join_order_by_matches_oracle_both_sides_unmatched",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
     }
 }
 
@@ -702,6 +691,97 @@ fn explain_query_plan_reports_rowid_search_with_order_by() {
         "SELECT * FROM b JOIN a ON b.a_id = a.id ORDER BY b.tag",
         "explain_query_plan_reports_rowid_search_with_order_by",
     );
+}
+
+/// #288: `FULL JOIN` combined with `DISTINCT` — `a.id=1` matches two
+/// `b` rows (a_id=1 twice), so a plain (non-distinct) projection of
+/// `a.id` alone would emit `1` twice; `DISTINCT` must dedup that down
+/// to one row, and the dedup must apply to the null-extended rows too
+/// (both `a`'s unmatched id=2/3 and `b`'s unmatched-side NULL `a.id`).
+#[test]
+fn full_join_distinct_matches_oracle_both_sides_unmatched() {
+    let db = join_fixture_db("full");
+    assert_matches_oracle(
+        &db,
+        "SELECT DISTINCT a.id FROM a FULL JOIN b ON a.id = b.a_id",
+        "full_join_distinct_matches_oracle_both_sides_unmatched",
+    );
+    let output = run_query(
+        &db,
+        "SELECT DISTINCT a.id FROM a FULL JOIN b ON a.id = b.a_id",
+    );
+    assert_eq!(
+        output.lines().filter(|l| *l == "1").count(),
+        1,
+        "a.id=1 (matched twice) must appear exactly once under DISTINCT; got: {output}"
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// #288: `FULL JOIN` combined with `LIMIT` (no `ORDER BY`) — verifies
+/// the two-pass emitter's short-circuit (`emit_limit_guard` jumping
+/// straight to `end_label`, placed after pass 2) actually stops pass 2
+/// once the limit is exhausted, rather than continuing to scan `b` a
+/// second time for no reason. Row order without `ORDER BY` isn't
+/// portably meaningful across engines, so this compares row *count*
+/// (matching `LIMIT`) rather than the oracle's exact row order.
+#[test]
+fn full_join_limit_matches_oracle_both_sides_unmatched() {
+    let db = join_fixture_db("full");
+    let output = run_query(
+        &db,
+        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id LIMIT 2",
+    );
+    assert_eq!(
+        output.lines().count(),
+        2,
+        "LIMIT 2 must cap at 2 rows; got: {output}"
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// #288: `FULL JOIN` combined with `ORDER BY` + `LIMIT` together —
+/// `LIMIT` must apply post-sort (SQLite's own pipeline order), so this
+/// is oracle-comparable row-for-row unlike the `LIMIT`-alone case
+/// above.
+#[test]
+fn full_join_order_by_limit_matches_oracle_both_sides_unmatched() {
+    let db = join_fixture_db("full");
+    assert_matches_oracle(
+        &db,
+        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id, b.id LIMIT 2",
+        "full_join_order_by_limit_matches_oracle_both_sides_unmatched",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// #288: `DISTINCT` combined with `ORDER BY` on a `FULL JOIN` is the
+/// one combination that still stays rejected — mirroring the same
+/// restriction the ordinary (non-FULL) join tree already enforces for
+/// `DISTINCT` + `ORDER BY` + any JOIN.
+#[test]
+fn full_join_distinct_order_by_still_unsupported() {
+    let db = join_fixture_db("full_combinators");
+    let sql = "SELECT DISTINCT a.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id";
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "expected {sql:?} to fail");
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected an unsupported-construct diagnostic for {sql:?}; got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
 }
 
 /// #243: `EXPLAIN QUERY PLAN` reports `SEARCH ... USING INTEGER PRIMARY

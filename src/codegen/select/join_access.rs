@@ -535,6 +535,40 @@ where
     Ok(())
 }
 
+/// Builds the [`SortKeyColumn`] list for one buffered joined row: a
+/// bare-column `ORDER BY` term reads its offset straight from
+/// `plan.target`, while a genuine expression is computed into its own
+/// trailing register (relative to `first`, the row's leading register)
+/// via [`compile_value`]. Shared by [`compile_join_level_for_sort`] (the
+/// ordinary join tree's `ORDER BY` pass) and #288's
+/// `compile_full_join_two_table` sorter-buffering emission points, so
+/// both stay byte-for-byte identical in how a sort key is derived.
+pub(super) fn compile_join_order_by_sort_keys(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    scope: &Scope,
+    order_by_plans: &[JoinOrderPlan],
+    first: i32,
+) -> Result<Vec<SortKeyColumn>, CodegenError> {
+    let mut sort_keys = Vec::with_capacity(order_by_plans.len());
+    for plan in order_by_plans {
+        let index = match &plan.target {
+            JoinOrderTarget::Offset(off) => *off,
+            JoinOrderTarget::Expr(expr) => {
+                let r = compile_value(em, reg, scope, expr)?;
+                usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+            }
+        };
+        sort_keys.push(SortKeyColumn {
+            index,
+            descending: plan.descending,
+            collation: plan.collation,
+            nulls_first: plan.nulls_first,
+        });
+    }
+    Ok(sort_keys)
+}
+
 /// [`compile_join_level`]'s variant for the `ORDER BY`+JOIN sorted path
 /// (#250): shares the exact same traversal — including the #243
 /// single-check-access seek optimization, which this variant used to miss
@@ -590,22 +624,7 @@ pub(super) fn compile_join_level_for_sort(
                 em.place(row_skip);
                 return Ok(());
             };
-            let mut sort_keys = Vec::with_capacity(order_by_plans.len());
-            for plan in order_by_plans {
-                let index = match &plan.target {
-                    JoinOrderTarget::Offset(off) => *off,
-                    JoinOrderTarget::Expr(expr) => {
-                        let r = compile_value(em, reg, scope, expr)?;
-                        usize::try_from(r.saturating_sub(first)).unwrap_or(0)
-                    }
-                };
-                sort_keys.push(SortKeyColumn {
-                    index,
-                    descending: plan.descending,
-                    collation: plan.collation,
-                    nulls_first: plan.nulls_first,
-                });
-            }
+            let sort_keys = compile_join_order_by_sort_keys(em, reg, scope, order_by_plans, first)?;
             em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
 
             let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
