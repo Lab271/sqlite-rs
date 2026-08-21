@@ -153,6 +153,46 @@ fn column_count_mismatch_is_rejected() {
     );
 }
 
+/// #268: SQLite performs no coercion between `UNION ALL` arms — a
+/// column position with `INTEGER` affinity in one arm and `TEXT` in
+/// another keeps each arm's own storage class/affinity untouched (this
+/// is SQLite's dynamic typing: `UNION ALL` is pure row concatenation,
+/// not a typed-column operation).
+#[test]
+fn union_all_does_not_coerce_between_mismatched_arm_types() {
+    let db = scratch_db("type_mismatch");
+    let ddls = ["CREATE TABLE ti(a INTEGER)", "CREATE TABLE ts(a TEXT)"];
+    let rows = [
+        "INSERT INTO ti VALUES (1), (2)",
+        "INSERT INTO ts VALUES ('x'), ('y')",
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    let output = run_query_ok(&db, "SELECT a FROM ti UNION ALL SELECT a FROM ts");
+    assert_eq!(output, "1\n2\nx\ny\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM ti UNION ALL SELECT a FROM ts",
+        "union_all_does_not_coerce_between_mismatched_arm_types",
+    );
+}
+
 /// Multiple `UNION ALL` arms chain: `A UNION ALL B UNION ALL C`.
 #[test]
 fn multiple_union_all_arms_chain() {

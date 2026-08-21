@@ -870,6 +870,37 @@ fn group_by_having_filters_groups() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// #268: a `HAVING` clause that filters out every group must return an
+/// empty result set, not an error or a spuriously non-empty one.
+#[test]
+fn group_by_having_filters_out_every_group() {
+    let (path, schema) = group_by_fixture("having_all");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT cat, count(*) FROM t GROUP BY cat HAVING count(*) > 100;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(rows, Vec::<Vec<Value>>::new());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #268: this codebase has no "implicit whole-table group" path —
+/// `compile_value`'s `is_aggregate_call` guard (`src/codegen/expr.rs`)
+/// rejects any aggregate call outside a `GROUP BY`-driven scan
+/// (`src/codegen/select/entry.rs` only routes into
+/// `compile_grouped_scan` when `group_by` is non-empty), so even
+/// `count(*)` with no `GROUP BY` at all is `Unsupported` today —
+/// against a populated table and (separately) an empty one. Documents
+/// the current rejection rather than a real answer; tracked as a
+/// follow-on feature gap, not fixed here.
+#[test]
+fn aggregate_without_group_by_is_still_unsupported() {
+    let (path, schema) = scratch_fixture_labeled("aggregate_no_group_by");
+    assert_eq!(our_rows(&path, &schema, "SELECT count(*) FROM t;"), None);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn group_by_expression() {
     let (path, schema) = group_by_fixture("expression");

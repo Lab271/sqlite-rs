@@ -600,6 +600,81 @@ fn distinct_collapses_duplicate_rows_across_a_join() {
     );
 }
 
+/// #268: the common anti-join idiom — an outer join followed by
+/// `WHERE <unmatched side>.<col> IS NULL` — isolates exactly the rows
+/// that the plain LEFT/RIGHT/FULL JOIN tests above show get
+/// NULL-extended.
+#[test]
+fn left_right_full_join_where_is_null_anti_join_matches_oracle() {
+    let db = join_fixture_db("anti_join");
+    for (label, sql) in [
+        (
+            "left",
+            "SELECT a.id, a.name FROM a LEFT JOIN b ON a.id = b.a_id WHERE b.id IS NULL",
+        ),
+        (
+            "right",
+            "SELECT b.id, b.tag FROM a RIGHT JOIN b ON a.id = b.a_id WHERE a.id IS NULL",
+        ),
+        (
+            "full",
+            "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id \
+             WHERE a.id IS NULL OR b.id IS NULL",
+        ),
+    ] {
+        assert_matches_oracle(
+            &db,
+            sql,
+            &format!("left_right_full_join_where_is_null_anti_join_matches_oracle[{label}]"),
+        );
+    }
+    // LEFT JOIN's unmatched `a` rows: `id=2` (bob) and `id=3` (carol) —
+    // `b.a_id` is never `2`, and `b.a_id=99` doesn't match any `a.id`.
+    let left = run_query(
+        &db,
+        "SELECT a.id, a.name FROM a LEFT JOIN b ON a.id = b.a_id WHERE b.id IS NULL",
+    );
+    assert_eq!(left, "2|bob\n3|carol\n");
+    // RIGHT JOIN's only unmatched row is `b.id=12` (a_id=99).
+    let right = run_query(
+        &db,
+        "SELECT b.id, b.tag FROM a RIGHT JOIN b ON a.id = b.a_id WHERE a.id IS NULL",
+    );
+    assert_eq!(right, "12|z\n");
+}
+
+/// #268: `FULL JOIN` combined with `ORDER BY`/`DISTINCT`/`LIMIT` — only
+/// INNER JOIN gets these combinator tests elsewhere in this file. Turns
+/// out this combination is itself unsupported today (a real,
+/// previously-untested gap this coverage pass surfaced, not fixed
+/// here): `src/codegen/select.rs::compile_full_join_two_table`'s
+/// doc-commented "single two-table FULL JOIN only" limitation also
+/// covers ORDER BY/DISTINCT layered on top (LIMIT rides on ORDER BY's
+/// codegen path, so it fails the same way).
+#[test]
+fn full_join_order_by_distinct_limit_are_still_unsupported() {
+    let db = join_fixture_db("full_combinators");
+    for sql in [
+        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id",
+        "SELECT DISTINCT a.id FROM a FULL JOIN b ON a.id = b.a_id",
+        "SELECT a.id, b.id FROM a FULL JOIN b ON a.id = b.a_id ORDER BY a.id LIMIT 2",
+    ] {
+        let output = Command::new(CLI)
+            .arg("query")
+            .arg(&db)
+            .arg(sql)
+            .output()
+            .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "expected {sql:?} to fail");
+        assert!(
+            stderr.contains("not yet supported"),
+            "expected an unsupported-construct diagnostic for {sql:?}; got: {stderr}"
+        );
+        assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+    }
+}
+
 /// #243: `EXPLAIN QUERY PLAN` reports `SEARCH ... USING INTEGER PRIMARY
 /// KEY` for the rowid-seek join path and `SCAN` for tables that still
 /// fall back to a full scan (no matching index on the equality side).

@@ -284,6 +284,105 @@ fn multi_column_not_in_subquery_matches_oracle() {
     );
 }
 
+/// #268: a multi-column `IN`/`NOT IN` subquery whose result set is
+/// empty — `IN` must match no rows, `NOT IN` must match every row
+/// (vacuously true for all of them).
+/// #268: a two-level-deep correlated subquery — the innermost subquery
+/// skips its immediate parent scope and correlates against the
+/// grandparent (outermost) query's `t.id`. Per this pass's scope-chain
+/// fallback (see `correlated_exists_matches_oracle`'s doc comment
+/// above), any depth of nesting resolves for free.
+#[test]
+fn two_level_correlated_exists_matches_oracle() {
+    let db = subquery_fixture_db("two_level_correlated");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM other WHERE EXISTS \
+         (SELECT 1 FROM other WHERE other.a_id = t.id))",
+        "two_level_correlated_exists_matches_oracle",
+    );
+}
+
+/// #268: a correlated subquery nested inside a FROM-subquery's SELECT
+/// list is a separate, still-unimplemented shape — `src/codegen/
+/// subquery.rs`'s catalog-visibility check rejects the inner
+/// subquery's reference to `other` because a FROM-subquery's own SELECT
+/// list is compiled against just that subquery's schema, not the full
+/// outer catalog. Documents the current clean rejection; not fixed
+/// here (tracked as a follow-on feature gap).
+#[test]
+fn correlated_subquery_inside_from_subquery_select_list_is_still_unsupported() {
+    let db = subquery_fixture_db("from_subquery_correlated_select_list");
+    let output = run_query(
+        &db,
+        "SELECT * FROM (SELECT id, (SELECT a_id FROM other WHERE other.id = t.id + 99) AS sub \
+         FROM t) AS s",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "expected this form to fail");
+    assert!(
+        stderr.contains("isn't visible to this compiler's"),
+        "expected the catalog-visibility diagnostic; got: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
+}
+
+#[test]
+fn multi_column_in_subquery_zero_rows_matches_oracle() {
+    let db = subquery_fixture_db("multi_col_in_zero_rows");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE (id, x) IN (SELECT id, x FROM t WHERE id = 999)",
+        "multi_column_in_subquery_zero_rows_matches_oracle",
+    );
+}
+
+#[test]
+fn multi_column_not_in_subquery_zero_rows_matches_oracle() {
+    let db = subquery_fixture_db("multi_col_not_in_zero_rows");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM t WHERE (id, x) NOT IN (SELECT id, x FROM t WHERE id = 999)",
+        "multi_column_not_in_subquery_zero_rows_matches_oracle",
+    );
+}
+
+/// #268: three-valued-logic edge case — a `NULL` component inside one
+/// of the subquery's result tuples. Per SQL semantics, `NOT IN` against
+/// a subquery result set containing any `NULL` component in the
+/// compared position can never yield a *known-true* `NOT IN`, so it
+/// must produce zero rows (not a crash, and not treating the `NULL` as
+/// an ordinary non-matching value).
+#[test]
+fn multi_column_not_in_subquery_with_null_component_matches_oracle() {
+    let db = scratch_db("multi_col_not_in_null");
+    let ddls = ["CREATE TABLE u(id INTEGER PRIMARY KEY, x INTEGER)"];
+    let rows = ["INSERT INTO u VALUES (1, 10), (2, NULL), (3, 30)"];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM u WHERE (id, x) NOT IN (SELECT id, x FROM u)",
+        "multi_column_not_in_subquery_with_null_component_matches_oracle",
+    );
+}
+
 /// #251: UPDATE's `SET`/`WHERE` clauses now thread the full table
 /// catalog through, so a subquery referencing a table other than the
 /// target resolves instead of failing at codegen time.
