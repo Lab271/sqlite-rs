@@ -65,6 +65,18 @@ pub enum Opcode {
     // codegen can chain into a `SeekRowid` on the table cursor.
     SeekIndexEq,
     IdxRowid,
+    // #296: index-ordered scan — walks a matching index's b-tree
+    // directly (forward or backward) in place of `Rewind`/`Next` +
+    // sorter opcodes, so `ORDER BY <indexed col> [DESC] LIMIT n` never
+    // buffers or sorts at all. Like `SeekIndexEq`/`IdxRowid` above,
+    // postdates the V2 oracle harvest, so excluded from `ALL` but fully
+    // dispatched and exhaustiveness-checked. `IdxRewind`/`IdxLast`
+    // mirror `Rewind`/`Last`'s "jump on empty" shape; `IdxNext`/
+    // `IdxPrev` mirror `Next`'s "jump on found" shape — see ADR-0020.
+    IdxRewind,
+    IdxLast,
+    IdxNext,
+    IdxPrev,
     // DDL (#215) — schema-mutating statements, each done procedurally in
     // one exec.rs handler rather than decomposed into cursor-driven
     // multi-instruction sequences; never harvested from a V2 oracle
@@ -260,6 +272,10 @@ fn _exhaustive(o: Opcode) {
         | Opcode::NoConflict
         | Opcode::SeekIndexEq
         | Opcode::IdxRowid
+        | Opcode::IdxRewind
+        | Opcode::IdxLast
+        | Opcode::IdxNext
+        | Opcode::IdxPrev
         | Opcode::CreateTable
         | Opcode::DropTable
         | Opcode::CreateIndex

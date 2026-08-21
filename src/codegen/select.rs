@@ -114,6 +114,7 @@ impl ScanCursors {
 mod aggregate;
 mod entry;
 mod eqp;
+mod index_scan;
 mod join_access;
 mod join_full;
 mod joins;

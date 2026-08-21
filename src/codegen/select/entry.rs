@@ -1,4 +1,5 @@
 use super::aggregate::compile_grouped_scan;
+use super::index_scan::try_compile_index_ordered_scan;
 use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
 use super::order_by::resolve_order_by;
 use super::projection::{compile_row_values, result_columns};
@@ -199,6 +200,18 @@ where
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
         compile_direct_scan(em, reg, select, schema, cursors, end_label, catalog, sink)
+    } else if try_compile_index_ordered_scan(
+        em,
+        reg,
+        select,
+        schema,
+        &order_by_plans,
+        cursors,
+        end_label,
+        catalog,
+        sink,
+    )? {
+        Ok(())
     } else {
         compile_sorted_scan(
             em,
