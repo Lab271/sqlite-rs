@@ -6,6 +6,8 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-21
+
 chore: `make lint` now covers `[[test]] test = false` targets
 (`corpus`/`parity`/`sqllogictest`/`point_lookup_perf`) — the same
 convention that opts them out of the default `cargo test` run also
