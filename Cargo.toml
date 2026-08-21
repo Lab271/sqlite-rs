@@ -122,7 +122,7 @@ criterion = "0.5"
 # vendor. `tools/bench_env.sh` points the build at the pinned Homebrew keg
 # via SQLITE3_LIB_DIR/SQLITE3_INCLUDE_DIR; `benches/engine.rs` asserts the
 # linked version matches at run time so a drift can't pass silently.
-rusqlite = "0.32"
+rusqlite = "0.40"
 
 # MD5 is part of the sqllogictest format itself (`"N values hashing to
 # <md5>"` result blocks, #96) — not a project cryptographic dependency, so
