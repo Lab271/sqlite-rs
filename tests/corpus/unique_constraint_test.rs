@@ -6,7 +6,7 @@
 //! a `UNIQUE` index via the oracle, run our own codegen, and check the
 //! oracle's own `PRAGMA integrity_check` plus row counts.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,7 +37,7 @@ fn seed(oracle: &PathBuf, db: &PathBuf, sql: &str) {
     assert!(status.success());
 }
 
-fn page_size_of(db: &PathBuf) -> u32 {
+fn page_size_of(db: &Path) -> u32 {
     let vfs = UnixVfs;
     let file = vfs.open_read(db).unwrap();
     let mut header_buf = [0u8; 100];
@@ -50,7 +50,7 @@ fn page_size_of(db: &PathBuf) -> u32 {
     }
 }
 
-fn read_header(db: &PathBuf, page_size: u32) -> DatabaseHeader {
+fn read_header(db: &Path, page_size: u32) -> DatabaseHeader {
     let vfs = UnixVfs;
     let pager = Pager::open(&vfs, db, page_size).unwrap();
     let raw = pager.read_page(1).unwrap();
@@ -59,7 +59,7 @@ fn read_header(db: &PathBuf, page_size: u32) -> DatabaseHeader {
     DatabaseHeader::parse(&buf).unwrap()
 }
 
-fn table_schema(db: &PathBuf, header: &DatabaseHeader, table: &str) -> TableSchema {
+fn table_schema(db: &Path, header: &DatabaseHeader, table: &str) -> TableSchema {
     let vfs = UnixVfs;
     let source = VfsPageSource::open(&vfs, db, header.page_size).unwrap();
     let mut cursor = TableCursor::new(source, header, 1);

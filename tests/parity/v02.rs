@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::driver::{run_case, ParityCase};
+use crate::driver::{run_case, ParityCase, QueryRunner};
 use crate::oracle::{corpus_dir, pinned_oracle, skip_no_oracle};
 
 /// The binary under test, as built by cargo for this test run.
@@ -180,7 +180,7 @@ fn star_expansion_acceptance_and_output_match_for_a_rowid_alias_table() {
 }
 
 fn assert_cases_match(db: &Path, cases: &[ParityCase]) {
-    let mine: &dyn Fn(&Path, &str) -> Result<Vec<String>, String> = &run_query_cli;
+    let mine: QueryRunner = &run_query_cli;
     let mut checked = 0usize;
     for case in cases {
         let Some(report) = run_case(db, case, Some(mine)) else {

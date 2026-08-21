@@ -109,6 +109,16 @@ lint: ## Run clippy and check formatting
 	# manual `make bench`/`make bench-cli` workflow, not part of the
 	# regular CI gate, so it deliberately isn't wired up here.
 	cargo clippy --locked --lib --bins --tests --examples -- -D warnings
+	# `[[test]] test = false` targets (corpus/parity/sqllogictest/
+	# point_lookup_perf) opt out of the default `cargo test` run (see
+	# their Cargo.toml comments) but `--tests` above doesn't build or
+	# lint them either — they went uncompiled and unlinted for a while
+	# as a result (#299: a stale `FromClause` field reference in
+	# sqllogictest/runner.rs was a genuine compile error invisible to
+	# every gate above until `cargo clippy --test sqllogictest` was run
+	# directly). Named explicitly rather than discovered, matching how
+	# `--tests` itself isn't a wildcard either.
+	cargo clippy --locked --test corpus --test parity --test sqllogictest --test point_lookup_perf -- -D warnings
 	cargo fmt -- --check
 
 deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)

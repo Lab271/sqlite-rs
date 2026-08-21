@@ -16,7 +16,7 @@
 //! "point lookup is a bit faster" from "point lookup doesn't scan the
 //! table at all."
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::Instant;
@@ -69,7 +69,7 @@ fn compile(schema: &TableSchema, sql: &str) -> Program {
     compile_select(&select, schema).unwrap_or_else(|e| panic!("compiling {sql:?}: {e}"))
 }
 
-fn run(path: &PathBuf, program: &Program) -> std::time::Duration {
+fn run(path: &Path, program: &Program) -> std::time::Duration {
     let vfs = UnixVfs;
     let file = vfs.open_read(path).unwrap();
     let mut header_buf = [0u8; 100];
@@ -89,7 +89,11 @@ fn run(path: &PathBuf, program: &Program) -> std::time::Duration {
         std::hint::black_box(rows);
     }
     samples.sort();
-    samples[samples.len() / 2]
+    let mid = samples.len() / 2;
+    samples
+        .get(mid)
+        .copied()
+        .expect("samples is non-empty (5 iterations pushed above)")
 }
 
 /// #137's headline claim, made concrete: as the table grows, a full
@@ -155,8 +159,11 @@ fn point_lookup_scan_ratio_widens_with_table_size() {
     // somewhere. Checked across every consecutive pair, not just the
     // endpoints, so a regression at any one fixture size is caught.
     for pair in ratios.windows(2) {
-        let (small_rows, small_ratio) = pair[0];
-        let (big_rows, big_ratio) = pair[1];
+        let (Some(&(small_rows, small_ratio)), Some(&(big_rows, big_ratio))) =
+            (pair.first(), pair.get(1))
+        else {
+            continue;
+        };
         assert!(
             big_ratio >= small_ratio * 0.5,
             "scan/seek ratio shrank going from {small_rows} rows ({small_ratio:.1}x) to \

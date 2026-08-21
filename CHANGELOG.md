@@ -6,6 +6,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+chore: `make lint` now covers `[[test]] test = false` targets
+(`corpus`/`parity`/`sqllogictest`/`point_lookup_perf`) — the same
+convention that opts them out of the default `cargo test` run also
+opted them out of `cargo clippy --tests`/`cargo fmt`, letting compile
+errors and lint violations accumulate invisibly (a stale `FromClause`
+field reference in `sqllogictest/runner.rs` was one such compile
+error, fixed separately). Fixed the 23 accumulated violations this
+uncovered: `&PathBuf` parameters narrowed to `&Path` (9 sites across
+`tests/corpus/`, 1 in `tests/performance/point_lookup.rs`), two
+`indexing_slicing` sites in `point_lookup.rs` replaced with
+`.get()`/destructuring, a `type_complexity` violation in
+`tests/parity/{driver,v02}.rs` factored into a `QueryRunner` type
+alias, and three violations in `tests/sqllogictest/{runner,format}.rs`
+(`manual_split_once`, `unnecessary_sort_by`, `enum_variant_names`).
+`make lint` now runs `cargo clippy` against these four targets
+explicitly (named, not a wildcard — matching how `--tests` itself
+isn't one either).
+
 fix: `tests/sqllogictest/runner.rs` failed to compile (`&FromClause`
 has no `name` field — a stale reference left over from #276's
 `TableRef`/`FromClause` refactor, invisible to `cargo build

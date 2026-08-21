@@ -11,6 +11,10 @@ use crate::oracle::{pinned_oracle, run_oracle, skip_no_oracle};
 use sqlite_rs::vfs::UnixVfs;
 use std::path::Path;
 
+/// A `run_case`-shaped query runner: given a fixture path and SQL,
+/// returns rendered output lines or an error message.
+pub type QueryRunner<'a> = &'a dyn Fn(&Path, &str) -> Result<Vec<String>, String>;
+
 /// One SQL statement to run against both engines on the same fixture DB.
 pub struct ParityCase {
     pub name: &'static str,
@@ -36,11 +40,7 @@ pub struct ParityReport {
 /// Runs `case` against the pinned oracle and, when a `mine` closure is
 /// supplied, against sqlite-rs — otherwise every gated dimension reports
 /// [`DimResult::Skipped`] with the given reason (the v02–v12 stub path).
-pub fn run_case(
-    db: &Path,
-    case: &ParityCase,
-    mine: Option<&dyn Fn(&Path, &str) -> Result<Vec<String>, String>>,
-) -> Option<ParityReport> {
+pub fn run_case(db: &Path, case: &ParityCase, mine: Option<QueryRunner>) -> Option<ParityReport> {
     let Some(oracle) = pinned_oracle() else {
         skip_no_oracle(case.name);
         return None;

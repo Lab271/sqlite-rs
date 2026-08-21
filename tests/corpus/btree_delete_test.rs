@@ -5,7 +5,7 @@
 //! the oracle directly (`run_oracle` is read-only), then write through
 //! `sqlite_rs::btree::{insert_row, delete_row}` and verify via the oracle.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,7 +34,7 @@ fn seed(oracle: &PathBuf, db: &PathBuf, sql: &str) {
     assert!(status.success());
 }
 
-fn page_size_of(vfs: &UnixVfs, db: &PathBuf) -> u32 {
+fn page_size_of(vfs: &UnixVfs, db: &Path) -> u32 {
     let pager = Pager::open(vfs, db, 4096).unwrap();
     let header = pager.read_page(1).unwrap();
     let page_size = u16::from_be_bytes([header[16], header[17]]) as u32;
@@ -45,7 +45,7 @@ fn page_size_of(vfs: &UnixVfs, db: &PathBuf) -> u32 {
     }
 }
 
-fn root_page_of(vfs: &UnixVfs, db: &PathBuf, header: &DatabaseHeader, table: &str) -> u32 {
+fn root_page_of(vfs: &UnixVfs, db: &Path, header: &DatabaseHeader, table: &str) -> u32 {
     let pager = Pager::open(vfs, db, header.page_size).unwrap();
     let mut cursor = TableCursor::new(pager, header, 1);
     let schemas = read_schema(&mut cursor, header.text_encoding).unwrap();
@@ -56,7 +56,7 @@ fn root_page_of(vfs: &UnixVfs, db: &PathBuf, header: &DatabaseHeader, table: &st
         .root_page
 }
 
-fn read_header(vfs: &UnixVfs, db: &PathBuf, page_size: u32) -> DatabaseHeader {
+fn read_header(vfs: &UnixVfs, db: &Path, page_size: u32) -> DatabaseHeader {
     let pager = Pager::open(vfs, db, page_size).unwrap();
     let raw = pager.read_page(1).unwrap();
     let mut buf = [0u8; 100];
