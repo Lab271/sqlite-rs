@@ -5,7 +5,7 @@
 //!
 //! Index keys are read back from the table cursor's *current* row via
 //! ordinary `Opcode::Column`/`Opcode::Rowid` (rowid last, matching the
-//! on-disk index key convention `btree::index_insert`/`index_delete`
+//! on-disk index key convention `btree::index::insert`/`index::delete`
 //! use) rather than reusing already-computed value registers — there is
 //! no register-copy opcode in the frozen V2 set
 //! (`tools/opcodes-v2.json`), so a fresh contiguous register run is

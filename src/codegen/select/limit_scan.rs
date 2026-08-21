@@ -1,0 +1,419 @@
+use super::order_by::{OrderByPlan, OrderByTarget};
+use super::projection::{
+    compile_row_values, emit_distinct_guard, emit_row_via_sink, ResultColumnPlan,
+};
+use super::*;
+/// LIMIT/OFFSET counters, set up once before the scan loop starts.
+pub(super) struct LimitState {
+    offset_reg: Option<i32>,
+    limit_reg: Option<i32>,
+}
+
+pub(super) fn compile_limit_setup(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    scope: &Scope,
+    select: &Select,
+) -> Result<Option<LimitState>, CodegenError> {
+    let Some(limit) = &select.limit else {
+        return Ok(None);
+    };
+    let limit_reg = compile_value(em, reg, scope, &limit.limit)?;
+    let offset_reg = match &limit.offset {
+        Some(offset_expr) => Some(compile_value(em, reg, scope, offset_expr)?),
+        None => None,
+    };
+    Ok(Some(LimitState {
+        offset_reg,
+        limit_reg: Some(limit_reg),
+    }))
+}
+
+/// Emits the OFFSET skip-guard (jumping to `row_skip` while
+/// `offset_reg` still has rows to skip) — call once per scanned row,
+/// before deciding whether to emit it.
+pub(super) fn emit_offset_guard(em: &mut Emitter, limit: &LimitState, row_skip: Label) {
+    if let Some(offset_reg) = limit.offset_reg {
+        let addr = em.emit(Instruction::new(Opcode::IfPos, offset_reg, 0, 1));
+        em.patch_p2(addr, row_skip);
+    }
+}
+
+/// Emits the LIMIT stop-guard (jumping to `end_label` once `limit_reg`
+/// reaches zero) — call once per row actually emitted.
+pub(super) fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: Label) {
+    if let Some(limit_reg) = limit.limit_reg {
+        let addr = em.emit(Instruction::new(Opcode::DecrJumpZero, limit_reg, 0, 0));
+        em.patch_p2(addr, end_label);
+    }
+}
+
+/// The two sides of a top-level `=` expression, or `None` for any other
+/// shape. Used by [`try_compile_rowid_seek`] to recognize `WHERE rowid =
+/// <int literal>` / `WHERE rowid = ?` (#137).
+///
+/// Single input reference, so lifetime elision ties both tuple elements
+/// to it without an explicit `<'a>` annotation — the qualified subset
+/// (`make mvl-limit`) forbids explicit lifetimes, and a helper taking
+/// both `schema` and `expr` by reference while returning a borrow of
+/// `expr` alone would need one. The caller also needs `schema` (to pick
+/// the non-rowid side via [`is_rowid_reference`]), so that step happens
+/// in [`try_compile_rowid_seek`] itself, which already holds both.
+pub(super) fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let ExprKind::Binary {
+        op: BinaryOp::Eq,
+        lhs,
+        rhs,
+    } = &expr.kind
+    else {
+        return None;
+    };
+    Some((lhs, rhs))
+}
+
+pub(super) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
+    let ExprKind::Column { name, .. } = &expr.kind else {
+        return false;
+    };
+    if name.eq_ignore_ascii_case("rowid")
+        || name.eq_ignore_ascii_case("_rowid_")
+        || name.eq_ignore_ascii_case("oid")
+    {
+        return true;
+    }
+    rowid_alias_column(schema)
+        .and_then(|idx| schema.columns.get(idx))
+        .is_some_and(|col| col.eq_ignore_ascii_case(name))
+}
+
+/// Emits `Integer`/`Variable` + `SeekRowid` in place of the
+/// `Rewind`/`Next` scan loop when `select`'s `WHERE` clause is a single
+/// top-level equality between a rowid reference (the `rowid`/`_rowid_`/
+/// `oid` keywords, or the table's actual `INTEGER PRIMARY KEY` alias
+/// column) and an integer literal or bind parameter — O(log n) point
+/// lookup instead of O(n) full scan (#137). Returns `Ok(true)` when the
+/// fast path was taken; `Ok(false)` leaves `em`/`reg` untouched so the
+/// caller falls back to the ordinary scan. Deliberately narrow —
+/// secondary-index columns, ranges, and compound conditions (`AND`/`OR`)
+/// all fall through to the ordinary scan and stay in V4 per the issue's
+/// bounded scope.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_rowid_seek<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        // A single-row result is already distinct — but keeping this
+        // path free of the ephemeral-index bookkeeping means it can
+        // stay a straight-line seek. Not worth special-casing; DISTINCT
+        // falls back to the ordinary scan.
+        return Ok(false);
+    }
+    let Some(where_expr) = &select.where_clause else {
+        return Ok(false);
+    };
+    let Some((lhs, rhs)) = top_level_equality_operands(where_expr) else {
+        return Ok(false);
+    };
+    let operand = if is_rowid_reference(schema, lhs) {
+        rhs
+    } else if is_rowid_reference(schema, rhs) {
+        lhs
+    } else {
+        return Ok(false);
+    };
+    // Bounded to the issue's in-scope shapes: an integer literal, or a
+    // bare/numbered bind parameter. Anything else (a string literal
+    // needing numeric-affinity coercion, a sub-expression, a named
+    // parameter) falls back to the ordinary scan rather than risk
+    // miscompiling a case this fast path wasn't built to handle.
+    let is_supported_operand = matches!(
+        &operand.kind,
+        ExprKind::Literal(Literal::Integer(_))
+            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+    );
+    if !is_supported_operand {
+        return Ok(false);
+    }
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+    let value_reg = compile_value(em, reg, &scope, operand)?;
+    let seek_addr = em.emit(Instruction::new(
+        Opcode::SeekRowid,
+        cursors.table,
+        0,
+        value_reg,
+    ));
+    em.patch_p2(seek_addr, end_label);
+
+    let row_skip = em.new_label();
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+    em.place(row_skip);
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_direct_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, catalog, sink)? {
+        return Ok(());
+    }
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        em.emit(Instruction::new(
+            Opcode::OpenEphemeral,
+            cursors.distinct,
+            0,
+            0,
+        ));
+    }
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+
+    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
+    em.patch_p2(rewind_addr, end_label);
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
+    let row_skip = em.new_label();
+    if let Some(where_expr) = &select.where_clause {
+        compile_cond(
+            em,
+            reg,
+            &scope,
+            where_expr,
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
+        )?;
+    }
+    emit_distinct_guard(
+        em,
+        reg,
+        select,
+        schema,
+        cursors.table,
+        false,
+        cursors.distinct,
+        row_skip,
+        catalog,
+    )?;
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+
+    em.place(row_skip);
+    let next_addr = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_sorted_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    order_by_plans: &[OrderByPlan],
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<(), CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        em.emit(Instruction::new(
+            Opcode::OpenEphemeral,
+            cursors.distinct,
+            0,
+            0,
+        ));
+    }
+    // The sort-key descriptor (which register each term reads) isn't
+    // known until pass 1 below actually allocates the computed-expression
+    // registers, so `SorterOpen` is emitted with a placeholder P4 and
+    // patched once that layout is known — it must still precede the scan
+    // loop in program order.
+    let sorter_open_addr = em.emit(Instruction::with_p4(
+        Opcode::SorterOpen,
+        cursors.sort,
+        0,
+        0,
+        P4::None,
+    ));
+
+    // Pass 1: buffer every matching row's full column tuple — plus a
+    // trailing register per computed ORDER BY expression — into the
+    // sorter, WHERE-filtered but pre-DISTINCT/LIMIT (those apply on
+    // the sorted output, matching SQLite's own ORDER BY pipeline
+    // shape). The trailing expression registers are never read back by
+    // `sink` (it only ever projects `select.columns`), so they exist
+    // purely as sort keys.
+    let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
+    let sort_step = em.new_label();
+    em.patch_p2(scan_rewind, sort_step);
+    let scan_loop = em.new_label();
+    em.place(scan_loop);
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let scan_skip = em.new_label();
+    if let Some(where_expr) = &select.where_clause {
+        compile_cond(
+            em,
+            reg,
+            &scope,
+            where_expr,
+            // `WHERE` is the boundary where SQL's three-valued logic
+            // collapses to two: a predicate whose truth is unknown
+            // excludes the row exactly like a false one.
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
+        )?;
+    }
+    let (first, _schema_count) = compile_row_values(
+        em,
+        reg,
+        schema,
+        &schema
+            .columns
+            .iter()
+            .map(|c| ResultColumnPlan::Column(c.clone()))
+            .collect::<Vec<_>>(),
+        cursors.table,
+        false,
+        catalog,
+    )?;
+
+    // Compute every genuine-expression sort key into its own register,
+    // appended after the schema-column block. A key's final register
+    // need not be the highest one its expression allocates (e.g. `CASE`
+    // allocates its destination before its branches), so the record's
+    // span is widened to `reg`'s post-compile watermark rather than
+    // trusting the last returned register — any intervening temporary
+    // just becomes an unread extra field.
+    let mut sort_keys = Vec::with_capacity(order_by_plans.len());
+    for plan in order_by_plans {
+        let index = match &plan.target {
+            OrderByTarget::Column(idx) => *idx,
+            OrderByTarget::Expr(expr) => {
+                let r = compile_value(em, reg, &scope, expr)?;
+                usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+            }
+        };
+        sort_keys.push(SortKeyColumn {
+            index,
+            descending: plan.descending,
+            collation: plan.collation,
+            nulls_first: plan.nulls_first,
+        });
+    }
+    em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
+
+    let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
+    let record_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::MakeRecord,
+        first,
+        i32::try_from(count).unwrap_or(0),
+        record_reg,
+    ));
+    em.emit(Instruction::new(
+        Opcode::SorterInsert,
+        cursors.sort,
+        record_reg,
+        0,
+    ));
+
+    em.place(scan_skip);
+    let scan_next = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
+    em.patch_p2(scan_next, scan_loop);
+
+    // Pass 2: iterate the sorted buffer, re-deriving the schema's full
+    // column tuple from each sorted record via an `OpenPseudo` cursor,
+    // then apply DISTINCT/LIMIT/OFFSET and emit result columns exactly
+    // as the direct-scan path does, reading from `cursors.pseudo`
+    // instead of `cursors.table`.
+    em.place(sort_step);
+    let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, cursors.sort, 0, 0));
+    em.patch_p2(sort_addr, end_label);
+
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+
+    let sorted_loop = em.new_label();
+    em.place(sorted_loop);
+    let sorter_data_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::SorterData,
+        cursors.sort,
+        sorter_data_reg,
+        0,
+    ));
+    // Re-opened every iteration rather than opened once before the loop
+    // with `sorter_data_reg` merely updated: `cursor.rs`'s pseudo-cursor
+    // is a cheap, idempotent register-pointer rebind (no allocation or
+    // I/O), and this mirrors SQLite's own per-row `OpenPseudo` re-open
+    // when the underlying data register changes each iteration.
+    em.emit(Instruction::new(
+        Opcode::OpenPseudo,
+        cursors.pseudo,
+        sorter_data_reg,
+        0,
+    ));
+
+    let row_skip = em.new_label();
+    emit_distinct_guard(
+        em,
+        reg,
+        select,
+        schema,
+        cursors.pseudo,
+        true,
+        cursors.distinct,
+        row_skip,
+        catalog,
+    )?;
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    emit_row_via_sink(em, reg, select, schema, cursors.pseudo, true, catalog, sink)?;
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+
+    em.place(row_skip);
+    let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
+    em.patch_p2(sorted_next, sorted_loop);
+    Ok(())
+}

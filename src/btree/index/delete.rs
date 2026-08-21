@@ -1,6 +1,6 @@
 //! Index b-tree delete (write path): entry delete plus underflow
 //! handling. Mirrors `delete.rs` (table delete) in spirit but not in
-//! mechanism — `index_insert.rs`'s module doc explains why: index b-tree
+//! mechanism — `insert.rs`'s module doc explains why: index b-tree
 //! interior cells carry a full entry (its own value), not just a routing
 //! key, so a delete target may be found sitting at interior level rather
 //! than in a leaf, and removing a routing entry can never be conflated
@@ -18,7 +18,7 @@
 //! structural surgery is covered by [`extract_max_entry`] below.
 //!
 //! **Interior-match deletion (predecessor swap).** When
-//! [`super::index::descend_index_tree`] reports
+//! [`super::descend_index_tree`] reports
 //! [`IndexDescent::InteriorMatch`] (the target key IS an interior page's
 //! own entry), the entry can't simply be dropped — its child pointer is
 //! load-bearing (routes to the subtree of lesser keys) and, separately,
@@ -37,12 +37,12 @@
 
 use std::cmp::Ordering;
 
-use super::index::{
+use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
     compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
     IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
 };
-use super::{page1_header_start, read_page_type, BtreeError, MAX_PAGES_VISITED};
+use crate::btree::{page1_header_start, read_page_type, BtreeError, MAX_PAGES_VISITED};
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{TextEncoding, Value};
@@ -269,7 +269,7 @@ fn remove_entry_by_child(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::btree::index_insert::insert_entry;
+    use crate::btree::index::insert::insert_entry;
     use crate::vfs::{MemoryVfs, PageSource};
     use std::path::Path;
 
