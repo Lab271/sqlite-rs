@@ -1072,12 +1072,18 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     };
     match vm.cursor(instr.p1)? {
         CursorSlot::EphemeralTable(_) => {
-            let values = decode_record(&payload, TextEncoding::Utf8).map_err(|e| {
-                ExecError::MalformedInstruction {
+            // No real db is attached for a purely in-memory VM (e.g. the
+            // ephemeral-table unit tests below) — fall back to UTF-8,
+            // matching every other decode site's default.
+            let encoding = vm
+                .db()
+                .map(|db| db.header.text_encoding)
+                .unwrap_or(TextEncoding::Utf8);
+            let values =
+                decode_record(&payload, encoding).map_err(|e| ExecError::MalformedInstruction {
                     opcode: "Insert",
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
             let state = vm.ephemeral_table_mut(instr.p1, "Insert")?;
             state.rows.push((rowid, values));
             Ok(Step::Next)
@@ -2424,6 +2430,34 @@ mod tests {
                 (Value::Integer(3), Value::Integer(30)),
             ]
         );
+    }
+
+    /// A `with_db` `Vm` whose header reports `encoding` — the source is
+    /// never actually read by an `EphemeralTable` insert/scan (#266), so
+    /// `minimal_writable_db`'s backing memory-VFS db just needs to parse.
+    fn ephemeral_vm_with_encoding(encoding: TextEncoding) -> Vm {
+        let (vfs, mut header) = minimal_writable_db(512, 0x0d);
+        header.text_encoding = encoding;
+        let source = crate::vfs::VfsPageSource::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        Vm::with_db(Rc::new(source), header)
+    }
+
+    #[test]
+    fn ephemeral_table_insert_decodes_using_database_text_encoding() {
+        let mut vm = ephemeral_vm_with_encoding(TextEncoding::Utf16Le);
+        open_ephemeral_table(&mut vm, 0);
+
+        // Built directly with `encode_record`/`TextEncoding::Utf16Le`,
+        // bypassing `MakeRecord` (which still hardcodes UTF-8 encoding,
+        // a separate, wider-scope gap tracked outside #266).
+        let payload = encode_record(&[Value::Text("héllo".into())], TextEncoding::Utf16Le);
+        vm.set_register(30, Value::Blob(payload.into())).unwrap();
+        vm.set_register(31, Value::Integer(1)).unwrap();
+        insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 31, 30)).unwrap();
+
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 99, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 11)).unwrap();
+        assert_eq!(*vm.register(11).unwrap(), Value::Text("héllo".into()));
     }
 
     #[test]
