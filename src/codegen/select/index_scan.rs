@@ -22,51 +22,49 @@ use super::*;
 /// per-column direction across `plans` that doesn't uniformly match (or
 /// uniformly reverse) the index's own per-column directions also falls
 /// through to `None` — the sorter path handles it instead.
-fn find_ordering_index<'a>(
-    schema: &'a TableSchema,
+fn index_matches_ordering(
+    schema: &TableSchema,
+    index: &IndexSchema,
     plans: &[OrderByPlan],
-) -> Option<(&'a IndexSchema, bool)> {
+) -> Option<bool> {
+    if index.columns.len() < plans.len() {
+        return None;
+    }
+    let mut forward: Option<bool> = None;
+    for (i, plan) in plans.iter().enumerate() {
+        if plan.collation != Collation::Binary {
+            return None;
+        }
+        if plan.nulls_first == plan.descending {
+            // An explicit NULLS clause overriding the direction's
+            // default can't be expressed by a raw b-tree walk.
+            return None;
+        }
+        let OrderByTarget::Column(col_idx) = &plan.target else {
+            return None;
+        };
+        let col_name = schema.columns.get(*col_idx)?;
+        let index_col = index.columns.get(i)?;
+        if !index_col.name.eq_ignore_ascii_case(col_name) {
+            return None;
+        }
+        let this_forward = plan.descending == index_col.desc;
+        match forward {
+            None => forward = Some(this_forward),
+            Some(f) if f == this_forward => {}
+            _ => return None,
+        }
+    }
+    forward
+}
+
+fn find_ordering_index(schema: &TableSchema, plans: &[OrderByPlan]) -> Option<(usize, bool)> {
     if plans.is_empty() {
         return None;
     }
-    'index: for index in &schema.indexes {
-        if index.columns.len() < plans.len() {
-            continue;
-        }
-        let mut forward: Option<bool> = None;
-        for (i, plan) in plans.iter().enumerate() {
-            if plan.collation != Collation::Binary {
-                continue 'index;
-            }
-            if plan.nulls_first == plan.descending {
-                // An explicit NULLS clause overriding the direction's
-                // default can't be expressed by a raw b-tree walk.
-                continue 'index;
-            }
-            let OrderByTarget::Column(col_idx) = &plan.target else {
-                continue 'index;
-            };
-            let Some(col_name) = schema.columns.get(*col_idx) else {
-                continue 'index;
-            };
-            let Some(index_col) = index.columns.get(i) else {
-                continue 'index;
-            };
-            if !index_col.name.eq_ignore_ascii_case(col_name) {
-                continue 'index;
-            }
-            let this_forward = plan.descending == index_col.desc;
-            match forward {
-                None => forward = Some(this_forward),
-                Some(f) if f == this_forward => {}
-                _ => continue 'index,
-            }
-        }
-        if let Some(forward) = forward {
-            return Some((index, forward));
-        }
-    }
-    None
+    schema.indexes.iter().enumerate().find_map(|(i, index)| {
+        index_matches_ordering(schema, index, plans).map(|forward| (i, forward))
+    })
 }
 
 /// Compiles `SELECT ... ORDER BY <indexed col(s)> [DESC] LIMIT n [OFFSET
@@ -108,7 +106,10 @@ where
     if schema.without_rowid {
         return Ok(false);
     }
-    let Some((index, forward)) = find_ordering_index(schema, order_by_plans) else {
+    let Some((index_idx, forward)) = find_ordering_index(schema, order_by_plans) else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_idx) else {
         return Ok(false);
     };
 
