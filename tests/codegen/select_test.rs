@@ -725,8 +725,8 @@ fn min_max_aggregate_honours_collate_nocase() {
     assert_eq!(
         rows,
         vec![vec![
-            Value::Text("a".to_string()),
-            Value::Text("C".to_string()),
+            Value::Text("a".to_string().into()),
+            Value::Text("C".to_string().into()),
         ]]
     );
     let _ = std::fs::remove_file(&path);
