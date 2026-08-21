@@ -1,13 +1,31 @@
 {
   "oracle_version": "3.53.4",
-  "query_count": 38,
-  "opcode_count": 65,
+  "query_count": 39,
+  "opcode_count": 68,
   "opcodes": {
     "Add": {
       "count": 1,
       "p4_variants": [],
       "example_query": "SELECT price + 1, price - 1, price / 2, qty % 2 FROM products",
       "category": "arithmetic"
+    },
+    "AggFinal": {
+      "count": 2,
+      "p4_variants": [
+        "count(0)",
+        "sum(1)"
+      ],
+      "example_query": "SELECT count(*), sum(price) FROM products",
+      "category": "function"
+    },
+    "AggStep": {
+      "count": 2,
+      "p4_variants": [
+        "count(0)",
+        "sum(1)"
+      ],
+      "example_query": "SELECT count(*), sum(price) FROM products",
+      "category": "function"
     },
     "BeginSubrtn": {
       "count": 1,
@@ -48,7 +66,7 @@
       "category": "arithmetic"
     },
     "Column": {
-      "count": 129,
+      "count": 130,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -58,6 +76,12 @@
       "p4_variants": [],
       "example_query": "SELECT qty & 1, qty | 1, qty << 1, qty >> 1, ~qty, name || note FROM products",
       "category": "arithmetic"
+    },
+    "Copy": {
+      "count": 1,
+      "p4_variants": [],
+      "example_query": "SELECT count(*), sum(price) FROM products",
+      "category": "result"
     },
     "DecrJumpZero": {
       "count": 5,
@@ -113,7 +137,7 @@
       "category": "compare"
     },
     "Goto": {
-      "count": 40,
+      "count": 41,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -127,7 +151,7 @@
       "category": "compare"
     },
     "Halt": {
-      "count": 38,
+      "count": 39,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -168,7 +192,7 @@
       "category": "control"
     },
     "Init": {
-      "count": 38,
+      "count": 39,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "control"
@@ -238,7 +262,7 @@
       "category": "control"
     },
     "Next": {
-      "count": 36,
+      "count": 37,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -256,7 +280,7 @@
       "category": "control"
     },
     "Null": {
-      "count": 1,
+      "count": 2,
       "p4_variants": [],
       "example_query": "SELECT CASE WHEN price > 100 THEN 1 END FROM products",
       "category": "result"
@@ -295,7 +319,7 @@
       "category": "cursor"
     },
     "OpenRead": {
-      "count": 38,
+      "count": 39,
       "p4_variants": [
         "0",
         "2",
@@ -317,7 +341,7 @@
       "category": "result"
     },
     "RealAffinity": {
-      "count": 33,
+      "count": 34,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "compare"
@@ -329,7 +353,7 @@
       "category": "arithmetic"
     },
     "ResultRow": {
-      "count": 38,
+      "count": 39,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "result"
@@ -341,7 +365,7 @@
       "category": "control"
     },
     "Rewind": {
-      "count": 35,
+      "count": 36,
       "p4_variants": [],
       "example_query": "SELECT * FROM products",
       "category": "cursor"
@@ -435,7 +459,7 @@
       "category": "arithmetic"
     },
     "Transaction": {
-      "count": 38,
+      "count": 39,
       "p4_variants": [
         "0"
       ],

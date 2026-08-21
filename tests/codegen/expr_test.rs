@@ -611,17 +611,18 @@ fn case_with_column_branch_and_cast_branch() {
 }
 
 #[test]
-fn case_branch_with_unsupported_expression_is_rejected() {
-    let (_path, schema) = one_row_fixture();
-    let select = match parse_select("SELECT CASE WHEN a = 1 THEN a + 1 ELSE 0 END FROM t") {
-        ParseOutcome::Accepted(s) => *s,
-        other => panic!("{other:?}"),
-    };
-    let err = compile_select(&select, &schema).unwrap_err();
-    assert!(
-        matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
-        "expected Unsupported, got {err:?}"
+fn case_branch_with_computed_expression_compiles_via_copy() {
+    // #141: a CASE branch that is a compound expression (not a bare
+    // literal or column reference) used to be rejected outright — no
+    // opcode existed to relocate its computed value into the CASE's
+    // shared result register. `Copy` closes that gap.
+    let (path, schema) = one_row_fixture();
+    let rows = run_select(
+        &path,
+        &schema,
+        "SELECT CASE WHEN a = 1 THEN a + 1 ELSE 0 END FROM t",
     );
+    assert_eq!(rows, vec![vec![Value::Integer(2)]]);
 }
 
 #[test]
