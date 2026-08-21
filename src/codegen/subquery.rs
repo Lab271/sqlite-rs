@@ -299,7 +299,7 @@ pub(crate) fn materialize_from_subquery(
             0,
         ));
         compile_select_scan(
-            em, reg, subquery, schema, cursors, end_label, &schemas, &mut sink,
+            em, reg, subquery, schema, cursors, end_label, catalog, &mut sink,
         )?;
     } else {
         let cursor_base = reg.alloc_cursor();

@@ -303,28 +303,21 @@ fn two_level_correlated_exists_matches_oracle() {
     );
 }
 
-/// #268: a correlated subquery nested inside a FROM-subquery's SELECT
-/// list is a separate, still-unimplemented shape — `src/codegen/
-/// subquery.rs`'s catalog-visibility check rejects the inner
-/// subquery's reference to `other` because a FROM-subquery's own SELECT
-/// list is compiled against just that subquery's schema, not the full
-/// outer catalog. Documents the current clean rejection; not fixed
-/// here (tracked as a follow-on feature gap).
+/// #289: a correlated subquery nested inside a FROM-subquery's own
+/// SELECT list — `src/codegen/subquery.rs`'s `materialize_from_subquery`
+/// now threads the full outer catalog through the FROM-subquery's own
+/// scan (rather than just its own schema), so a subquery nested inside
+/// it can resolve a reference to any catalog table, correlated (via the
+/// scope-chain fallback, `other.id = t.id + 99`) or otherwise.
 #[test]
-fn correlated_subquery_inside_from_subquery_select_list_is_still_unsupported() {
+fn correlated_subquery_inside_from_subquery_select_list_matches_oracle() {
     let db = subquery_fixture_db("from_subquery_correlated_select_list");
-    let output = run_query(
+    assert_matches_oracle(
         &db,
         "SELECT * FROM (SELECT id, (SELECT a_id FROM other WHERE other.id = t.id + 99) AS sub \
          FROM t) AS s",
+        "correlated_subquery_inside_from_subquery_select_list_matches_oracle",
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "expected this form to fail");
-    assert!(
-        stderr.contains("isn't visible to this compiler's"),
-        "expected the catalog-visibility diagnostic; got: {stderr}"
-    );
-    assert!(!stderr.contains("panicked at"), "must not panic: {stderr}");
 }
 
 #[test]
