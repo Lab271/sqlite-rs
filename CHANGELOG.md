@@ -43,6 +43,22 @@ fixture through the SQL engine isn't possible yet — `MakeRecord`
 (`src/vdbe/result.rs`) still hardcodes UTF-8 on the encode side, a
 separate, wider-scope gap left for a follow-up ticket.
 
+test: aggregate/join/subquery edge-case coverage from the v0.13.0
+review (#268). Adds 11 tests across `tests/codegen/select_test.rs`,
+`tests/corpus/union_test.rs`, `tests/corpus/join_test.rs`, and
+`tests/corpus/subquery_test.rs`: HAVING-filters-all-groups, UNION ALL
+arm type/affinity mismatch (no coercion, verified), the LEFT/RIGHT/
+FULL JOIN `WHERE ... IS NULL` anti-join idiom, two-level-deep
+correlated subqueries, and multi-column `IN`/`NOT IN` subquery edge
+cases (zero-row result, NULL tuple component) — all against working
+functionality. Two sub-items turned out to be missing features, not
+test gaps, and are documented as clean `Unsupported` rejections rather
+than fixed here: aggregates with no `GROUP BY` at all (even
+`count(*)`), and `FULL JOIN` combined with `ORDER BY`/`DISTINCT`/
+`LIMIT`; also newly discovered, a correlated subquery nested inside a
+FROM-subquery's own SELECT list. Tracked as follow-on tickets rather
+than expanding this test-only ticket's scope.
+
 refactor: tighten `src/btree` and `src/codegen` module layout (#273,
 #276). Pure module reorganization, no behavior change: `src/btree/`
 groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
