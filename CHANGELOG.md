@@ -55,6 +55,26 @@ functions combined with a JOIN aren't supported by codegen yet, so it
 runs against a single table rather than the joined query — tracked as a
 known coverage gap in #268.
 
+perf: bounded top-K sorter for `ORDER BY ... LIMIT N` (#129). The
+ephemeral sorter (`src/vdbe/sorter.rs`) previously buffered and sorted
+every matching row before `LIMIT` ever applied — a full `O(N log N)`
+sort regardless of how small `LIMIT` was. `SorterOpen` now accepts an
+optional bound register (`P2`/`P5`, wired from
+`src/codegen/select/limit_scan.rs::compile_sorted_scan` via the
+existing-but-previously-unused `OffsetLimit` opcode's `LIMIT +
+max(OFFSET, 0)` / `-1`-means-unbounded convention), and `SorterInsert`
+maintains a binary max-heap capped at that bound instead of an
+ever-growing buffer — O(log bound) per insert, provably lossless (a
+row that loses the eviction comparison can never land within the
+final `LIMIT` output). Skipped whenever `DISTINCT` is present (it
+dedupes *after* the sort, so bounding beforehand could evict a row
+DISTINCT would have kept). ~40% faster on the tier-1 benchmark's
+`order_by_limit` case; a linear (non-heap) worst-row scan was tried
+first and *regressed* performance whenever `bound` exceeds `log2(row
+count)` — a genuine dead end worth noting for anyone revisiting this.
+Index-ordered scanning (skip the sorter entirely when an index matches
+the `ORDER BY` column) is a separate, larger follow-up — see #296.
+
 refactor: consolidate aggregate codegen onto `AggStep`/`AggFinal` (#263,
 ADR-0019). `src/codegen/select/aggregate.rs`'s `GROUP BY`/plain-aggregate
 compilation (`compile_grouped_scan`) now emits `Opcode::AggStep`/

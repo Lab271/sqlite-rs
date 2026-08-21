@@ -14,7 +14,7 @@
 //! Register/cursor-slot conventions this ticket chose (see
 //! `src/vdbe/cursor.rs`'s module doc for the same caveat: these are not
 //! claimed to match codegen's, #91, eventual harvested operand layout):
-//! - `SorterOpen(p1=cursor, p4=SortKey(columns))`
+//! - `SorterOpen(p1=cursor, p2=bound register [only if p5!=0], p4=SortKey(columns), p5=1 if bounded)`
 //! - `SorterInsert(p1=cursor, p2=register holding the record blob)`
 //! - `SorterSort`/`Sort(p1=cursor, p2=jump target if the sorter is
 //!   empty)` — mirrors `Rewind`'s "jump on empty" shape.
@@ -23,6 +23,19 @@
 //! - `SorterData(p1=cursor, p2=dest register)` — writes the current
 //!   sorted row's raw record bytes (a `Value::Blob`) into the register,
 //!   the same register `OpenPseudo`'s `P2` names.
+//!
+//! `SorterOpen`'s optional bound (#129): when `P5` is nonzero, `P2`
+//! names a register holding the maximum number of rows the sorter ever
+//! needs to keep — codegen computes it via `OffsetLimit` as `LIMIT +
+//! max(OFFSET, 0)`, using that opcode's `-1`-means-unbounded convention
+//! (`LIMIT -1`/no `LIMIT`) to fall back to the old unbounded behavior
+//! whenever no bound is known. `SorterInsert` then maintains a bounded
+//! top-K set instead of an ever-growing buffer: once at capacity, an
+//! incoming row only replaces the worst-currently-kept row (by the sort
+//! key) if it sorts ahead of it, and is discarded otherwise. This is
+//! never a lossy approximation — the discarded rows are provably outside
+//! the first `bound` positions of the final sorted output — it just
+//! avoids buffering (and later sorting) rows `LIMIT` will never reach.
 
 use std::cmp::Ordering;
 
@@ -32,15 +45,25 @@ use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, SortKeyColumn, P4};
 
-/// A sorter cursor's state: the sort-key descriptor, the buffered raw
-/// record bytes (unsorted until `SorterSort` runs), and the current
-/// iteration position once sorted.
+/// A sorter cursor's state: the sort-key descriptor, the buffered rows
+/// (unsorted until `SorterSort` runs) as raw record bytes paired with
+/// their already-decoded values, the current iteration position once
+/// sorted, and an optional top-K bound (#129) — `None` means the
+/// traditional unbounded buffer. Decoding once at insert time (rather
+/// than decoding again for every top-K eviction comparison, or in a
+/// separate full pass at `SorterSort` time) avoids O(N) redundant
+/// decode work; keeping the bounded buffer heap-ordered (see
+/// `sorter_insert`) is what keeps eviction itself at O(log bound) per
+/// insert rather than O(bound) — the latter turned out to *regress*
+/// performance versus the old unbounded sort whenever `bound` exceeds
+/// `log2(row count)` (e.g. `bound=100` vs `log2(830_000)≈20`).
 #[derive(Debug)]
 pub(crate) struct SorterState {
     keys: Vec<SortKeyColumn>,
-    buffer: Vec<Vec<u8>>,
+    buffer: Vec<(Vec<u8>, Vec<Value>)>,
     sorted: bool,
     pos: usize,
+    bound: Option<usize>,
 }
 
 // Methods rather than free functions so the borrow of `self` elides: a free
@@ -78,7 +101,9 @@ impl Vm {
 }
 
 /// `SorterOpen`: opens an empty sorter, keyed by `P4`'s sort-key
-/// descriptor, into cursor slot `P1`.
+/// descriptor, into cursor slot `P1`. A nonzero `P5` reads `P2` as this
+/// sorter's top-K bound (#129): a negative value (`OffsetLimit`'s
+/// unbounded sentinel) leaves it unbounded, same as `P5 == 0`.
 pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let keys = match &instr.p4 {
         P4::SortKey(keys) => keys.clone(),
@@ -89,6 +114,20 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             })
         }
     };
+    let bound = if instr.p5 == 0 {
+        None
+    } else {
+        match vm.register(instr.p2)? {
+            Value::Integer(n) if *n >= 0 => usize::try_from(*n).ok(),
+            Value::Integer(_) => None,
+            other => {
+                return Err(ExecError::MalformedInstruction {
+                    opcode: "SorterOpen",
+                    reason: format!("expected an Integer bound, got {other:?}"),
+                })
+            }
+        }
+    };
     vm.set_cursor(
         instr.p1,
         CursorSlot::Sorter(SorterState {
@@ -96,6 +135,7 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             buffer: Vec::new(),
             sorted: false,
             pos: 0,
+            bound,
         }),
     )?;
     Ok(Step::Next)
@@ -104,6 +144,18 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// `SorterInsert`: buffers register `P2`'s record blob as one candidate
 /// row on sorter `P1`. Invalidates any prior sort — the buffer is
 /// re-sorted the next time `SorterSort`/`Sort` runs.
+///
+/// When the sorter has a top-K bound (#129) and is already at capacity,
+/// this instead keeps only the better of the incoming row and the
+/// worst-currently-kept row (by the sort key), discarding the other —
+/// provably safe since a row that loses this comparison can never land
+/// within the first `bound` positions of the final sorted output. The
+/// buffer is kept as a binary max-heap (ordered so the root is always
+/// the worst-kept row) specifically so this is an O(log bound)
+/// operation per insert, not O(bound): a linear worst-row scan was
+/// tried first and made things *slower* than the old unbounded sort
+/// whenever `bound` exceeds `log2(row count)` (100 vs ~20 for an
+/// 830K-row table) — more total comparisons, not fewer.
 pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let blob = match vm.register(instr.p2)? {
         Value::Blob(b) => b.clone(),
@@ -115,64 +167,148 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
         }
     };
     let state = vm.sorter_mut(instr.p1, "SorterInsert")?;
-    state.buffer.push(blob.to_vec());
     state.sorted = false;
+    match state.bound {
+        Some(0) => {}
+        Some(n) if state.buffer.len() >= n => {
+            let new_values = decode_bytes("SorterInsert", &blob)?;
+            let is_better = state.buffer.first().is_some_and(|(_, worst)| {
+                compare_rows(&new_values, worst, &state.keys) == Ordering::Less
+            });
+            if is_better {
+                if let Some(slot) = state.buffer.first_mut() {
+                    *slot = (blob.to_vec(), new_values);
+                }
+                heap_sift_down(&mut state.buffer, 0, &state.keys);
+            }
+        }
+        _ => {
+            let values = decode_bytes("SorterInsert", &blob)?;
+            state.buffer.push((blob.to_vec(), values));
+            if state.bound.is_some() {
+                let last = state.buffer.len().saturating_sub(1);
+                heap_sift_up(&mut state.buffer, last, &state.keys);
+            }
+        }
+    }
     Ok(Step::Next)
+}
+
+type SorterRow = (Vec<u8>, Vec<Value>);
+
+/// Restores the max-heap property (root = worst row, per `compare_rows`)
+/// after appending a new element at `buf`'s end — bubbles it up while
+/// it outranks its parent. `buf`'s heap-ness is only ever needed
+/// transiently during a bounded sorter's buffering phase (#129);
+/// `SorterSort` re-sorts the (now small, bounded) buffer from scratch
+/// afterward, so no ordering guarantee needs to survive past eviction.
+fn heap_sift_up(buf: &mut [SorterRow], mut i: usize, keys: &[SortKeyColumn]) {
+    while i > 0 {
+        let parent = i.saturating_sub(1) / 2;
+        let should_swap = match (buf.get(i), buf.get(parent)) {
+            (Some((_, a)), Some((_, b))) => compare_rows(a, b, keys) == Ordering::Greater,
+            _ => false,
+        };
+        if !should_swap {
+            break;
+        }
+        buf.swap(i, parent);
+        i = parent;
+    }
+}
+
+/// Restores the max-heap property starting from `i` (normally the root)
+/// after its value changed — bubbles the new value down past whichever
+/// child now outranks it.
+fn heap_sift_down(buf: &mut [SorterRow], mut i: usize, keys: &[SortKeyColumn]) {
+    let len = buf.len();
+    loop {
+        let left = i.saturating_mul(2).saturating_add(1);
+        let right = i.saturating_mul(2).saturating_add(2);
+        let mut largest = i;
+        if left < len
+            && matches!(
+                (buf.get(left), buf.get(largest)),
+                (Some((_, a)), Some((_, b))) if compare_rows(a, b, keys) == Ordering::Greater
+            )
+        {
+            largest = left;
+        }
+        if right < len
+            && matches!(
+                (buf.get(right), buf.get(largest)),
+                (Some((_, a)), Some((_, b))) if compare_rows(a, b, keys) == Ordering::Greater
+            )
+        {
+            largest = right;
+        }
+        if largest == i {
+            break;
+        }
+        buf.swap(i, largest);
+        i = largest;
+    }
+}
+
+fn decode_bytes(opcode: &'static str, bytes: &[u8]) -> Result<Vec<Value>, ExecError> {
+    decode_record(bytes, TextEncoding::Utf8).map_err(|e| ExecError::MalformedInstruction {
+        opcode,
+        reason: e.to_string(),
+    })
+}
+
+/// The sort order two already-decoded rows fall in per `keys`' per-column
+/// direction/collation/NULLS placement — shared by `SorterSort`'s full
+/// sort and `SorterInsert`'s bounded top-K eviction (#129), so both see
+/// the exact same ordering.
+fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKeyColumn]) -> Ordering {
+    for key in keys {
+        let av = a.first_n(key);
+        let bv = b.first_n(key);
+        let ord = match (av, bv) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => {
+                if key.nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (_, Value::Null) => {
+                if key.nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            _ => {
+                let ord = compare(av, bv, key.collation);
+                if key.descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 /// `SorterSort`/`Sort`: sorts sorter `P1`'s buffered rows in place by
 /// its key descriptor's per-column direction and collation, delegating
 /// the actual value comparison to the kernel (spec 009 Requirement 5).
-/// Jumps to `P2` if the sorter is empty (mirrors `Rewind`).
+/// Every row's values were already decoded at insert time, so this is
+/// a pure comparison sort — no decoding here. Jumps to `P2` if the
+/// sorter is empty (mirrors `Rewind`).
 pub fn sorter_sort(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = vm.sorter_mut(instr.p1, "SorterSort")?;
-    let keys = state.keys.clone();
-    let mut decoded = Vec::with_capacity(state.buffer.len());
-    for bytes in &state.buffer {
-        let values = decode_record(bytes, TextEncoding::Utf8).map_err(|e| {
-            ExecError::MalformedInstruction {
-                opcode: "SorterSort",
-                reason: e.to_string(),
-            }
-        })?;
-        decoded.push((values, bytes.clone()));
-    }
-    decoded.sort_by(|(a, _), (b, _)| {
-        for key in &keys {
-            let av = a.first_n(key);
-            let bv = b.first_n(key);
-            let ord = match (av, bv) {
-                (Value::Null, Value::Null) => Ordering::Equal,
-                (Value::Null, _) => {
-                    if key.nulls_first {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }
-                (_, Value::Null) => {
-                    if key.nulls_first {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
-                }
-                _ => {
-                    let ord = compare(av, bv, key.collation);
-                    if key.descending {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                }
-            };
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-        Ordering::Equal
-    });
-    state.buffer = decoded.into_iter().map(|(_, bytes)| bytes).collect();
+    let keys = &state.keys;
+    state
+        .buffer
+        .sort_by(|(_, a), (_, b)| compare_rows(a, b, keys));
     state.sorted = true;
     state.pos = 0;
     Ok(if state.buffer.is_empty() {
@@ -216,6 +352,7 @@ pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
                 opcode: "SorterData",
                 reason: "sorter cursor has no current row".to_string(),
             })?
+            .0
             .clone()
     };
     vm.set_register(instr.p2, Value::Blob(bytes.into()))?;
@@ -230,7 +367,7 @@ trait FirstN {
     fn first_n(&self, key: &SortKeyColumn) -> &Value;
 }
 
-impl FirstN for Vec<Value> {
+impl FirstN for [Value] {
     fn first_n(&self, key: &SortKeyColumn) -> &Value {
         self.get(key.index).unwrap_or(&Value::Null)
     }
@@ -256,6 +393,38 @@ mod tests {
             &Instruction::with_p4(Opcode::SorterOpen, cursor, 0, 0, P4::SortKey(keys)),
         )
         .unwrap();
+    }
+
+    /// Opens a bounded (top-K) sorter: `bound` is placed in register `1`
+    /// and named via `SorterOpen`'s `P2`/`P5` bound convention (#129).
+    fn open_bounded_sorter(vm: &mut Vm, cursor: i32, keys: Vec<SortKeyColumn>, bound: i64) {
+        vm.set_register(1, Value::Integer(bound)).unwrap();
+        let mut instr = Instruction::with_p4(Opcode::SorterOpen, cursor, 1, 0, P4::SortKey(keys));
+        instr.p5 = 1;
+        sorter_open(vm, &instr).unwrap();
+    }
+
+    fn sorted_all(vm: &mut Vm, cursor: i32) -> Vec<Value> {
+        if sorter_sort(vm, &Instruction::new(Opcode::SorterSort, cursor, 999, 0)).unwrap()
+            == Step::Jump(999)
+        {
+            return Vec::new();
+        }
+        let mut seen = Vec::new();
+        loop {
+            sorter_data(vm, &Instruction::new(Opcode::SorterData, cursor, 5, 0)).unwrap();
+            let Value::Blob(bytes) = vm.register(5).unwrap() else {
+                panic!("expected a Blob");
+            };
+            let row = decode_record(bytes, TextEncoding::Utf8).unwrap();
+            seen.push(row[0].clone());
+            match sorter_next(vm, &Instruction::new(Opcode::SorterNext, cursor, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        seen
     }
 
     #[test]
@@ -482,6 +651,145 @@ mod tests {
                 Value::Integer(0),
                 Value::Integer(-7),
             ]
+        );
+    }
+
+    #[test]
+    fn bounded_sorter_keeps_only_the_smallest_k_ascending() {
+        // ORDER BY i ASC LIMIT 3 over 10..=1 descending inserts — the
+        // bound must retain {1,2,3} regardless of insertion order.
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            3,
+        );
+        for i in (1..=10).rev() {
+            insert_row(&mut vm, 0, &[Value::Integer(i)]);
+        }
+        assert_eq!(
+            sorted_all(&mut vm, 0),
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]
+        );
+    }
+
+    #[test]
+    fn bounded_sorter_keeps_only_the_largest_k_descending() {
+        // ORDER BY i DESC LIMIT 3 — mirrors the ascending case but the
+        // retained top-K are the largest values instead.
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: true,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            3,
+        );
+        for i in 1..=10 {
+            insert_row(&mut vm, 0, &[Value::Integer(i)]);
+        }
+        assert_eq!(
+            sorted_all(&mut vm, 0),
+            vec![Value::Integer(10), Value::Integer(9), Value::Integer(8)]
+        );
+    }
+
+    #[test]
+    fn bounded_sorter_with_fewer_rows_than_bound_keeps_them_all() {
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            100,
+        );
+        insert_row(&mut vm, 0, &[Value::Integer(3)]);
+        insert_row(&mut vm, 0, &[Value::Integer(1)]);
+        insert_row(&mut vm, 0, &[Value::Integer(2)]);
+        assert_eq!(
+            sorted_all(&mut vm, 0),
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]
+        );
+    }
+
+    #[test]
+    fn bound_of_zero_keeps_nothing() {
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            0,
+        );
+        insert_row(&mut vm, 0, &[Value::Integer(1)]);
+        insert_row(&mut vm, 0, &[Value::Integer(2)]);
+        assert!(sorted_all(&mut vm, 0).is_empty());
+    }
+
+    #[test]
+    fn negative_bound_register_means_unbounded_offset_limit_sentinel() {
+        // OffsetLimit's own convention (LIMIT -1 / no LIMIT): a negative
+        // bound register falls back to the traditional unbounded sorter.
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            -1,
+        );
+        for i in (1..=10).rev() {
+            insert_row(&mut vm, 0, &[Value::Integer(i)]);
+        }
+        assert_eq!(sorted_all(&mut vm, 0).len(), 10);
+    }
+
+    #[test]
+    fn ties_at_the_bound_boundary_still_produce_k_rows() {
+        // Duplicate keys right at the eviction boundary must not cause
+        // the bounded sorter to under- or over-count.
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 0,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            2,
+        );
+        insert_row(&mut vm, 0, &[Value::Integer(5)]);
+        insert_row(&mut vm, 0, &[Value::Integer(5)]);
+        insert_row(&mut vm, 0, &[Value::Integer(5)]);
+        assert_eq!(
+            sorted_all(&mut vm, 0),
+            vec![Value::Integer(5), Value::Integer(5)]
         );
     }
 }
