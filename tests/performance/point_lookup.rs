@@ -15,16 +15,25 @@
 //! single fixed threshold on one fixture size couldn't distinguish
 //! "point lookup is a bit faster" from "point lookup doesn't scan the
 //! table at all."
+//!
+//! Also covers V4's join-level counterpart: whether a `JOIN`'s inner
+//! table gets a `SeekIndexEq` point lookup per outer row (when the join
+//! column has a `UNIQUE` index, #243) instead of a `Rewind`/`Next` scan
+//! per outer row. See `join_lookup_indexed_beats_unindexed_at_every_outer_table_size`
+//! below.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::Instant;
 
-use sqlite_rs::codegen::compile_select;
+use sqlite_rs::btree::TableCursor;
+use sqlite_rs::codegen::{compile_select, compile_select_joined, resolve_from_table_schema};
+use sqlite_rs::dump;
 use sqlite_rs::header::DatabaseHeader;
+use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
-use sqlite_rs::schema::TableSchema;
+use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::{execute_with_db, explain, Program};
 use sqlite_rs::vfs::{PageSource, UnixVfs, Vfs, VfsPageSource};
 
@@ -169,6 +178,164 @@ fn point_lookup_scan_ratio_widens_with_table_size() {
             "scan/seek ratio shrank going from {small_rows} rows ({small_ratio:.1}x) to \
              {big_rows} rows ({big_ratio:.1}x) — expected it to hold steady or widen, since a \
              real O(log n) seek shouldn't lose ground as the table grows"
+        );
+    }
+}
+
+/// Builds a `bench_data`/`bench_lookup`-shaped JOIN fixture (same shape
+/// as `tests/performance/engine.rs`'s `join` scenario, #301): `bench_data`
+/// has a `bucket` column joined against `bench_lookup.code`. `bench_lookup`
+/// is a plain rowid table (not `WITHOUT ROWID` — this crate's table scan
+/// doesn't yet handle index-organized tables) with a `TEXT` `code` column
+/// so a plain rowid lookup can't apply. When `indexed` is true,
+/// `bench_lookup.code` gets an explicit `CREATE UNIQUE INDEX` —
+/// `choose_join_access` only considers `UNIQUE` single-column indexes,
+/// see `src/codegen/select/join_access.rs` — so the join's inner side is
+/// a `SeekIndexEq`, not a `Rewind`/`Next` scan.
+fn join_fixture(row_count: u32, indexed: bool, label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_point_lookup_join_perf_{}_{label}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let mut sql = String::from(
+        "CREATE TABLE bench_lookup(code TEXT, label TEXT);\n\
+         INSERT INTO bench_lookup SELECT 'code-' || value, 'label-' || value \
+         FROM generate_series(0, 199);\n",
+    );
+    if indexed {
+        sql.push_str("CREATE UNIQUE INDEX bench_lookup_code ON bench_lookup(code);\n");
+    }
+    sql.push_str("CREATE TABLE bench_data(id INTEGER PRIMARY KEY, bucket TEXT);\n");
+    sql.push_str(
+        "INSERT INTO bench_data SELECT value, 'code-' || (value % 200) \
+         FROM generate_series(1, ",
+    );
+    sql.push_str(&row_count.to_string());
+    sql.push_str(");\n");
+
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(sql)
+        .status()
+        .expect("invoking sqlite3 to build the join fixture (requires sqlite3 on PATH)");
+    assert!(status.success(), "join fixture creation failed");
+    path
+}
+
+fn compile_join(sql: &str, catalog: &[TableSchema]) -> Program {
+    let select = match parse_select(sql) {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected {sql:?} to parse, got {other:?}"),
+    };
+    compile_join_select(&select, catalog)
+}
+
+fn compile_join_select(select: &Select, catalog: &[TableSchema]) -> Program {
+    let from = select.from.as_ref().expect("bench SQL has no FROM clause");
+    let resolve = |table_ref: &sqlite_rs::parser::ast::TableRef| {
+        resolve_from_table_schema(table_ref, catalog)
+            .unwrap_or_else(|e| panic!("resolve table {table_ref:?}: {e}"))
+    };
+    let mut schemas = vec![resolve(&from.first)];
+    schemas.extend(from.joins.iter().map(|j| resolve(&j.table)));
+    compile_select_joined(select, &schemas, catalog)
+        .unwrap_or_else(|e| panic!("compile {select:?}: {e}"))
+}
+
+fn run_join(path: &Path, program: &Program) -> std::time::Duration {
+    let (header, pager) =
+        dump::open(&UnixVfs, path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    let source: Rc<dyn PageSource> = Rc::new(pager);
+
+    let mut samples = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let start = Instant::now();
+        let rows = execute_with_db(program, Rc::clone(&source), header).expect("execute");
+        samples.push(start.elapsed());
+        std::hint::black_box(rows);
+    }
+    samples.sort();
+    let mid = samples.len() / 2;
+    samples
+        .get(mid)
+        .copied()
+        .expect("samples is non-empty (5 iterations pushed above)")
+}
+
+fn catalog_of(path: &Path) -> Vec<TableSchema> {
+    let (header, pager) =
+        dump::open(&UnixVfs, path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    let source: Rc<dyn PageSource> = Rc::new(pager);
+    let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    read_schema(&mut schema_cursor, header.text_encoding)
+        .unwrap_or_else(|e| panic!("read_schema {path:?}: {e}"))
+}
+
+/// V4's join-path counterpart to
+/// `point_lookup_scan_ratio_widens_with_table_size` above: instead of a
+/// single table's `rowid` seek, this is `bench_data JOIN bench_lookup ON
+/// bench_data.bucket = bench_lookup.code` — every outer row does one
+/// lookup into `bench_lookup`, so an unindexed `code` forces a full
+/// `Rewind`/`Next` scan of the ~200-row lookup table *per outer row*
+/// (O(outer * inner)), while an index on `code` collapses that per-row
+/// lookup to a `SeekIndexEq` (O(outer * log inner)). Unlike the rowid-seek
+/// test above, both sides here scale linearly with `bench_data`'s row
+/// count (only the *inner* table is fixed-size), so the indexed/unindexed
+/// ratio is expected to stay roughly steady rather than widen as
+/// `bench_data` grows — this test pins that the gap is real and durable,
+/// not that it widens.
+#[test]
+fn join_lookup_indexed_beats_unindexed_at_every_outer_table_size() {
+    if Command::new("sqlite3").arg("-version").output().is_err() {
+        eprintln!(
+            "skipping join_lookup_indexed_beats_unindexed_at_every_outer_table_size: \
+             no sqlite3 on PATH"
+        );
+        return;
+    }
+
+    let sql = "SELECT bench_data.id, bench_lookup.label FROM bench_data \
+               JOIN bench_lookup ON bench_data.bucket = bench_lookup.code";
+
+    let mut ratios = Vec::new();
+    for &row_count in &[200u32, 800u32, 3_200u32] {
+        let unindexed_path = join_fixture(row_count, false, &format!("{row_count}_noidx"));
+        let indexed_path = join_fixture(row_count, true, &format!("{row_count}_idx"));
+
+        let indexed_catalog = catalog_of(&indexed_path);
+        let indexed_program = compile_join(sql, &indexed_catalog);
+        let explained = explain(&indexed_program);
+        assert!(
+            explained.iter().any(|r| r.opcode == "SeekIndexEq"),
+            "expected the indexed join to compile a SeekIndexEq into bench_lookup"
+        );
+
+        let unindexed_catalog = catalog_of(&unindexed_path);
+        let unindexed_program = compile_join(sql, &unindexed_catalog);
+
+        let unindexed_time = run_join(&unindexed_path, &unindexed_program);
+        let indexed_time = run_join(&indexed_path, &indexed_program);
+        let ratio = unindexed_time.as_secs_f64() / indexed_time.as_secs_f64().max(f64::EPSILON);
+        eprintln!(
+            "outer_rows={row_count}: unindexed_join={unindexed_time:?} \
+             indexed_join={indexed_time:?} ratio={ratio:.1}x"
+        );
+        ratios.push((row_count, ratio));
+
+        let _ = std::fs::remove_file(&unindexed_path);
+        let _ = std::fs::remove_file(&indexed_path);
+    }
+
+    // Same generous-floor rationale as the rowid-seek test above: pin
+    // that the indexed join is *meaningfully* faster, not an exact
+    // multiplier that would make this test flaky on a loaded CI box.
+    for (row_count, ratio) in &ratios {
+        assert!(
+            *ratio > 1.5,
+            "expected the indexed join ({row_count} outer rows) to be meaningfully faster than \
+             the unindexed join, got only {ratio:.1}x — has the join index-seek path regressed?"
         );
     }
 }

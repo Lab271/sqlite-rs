@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -80,7 +80,7 @@ sqllogictest: ## Run the sqllogictest slice against a pinned real sqlite3, refre
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3
 
-test-point-lookup-perf: ## Quick wall-clock demo that WHERE rowid = <const> seeks instead of scanning (#137)
+test-point-lookup-perf: ## Quick wall-clock demos: rowid seek vs scan (#137), and indexed vs unindexed JOIN lookup (V4)
 	cargo test --locked --test point_lookup_perf -- --nocapture
 
 
@@ -143,6 +143,9 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	done; \
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
+
+version: ## Print the crate's current version (Cargo.toml [package].version)
+	@sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1
 
 version-pin: ## Version gate: every sqlite3 pin site agrees with Cargo.toml's [package.metadata.oracle]
 	python3 tools/version_pin.py --strict
