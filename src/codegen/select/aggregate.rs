@@ -40,7 +40,7 @@ use super::*;
 /// still produces exactly one row (`count(*) = 0`, other aggregates
 /// `NULL`) — `implicit_group` selects that behavior.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(super) fn compile_grouped_scan<F>(
+pub(crate) fn compile_grouped_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
@@ -49,13 +49,18 @@ pub(super) fn compile_grouped_scan<F>(
     end_label: Label,
     catalog: &[TableSchema],
     implicit_group: bool,
+    outer_scope: Option<&Scope>,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
-    let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
-    let pseudo_scope = Scope::single(schema, cursors.pseudo).with_catalog(catalog.to_vec());
+    let mut table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let mut pseudo_scope = Scope::single(schema, cursors.pseudo).with_catalog(catalog.to_vec());
+    if let Some(outer) = outer_scope {
+        table_scope = table_scope.with_outer(outer.clone());
+        pseudo_scope = pseudo_scope.with_outer(outer.clone());
+    }
     let group_targets: Vec<OrderByTarget> = select
         .group_by
         .iter()
@@ -422,7 +427,7 @@ pub(super) fn collect_aggregates(
 /// whole-table group when `select.group_by.is_empty()`, distinguishing
 /// `SELECT count(*) FROM t;` (implicit group) from an ordinary
 /// aggregate-free `SELECT` (plain scan).
-pub(super) fn select_has_aggregate(select: &Select) -> bool {
+pub(crate) fn select_has_aggregate(select: &Select) -> bool {
     let mut found = Vec::new();
     for col in &select.columns {
         if let ResultColumn::Expr { expr, .. } = col {

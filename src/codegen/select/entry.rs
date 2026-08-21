@@ -190,7 +190,7 @@ where
             });
         }
         return compile_grouped_scan(
-            em, reg, select, schema, cursors, end_label, catalog, false, sink,
+            em, reg, select, schema, cursors, end_label, catalog, false, None, sink,
         );
     }
     // #287: no explicit GROUP BY, but the SELECT list/HAVING has an
@@ -214,7 +214,7 @@ where
             });
         }
         return compile_grouped_scan(
-            em, reg, select, schema, cursors, end_label, catalog, true, sink,
+            em, reg, select, schema, cursors, end_label, catalog, true, None, sink,
         );
     }
     if select.having.is_some() {

@@ -34,7 +34,8 @@
 
 use crate::codegen::expr::{compile_cond, compile_value};
 use crate::codegen::select::{
-    compile_select_joined_scan, compile_select_scan, CodegenError, ScanCursors,
+    compile_grouped_scan, compile_select_joined_scan, compile_select_scan, select_has_aggregate,
+    CodegenError, ScanCursors,
 };
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Scope, Target};
 use crate::parser::ast::{Expr, ExprKind, ResultColumn, Select, TableRef};
@@ -428,11 +429,7 @@ pub(crate) fn compile_scalar_subquery(
         return Ok(dest);
     };
 
-    let col_expr = single_result_expr(subselect)?;
     let sub_cursor = reg.alloc_cursor();
-    let sub_scope = Scope::single(&schema, sub_cursor)
-        .with_catalog(catalog)
-        .with_outer(outer_scope.clone());
 
     em.emit(Instruction::new(
         Opcode::OpenRead,
@@ -440,6 +437,50 @@ pub(crate) fn compile_scalar_subquery(
         i32::try_from(schema.root_page).unwrap_or(0),
         0,
     ));
+
+    if select_has_aggregate(subselect) {
+        // #304: the subquery's projected expression contains an
+        // aggregate call (e.g. `(SELECT max(x) FROM t ...)`) — route
+        // through the same implicit-whole-table-group machinery #287
+        // built for a top-level `GROUP BY`-less aggregate query, via
+        // its `sink` callback, instead of `compile_value`'s plain
+        // (aggregate-rejecting) expression path. `compile_grouped_scan`
+        // always emits exactly one finalized group's registers, so the
+        // sink just copies the first of them into `dest` — no loop/
+        // `Rewind`/`Next`/`WHERE`-skip bookkeeping needed here, that's
+        // all internal to `compile_grouped_scan` now.
+        let cursors = ScanCursors {
+            table: sub_cursor,
+            sort: reg.alloc_cursor(),
+            pseudo: reg.alloc_cursor(),
+            distinct: reg.alloc_cursor(),
+        };
+        let end_label = em.new_label();
+        let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, _count: i32| {
+            em.emit(Instruction::new(Opcode::Copy, first, dest, 0));
+            Ok(())
+        };
+        compile_grouped_scan(
+            em,
+            reg,
+            subselect,
+            &schema,
+            cursors,
+            end_label,
+            &catalog,
+            true,
+            Some(outer_scope),
+            &mut sink,
+        )?;
+        em.place(end_label);
+        return Ok(dest);
+    }
+
+    let col_expr = single_result_expr(subselect)?;
+    let sub_scope = Scope::single(&schema, sub_cursor)
+        .with_catalog(catalog)
+        .with_outer(outer_scope.clone());
+
     let end_label = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
     em.patch_p2(rewind_addr, end_label);
