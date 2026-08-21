@@ -5,7 +5,9 @@
 //! (e.g. `JOIN`) from "actually malformed" — otherwise a not-yet-built
 //! feature reads identically to a typo.
 
-use super::ast::{CreateIndex, CreateTable, Delete, DropIndex, DropTable, Insert, Select, Update};
+use super::ast::{
+    CreateIndex, CreateTable, Delete, DropIndex, DropTable, Explain, Insert, Select, Update,
+};
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
@@ -42,6 +44,30 @@ pub fn parse_select(src: &str) -> ParseOutcome<Select> {
     match parser.parse_select_stmt() {
         Ok(select) => match parser.expect_end() {
             Ok(()) => ParseOutcome::Accepted(Box::new(select)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses `EXPLAIN [QUERY PLAN] select-stmt` (#243, grammar V4). Never
+/// panics — any input produces one of the three [`ParseOutcome`]
+/// variants. Bare `EXPLAIN` (no `QUERY PLAN`) and non-`SELECT` bodies
+/// are `Unsupported`, not `Invalid` — syntactically recognized SQL this
+/// entry point doesn't implement, per [`ParseOutcome`]'s three-way
+/// contract.
+pub fn parse_explain(src: &str) -> ParseOutcome<Explain> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_explain_stmt() {
+        Ok(explain) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(explain)),
             Err(ParseFail::Unsupported { message, span }) => {
                 ParseOutcome::Unsupported { message, span }
             }

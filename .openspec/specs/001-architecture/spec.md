@@ -462,3 +462,20 @@ Comparison of SQLite's C implementation (estimated from source) against sqlite-r
 - SQLite's 20 years of edge-case handling not yet replicated
 
 **Takeaway:** For equivalent implemented scope, Rust is ~5-8x smaller. Contributing factors: Rust's expressiveness, no manual memory management, `#![forbid(unsafe_code)]`.
+
+## Constants Alignment (verified 2026-08-20)
+
+File-format and locking constants match SQLite specification:
+
+| Constant | SQLite | sqlite-rs | Source |
+|----------|--------|-----------|--------|
+| PENDING_BYTE | 0x40000000 | ✓ | `src/vfs/lock.rs` |
+| SHARED_FIRST | PENDING_BYTE + 2 | ✓ | `src/vfs/lock.rs` |
+| SHARED_SIZE | 510 | ✓ | `src/vfs/lock.rs` |
+| FILE_HEADER_LEN | 100 | ✓ | `src/header.rs` |
+| JOURNAL_MAGIC | 0xd9d505f920a163d7 | ✓ | `src/pager.rs` |
+| WAL_MAGIC_LE | 0x377f0682 | ✓ | `src/pager/wal.rs` |
+| WAL_MAGIC_BE | 0x377f0683 | ✓ | `src/pager/wal.rs` |
+| WAL_HEADER_LEN | 32 | ✓ | `src/pager/wal.rs` |
+| WAL_FRAME_HEADER | 24 | ✓ | `src/pager/wal.rs` |
+| MAX_PAYLOAD | 2^31-1 | ✓ | `src/btree.rs` |

@@ -38,11 +38,19 @@ sql-stmt        ::= select-stmt        (* V2 *)
                   | delete-stmt        (* V3 *)
                   | create-table-stmt  (* V3 *)
                   | create-index-stmt  (* V3 *)
-                  | drop-stmt ;        (* V3 *)
+                  | drop-stmt          (* V3 *)
+                  | explain-stmt ;     (* V4 *)
                   (* V4+: CTEs, views -- see Future blocks;
                      #237 landed the INNER/LEFT/CROSS JOIN subset, #250 extended it
                      with NATURAL/RIGHT/FULL/USING/comma-join (see from-clause),
-                     #240 landed the UNION ALL compound-select tail (see select-stmt) *)
+                     #240 landed the UNION ALL compound-select tail (see select-stmt),
+                     #243 pulled EXPLAIN [QUERY PLAN] forward from its original
+                     V7 slot -- see explain-stmt below -- because the planner's
+                     index-selection work needs EQP output to be observable now;
+                     PRAGMA/ANALYZE remain V7 *)
+
+explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
+                     (* V4 [parse.y:173 explain] *)
 
 (* ===================== SELECT (V2 slice, FROM/JOIN + GROUP BY/HAVING + UNION ALL V4 slice) =====================
  * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :750 from, :925 orderby_opt, :967 limit_opt, :1002 where_opt]
@@ -285,7 +293,7 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      (GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
  *      above)
  * V5:  BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE
- * V7:  PRAGMA, EXPLAIN [QUERY PLAN], ANALYZE
+ * V7:  PRAGMA, ANALYZE (EXPLAIN [QUERY PLAN] pulled forward to V4 -- #243)
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),
  *      ALTER TABLE (RENAME / ADD|DROP|RENAME COLUMN)
  * V9:  UPSERT (ON CONFLICT DO ...), RETURNING, window functions (OVER/PARTITION/frames),
