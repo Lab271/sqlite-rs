@@ -22,6 +22,21 @@ single-column `IN`'s ephemeral-index machinery to an N-column key.
 SQLite has never implemented that syntax (Postgres/MySQL/standard-SQL
 only); subqueries in `FROM` split off to a follow-up (#257).
 
+fix: two computed result columns collide (#141). `Copy` (`r[P2] =
+r[P1]`) harvested from the pinned oracle (`SELECT count(*), sum(price)
+FROM products`, alongside `AggStep`/`AggFinal` riding the same
+harvest — see ADR-0018) closes the gap `Opcode::Copy` was already
+hand-added for during #208 but never wired into `compile_row_values`'s
+contiguity check. `compile_row_values` (`src/codegen/select.rs`) now
+computes each result column first, and only reserves a fresh
+contiguous run + `Copy`s into it when the columns didn't land
+contiguously on their own — no more outright rejection of e.g.
+`SELECT i + 1, i - 1 FROM t` or `SELECT coalesce(i, -1), ifnull(s, 'z')
+FROM t`. `emit_branch_into` (`src/codegen/expr.rs`) now accepts
+arbitrary CASE branch expressions the same way, and `FunctionCall`
+argument compilation gained the identical reserve-and-copy fallback
+for the same underlying contiguity check under a different name.
+
 ## [0.13.0] - 2026-08-21
 
 JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what

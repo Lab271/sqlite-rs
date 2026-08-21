@@ -146,7 +146,7 @@ impl Opcode {
     /// handled by at least one match arm somewhere that matches on
     /// `Opcode` exhaustively — it does not require a variant to appear
     /// in `ALL`.
-    pub const ALL: [Opcode; 65] = [
+    pub const ALL: [Opcode; 68] = [
         Opcode::Init,
         Opcode::Goto,
         Opcode::Once,
@@ -197,6 +197,9 @@ impl Opcode {
         Opcode::Concat,
         Opcode::Cast,
         Opcode::Function,
+        Opcode::AggStep,
+        Opcode::AggFinal,
+        Opcode::Copy,
         Opcode::Integer,
         Opcode::Int64,
         Opcode::Real,

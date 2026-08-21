@@ -436,8 +436,8 @@ it callable via this opcode, with no VDBE-layer change required.
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
-The 9 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,
-`Null`, `String8`, `Variable`, `MakeRecord`, `ResultRow` — MUST implement
+The 10 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,
+`Null`, `String8`, `Variable`, `Copy`, `MakeRecord`, `ResultRow` — MUST implement
 literal loading (`Integer`: load an `i64` constant into a register from
 `P1`; `Int64`: load an `i64` constant carried in `P4` — the 64-bit
 counterpart for a literal outside `P1`'s `i32` range, #142; `Real`:
@@ -446,7 +446,8 @@ from `P4`; `Null`: write NULL into the register range `P2..=P3`, or
 just `P2` when `P3` does not name a higher register; `String8`: load a
 UTF-8 string constant from `P4` into a register; `Variable`: load bound
 parameter `P1` (1-based, `sqlite3_bind_*` convention) into register `P2`,
-reading NULL for an unbound or out-of-range index), record serialization (`MakeRecord`:
+reading NULL for an unbound or out-of-range index; `Copy`: `r[P2] = r[P1]`,
+relocating an already-computed value into a different register), record serialization (`MakeRecord`:
 pack a contiguous run of registers into spec 003's record format, using
 `P4`'s per-column serial-type hints where present), and row emission
 (`ResultRow`: yield a contiguous run of registers as one output row to the
@@ -514,6 +515,23 @@ VDBE-private serialization.
   NULL that has to replace a live value
 
 **Tests:** `src/vdbe/result.rs::tests::null_overwrites_a_live_register_and_spans_p2_to_p3`
+
+#### Scenario: Copy relocates a computed value into a shared or reserved register
+
+- GIVEN `SELECT count(*), sum(price) FROM products` (harvested: `Copy`
+  once — per `tools/opcodes-v2.json`, #141) and, in this crate's own
+  codegen, two result columns that each allocate temporaries before
+  their own destination register (e.g. `SELECT i + 1, i - 1 FROM t`),
+  or a CASE branch that is a compound expression rather than a bare
+  literal/column reference
+- THEN `Copy` writes `r[P1]` into `r[P2]`, letting `compile_row_values`/
+  `emit_branch_into` compute a value wherever the bump allocator lands
+  it and then relocate it into the contiguous run `MakeRecord`/
+  `ResultRow` need (or into a CASE branch's shared result register)
+  instead of refusing the query outright
+
+**Tests:** `tests/codegen/expr_test.rs::case_branch_with_computed_expression_compiles_via_copy`,
+`tests/codegen/select_test.rs::two_computed_result_columns_do_not_collide`
 
 #### Scenario: ResultRow emits a fixed register range as one output row every iteration
 

@@ -183,6 +183,46 @@ fn v2_corpus_compiles_and_matches_oracle_row_for_row() {
 /// `CAST(name AS REAL)` and `a = 1.;`) landed in #142.
 const KNOWN_GAPS: &[&str] = &[];
 
+/// Regression fixture for #141: two computed result columns, each of
+/// which allocates temporaries before its own destination register,
+/// used to collide against `compile_row_values`'s contiguous-register
+/// assumption and be rejected outright as unsupported.
+#[test]
+fn two_computed_result_columns_do_not_collide() {
+    let (path, schema) = scratch_fixture_labeled("copy_arith");
+    let rows = our_rows(&path, &schema, "SELECT a + 1, a - 1 FROM t")
+        .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(2), Value::Integer(0)],
+            vec![Value::Integer(3), Value::Integer(1)],
+            vec![Value::Integer(4), Value::Integer(2)],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn coalesce_and_ifnull_result_columns_do_not_collide() {
+    let (path, schema) = scratch_fixture_labeled("copy_func");
+    let rows = our_rows(
+        &path,
+        &schema,
+        "SELECT coalesce(a, -1), ifnull(name, 'z') FROM t",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Integer(1), Value::Text("aa".to_string())],
+            vec![Value::Integer(2), Value::Text("bb".to_string())],
+            vec![Value::Integer(3), Value::Text("cc".to_string())],
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Regression fixture for #140: `ORDER BY ... NULLS FIRST/LAST` was
 /// parsed and stored (`ast::OrderingTerm::nulls_last`) but never read by
 /// `resolve_order_by`, so the explicit modifier was silently ignored.

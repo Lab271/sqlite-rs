@@ -2702,8 +2702,13 @@ fn result_columns(select: &Select, schema: &TableSchema) -> Vec<ResultColumnPlan
     out
 }
 
-/// Compiles each result column into a contiguous register range
-/// starting at a freshly allocated register, returning `(first, count)`.
+/// Compiles each result column into a contiguous register range,
+/// returning `(first, count)`. Each column is first compiled into
+/// whatever register the bump allocator hands out next (a compound
+/// expression, e.g. CASE or a function call, may itself allocate
+/// temporaries before settling on its final result register), then
+/// `Opcode::Copy`'d into a freshly reserved contiguous run — mirroring
+/// the aggregate/snapshot dest-block pattern below (#141).
 fn compile_row_values(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -2713,17 +2718,6 @@ fn compile_row_values(
     pseudo: bool,
     catalog: &[TableSchema],
 ) -> Result<(i32, usize), CodegenError> {
-    // Each column is compiled into whatever register the bump
-    // allocator hands out next (not pre-reserved), since a compound
-    // expression (e.g. CASE) may itself allocate temporaries before
-    // settling on its final result register. `MakeRecord`/`ResultRow`
-    // need a contiguous run, so columns are only safe to compile
-    // straight through when every one of them is a "simple" shape that
-    // allocates exactly its own destination register and nothing more
-    // (`Column`, a bare literal, or a plain `Column` expr) — true for
-    // the whole V2 corpus's result-column shapes. A future ticket
-    // needs a MOVE-style opcode to relax this for arbitrary compound
-    // expressions mixed with other columns.
     let mut regs = Vec::with_capacity(cols.len());
     for col in cols {
         let r = match col {
@@ -2824,19 +2818,27 @@ fn compile_row_values(
     let Some(&first) = regs.first() else {
         return Ok((reg.alloc(), 0));
     };
-    for (i, r) in regs.iter().enumerate() {
-        let want = first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
-        if *r != want {
-            return Err(CodegenError::Unsupported {
-                reason:
-                    "result columns must land in contiguous registers for MakeRecord/ResultRow \
-                         (a function call or other multi-register expression mixed with other \
-                         columns is not yet supported)"
-                        .to_string(),
-            });
-        }
+    let already_contiguous = regs
+        .iter()
+        .enumerate()
+        .all(|(i, r)| *r == first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)));
+    if already_contiguous {
+        return Ok((first, cols.len()));
     }
-    Ok((first, cols.len()))
+    // Not naturally contiguous (a compound expression allocated
+    // temporaries before its own result register) — reserve a fresh
+    // contiguous run *after* every column has already been compiled
+    // (so nothing else bump-allocates in between), then copy each
+    // computed value into place. Same dest-block pattern as the
+    // aggregate/snapshot record above (#141).
+    let dests: Vec<i32> = (0..regs.len()).map(|_| reg.alloc()).collect();
+    let Some(&dest_first) = dests.first() else {
+        return Ok((reg.alloc(), 0));
+    };
+    for (&r, &dest) in regs.iter().zip(&dests) {
+        em.emit(Instruction::new(Opcode::Copy, r, dest, 0));
+    }
+    Ok((dest_first, cols.len()))
 }
 
 /// Computes each result column into a contiguous register run, then

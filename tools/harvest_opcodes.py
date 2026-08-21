@@ -99,6 +99,21 @@ QUERIES = [
     "SELECT CAST(qty AS TEXT), CAST(price AS TEXT) FROM products",
     "SELECT CAST(name AS BLOB), CAST(qty AS BLOB) FROM products",
     "SELECT CAST(name AS NUMERIC), CAST(price AS NUMERIC) FROM products",
+    # Copy (#141): no V2-scope single-table query shape ever makes the
+    # oracle's real register planner reach for Copy — it always
+    # pre-plans a computed expression's destination register instead of
+    # computing into a scratch register and copying (tried: mixed
+    # computed+plain columns in every order, CASE, DISTINCT, ORDER BY on
+    # an out-of-list expression, IN-lists, correlated subqueries — see
+    # #141's investigation comment). It only reaches for Copy in
+    # aggregate/GROUP BY/compound-SELECT shapes, which V4 (#234) now
+    # brings into scope. A bare aggregate query is the minimal such
+    # shape: it harvests Copy alongside AggStep/AggFinal (already
+    # `Opcode` variants per #241/#242, exercised by hand-assembled VM
+    # unit tests, but never before formally harvested) without dragging
+    # in GROUP BY's five unrelated control-flow opcodes
+    # (Compare/Gosub/If/Jump/Move).
+    "SELECT count(*), sum(price) FROM products",
 ]
 
 CLASSIFICATION = {

@@ -818,30 +818,36 @@ pub(crate) fn compile_value(
             // window starting at P2, so the args must land next to each
             // other. Reserving the window up front and *then* compiling
             // into it does not work: `compile_value` allocates its own
-            // destination, so every argument landed past the reservation
-            // and the contiguity check below rejected every call with
-            // arguments — `abs(id)` included. Instead, compile the args
-            // first and take the window from where they actually landed.
-            // Each `compile_value` returns the last register it
-            // allocated, so consecutive simple args are naturally
-            // adjacent; the check still catches the nested cases where
-            // that does not hold (e.g. an argument whose own lowering
-            // allocates its destination before its operands).
-            let mut first = 0i32;
-            for (i, arg) in arg_exprs.iter().enumerate() {
-                let r = compile_value(em, reg, scope, arg)?;
-                if i == 0 {
-                    first = r;
-                } else if r != first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)) {
-                    return Err(CodegenError::Unsupported {
-                        reason: "function argument registers were not contiguous".to_string(),
-                    });
-                }
+            // destination, so every argument landed past the reservation.
+            // Instead, compile the args first and take the window from
+            // where they actually landed — consecutive simple args are
+            // naturally adjacent this way. When that does not hold (an
+            // argument whose own lowering allocates its destination
+            // before its operands, e.g. `coalesce(i, -1)` alongside
+            // another such call), fall back to copying each arg into a
+            // freshly reserved contiguous run (#141).
+            let mut arg_regs = Vec::with_capacity(arg_exprs.len());
+            for arg in arg_exprs.iter() {
+                arg_regs.push(compile_value(em, reg, scope, arg)?);
             }
-            if arg_exprs.is_empty() {
+            let mut first = match arg_regs.first().copied() {
+                Some(r) => r,
                 // Zero-arg call (or `f(*)`): P2 still has to point at a
                 // register, and nothing reads it.
-                first = reg.alloc();
+                None => reg.alloc(),
+            };
+            let already_contiguous = arg_regs
+                .iter()
+                .enumerate()
+                .all(|(i, &r)| r == first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)));
+            if !already_contiguous {
+                let dests: Vec<i32> = (0..arg_regs.len()).map(|_| reg.alloc()).collect();
+                if let Some(&dest_first) = dests.first() {
+                    first = dest_first;
+                }
+                for (&r, &dest) in arg_regs.iter().zip(&dests) {
+                    em.emit(Instruction::new(Opcode::Copy, r, dest, 0));
+                }
             }
             let dest = reg.alloc();
             em.emit(Instruction::with_p4(
@@ -1094,7 +1100,7 @@ pub(crate) fn compile_value(
                     &cond,
                     CondTargets::null_is_false(Target::Fallthrough, Target::Jump(next_label)),
                 )?;
-                emit_branch_into(em, scope, then_expr, dest)?;
+                emit_branch_into(em, reg, scope, then_expr, dest)?;
                 em.goto(end_label);
                 em.place(next_label);
             }
@@ -1105,7 +1111,7 @@ pub(crate) fn compile_value(
             // iterations), so the no-match path always explicitly
             // (re)writes NULL rather than relying on "never written".
             match else_ {
-                Some(else_expr) => emit_branch_into(em, scope, else_expr, dest)?,
+                Some(else_expr) => emit_branch_into(em, reg, scope, else_expr, dest)?,
                 None => {
                     // This used to fake a NULL with an out-of-range
                     // `Column` read; `Null` (#134) says what it means,
@@ -1147,20 +1153,17 @@ fn compile_negate_value(em: &mut Emitter, reg: &mut RegAlloc, src: i32) -> i32 {
     out
 }
 
-/// No `Copy`/`Move` opcode exists in the frozen V2 set, so CASE's
-/// branch results (each computed into its own register) must land in
-/// one shared destination. Known simplification: only `Literal` and
-/// `Column` branch expressions are re-emitted directly into `dest`
-/// (covers the V2 corpus's actual CASE usage, e.g.
-/// `tests/corpus/sql/valid_in_subset/functions_case_cast.sql`'s
-/// literal-only THEN/ELSE clauses); any other branch expression is
-/// rejected outright — evaluating it into a temporary and leaving
-/// `dest` untouched would silently surface a stale register from a
-/// prior branch or a prior loop iteration as this branch's result, a
-/// wrong-answer bug rather than a documented limitation. A future
-/// ticket needs a real MOVE opcode to close this gap generally.
+/// CASE's branch results (each computed into its own register) must
+/// land in one shared destination. `Literal` and `Column` branches are
+/// re-emitted directly into `dest`; any other branch expression is
+/// compiled via `compile_value` into its own register and `Copy`'d
+/// into `dest` (#141) — evaluating straight into `dest` and leaving it
+/// untouched on a re-entrant compile would otherwise risk a stale
+/// register from a prior branch or a prior loop iteration leaking out
+/// as this branch's result.
 fn emit_branch_into(
     em: &mut Emitter,
+    reg: &mut RegAlloc,
     scope: &Scope,
     expr: &Expr,
     dest: i32,
@@ -1224,12 +1227,8 @@ fn emit_branch_into(
             }
         }
         _ => {
-            return Err(CodegenError::Unsupported {
-                reason: "CASE branch results other than a bare literal or column reference are \
-                         not yet supported by this V2-scope compiler (no MOVE opcode to copy a \
-                         computed value into the CASE's shared result register)"
-                    .to_string(),
-            });
+            let r = compile_value(em, reg, scope, expr)?;
+            em.emit(Instruction::new(Opcode::Copy, r, dest, 0));
         }
     }
     Ok(())
