@@ -689,19 +689,57 @@ pub(super) fn compile_join_level<F>(
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
+    compile_join_level_traverse(
+        em,
+        reg,
+        exec_bindings,
+        orig_bindings,
+        pos_of,
+        levels,
+        dedup_star,
+        null_mask,
+        matched_regs,
+        level,
+        catalog,
+        &mut |em, reg, scope| {
+            emit_join_final_row(em, reg, select, scope, end_label, limit, distinct_cursor, sink)
+        },
+    )
+}
+
+/// Shared nested-loop/outer-join traversal behind both [`compile_join_level`]
+/// (the unsorted path) and [`super::join_access::compile_join_level_for_sort`]
+/// (#250's `ORDER BY`+JOIN sorted path) — every level's `Rewind`/`Next` loop,
+/// `ON`-condition checks, `#243` single-check-access seek optimization, and
+/// `LEFT`/`RIGHT` "matched"-register/null-extension bookkeeping lives here
+/// exactly once, so the sorted path can no longer silently miss the seek
+/// optimization the unsorted path gets (the bug this extraction fixes: the
+/// two paths used to be hand-forked copies, and only one of them ever grew
+/// the #243 seek). `leaf` is invoked once per candidate combination (i.e.
+/// once `level == exec_bindings.len()`) with the fully-resolved [`Scope`];
+/// each caller supplies its own innermost emission (direct row emit for the
+/// unsorted path, sort-buffer write for the sorted path) via `leaf`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_join_level_traverse<L>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    exec_bindings: &[TableBinding],
+    orig_bindings: &[TableBinding],
+    pos_of: &[usize],
+    levels: &[LevelPlan],
+    dedup_star: &[std::collections::HashSet<String>],
+    null_mask: &mut Vec<bool>,
+    matched_regs: &mut Vec<Option<i32>>,
+    level: usize,
+    catalog: &[TableSchema],
+    leaf: &mut L,
+) -> Result<(), CodegenError>
+where
+    L: FnMut(&mut Emitter, &mut RegAlloc, &Scope) -> Result<(), CodegenError>,
+{
     if level == exec_bindings.len() {
         let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-        emit_join_final_row(
-            em,
-            reg,
-            select,
-            &scope,
-            end_label,
-            limit,
-            distinct_cursor,
-            sink,
-        )?;
-        return Ok(());
+        return leaf(em, reg, &scope);
     }
 
     let Some(binding) = exec_bindings.get(level) else {
@@ -788,10 +826,9 @@ where
                 em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
             }
             let next_level = level.saturating_add(1);
-            compile_join_level(
+            compile_join_level_traverse(
                 em,
                 reg,
-                select,
                 exec_bindings,
                 orig_bindings,
                 pos_of,
@@ -800,11 +837,8 @@ where
                 null_mask,
                 matched_regs,
                 next_level,
-                end_label,
-                limit,
-                distinct_cursor,
                 catalog,
-                sink,
+                leaf,
             )?;
             em.place(miss);
         }
@@ -840,10 +874,9 @@ where
                 }
             }
             let next_level = level.saturating_add(1);
-            compile_join_level(
+            compile_join_level_traverse(
                 em,
                 reg,
-                select,
                 exec_bindings,
                 orig_bindings,
                 pos_of,
@@ -852,11 +885,8 @@ where
                 null_mask,
                 matched_regs,
                 next_level,
-                end_label,
-                limit,
-                distinct_cursor,
                 catalog,
-                sink,
+                leaf,
             )?;
             em.place(skip);
             let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
@@ -887,10 +917,9 @@ where
                 *slot = true;
             }
         }
-        compile_join_level(
+        compile_join_level_traverse(
             em,
             reg,
-            select,
             exec_bindings,
             orig_bindings,
             pos_of,
@@ -899,11 +928,8 @@ where
             null_mask,
             matched_regs,
             end.saturating_add(1),
-            end_label,
-            limit,
-            distinct_cursor,
             catalog,
-            sink,
+            leaf,
         )?;
         for lv in start..=end {
             if let Some(slot) = null_mask.get_mut(lv) {

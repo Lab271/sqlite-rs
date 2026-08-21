@@ -1,4 +1,4 @@
-use super::joins::{join_scope, LevelPlan};
+use super::joins::LevelPlan;
 use super::limit_scan::{
     compile_limit_setup, emit_limit_guard, emit_offset_guard, is_rowid_reference,
     top_level_equality_operands,
@@ -562,15 +562,15 @@ where
 }
 
 /// [`compile_join_level`]'s variant for the `ORDER BY`+JOIN sorted path
-/// (#250): identical nested-loop/outer-join structure (LEFT/RIGHT
-/// null-extension bookkeeping is unaffected by sorting — it decides
-/// which rows exist at all, before they're ever buffered), but the
-/// innermost level buffers the full joined row plus `ORDER BY` sort keys
-/// into `sort_cursor` (see [`emit_full_joined_row`]) instead of applying
-/// `LIMIT` and projecting `select.columns` via [`emit_join_row`]. Only
-/// `WHERE` still applies at this innermost point — `LIMIT`/`DISTINCT`
-/// apply to the sorted output in [`compile_joined_sorted_scan`]'s pass 2
-/// instead.
+/// (#250): shares the exact same traversal — including the #243
+/// single-check-access seek optimization, which this variant used to miss
+/// entirely back when it was a hand-forked copy of `compile_join_level`
+/// (see [`super::joins::compile_join_level_traverse`]) — but the innermost
+/// level buffers the full joined row plus `ORDER BY` sort keys into
+/// `sort_cursor` (see [`emit_full_joined_row`]) instead of applying `LIMIT`
+/// and projecting `select.columns` via [`emit_join_row`]. Only `WHERE`
+/// still applies at this innermost point — `LIMIT`/`DISTINCT` apply to the
+/// sorted output in [`compile_joined_sorted_scan`]'s pass 2 instead.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_join_level_for_sort(
     em: &mut Emitter,
@@ -589,109 +589,9 @@ pub(super) fn compile_join_level_for_sort(
     sort_cursor: i32,
     sorter_open_addr: usize,
 ) -> Result<(), CodegenError> {
-    if level == exec_bindings.len() {
-        let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-        let row_skip = em.new_label();
-        if let Some(where_expr) = &select.where_clause {
-            compile_cond(
-                em,
-                reg,
-                &scope,
-                where_expr,
-                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
-            )?;
-        }
-        let Some(first) = emit_full_joined_row(em, reg, &scope)? else {
-            em.place(row_skip);
-            return Ok(());
-        };
-        let mut sort_keys = Vec::with_capacity(order_by_plans.len());
-        for plan in order_by_plans {
-            let index = match &plan.target {
-                JoinOrderTarget::Offset(off) => *off,
-                JoinOrderTarget::Expr(expr) => {
-                    let r = compile_value(em, reg, &scope, expr)?;
-                    usize::try_from(r.saturating_sub(first)).unwrap_or(0)
-                }
-            };
-            sort_keys.push(SortKeyColumn {
-                index,
-                descending: plan.descending,
-                collation: plan.collation,
-                nulls_first: plan.nulls_first,
-            });
-        }
-        em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
-
-        let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
-        let record_reg = reg.alloc();
-        em.emit(Instruction::new(
-            Opcode::MakeRecord,
-            first,
-            i32::try_from(count).unwrap_or(0),
-            record_reg,
-        ));
-        em.emit(Instruction::new(
-            Opcode::SorterInsert,
-            sort_cursor,
-            record_reg,
-            0,
-        ));
-        em.place(row_skip);
-        return Ok(());
-    }
-
-    let Some(binding) = exec_bindings.get(level) else {
-        return Err(CodegenError::Unsupported {
-            reason: "join level out of range".to_string(),
-        });
-    };
-    let cursor = binding.cursor;
-    let plan = levels.get(level).cloned().unwrap_or_default();
-
-    if plan.null_span.is_some() {
-        let matched = reg.alloc();
-        em.emit(Instruction::new(Opcode::Integer, 0, matched, 0));
-        if let Some(slot) = matched_regs.get_mut(level) {
-            *slot = Some(matched);
-        }
-    }
-
-    let rewind_end = em.new_label();
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
-    em.patch_p2(rewind_addr, rewind_end);
-    let loop_start = em.new_label();
-    em.place(loop_start);
-
-    let skip = em.new_label();
-    for check in &plan.checks {
-        if let Some(constraint) = &check.constraint {
-            let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-            compile_cond(
-                em,
-                reg,
-                &scope,
-                constraint,
-                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
-            )?;
-        }
-        if let Some(outer_level) = check.sets_matched {
-            let target = matched_regs
-                .get(outer_level)
-                .copied()
-                .flatten()
-                .ok_or_else(|| CodegenError::Unsupported {
-                    reason: "join level plan referenced an unallocated matched register"
-                        .to_string(),
-                })?;
-            em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
-        }
-    }
-    let next_level = level.saturating_add(1);
-    compile_join_level_for_sort(
+    super::joins::compile_join_level_traverse(
         em,
         reg,
-        select,
         exec_bindings,
         orig_bindings,
         pos_of,
@@ -699,58 +599,57 @@ pub(super) fn compile_join_level_for_sort(
         dedup_star,
         null_mask,
         matched_regs,
-        next_level,
+        level,
         catalog,
-        order_by_plans,
-        sort_cursor,
-        sorter_open_addr,
-    )?;
-    em.place(skip);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
-    em.patch_p2(next_addr, loop_start);
-    em.place(rewind_end);
+        &mut |em, reg, scope| {
+            let row_skip = em.new_label();
+            if let Some(where_expr) = &select.where_clause {
+                compile_cond(
+                    em,
+                    reg,
+                    scope,
+                    where_expr,
+                    CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
+                )?;
+            }
+            let Some(first) = emit_full_joined_row(em, reg, scope)? else {
+                em.place(row_skip);
+                return Ok(());
+            };
+            let mut sort_keys = Vec::with_capacity(order_by_plans.len());
+            for plan in order_by_plans {
+                let index = match &plan.target {
+                    JoinOrderTarget::Offset(off) => *off,
+                    JoinOrderTarget::Expr(expr) => {
+                        let r = compile_value(em, reg, scope, expr)?;
+                        usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+                    }
+                };
+                sort_keys.push(SortKeyColumn {
+                    index,
+                    descending: plan.descending,
+                    collation: plan.collation,
+                    nulls_first: plan.nulls_first,
+                });
+            }
+            em.patch_p4(sorter_open_addr, P4::SortKey(sort_keys));
 
-    if let Some((start, end)) = plan.null_span {
-        let matched = matched_regs.get(level).copied().flatten().ok_or_else(|| {
-            CodegenError::Unsupported {
-                reason: "join level plan missing matched register for outer join".to_string(),
-            }
-        })?;
-        let do_null = em.new_label();
-        let after_null = em.new_label();
-        let addr = em.emit(Instruction::new(Opcode::IfNot, matched, 0, 0));
-        em.patch_p2(addr, do_null);
-        em.goto(after_null);
-
-        em.place(do_null);
-        for lv in start..=end {
-            if let Some(slot) = null_mask.get_mut(lv) {
-                *slot = true;
-            }
-        }
-        compile_join_level_for_sort(
-            em,
-            reg,
-            select,
-            exec_bindings,
-            orig_bindings,
-            pos_of,
-            levels,
-            dedup_star,
-            null_mask,
-            matched_regs,
-            end.saturating_add(1),
-            catalog,
-            order_by_plans,
-            sort_cursor,
-            sorter_open_addr,
-        )?;
-        for lv in start..=end {
-            if let Some(slot) = null_mask.get_mut(lv) {
-                *slot = false;
-            }
-        }
-        em.place(after_null);
-    }
-    Ok(())
+            let count = usize::try_from(reg.peek().saturating_sub(first)).unwrap_or(0);
+            let record_reg = reg.alloc();
+            em.emit(Instruction::new(
+                Opcode::MakeRecord,
+                first,
+                i32::try_from(count).unwrap_or(0),
+                record_reg,
+            ));
+            em.emit(Instruction::new(
+                Opcode::SorterInsert,
+                sort_cursor,
+                record_reg,
+                0,
+            ));
+            em.place(row_skip);
+            Ok(())
+        },
+    )
 }

@@ -675,6 +675,35 @@ fn full_join_order_by_distinct_limit_are_still_unsupported() {
     }
 }
 
+/// #270: `ORDER BY` combined with a JOIN used to silently deoptimize —
+/// `compile_join_level_for_sort` was a hand-forked copy of
+/// `compile_join_level` that never grew the #243 single-check-access seek
+/// optimization, so adding `ORDER BY` to an otherwise-seekable join query
+/// quietly downgraded the inner table's `SeekRowid` point lookup to a full
+/// `Rewind`/`Next` scan. Now that both paths share one traversal (see
+/// `src/codegen/select/joins.rs::compile_join_level_traverse`), the sorted
+/// path must report the exact same `SEARCH ... USING INTEGER PRIMARY KEY`
+/// plan as the unsorted path in
+/// `explain_query_plan_reports_rowid_search_and_scan` below, not `SCAN a`.
+#[test]
+fn explain_query_plan_reports_rowid_search_with_order_by() {
+    let db = join_fixture_db("eqp_rowid_order_by");
+    let output = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM b JOIN a ON b.a_id = a.id ORDER BY b.tag",
+    );
+    assert_eq!(
+        output, "0|0|0|SCAN b\n1|0|0|SEARCH a USING INTEGER PRIMARY KEY (rowid=?)\n",
+        "ORDER BY must not deoptimize the join's #243 seek: outer table b is a full scan, \
+         inner table a is still seeked by rowid, same as the unsorted path"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM b JOIN a ON b.a_id = a.id ORDER BY b.tag",
+        "explain_query_plan_reports_rowid_search_with_order_by",
+    );
+}
+
 /// #243: `EXPLAIN QUERY PLAN` reports `SEARCH ... USING INTEGER PRIMARY
 /// KEY` for the rowid-seek join path and `SCAN` for tables that still
 /// fall back to a full scan (no matching index on the equality side).
