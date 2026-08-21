@@ -282,18 +282,28 @@ fn schema_table_names_match_after_ddl_statements() {
     // `read_schema`), not `sqlite_master` itself — reuse the `tables` CLI
     // subcommand (#177), which already lists `sqlite_master` table names
     // directly, excluding `sqlite_%` internals the same way this
-    // comparison needs.
+    // comparison needs. `tables` now renders `sqlite3 .tables`'s
+    // multi-column, space-padded layout rather than one name per line
+    // (#177), so both sides are normalized to a sorted name list before
+    // comparing rather than compared byte-for-byte.
     let ours = Command::new(CLI)
         .arg("tables")
         .arg(&ours_db)
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} tables {}: {e}", ours_db.display()));
     assert!(ours.status.success(), "our `tables` subcommand failed");
-    let ours_names = String::from_utf8_lossy(&ours.stdout).into_owned();
+    let ours_stdout = String::from_utf8_lossy(&ours.stdout).into_owned();
+    let mut ours_names: Vec<&str> = ours_stdout.split_whitespace().collect();
+    ours_names.sort_unstable();
 
     let names_sql =
         "select name from sqlite_schema where type='table' and name not like 'sqlite\\_%' escape '\\' order by name";
     let theirs =
         oracle_query(&oracle, &theirs_db, names_sql).expect("query sqlite_schema (oracle)");
-    assert_eq!(ours_names, theirs, "schema dimension mismatch after DDL");
+    let mut theirs_names: Vec<&str> = theirs.lines().collect();
+    theirs_names.sort_unstable();
+    assert_eq!(
+        ours_names, theirs_names,
+        "schema dimension mismatch after DDL"
+    );
 }

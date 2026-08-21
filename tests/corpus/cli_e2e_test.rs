@@ -63,6 +63,15 @@ fn run_cli(subcommand: &str, db: &Path) -> Output {
         .unwrap_or_else(|e| panic!("running {CLI} {subcommand} {}: {e}", db.display()))
 }
 
+fn run_cli_with_args(subcommand: &str, db: &Path, extra_args: &[&str]) -> Output {
+    Command::new(CLI)
+        .arg(subcommand)
+        .arg(db)
+        .args(extra_args)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} {subcommand} {}: {e}", db.display()))
+}
+
 /// Mirrors `run_export`'s naming: `<sanitized_table>_<stem>.csv`.
 fn expected_csv_path(dir: &Path, table: &str, db: &Path) -> PathBuf {
     let stem = db.file_stem().unwrap().to_string_lossy().into_owned();
@@ -579,7 +588,9 @@ fn usage_errors_exit_two() {
 }
 
 /// `tables` command lists table names from sqlite_master, sorted
-/// alphabetically, excluding sqlite_% internal tables.
+/// alphabetically, excluding sqlite_% internal tables, rendered in
+/// `sqlite3 .tables`'s multi-column layout (byte-for-byte against the
+/// pinned 3.53.4 oracle — verified interactively; see #177).
 #[test]
 fn tables_lists_all_tables_sorted() {
     let fixture = crate::oracle::corpus_dir().join("features/multitable.db");
@@ -597,12 +608,62 @@ fn tables_lists_all_tables_sorted() {
     assert!(output.status.success(), "tables failed: {stderr}");
     assert!(stderr.is_empty(), "stderr should be empty; got: {stderr}");
 
-    let tables: Vec<&str> = stdout.lines().collect();
     assert_eq!(
-        tables,
-        vec!["customers", "order_items", "orders", "products"],
-        "expected four tables in alphabetical order"
+        stdout, "customers     order_items     orders     products\n",
+        "expected the four table names column-wrapped in sorted order"
     );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `tables <file> PATTERN` filters names through a LIKE pattern (#177),
+/// same as `sqlite3`'s `.tables PATTERN`.
+#[test]
+fn tables_pattern_filters_names() {
+    let fixture = crate::oracle::corpus_dir().join("features/multitable.db");
+    if !fixture.exists() {
+        eprintln!("skipping: {} not present", fixture.display());
+        return;
+    }
+    let dir = scratch_dir("tables-pattern");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = run_cli_with_args("tables", &db, &["order%"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "tables failed: {stderr}");
+    assert_eq!(stdout, "order_items     orders\n");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `tables` includes views alongside tables (#177's `type IN
+/// ('table','view')` scope), sorted together with them.
+#[test]
+fn tables_includes_views_alongside_tables() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("tables_includes_views_alongside_tables");
+        return;
+    };
+    let dir = scratch_dir("tables-views");
+    let db = dir.join("views.db");
+
+    let setup = "CREATE TABLE foo(x); CREATE TABLE bar(x); \
+        CREATE VIEW fview AS SELECT * FROM foo;";
+    let setup_status = std::process::Command::new(&oracle)
+        .arg(&db)
+        .arg(setup)
+        .status()
+        .unwrap_or_else(|e| panic!("running oracle to build fixture: {e}"));
+    assert!(setup_status.success(), "oracle fixture setup failed");
+
+    let output = run_cli("tables", &db);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "tables failed: {stderr}");
+    assert_eq!(stdout, "bar     foo     fview\n");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

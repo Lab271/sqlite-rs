@@ -26,8 +26,8 @@ use sqlite_rs::parser::error::{
     parse_insert, parse_update,
 };
 use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
-use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::{execute_with_db, execute_with_writable_db, explain};
+use sqlite_rs::schema::{read_schema, read_table_and_view_names};
+use sqlite_rs::vdbe::{execute_with_db, execute_with_writable_db, explain, like_match};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 fn main() -> ExitCode {
@@ -47,8 +47,8 @@ fn main() -> ExitCode {
         },
         Some("query") => run_query(args.collect()),
         Some("tables") => match args.next() {
-            Some(path) => run_tables(Path::new(&path)),
-            None => usage_error("tables <file>"),
+            Some(path) => run_tables(Path::new(&path), args.next().as_deref()),
+            None => usage_error("tables <file> [PATTERN]"),
         },
         Some("exec") => {
             let (Some(path), Some(sql)) = (args.next(), args.next()) else {
@@ -185,11 +185,13 @@ fn fatal(path: &Path, e: &impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `tables <file>`: list table names from sqlite_master, sorted
-/// alphabetically, excluding internal `sqlite_%` tables. Simple precursor
-/// to full `.tables [PATTERN]` REPL support (see #177). Note: views not
-/// yet included (requires schema extension).
-fn run_tables(path: &Path) -> ExitCode {
+/// `tables <file> [PATTERN]`: `sqlite3`'s `.tables [PATTERN]` shell
+/// command (#177) — table and view names from `sqlite_master`, sorted
+/// alphabetically, excluding internal `sqlite_%` names, optionally
+/// filtered by a LIKE `PATTERN`, rendered in `.tables`'s multi-column
+/// layout. Temp-table `temp.` prefixing is deferred (needs the V3+ write
+/// path's temp-database support).
+fn run_tables(path: &Path, pattern: Option<&str>) -> ExitCode {
     let (header, pager) = match dump::open(&UnixVfs, path) {
         Ok(v) => v,
         Err(e) => return fatal(path, &e),
@@ -197,22 +199,108 @@ fn run_tables(path: &Path) -> ExitCode {
     let source: Rc<dyn PageSource> = Rc::new(pager);
 
     let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
-    let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
-        Ok(s) => s,
+    let names = match read_table_and_view_names(&mut schema_cursor, header.text_encoding) {
+        Ok(n) => n,
         Err(e) => return fatal(path, &e),
     };
 
-    let mut names: Vec<&str> = schemas
+    let mut names: Vec<&str> = names
         .iter()
-        .filter(|s| !s.name.starts_with("sqlite_"))
-        .map(|s| s.name.as_str())
+        .map(String::as_str)
+        .filter(|name| !name.starts_with("sqlite_"))
+        .filter(|name| pattern.is_none_or(|p| like_match(name, p, None)))
         .collect();
     names.sort_unstable();
 
-    for name in names {
-        println!("{name}");
-    }
+    print_columnized(&names);
     ExitCode::SUCCESS
+}
+
+/// The shell's assumed terminal width for `.tables`' column-fitting search.
+const TABLES_TERM_WIDTH: usize = 80;
+
+/// Per-column gap (verified empirically against the pinned 3.53.4 oracle:
+/// each column is left-padded to `column's longest name + 5`, not the
+/// more common `+2` — e.g. `.tables` on a 2-table db prints
+/// `ab     verylongtablename123` with a 5-space gap after `ab`).
+const TABLES_COLUMN_GAP: usize = 5;
+
+/// The longest name in `names[start..end]` (`0` for an empty range).
+fn column_max_len(names: &[&str], start: usize, end: usize) -> usize {
+    names
+        .get(start..end.min(names.len()))
+        .into_iter()
+        .flatten()
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Total row width column-major layout with `num_cols` columns would take,
+/// per-column width `TABLES_COLUMN_GAP` narrower for whichever column ends
+/// up rightmost overall (no trailing padding needed there).
+fn row_width(names: &[&str], num_cols: usize, num_rows: usize) -> usize {
+    let last_idx = names.len().saturating_sub(1);
+    let mut total = 0usize;
+    for col in 0..num_cols {
+        let start = col.saturating_mul(num_rows);
+        if start >= names.len() {
+            break;
+        }
+        let end = start.saturating_add(num_rows);
+        let colmax = column_max_len(names, start, end);
+        if start.saturating_add(num_rows) > last_idx {
+            total = total.saturating_add(colmax);
+        } else {
+            total = total
+                .saturating_add(colmax)
+                .saturating_add(TABLES_COLUMN_GAP);
+        }
+    }
+    total
+}
+
+/// Renders `names` the way `sqlite3`'s shell prints `.tables` output:
+/// column-major (fill down each column before moving to the next), each
+/// column padded to that column's own longest name (see
+/// [`TABLES_COLUMN_GAP`]), wrapped to fit [`TABLES_TERM_WIDTH`] columns —
+/// picks the widest column count whose row width still fits.
+fn print_columnized(names: &[&str]) {
+    if names.is_empty() {
+        return;
+    }
+    let num_cols = (1..=names.len())
+        .rev()
+        .find(|&nc| {
+            let nr = names.len().div_ceil(nc);
+            row_width(names, nc, nr) <= TABLES_TERM_WIDTH
+        })
+        .unwrap_or(1);
+    let num_rows = names.len().div_ceil(num_cols);
+
+    let col_widths: Vec<usize> = (0..num_cols)
+        .map(|col| {
+            let start = col.saturating_mul(num_rows);
+            column_max_len(names, start, start.saturating_add(num_rows))
+        })
+        .collect();
+
+    for row in 0..num_rows {
+        let mut line = String::new();
+        for (col, col_width) in col_widths.iter().enumerate() {
+            let idx = col.saturating_mul(num_rows).saturating_add(row);
+            let Some(name) = names.get(idx) else {
+                continue;
+            };
+            if idx.saturating_add(num_rows) >= names.len() {
+                line.push_str(name);
+            } else {
+                let width = col_width.saturating_add(TABLES_COLUMN_GAP);
+                line.push_str(&format!("{name:<width$}"));
+            }
+        }
+        println!("{line}");
+    }
 }
 
 /// `query <file> "<SQL>"`: parse -> resolve the `FROM` table's schema ->

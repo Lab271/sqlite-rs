@@ -458,7 +458,7 @@ fn iif(args: &[Value]) -> Result<Value, FunctionError> {
     })
 }
 
-fn like_match(text: &str, pattern: &str, escape: Option<char>) -> bool {
+pub fn like_match(text: &str, pattern: &str, escape: Option<char>) -> bool {
     let t: Vec<char> = text.chars().collect();
     let p: Vec<char> = pattern.chars().collect();
     like_rec(&t, &p, escape, 0, 0)
