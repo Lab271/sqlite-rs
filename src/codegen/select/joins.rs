@@ -64,14 +64,22 @@ pub fn compile_select_joined(
     // #250's codegen half: `FULL JOIN` gets its own dedicated two-table
     // emitter (see `compile_full_join_two_table`'s doc comment) rather
     // than participating in the `RIGHT`-reordering scheme below — it's
-    // only supported as the sole join in the `FROM` clause today. Its
-    // pass-1/pass-2 shape doesn't (yet) generalize to ORDER BY/DISTINCT
-    // the way the rest of this function's join tree now does, so those
-    // stay rejected for a `FULL JOIN` specifically.
+    // only supported as the sole join in the `FROM` clause today. #288
+    // extended that emitter's pass-1/pass-2 shape to also support
+    // `ORDER BY` (via its own sorter pass) and `DISTINCT` (via the same
+    // ephemeral-index guard the rest of this module uses); only the two
+    // combined together stays rejected, same as the ordinary join tree
+    // below.
     if from.joins.len() == 1 && from.joins.first().is_some_and(|j| j.op == JoinOp::Full) {
-        if !select.order_by.is_empty() || matches!(select.distinct, Some(Distinctness::Distinct)) {
+        // #288: `ORDER BY` and `DISTINCT` are each independently
+        // supported combined with a `FULL JOIN` now (see
+        // `compile_full_join_two_table`'s doc comment) — only their
+        // *combination* stays rejected, mirroring the same restriction
+        // the ordinary join tree enforces just below in
+        // `compile_select_joined_scan`.
+        if !select.order_by.is_empty() && matches!(select.distinct, Some(Distinctness::Distinct)) {
             return Err(CodegenError::Unsupported {
-                reason: "ORDER BY/DISTINCT combined with a FULL JOIN is not yet supported"
+                reason: "DISTINCT combined with ORDER BY and a FULL JOIN is not yet supported"
                     .to_string(),
             });
         }
