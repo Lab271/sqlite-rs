@@ -6,4 +6,4 @@
 mod ddl_reader;
 
 pub(crate) use ddl_reader::{column_defs, column_type, rowid_alias_column};
-pub use ddl_reader::{read_schema, DdlError, IndexSchema, TableSchema};
+pub use ddl_reader::{read_schema, read_table_and_view_names, DdlError, IndexSchema, TableSchema};

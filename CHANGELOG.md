@@ -19,6 +19,17 @@ groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
 each ~1000 lines or fewer. Spec 006 `Implementation:`/`Tests:` path
 citations updated for the moved btree files.
 
+feat: `.tables [PATTERN]` shell parity for the `sqlite-rs tables` CLI
+subcommand (#177). Lists tables *and* views from `sqlite_master` (a new
+`read_table_and_view_names` schema reader, `src/schema/ddl_reader.rs`,
+bypasses `read_schema`'s DDL parsing entirely since `.tables` needs
+neither), excludes internal `sqlite_%` names, accepts an optional LIKE
+`PATTERN` argument (reusing `vdbe::like_match`), and renders in
+`sqlite3`'s multi-column, space-padded `.tables` layout — verified
+byte-for-byte against the pinned 3.53.4 oracle. `temp.`-prefixed temp
+tables remain deferred (needs the V3+ write path's temp-database
+support).
+
 ## [0.13.0] - 2026-08-21
 
 feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,

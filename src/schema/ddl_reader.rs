@@ -125,6 +125,30 @@ pub fn read_schema<P: PageSource>(
     Ok(schemas)
 }
 
+/// Walks `sqlite_master` via `cursor` (root_page = 1) and returns every
+/// `type IN ('table', 'view')` name, unfiltered and in storage order —
+/// the shell's `.tables` needs both kinds of names but none of
+/// [`TableSchema`]'s DDL parsing, so this bypasses [`read_schema`]
+/// entirely rather than teaching it a schema-kind discriminator.
+pub fn read_table_and_view_names<P: PageSource>(
+    cursor: &mut TableCursor<P>,
+    encoding: TextEncoding,
+) -> Result<Vec<String>, DdlError> {
+    let mut names = Vec::new();
+    let mut row = cursor.first()?;
+    while let Some(r) = row {
+        let values = decode_record(&r.payload, encoding)?;
+        if values.len() != 5 {
+            return Err(DdlError::MalformedRow(values.len()));
+        }
+        if matches!(text(values.first()), "table" | "view") {
+            names.push(text(values.get(1)).to_string());
+        }
+        row = cursor.next()?;
+    }
+    Ok(names)
+}
+
 fn table_schema(values: &[Value]) -> TableSchema {
     let name = text(values.get(1)).to_string();
     let root_page = match values.get(3) {
