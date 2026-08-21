@@ -10,6 +10,9 @@ url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-c
 [imports.google]
 url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
 
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
 [imports.mozilla]
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
@@ -33,9 +36,9 @@ criteria = "safe-to-run"
 version = "2.13.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.cfg-if]]
-version = "1.0.4"
-criteria = "safe-to-deploy"
+[[exemptions.cc]]
+version = "1.4.4"
+criteria = "safe-to-run"
 
 [[exemptions.cfg_aliases]]
 version = "0.2.2"
@@ -55,10 +58,6 @@ criteria = "safe-to-run"
 
 [[exemptions.criterion]]
 version = "0.5.1"
-criteria = "safe-to-run"
-
-[[exemptions.criterion-plot]]
-version = "0.5.0"
 criteria = "safe-to-run"
 
 [[exemptions.crossbeam-deque]]
@@ -93,6 +92,10 @@ criteria = "safe-to-run"
 version = "2.5.0"
 criteria = "safe-to-run"
 
+[[exemptions.find-msvc-tools]]
+version = "0.1.11"
+criteria = "safe-to-run"
+
 [[exemptions.futures-core]]
 version = "0.3.34"
 criteria = "safe-to-run"
@@ -103,10 +106,6 @@ criteria = "safe-to-run"
 
 [[exemptions.futures-util]]
 version = "0.3.34"
-criteria = "safe-to-run"
-
-[[exemptions.getrandom]]
-version = "0.3.4"
 criteria = "safe-to-run"
 
 [[exemptions.getrandom]]
@@ -123,14 +122,6 @@ criteria = "safe-to-run"
 
 [[exemptions.hashlink]]
 version = "0.9.1"
-criteria = "safe-to-run"
-
-[[exemptions.hermit-abi]]
-version = "0.5.2"
-criteria = "safe-to-run"
-
-[[exemptions.is-terminal]]
-version = "0.4.17"
 criteria = "safe-to-run"
 
 [[exemptions.itoa]]
@@ -164,10 +155,6 @@ criteria = "safe-to-run"
 [[exemptions.nix]]
 version = "0.31.3"
 criteria = "safe-to-deploy"
-
-[[exemptions.once_cell]]
-version = "1.21.4"
-criteria = "safe-to-run"
 
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
@@ -209,24 +196,12 @@ criteria = "safe-to-run"
 version = "0.9.5"
 criteria = "safe-to-run"
 
-[[exemptions.rand_chacha]]
-version = "0.9.0"
-criteria = "safe-to-run"
-
-[[exemptions.rand_core]]
-version = "0.9.5"
-criteria = "safe-to-run"
-
 [[exemptions.rand_xorshift]]
 version = "0.4.0"
 criteria = "safe-to-run"
 
 [[exemptions.rayon]]
 version = "1.12.0"
-criteria = "safe-to-run"
-
-[[exemptions.rayon-core]]
-version = "1.13.0"
 criteria = "safe-to-run"
 
 [[exemptions.regex]]
@@ -329,8 +304,16 @@ criteria = "safe-to-run"
 version = "0.3.104"
 criteria = "safe-to-run"
 
+[[exemptions.winapi-i686-pc-windows-gnu]]
+version = "0.4.0"
+criteria = "safe-to-run"
+
 [[exemptions.winapi-util]]
 version = "0.1.11"
+criteria = "safe-to-run"
+
+[[exemptions.winapi-x86_64-pc-windows-gnu]]
+version = "0.4.0"
 criteria = "safe-to-run"
 
 [[exemptions.windows-link]]

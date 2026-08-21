@@ -2,3 +2,21 @@
 # cargo-vet audits file
 
 [audits]
+
+[[trusted.cc]]
+criteria = "safe-to-deploy"
+user-id = 55123
+start = "2022-10-29"
+end = "2027-08-21"
+
+[[trusted.find-msvc-tools]]
+criteria = "safe-to-deploy"
+user-id = 539
+start = "2025-08-29"
+end = "2027-08-21"
+
+[[trusted.shlex]]
+criteria = "safe-to-deploy"
+user-id = 1214 # Fenhl (fenhl)
+start = "2021-02-03"
+end = "2027-08-21"
