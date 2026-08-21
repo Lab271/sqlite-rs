@@ -72,6 +72,25 @@ where
         table_scope = table_scope.with_outer(outer.clone());
         pseudo_scope = pseudo_scope.with_outer(outer.clone());
     }
+    // #322: hoist any uncorrelated WHERE-clause IN/scalar (including
+    // aggregate, #304) subquery out of pass 1's scan loop below,
+    // materializing it exactly once here rather than once per
+    // WHERE-matching row — #306 already did this for
+    // `compile_direct_scan`/`compile_sorted_scan`, but never for this
+    // aggregate/GROUP BY scan, so a WHERE-clause aggregate subquery over
+    // the same table (e.g. `WHERE x > (SELECT avg(x) FROM t)`) was
+    // re-scanning the whole table once per row here — O(n^2), severe
+    // enough to hit the VDBE step guard rail on a real-sized table.
+    let hoisted = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::hoist_uncorrelated_where_subqueries(
+            em,
+            reg,
+            &table_scope,
+            where_expr,
+        )?,
+        None => std::collections::HashMap::new(),
+    };
+    let table_scope = table_scope.with_hoisted(std::rc::Rc::new(hoisted));
     let group_targets: Vec<OrderByTarget> = select
         .group_by
         .iter()

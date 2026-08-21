@@ -131,6 +131,27 @@
       "ours_ns": 350312771.0,
       "oracle_ns": 129876166.5,
       "ratio_ours_over_oracle": 2.697282961458521
+    },
+    {
+      "scenario": "correlated_subquery",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 1497924375.0,
+      "oracle_ns": 2014133.3399999999,
+      "ratio_ours_over_oracle": 743.7066579713139
+    },
+    {
+      "scenario": "agg_subquery",
+      "fixture": "bench_1mb.db",
+      "ours_ns": 61011333.0,
+      "oracle_ns": 268407.233058608,
+      "ratio_ours_over_oracle": 227.30882586415947
+    },
+    {
+      "scenario": "agg_subquery",
+      "fixture": "bench_50mb.db",
+      "ours_ns": 2924027812.5,
+      "oracle_ns": 14412526.125,
+      "ratio_ours_over_oracle": 202.8810069199441
     }
   ],
   "tier2_cli": []

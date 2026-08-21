@@ -307,6 +307,43 @@ fn uncorrelated_scalar_subquery_where_clause_hoists_before_outer_rewind() {
     );
 }
 
+/// #322 regression: #306's hoist was wired into `compile_direct_scan`/
+/// `compile_sorted_scan` but never into `compile_grouped_scan` — so an
+/// uncorrelated scalar (here, aggregate — #304) subquery in the `WHERE`
+/// clause of an aggregate/`GROUP BY`-bearing outer query kept
+/// re-materializing per WHERE-matching row, same class of bug as the
+/// scalar-subquery case above but for the aggregate scan path. Same
+/// `OpenRead`-before-`Rewind` shape as
+/// `uncorrelated_scalar_subquery_where_clause_hoists_before_outer_rewind`,
+/// just with an aggregate outer query (`count(*)`, no `GROUP BY` —
+/// #287's implicit whole-table group, which is what routes through
+/// `compile_grouped_scan`) instead of a plain projection.
+#[test]
+fn uncorrelated_aggregate_subquery_where_clause_hoists_before_outer_rewind() {
+    let db = subquery_fixture_db("hoist_agg_subquery");
+    let program = explain(
+        &db,
+        "SELECT count(*) FROM t WHERE x > (SELECT avg(x) FROM t)",
+    );
+    let open_read_addrs: Vec<usize> = program
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.split('|').nth(1) == Some("OpenRead"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        open_read_addrs.len(),
+        2,
+        "expected exactly 2 OpenReads (subquery + outer scan); program:\n{program}"
+    );
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        open_read_addrs[0] < rewind_addr && open_read_addrs[1] < rewind_addr,
+        "expected both the hoisted aggregate subquery's OpenRead and the outer scan's own \
+         OpenRead to precede the outer Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}
+
 /// A correlated subquery (referencing the enclosing query's `t.id`
 /// from inside the subquery's own WHERE clause) must fail cleanly with
 /// this pass's documented "correlated subqueries are not yet

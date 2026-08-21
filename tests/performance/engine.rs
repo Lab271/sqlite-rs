@@ -112,6 +112,19 @@ const SCENARIOS: &[(&str, &str)] = &[
         "SELECT id, x FROM bench_data \
          WHERE bucket > (SELECT code FROM bench_lookup WHERE code = bench_data.bucket)",
     ),
+    // #322: an uncorrelated *aggregate* subquery (#304) in the WHERE
+    // clause of an outer query that is *itself* aggregate/GROUP BY
+    // (here, `count(*)` with no GROUP BY — #287's implicit whole-table
+    // group). #306's hoist was wired into the plain-scan codegen
+    // (`compile_direct_scan`/`compile_sorted_scan`) but not into the
+    // aggregate scan (`compile_grouped_scan`), so this exact shape
+    // re-ran the inner `AVG(x)` full-table scan once per WHERE-matching
+    // outer row — O(n^2), severe enough to blow the 50M-step VDBE guard
+    // rail before #322's fix landed.
+    (
+        "agg_subquery",
+        "SELECT count(*) FROM bench_data WHERE x > (SELECT avg(x) FROM bench_data)",
+    ),
 ];
 
 /// Aborts the bench run on a setup/execution failure. A bare `panic!` is
