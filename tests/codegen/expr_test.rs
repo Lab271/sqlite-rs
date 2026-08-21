@@ -662,17 +662,17 @@ fn case_branch_with_computed_expression_compiles_via_copy() {
 }
 
 #[test]
-fn aggregate_call_is_rejected_as_unsupported() {
-    let (_path, schema) = one_row_fixture();
-    let select = match parse_select("SELECT count(*) FROM t") {
-        ParseOutcome::Accepted(s) => *s,
-        other => panic!("{other:?}"),
-    };
-    let err = compile_select(&select, &schema).unwrap_err();
-    assert!(
-        matches!(err, sqlite_rs::codegen::CodegenError::Unsupported { .. }),
-        "expected Unsupported, got {err:?}"
-    );
+fn aggregate_call_without_group_by_compiles_the_implicit_whole_table_group() {
+    // #287: `compile_value`'s `is_aggregate_call` guard still rejects
+    // an aggregate call reached through its own (non-aggregate-aware)
+    // path, but `count(*)` with no GROUP BY at all no longer reaches
+    // that path — `compile_select_scan` routes it into
+    // `compile_grouped_scan`'s implicit whole-table group instead.
+    // Previously `aggregate_call_is_rejected_as_unsupported`, which
+    // asserted the clean rejection that predated this feature.
+    let (path, schema) = one_row_fixture();
+    let rows = run_select(&path, &schema, "SELECT count(*) FROM t");
+    assert_eq!(rows, vec![vec![Value::Integer(1)]]);
 }
 
 #[test]

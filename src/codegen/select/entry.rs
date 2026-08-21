@@ -1,4 +1,4 @@
-use super::aggregate::compile_grouped_scan;
+use super::aggregate::{compile_grouped_scan, select_has_aggregate};
 use super::index_scan::try_compile_index_ordered_scan;
 use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
 use super::order_by::resolve_order_by;
@@ -189,7 +189,33 @@ where
                 reason: "GROUP BY combined with DISTINCT not yet supported".to_string(),
             });
         }
-        return compile_grouped_scan(em, reg, select, schema, cursors, end_label, catalog, sink);
+        return compile_grouped_scan(
+            em, reg, select, schema, cursors, end_label, catalog, false, sink,
+        );
+    }
+    // #287: no explicit GROUP BY, but the SELECT list/HAVING has an
+    // aggregate call — the whole table is one implicit group, reusing
+    // `compile_grouped_scan`'s machinery with an empty GROUP BY key
+    // (so every row belongs to the same synthetic group) and
+    // `implicit_group: true` (so a zero-row table still flushes one
+    // row — count(*) = 0, other aggregates NULL — instead of zero
+    // rows the way an explicit `GROUP BY` over no matches would).
+    if select_has_aggregate(select) {
+        if !select.order_by.is_empty() {
+            return Err(CodegenError::Unsupported {
+                reason: "ORDER BY combined with an aggregate (no GROUP BY) not yet supported"
+                    .to_string(),
+            });
+        }
+        if select.distinct.is_some() {
+            return Err(CodegenError::Unsupported {
+                reason: "DISTINCT combined with an aggregate (no GROUP BY) not yet supported"
+                    .to_string(),
+            });
+        }
+        return compile_grouped_scan(
+            em, reg, select, schema, cursors, end_label, catalog, true, sink,
+        );
     }
     if select.having.is_some() {
         return Err(CodegenError::Unsupported {

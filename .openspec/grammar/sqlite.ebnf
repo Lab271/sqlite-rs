@@ -74,10 +74,16 @@ select-stmt     ::= select-core { "UNION" "ALL" select-core }            (* V2 c
 select-core     ::= "SELECT" [ "DISTINCT" | "ALL" ] result-column { "," result-column }
                      [ "FROM" from-clause ]
                      [ "WHERE" expr ]
-                     [ group-by-clause ] ;                             (* V2/V4 *)
+                     [ group-by-clause ]
+                     [ "HAVING" expr ] ;                               (* V2/V4/#287 -- HAVING is parse.y's own
+                                                                            independent having_opt, not nested
+                                                                            under groupby_opt: it's legal with no
+                                                                            GROUP BY at all, filtering the
+                                                                            implicit whole-table group (#287) *)
 
-group-by-clause ::= "GROUP" "BY" expr { "," expr } [ "HAVING" expr ] ;
-                     (* V4 [parse.y:950 groupby_opt, :955 having_opt] *)
+group-by-clause ::= "GROUP" "BY" expr { "," expr } ;
+                     (* V4 [parse.y:950 groupby_opt]; HAVING [parse.y:955
+                        having_opt] moved to select-core above -- #287 *)
 
 result-column   ::= "*"                                   (* V2 [parse.y:717 selcollist] *)
                   | table-name "." "*"                    (* V2 [parse.y selcollist nm DOT STAR] *)

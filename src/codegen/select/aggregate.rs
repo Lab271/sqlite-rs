@@ -28,6 +28,17 @@ use super::*;
 ///   pseudo cursor — narrow enough (grouping/aggregating by a *bare*
 ///   rowid-alias column is handled correctly; only a compound
 ///   expression referencing it is affected) not to block this ticket.
+///
+/// `select.group_by.is_empty()` is also the entry point for #287's
+/// implicit whole-table group: with no `GROUP BY` key at all, every
+/// WHERE-matching row belongs to one synthetic group (`group_targets`
+/// is empty, so the boundary check below only ever fires on the very
+/// first row). The one place that still needs to differ from an
+/// explicit `GROUP BY ()`-shaped zero-row result is the *tail* flush:
+/// an explicit `GROUP BY` over zero matching rows correctly produces
+/// zero groups, but a whole-table aggregate with zero matching rows
+/// still produces exactly one row (`count(*) = 0`, other aggregates
+/// `NULL`) — `implicit_group` selects that behavior.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn compile_grouped_scan<F>(
     em: &mut Emitter,
@@ -37,6 +48,7 @@ pub(super) fn compile_grouped_scan<F>(
     cursors: ScanCursors,
     end_label: Label,
     catalog: &[TableSchema],
+    implicit_group: bool,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -132,7 +144,19 @@ where
     // Pass 2: walk the sorted buffer, grouping and aggregating.
     em.place(sort_step);
     let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, cursors.sort, 0, 0));
-    em.patch_p2(sort_addr, end_label);
+    // `SorterSort` jumps straight past pass 2 when the sorter is empty
+    // (a WHERE-matching-zero-rows table). An explicit `GROUP BY` in
+    // that case has zero groups, so `end_label` is correct as-is; the
+    // implicit whole-table group (#287) still needs its one all-NULL
+    // (count(*) = 0) row, so it jumps to `tail_flush_label` below
+    // instead — the same unconditional flush the normal end-of-loop
+    // path falls through to.
+    let empty_sorter_target = if implicit_group {
+        em.new_label()
+    } else {
+        end_label
+    };
+    em.patch_p2(sort_addr, empty_sorter_target);
 
     let limit = compile_limit_setup(em, reg, &table_scope, select)?;
 
@@ -144,6 +168,17 @@ where
 
     let prev_key_regs: Vec<i32> = group_targets.iter().map(|_| reg.alloc()).collect();
     let snapshot_regs: Vec<i32> = schema.columns.iter().map(|_| reg.alloc()).collect();
+    // Initialized to NULL up front so the implicit whole-table group's
+    // tail flush over a zero-row table (no row ever reaches
+    // `read_row_columns_into` to overwrite these) reads NULL for any
+    // plain (non-aggregate) column reference, matching SQLite's
+    // "arbitrary row" semantics degrading to NULL when there is none.
+    // Harmless for the explicit-`GROUP BY` case too: every real group
+    // always has at least one row, which unconditionally overwrites
+    // these before its flush.
+    for &r in &snapshot_regs {
+        em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+    }
     // Aggregate-context slots (`Vm::agg_contexts`) are a disjoint table
     // from the register file, addressed by their own small integer
     // space — a bare 0-based counter here, not `reg.alloc()`.
@@ -269,10 +304,21 @@ where
     em.patch_p2(sorted_next, sorted_loop);
 
     // Tail flush: the very last group never sees another row to trigger
-    // `boundary_label`'s mid-loop flush.
+    // `boundary_label`'s mid-loop flush. An explicit `GROUP BY` over
+    // zero matching rows correctly produces zero groups (skip the
+    // flush when `have_group_reg` never went high); the implicit
+    // whole-table group (#287) always flushes exactly one row, even
+    // over an empty table — `count(*)` finalizes to 0, other
+    // aggregates to NULL, via `snapshot_regs`'s NULL initialization
+    // above and `AggFinal`'s never-stepped-slot handling.
+    if implicit_group {
+        em.place(empty_sorter_target);
+    }
     let skip_tail_flush = em.new_label();
-    let tail_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
-    em.patch_p2(tail_check, skip_tail_flush);
+    if !implicit_group {
+        let tail_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+        em.patch_p2(tail_check, skip_tail_flush);
+    }
     flush_group(
         em,
         reg,
@@ -369,6 +415,27 @@ pub(super) fn collect_aggregates(
             Ok((call, name, arg))
         })
         .collect()
+}
+
+/// Whether `select` has any aggregate call in its result columns or
+/// `HAVING` clause — the #287 trigger for compiling an implicit
+/// whole-table group when `select.group_by.is_empty()`, distinguishing
+/// `SELECT count(*) FROM t;` (implicit group) from an ordinary
+/// aggregate-free `SELECT` (plain scan).
+pub(super) fn select_has_aggregate(select: &Select) -> bool {
+    let mut found = Vec::new();
+    for col in &select.columns {
+        if let ResultColumn::Expr { expr, .. } = col {
+            find_aggregates(expr, &mut found);
+            if !found.is_empty() {
+                return true;
+            }
+        }
+    }
+    if let Some(having) = &select.having {
+        find_aggregates(having, &mut found);
+    }
+    !found.is_empty()
 }
 
 pub(super) fn find_aggregates(expr: &Expr, out: &mut Vec<Expr>) {

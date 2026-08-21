@@ -213,27 +213,39 @@ fn without_rowid_table_never_substitutes_rowid() {
 }
 
 // ---------------------------------------------------------------
-// Aggregates: compiled as ordinary per-row scalar calls, so
-// `SELECT count(*) FROM t` emitted one row per input row. V2 has no
-// grouping pass, so codegen refuses rather than emitting wrong output.
+// Aggregates without GROUP BY (#287): `count`/`sum`/`avg`/`min`/`max`
+// now compile via the implicit whole-table group — previously (#268)
+// every aggregate call without GROUP BY was rejected outright, since
+// this codebase had no grouping pass at all yet. `total`/
+// `group_concat` still have no `crate::vdbe::aggregate::AggState`
+// accumulator (see `classify_aggregate`), so they remain rejected.
 // ---------------------------------------------------------------
 
 #[test]
-fn aggregate_calls_are_rejected_as_unsupported() {
+fn aggregate_calls_without_group_by_compile_via_the_implicit_whole_table_group() {
     let s = schema(PLAIN_DDL, &["id", "name"]);
     for sql in [
         "SELECT count(*) FROM t",
         "SELECT count(id) FROM t",
         "SELECT sum(id) FROM t",
         "SELECT avg(id) FROM t",
-        "SELECT total(id) FROM t",
-        "SELECT group_concat(name) FROM t",
         "SELECT max(id) FROM t",
         "SELECT min(id) FROM t",
     ] {
+        let _ = compile(sql, &s);
+    }
+}
+
+#[test]
+fn aggregates_without_an_agg_state_accumulator_are_still_rejected_as_unsupported() {
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    for sql in [
+        "SELECT total(id) FROM t",
+        "SELECT group_concat(name) FROM t",
+    ] {
         match compile_err(sql, &s) {
             CodegenError::Unsupported { reason } => assert!(
-                reason.contains("aggregate"),
+                reason.contains("aggregate") || reason.contains("supported"),
                 "{sql:?} rejected for the wrong reason: {reason}"
             ),
             other => panic!("{sql:?} expected Unsupported, got {other:?}"),
