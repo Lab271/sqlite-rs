@@ -6,6 +6,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+refactor: tighten `src/btree` and `src/codegen` module layout (#273,
+#276). Pure module reorganization, no behavior change: `src/btree/`
+groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
+`table/`, and index write ops (`index_insert`/`index_delete`) under
+`index.rs` + `index/`, giving both write paths symmetric naming;
+`ddl.rs` renamed to `schema.rs`. `src/codegen/` groups DDL codegen
+(`create_table`/`drop_table`/`create_index`/`drop_index`) under
+`ddl.rs` + `ddl/`; `select.rs` (4033 lines) split into a facade plus
+9 sub-modules under `select/` (`entry`, `joins`, `join_full`, `eqp`,
+`join_access`, `order_by`, `projection`, `limit_scan`, `aggregate`),
+each ~1000 lines or fewer. Spec 006 `Implementation:`/`Tests:` path
+citations updated for the moved btree files.
+
 ## [0.13.0] - 2026-08-21
 
 feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,

@@ -16,26 +16,20 @@
 //! column is a schema-aware operation that belongs above this layer,
 //! once the DDL reader (step 7) knows which column, if any, is the alias.
 
-mod ddl;
-mod delete;
 mod error;
 mod index;
-mod index_delete;
-mod index_insert;
-mod insert;
 mod master;
+mod schema;
+mod table;
 
-pub use ddl::{create_empty_index_root, create_empty_table_root, populate_index_from_table};
-pub use delete::delete_row;
 pub use error::BtreeError;
-pub use index::{IndexCursor, IndexRow};
-pub use index_delete::delete_entry;
-pub use index_insert::insert_entry;
-pub use insert::insert_row;
+pub use index::{delete_entry, insert_entry, IndexCursor, IndexRow};
 pub use master::{
     bump_schema_cookie, delete_master_row, ensure_sqlite_sequence_table, insert_master_row,
     update_sequence, MasterEntry, SQLITE_MASTER_ROOT_PAGE,
 };
+pub use schema::{create_empty_index_root, create_empty_table_root, populate_index_from_table};
+pub use table::{delete_row, insert_row};
 
 use crate::header::DatabaseHeader;
 use crate::record::{decode_varint, encode_varint};
@@ -976,7 +970,7 @@ fn decode_cell_head(
 
 /// A one-page, empty-leaf-root database: just enough header bytes for
 /// `DatabaseHeader::parse` and `Pager::open` to accept it. Shared by the
-/// `#[cfg(test)]` modules of `delete.rs`, `ddl.rs`, `insert.rs` and
+/// `#[cfg(test)]` modules of `delete.rs`, `schema.rs`, `insert.rs` and
 /// `master.rs`, which all built this same fixture independently before.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]

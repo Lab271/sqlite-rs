@@ -193,7 +193,7 @@ The originating issue's corpus section expects an index fixture with an overflow
 
 The system MUST insert a `(rowid, payload)` row into a table b-tree leaf page that has room for it: encoding the cell (payload-length varint + rowid varint + local payload bytes, plus a 4-byte overflow-page pointer per Requirement 2 when the payload doesn't fit locally), locating the rowid-ordered insertion position, and rewriting the page's cell-pointer array and cell count so the leaf's cells remain in strict ascending rowid order. Inserting a rowid that already exists in the leaf MUST return `Err`, never silently overwrite or duplicate.
 
-**Implementation:** `src/btree/insert.rs::insert_into_leaf`, `src/btree/insert.rs::encode_leaf_cell`
+**Implementation:** `src/btree/table/insert.rs::insert_into_leaf`, `src/btree/table/insert.rs::encode_leaf_cell`
 
 #### Scenario: Single-row insert into an otherwise-empty leaf
 
@@ -209,13 +209,13 @@ The system MUST insert a `(rowid, payload)` row into a table b-tree leaf page th
 - WHEN a second insert targets rowid `R`
 - THEN `insert_row` MUST return `Err(BtreeError::DuplicateRowid)`, leaving the page unchanged
 
-**Tests:** inline `#[cfg(test)]` in `src/btree/insert.rs` (planned — not yet written; duplicate-rowid rejection is implemented but not corpus/oracle-tested)
+**Tests:** inline `#[cfg(test)]` in `src/btree/table/insert.rs` (planned — not yet written; duplicate-rowid rejection is implemented but not corpus/oracle-tested)
 
 ### Requirement 9: Leaf Split with Median Propagation [MUST]
 
 When a cell won't fit in its target leaf, the system MUST allocate a new page (via the pager's freelist-aware allocator), distribute the leaf's existing cells plus the new cell roughly in half by count (the original page keeps the lower rowids, the newly allocated page takes the upper half), and propagate the split to the parent interior page by inserting a routing cell (child = original leaf, key = the original leaf's new maximum rowid) immediately before whatever routing entry previously pointed at the original leaf, redirecting that entry to the new page.
 
-**Implementation:** `src/btree/insert.rs::insert_into_leaf`, `src/btree/insert.rs::insert_into_parent`
+**Implementation:** `src/btree/table/insert.rs::insert_into_leaf`, `src/btree/table/insert.rs::insert_into_parent`
 
 #### Scenario: Insert forces exactly one leaf split
 
@@ -229,7 +229,7 @@ When a cell won't fit in its target leaf, the system MUST allocate a new page (v
 
 When an interior page's routing-cell insert (propagated up from a child split, per Requirement 9) doesn't fit, the system MUST split the interior page itself: promoting the median key to the grandparent without duplicating it in either child, with the left interior page's rightmost pointer becoming the promoted entry's former child pointer. This MUST recurse arbitrarily many levels up the ancestor chain produced by the leaf-to-root path search.
 
-**Implementation:** `src/btree/insert.rs::insert_into_parent`
+**Implementation:** `src/btree/table/insert.rs::insert_into_parent`
 
 #### Scenario: Insert forces multiple cascading interior splits
 
@@ -243,7 +243,7 @@ When an interior page's routing-cell insert (propagated up from a child split, p
 
 Because a table's root page number is fixed (referenced by its `sqlite_master` entry) and can never be relocated, the system MUST handle a split that reaches the root by relocating the root's current content (leaf or interior, verbatim) to a newly allocated page, then reinitializing the root page in place as a fresh interior page holding a single routing cell (child = the relocated page, key = the promoted divider) and the split's new sibling as the rightmost pointer. This MUST work whether the root is page 1 (the 100-byte file-header offset per the page-1 trap) or any other page number.
 
-**Implementation:** `src/btree/insert.rs::root_split`
+**Implementation:** `src/btree/table/insert.rs::root_split`
 
 #### Scenario: Insert forces a root split
 
@@ -281,7 +281,7 @@ Because a table's root page number is fixed (referenced by its `sqlite_master` e
 
 The system MUST delete the row with a given rowid from a table b-tree leaf page: locating the cell by rowid, removing it from the cell-pointer array, and rewriting the page's remaining cells (in order) and cell count. Deleting a rowid that doesn't exist in the tree MUST return `Err`, leaving the tree unchanged.
 
-**Implementation:** `src/btree/delete.rs::delete_row`
+**Implementation:** `src/btree/table/delete.rs::delete_row`
 
 #### Scenario: Deleting a missing rowid errors without mutating the tree
 
@@ -289,7 +289,7 @@ The system MUST delete the row with a given rowid from a table b-tree leaf page:
 - WHEN `delete_row` is called with rowid `R`
 - THEN it MUST return `Err(BtreeError::RowidNotFound)`, leaving the page unchanged
 
-**Tests:** `src/btree/delete.rs::tests::deleting_a_missing_rowid_errors`
+**Tests:** `src/btree/table/delete.rs::tests::deleting_a_missing_rowid_errors`
 
 #### Scenario: Deleting one row out of several leaves the rest intact
 
@@ -297,7 +297,7 @@ The system MUST delete the row with a given rowid from a table b-tree leaf page:
 - WHEN one row's rowid is deleted
 - THEN the remaining rows MUST stay in ascending rowid order, unchanged
 
-**Tests:** `src/btree/delete.rs::tests::deleting_one_of_two_rows_keeps_the_other`, `tests/corpus/btree_delete_test.rs::delete_single_row_from_a_two_row_leaf`
+**Tests:** `src/btree/table/delete.rs::tests::deleting_one_of_two_rows_keeps_the_other`, `tests/corpus/btree_delete_test.rs::delete_single_row_from_a_two_row_leaf`
 
 #### Scenario: Bulk delete stays oracle-identical at scale
 
@@ -319,7 +319,7 @@ The system MUST delete the row with a given rowid from a table b-tree leaf page:
 
 When a delete leaves a non-root page with zero cells, the system MUST remove that page's routing entry from its parent (redirecting the parent's `rightmost` pointer if the emptied page was the parent's rightmost child) and deallocate the emptied page via the pager's freelist (Requirement per spec 007/freelist). This is a documented simplification of SQLite's proactive half-full-threshold sibling redistribution: pages are only collapsed once completely empty, not proactively rebalanced while still holding rows — sufficient for structural validity (`PRAGMA integrity_check`) and for freed pages to be reused by a later insert, without porting the exact 3-sibling balance algorithm.
 
-**Implementation:** `src/btree/delete.rs::collapse_into_ancestors`
+**Implementation:** `src/btree/table/delete.rs::collapse_into_ancestors`
 
 #### Scenario: Deleting the only row in the root leaves an empty root leaf
 
@@ -327,7 +327,7 @@ When a delete leaves a non-root page with zero cells, the system MUST remove tha
 - WHEN that row is deleted
 - THEN the root page MUST remain a valid, empty leaf page (the root can never be deallocated)
 
-**Tests:** `src/btree/delete.rs::tests::deleting_the_only_row_leaves_an_empty_root_leaf`
+**Tests:** `src/btree/table/delete.rs::tests::deleting_the_only_row_leaves_an_empty_root_leaf`
 
 #### Scenario: Page merge triggers correctly when a non-root leaf empties
 
@@ -341,7 +341,7 @@ When a delete leaves a non-root page with zero cells, the system MUST remove tha
 
 When collapsing a page leaves its own parent with zero routing entries (just a `rightmost` pointer), the system MUST cascade the collapse up the ancestor chain. If the cascade reaches the root itself, the system MUST relocate the sole remaining child's content (leaf or interior, verbatim) into the fixed root page in place, then deallocate the now-vacated child page — mirroring `insert.rs::root_split` in reverse.
 
-**Implementation:** `src/btree/delete.rs::collapse_into_ancestors`, `src/btree/delete.rs::collapse_root`
+**Implementation:** `src/btree/table/delete.rs::collapse_into_ancestors`, `src/btree/table/delete.rs::collapse_root`
 
 #### Scenario: Delete-all cascades every level back to a single empty leaf root
 
@@ -365,13 +365,13 @@ When collapsing a page leaves its own parent with zero routing entries (just a `
 - WHEN the cascade collapses that interior page away
 - THEN `rightmost`'s subtree MUST be spliced into the interior page's own parent (replacing whichever reference pointed at the collapsing page), never dropped — every surviving row MUST remain reachable from the root
 
-**Tests:** `src/btree/delete.rs::tests::deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree`
+**Tests:** `src/btree/table/delete.rs::tests::deleting_one_subtree_never_orphans_a_sibling_rightmost_subtree`
 
 ### Requirement 15: Index Leaf Cell Insert and Split [MUST]
 
 The system MUST insert an entry (a full record — indexed columns plus the referenced rowid for an ordinary secondary index, or the whole row for a WITHOUT ROWID table) into an index b-tree leaf page (`src/btree/index.rs`'s `LEAF_INDEX`/`INTERIOR_INDEX` page types), keyed by [`compare_keys`](BINARY-collation, per Requirement 6) rather than numeric rowid order. Unlike a table leaf split (Requirement 9), which copies the divider and keeps it in the leaf, an index leaf split MUST promote its median entry into the parent, removing it from both halves — because index interior cells carry a full entry, not just a routing key (Requirement 5). Inserting an entry whose key compares exactly equal to an existing one — whether that existing entry lives in a leaf or has been promoted to interior level — MUST return `Err(BtreeError::DuplicateKey)`.
 
-**Implementation:** `src/btree/index_insert.rs::insert_entry`, `src/btree/index_insert.rs::insert_into_index_leaf`
+**Implementation:** `src/btree/index/insert.rs::insert_entry`, `src/btree/index/insert.rs::insert_into_index_leaf`
 
 #### Scenario: Duplicate key is rejected even when the existing entry lives at interior level
 
@@ -379,7 +379,7 @@ The system MUST insert an entry (a full record — indexed columns plus the refe
 - WHEN a second insert targets that same key
 - THEN `insert_entry` MUST return `Err(BtreeError::DuplicateKey)`, leaving the tree unchanged
 
-**Tests:** `src/btree/index_insert.rs::tests::duplicate_key_is_rejected`
+**Tests:** `src/btree/index/insert.rs::tests::duplicate_key_is_rejected`
 
 #### Scenario: Bulk insert forces index splits and reads back in BINARY order
 
@@ -401,7 +401,7 @@ The system MUST insert an entry (a full record — indexed columns plus the refe
 
 The system MUST delete the entry with a given key from an index b-tree. Deleting a key that doesn't exist MUST return `Err(BtreeError::KeyNotFound)`, leaving the tree unchanged. An emptied leaf (or an interior page that drains to zero of its own entries) is left in place rather than deallocated — a documented simplification mirroring Requirement 13's for table b-trees, adapted for the fact that an index interior entry's own value must never be discarded merely because its child subtree emptied (see Requirement 17).
 
-**Implementation:** `src/btree/index_delete.rs::delete_entry`, `src/btree/index_delete.rs::delete_from_leaf`
+**Implementation:** `src/btree/index/delete.rs::delete_entry`, `src/btree/index/delete.rs::delete_from_leaf`
 
 #### Scenario: Deleting a missing key errors without mutating the tree
 
@@ -409,7 +409,7 @@ The system MUST delete the entry with a given key from an index b-tree. Deleting
 - WHEN `delete_entry` is called with that key
 - THEN it MUST return `Err(BtreeError::KeyNotFound)`, leaving the tree unchanged
 
-**Tests:** `src/btree/index_delete.rs::tests::deleting_a_missing_key_errors`
+**Tests:** `src/btree/index/delete.rs::tests::deleting_a_missing_key_errors`
 
 #### Scenario: Delete-all leaves the index empty
 
@@ -423,7 +423,7 @@ The system MUST delete the entry with a given key from an index b-tree. Deleting
 
 Because index interior cells carry a full entry (Requirement 5), deleting a key that was promoted to interior level by an earlier split MUST NOT simply remove that routing entry — its child pointer is load-bearing, and removing the entry would also discard whichever value it carries. The system MUST instead find that entry's in-order predecessor (the maximum entry within its own left-child subtree, found by recursively descending — preferring the rightmost subtree, falling back to an interior page's own last entry once its rightmost subtree is confirmed drained) and swap the predecessor's value into the matched entry's position, physically removing the predecessor from wherever it actually lived. If the matched entry's subtree is entirely drained (no predecessor available), the entry is removed outright instead.
 
-**Implementation:** `src/btree/index_delete.rs::delete_via_predecessor_swap`, `src/btree/index_delete.rs::extract_max_entry`
+**Implementation:** `src/btree/index/delete.rs::delete_via_predecessor_swap`, `src/btree/index/delete.rs::extract_max_entry`
 
 #### Scenario: Deleting an entry promoted to interior level swaps in its predecessor
 
@@ -431,7 +431,7 @@ Because index interior cells carry a full entry (Requirement 5), deleting a key 
 - WHEN that interior-level key is deleted
 - THEN the interior entry's value MUST be replaced by its predecessor's, the predecessor MUST be physically removed from its leaf, and the tree MUST remain oracle-valid
 
-**Tests:** `src/btree/index_delete.rs::tests::minimal_two_entry_split_then_delete_promoted_key`
+**Tests:** `src/btree/index/delete.rs::tests::minimal_two_entry_split_then_delete_promoted_key`
 
 #### Scenario: Deleting every entry, including ones promoted to interior level, in ascending order
 
@@ -439,4 +439,4 @@ Because index interior cells carry a full entry (Requirement 5), deleting a key 
 - WHEN each delete runs — some hitting a leaf directly, others hitting an interior-level promoted entry
 - THEN every delete MUST succeed (no `KeyNotFound` false negative from an incomplete predecessor search) and the tree MUST end fully empty
 
-**Tests:** `src/btree/index_delete.rs::tests::split_then_delete_all_including_promoted_interior_entries`
+**Tests:** `src/btree/index/delete.rs::tests::split_then_delete_all_including_promoted_interior_entries`

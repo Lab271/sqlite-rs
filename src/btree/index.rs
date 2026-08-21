@@ -30,6 +30,12 @@ use crate::pager::Pager;
 use crate::record::{decode_record, decode_varint, TextEncoding, Value};
 use crate::vfs::PageSource;
 
+mod delete;
+mod insert;
+
+pub use delete::delete_entry;
+pub use insert::insert_entry;
+
 pub(super) const LEAF_INDEX: u8 = 0x0a;
 pub(super) const INTERIOR_INDEX: u8 = 0x02;
 

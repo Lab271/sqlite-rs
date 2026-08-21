@@ -13,17 +13,17 @@
 //! table write path where leaf split (copy-and-keep divider) and interior
 //! split (promote-and-remove) differ.
 //!
-//! Position/ordering uses [`super::index::compare_keys`] (BINARY-collation
+//! Position/ordering uses [`super::compare_keys`] (BINARY-collation
 //! key comparison) rather than numeric rowid comparison. Shares the same
 //! "every page mutation fully rebuilds the page" simplification as
 //! `insert.rs`.
 
-use super::index::{
+use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
     compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
     IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
 };
-use super::{local_payload_size, page1_header_start, put, read_page_type, BtreeError};
+use crate::btree::{local_payload_size, page1_header_start, put, read_page_type, BtreeError};
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{encode_record, encode_varint, TextEncoding, Value};

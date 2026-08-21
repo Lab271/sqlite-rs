@@ -23,7 +23,7 @@
 //! redistribution, which nothing else in this codebase's rebuild-from-
 //! scratch write path does either.
 
-use super::{
+use crate::btree::{
     build_interior_cell, collect_interior_entries, collect_leaf_cells, decode_cell_head,
     find_leaf_page, local_payload_size, page1_header_start, read_page_type, read_u32,
     write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
@@ -279,7 +279,7 @@ mod tests {
     use crate::btree::insert_row;
     use std::path::Path;
 
-    use super::super::test_minimal_db as minimal_db;
+    use crate::btree::test_minimal_db as minimal_db;
 
     #[test]
     fn deleting_a_missing_rowid_errors() {

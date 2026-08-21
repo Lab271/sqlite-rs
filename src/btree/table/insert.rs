@@ -15,7 +15,7 @@
 //! (reserved bytes always 0) but would need generalizing before a `PRAGMA
 //! reserve_bytes` fixture is supported.
 
-use super::{
+use crate::btree::{
     build_interior_cell, collect_interior_entries, collect_leaf_cells, find_leaf_page,
     local_payload_size, page1_header_start, put, read_page_type, write_interior_page,
     write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
@@ -366,7 +366,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    use super::super::test_minimal_db as minimal_db;
+    use crate::btree::test_minimal_db as minimal_db;
 
     /// 006-btree Requirement 8's duplicate-rowid scenario: inserting a
     /// rowid that already exists in the leaf must error, not silently
@@ -532,7 +532,7 @@ mod tests {
         let header_start = page1_header_start(1);
         {
             let buf = pager.get_page_mut(1).unwrap();
-            buf[header_start] = super::super::index::LEAF_INDEX;
+            buf[header_start] = crate::btree::index::LEAF_INDEX;
         }
 
         let new_right = pager.allocate_page().unwrap();
@@ -542,7 +542,7 @@ mod tests {
             BtreeError::UnexpectedPageType {
                 page_num: 1,
                 page_type,
-            } if page_type == super::super::index::LEAF_INDEX
+            } if page_type == crate::btree::index::LEAF_INDEX
         ));
     }
 }
