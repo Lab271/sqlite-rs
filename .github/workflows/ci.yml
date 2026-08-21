@@ -5,10 +5,14 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+      - ".github/**"
+      - "!.github/workflows/**"
   pull_request:
     branches: [main]
     paths-ignore:
       - "**.md"
+      - ".github/**"
+      - "!.github/workflows/**"
 
 env:
   # Must match Cargo.toml's [package.metadata.oracle] version — the single
