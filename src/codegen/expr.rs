@@ -1136,9 +1136,19 @@ pub(crate) fn compile_value(
         | ExprKind::InSubqueryMulti { .. } => compile_bool_to_value(em, reg, scope, expr),
 
         // #238: a scalar subquery in value position — `SELECT (SELECT
-        // max(x) FROM t)`, `x = (SELECT ...)`, etc.
+        // max(x) FROM t)`, `x = (SELECT ...)`, etc. #306: if this
+        // subquery was hoisted (materialized once, before the enclosing
+        // scan's `Rewind`, because it's uncorrelated), its result is
+        // already sitting in a register — reuse it instead of
+        // re-running the subquery's whole scan on every outer row.
         ExprKind::Subquery(subquery) => {
-            crate::codegen::subquery::compile_scalar_subquery(em, reg, scope, subquery)
+            match scope
+                .hoisted
+                .get(&crate::codegen::subquery::select_id(subquery))
+            {
+                Some(crate::codegen::subquery::HoistedSubquery::Scalar { reg: r }) => Ok(*r),
+                _ => crate::codegen::subquery::compile_scalar_subquery(em, reg, scope, subquery),
+            }
         }
     }
 }

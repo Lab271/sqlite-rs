@@ -209,6 +209,16 @@ where
         ));
     }
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    // #306: hoist any uncorrelated WHERE-clause IN/scalar subquery out
+    // of the scan loop below, materializing it exactly once here rather
+    // than on every outer row.
+    let hoisted = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::hoist_uncorrelated_where_subqueries(
+            em, reg, &scope, where_expr,
+        )?,
+        None => std::collections::HashMap::new(),
+    };
+    let scope = scope.with_hoisted(std::rc::Rc::new(hoisted));
     let limit = compile_limit_setup(em, reg, &scope, select)?;
 
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
@@ -279,6 +289,14 @@ where
     }
 
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    // #306: same hoist as `compile_direct_scan` — see its comment.
+    let hoisted = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::hoist_uncorrelated_where_subqueries(
+            em, reg, &scope, where_expr,
+        )?,
+        None => std::collections::HashMap::new(),
+    };
+    let scope = scope.with_hoisted(std::rc::Rc::new(hoisted));
 
     // LIMIT/OFFSET are set up here, before the sorter opens, rather than
     // just before pass 2 — so a combined bound register is ready in time

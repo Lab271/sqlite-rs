@@ -98,6 +98,7 @@ pub(super) fn compile_full_join_two_table(
         catalog: schemas.to_vec(),
         outer: None,
         dedup_star: dedup_star.clone(),
+        ..Scope::default()
     };
 
     // #288: `ORDER BY` and `DISTINCT` combined stay rejected — the
@@ -177,6 +178,7 @@ pub(super) fn compile_full_join_two_table(
         catalog: schemas.to_vec(),
         outer: None,
         dedup_star: dedup_star.clone(),
+        ..Scope::default()
     };
     if let Some(c) = &constraint {
         compile_cond(
@@ -240,6 +242,7 @@ pub(super) fn compile_full_join_two_table(
         catalog: schemas.to_vec(),
         outer: None,
         dedup_star: dedup_star.clone(),
+        ..Scope::default()
     };
     if has_order_by {
         emit_full_join_sort_row(
@@ -297,6 +300,7 @@ pub(super) fn compile_full_join_two_table(
         catalog: schemas.to_vec(),
         outer: None,
         dedup_star: dedup_star.clone(),
+        ..Scope::default()
     };
     if has_order_by {
         emit_full_join_sort_row(

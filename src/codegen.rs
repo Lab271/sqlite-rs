@@ -362,6 +362,19 @@ pub(crate) struct Scope {
     /// unaffected — this only gates the [`select::ResultColumn::Star`]
     /// expansion path.
     pub(crate) dedup_star: Vec<std::collections::HashSet<String>>,
+    /// Uncorrelated WHERE-clause subqueries hoisted out of the enclosing
+    /// single-table scan loop and materialized exactly once, before the
+    /// scan's `Rewind` (#306) — keyed by [`subquery::select_id`] of the
+    /// subquery's own `Select` AST node. `compile_cond`/`compile_value`'s
+    /// `InSubquery`/`Subquery` dispatch consult this map first, reading
+    /// the precomputed cursor/register instead of re-materializing the
+    /// subquery on every outer row. Empty (the default) for every scope
+    /// that isn't a single-table scan's own — a correlated subquery, or
+    /// one outside this pass's scope (see
+    /// [`subquery::hoist_uncorrelated_where_subqueries`]'s doc comment),
+    /// is simply never inserted, so its lookup misses and it falls
+    /// through to the unmodified per-row materialization path.
+    pub(crate) hoisted: std::rc::Rc<HashMap<usize, subquery::HoistedSubquery>>,
 }
 
 impl Scope {
@@ -380,6 +393,7 @@ impl Scope {
             catalog: Vec::new(),
             outer: None,
             dedup_star: vec![std::collections::HashSet::new()],
+            hoisted: std::rc::Rc::default(),
         }
     }
 
@@ -397,6 +411,16 @@ impl Scope {
     /// implements.
     pub(crate) fn with_outer(mut self, outer: Scope) -> Self {
         self.outer = Some(Box::new(outer));
+        self
+    }
+
+    /// Attaches a single-table scan's hoisted-uncorrelated-subquery map
+    /// (#306) — see [`Scope::hoisted`]'s doc comment.
+    pub(crate) fn with_hoisted(
+        mut self,
+        hoisted: std::rc::Rc<HashMap<usize, subquery::HoistedSubquery>>,
+    ) -> Self {
+        self.hoisted = hoisted;
         self
     }
 
