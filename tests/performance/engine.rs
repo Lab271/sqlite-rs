@@ -95,6 +95,23 @@ const SCENARIOS: &[(&str, &str)] = &[
         "subquery",
         "SELECT id, x FROM bench_data WHERE bucket > (SELECT code FROM bench_lookup WHERE code = 0)",
     ),
+    // #303: the correlated counterpart of the `subquery` scenario above
+    // — `code = bench_data.bucket` instead of a fixed literal, so the
+    // inner subquery references the outer row and is genuinely
+    // correlated, making it ineligible for #306's uncorrelated-subquery
+    // hoist. This re-scans `bench_lookup` (~1000 rows) once per outer
+    // row rather than once total, which is exactly the "materialization
+    // only, no coroutines" cost ADR-0021 documents. Deliberately run
+    // only against `bench_1mb.db` (see `bench_fixture`'s skip below) —
+    // against `bench_50mb.db`'s larger outer row count this blows past
+    // the 50M-step VDBE guard rail before criterion can measure it,
+    // which is itself evidence of the unbounded cost this scenario
+    // exists to surface.
+    (
+        "correlated_subquery",
+        "SELECT id, x FROM bench_data \
+         WHERE bucket > (SELECT code FROM bench_lookup WHERE code = bench_data.bucket)",
+    ),
 ];
 
 /// Aborts the bench run on a setup/execution failure. A bare `panic!` is
@@ -187,6 +204,12 @@ fn bench_fixture(c: &mut Criterion, fixture_name: &str) {
     let theirs = open_theirs(&path);
 
     for (scenario, sql) in SCENARIOS {
+        // See `correlated_subquery`'s own comment above: unbounded on
+        // the larger fixture, would blow the VDBE step cap.
+        if *scenario == "correlated_subquery" && fixture_name == "bench_50mb.db" {
+            continue;
+        }
+
         let group_name = format!("{scenario}/{fixture_name}");
         let mut group = c.benchmark_group(group_name);
 
