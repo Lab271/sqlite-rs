@@ -243,8 +243,7 @@ where
             .ok_or_else(|| CodegenError::Unsupported {
                 reason: "join level out of range".to_string(),
             })?;
-        let constraint =
-            resolve_join_constraint(join, left, right, right_idx, &mut dedup_star)?;
+        let constraint = resolve_join_constraint(join, left, right, right_idx, &mut dedup_star)?;
         constraints.push(constraint);
     }
 
@@ -723,7 +722,16 @@ where
         level,
         catalog,
         &mut |em, reg, scope| {
-            emit_join_final_row(em, reg, select, scope, end_label, limit, distinct_cursor, sink)
+            emit_join_final_row(
+                em,
+                reg,
+                select,
+                scope,
+                end_label,
+                limit,
+                distinct_cursor,
+                sink,
+            )
         },
     )
 }

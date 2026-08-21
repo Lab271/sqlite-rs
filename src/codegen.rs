@@ -436,7 +436,12 @@ impl Scope {
         name: &str,
     ) -> Result<(i32, usize, &crate::schema::TableSchema, bool), select::CodegenError> {
         let binding_idx = self.resolve_own_binding_index(table, name)?;
-        let binding = &self.tables[binding_idx];
+        let binding =
+            self.tables
+                .get(binding_idx)
+                .ok_or_else(|| select::CodegenError::UnknownColumn {
+                    name: name.to_string(),
+                })?;
         let idx = expr::column_index(&binding.schema, name).unwrap_or(0);
         Ok((binding.cursor, idx, &binding.schema, binding.forced_null))
     }
@@ -463,7 +468,13 @@ impl Scope {
                 .ok_or_else(|| select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
                 })?;
-            expr::column_index(&self.tables[idx].schema, name).ok_or_else(|| {
+            let binding =
+                self.tables
+                    .get(idx)
+                    .ok_or_else(|| select::CodegenError::UnknownColumn {
+                        name: format!("{table}.{name}"),
+                    })?;
+            expr::column_index(&binding.schema, name).ok_or_else(|| {
                 select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
                 }
