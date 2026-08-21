@@ -6,7 +6,7 @@
 # Usage: cd tests/performance && make point-lookup
 # (or `make -C tests/performance point-lookup` from the repo root).
 
-.PHONY: help point-lookup engine engine-point-lookup engine-full-scan engine-filter-scan engine-order-by-limit engine-expr-heavy engine-prepare-only all
+.PHONY: help point-lookup engine engine-point-lookup engine-full-scan engine-filter-scan engine-order-by-limit engine-expr-heavy engine-prepare-only crud all
 
 help: ## List targets in this Makefile
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}'
@@ -41,4 +41,7 @@ engine-expr-heavy: ## Just the expr_heavy scenario
 engine-prepare-only: ## Just the prepare_only scenario (parse+codegen only, no execution)
 	bash -c 'cd ../.. && . ./tools/bench_env.sh && cargo bench --bench engine -- prepare_only'
 
-all: point-lookup engine ## Run the quick demo, then the full criterion bench
+crud: ## Run the 15-scenario full-CRUD bench (crud.rs): reads + INSERT/UPDATE/DELETE, sqlite-rs vs oracle
+	bash -c 'cd ../.. && . ./tools/bench_env.sh && cargo bench --bench crud'
+
+all: point-lookup engine crud ## Run the quick demo, then the full criterion benches
