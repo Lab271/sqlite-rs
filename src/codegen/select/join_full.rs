@@ -1,5 +1,5 @@
 use super::eqp::table_binding_name;
-use super::joins::{emit_join_final_row, synthesize_equality_constraint};
+use super::joins::{emit_join_final_row, resolve_join_constraint};
 use super::limit_scan::compile_limit_setup;
 use super::*;
 /// #250: `A FULL JOIN B ON cond` (or `USING (...)`/`NATURAL`),
@@ -70,42 +70,7 @@ pub(super) fn compile_full_join_two_table(
     let mut dedup_star: Vec<std::collections::HashSet<String>> =
         vec![std::collections::HashSet::new(); 2];
     let left = std::slice::from_ref(&binding_a);
-    let constraint = match &join.constraint {
-        Some(JoinConstraint::On(e)) => Some(e.clone()),
-        Some(JoinConstraint::Using(cols)) => {
-            let (expr, shared) = synthesize_equality_constraint(left, &binding_b, cols, true)?;
-            if let Some(slot) = dedup_star.get_mut(1) {
-                slot.extend(shared);
-            }
-            expr
-        }
-        None if join.natural => {
-            let shared_names: Vec<String> = binding_b
-                .schema
-                .columns
-                .iter()
-                .filter(|name| {
-                    binding_a
-                        .schema
-                        .columns
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(name))
-                })
-                .cloned()
-                .collect();
-            if shared_names.is_empty() {
-                None
-            } else {
-                let (expr, shared) =
-                    synthesize_equality_constraint(left, &binding_b, &shared_names, false)?;
-                if let Some(slot) = dedup_star.get_mut(1) {
-                    slot.extend(shared);
-                }
-                expr
-            }
-        }
-        None => None,
-    };
+    let constraint = resolve_join_constraint(join, left, &binding_b, 1, &mut dedup_star)?;
 
     let full_scope = Scope {
         tables: bindings.clone(),

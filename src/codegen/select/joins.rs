@@ -7,6 +7,7 @@ use super::join_full::compile_full_join_two_table;
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard, LimitState};
 use super::order_by::SYNTHETIC_SPAN;
 use super::*;
+use crate::parser::ast::Join;
 /// Compiles a joined `select` (#237: `INNER`/plain `JOIN`, `LEFT
 /// [OUTER] JOIN`, `CROSS JOIN`) against `schemas` — one schema per
 /// table in `select.from`'s order: the first table, then each
@@ -242,43 +243,8 @@ where
             .ok_or_else(|| CodegenError::Unsupported {
                 reason: "join level out of range".to_string(),
             })?;
-        let constraint = match &join.constraint {
-            Some(JoinConstraint::On(e)) => Some(e.clone()),
-            Some(JoinConstraint::Using(cols)) => {
-                let (expr, shared) = synthesize_equality_constraint(left, right, cols, true)?;
-                if let Some(slot) = dedup_star.get_mut(right_idx) {
-                    slot.extend(shared);
-                }
-                expr
-            }
-            None if join.natural => {
-                let shared_names: Vec<String> = right
-                    .schema
-                    .columns
-                    .iter()
-                    .filter(|name| {
-                        left.iter().any(|b| {
-                            b.schema
-                                .columns
-                                .iter()
-                                .any(|c| c.eq_ignore_ascii_case(name))
-                        })
-                    })
-                    .cloned()
-                    .collect();
-                if shared_names.is_empty() {
-                    None
-                } else {
-                    let (expr, shared) =
-                        synthesize_equality_constraint(left, right, &shared_names, false)?;
-                    if let Some(slot) = dedup_star.get_mut(right_idx) {
-                        slot.extend(shared);
-                    }
-                    expr
-                }
-            }
-            None => None,
-        };
+        let constraint =
+            resolve_join_constraint(join, left, right, right_idx, &mut dedup_star)?;
         constraints.push(constraint);
     }
 
@@ -605,6 +571,61 @@ pub(super) fn synthesize_equality_constraint(
         shared.push(name.to_ascii_lowercase());
     }
     Ok((acc, shared))
+}
+
+/// Resolves one `Join`'s constraint into an `ON`-equivalent `Expr` (or
+/// `None` for an unconditional `CROSS`/no-shared-column `NATURAL` join):
+/// an explicit `ON` clause is used as-is, `USING (...)`/`NATURAL` both
+/// route through [`synthesize_equality_constraint`] (`NATURAL` first
+/// computing its own shared-column-name list), and either populates
+/// `dedup_star[right_idx]` with the columns `SELECT *` must dedup.
+/// Shared by [`compile_select_joined_scan`]'s N-way join-level loop and
+/// [`compile_full_join_two_table`]'s dedicated two-table path — both used
+/// to hand-fork this same match/dedup-bookkeeping block.
+pub(super) fn resolve_join_constraint(
+    join: &Join,
+    left: &[TableBinding],
+    right: &TableBinding,
+    right_idx: usize,
+    dedup_star: &mut [std::collections::HashSet<String>],
+) -> Result<Option<Expr>, CodegenError> {
+    match &join.constraint {
+        Some(JoinConstraint::On(e)) => Ok(Some(e.clone())),
+        Some(JoinConstraint::Using(cols)) => {
+            let (expr, shared) = synthesize_equality_constraint(left, right, &cols[..], true)?;
+            if let Some(slot) = dedup_star.get_mut(right_idx) {
+                slot.extend(shared);
+            }
+            Ok(expr)
+        }
+        None if join.natural => {
+            let shared_names: Vec<String> = right
+                .schema
+                .columns
+                .iter()
+                .filter(|name| {
+                    left.iter().any(|b| {
+                        b.schema
+                            .columns
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(name))
+                    })
+                })
+                .cloned()
+                .collect();
+            if shared_names.is_empty() {
+                Ok(None)
+            } else {
+                let (expr, shared) =
+                    synthesize_equality_constraint(left, right, &shared_names, false)?;
+                if let Some(slot) = dedup_star.get_mut(right_idx) {
+                    slot.extend(shared);
+                }
+                Ok(expr)
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 /// One constraint checked while iterating `exec_bindings[check_level]`'s
