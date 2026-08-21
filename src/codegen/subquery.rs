@@ -37,15 +37,37 @@ use crate::codegen::select::{
     compile_select_joined_scan, compile_select_scan, CodegenError, ScanCursors,
 };
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Scope, Target};
-use crate::parser::ast::{Expr, ExprKind, ResultColumn, Select, TableRef};
+use crate::parser::ast::{BinaryOp, Expr, ExprKind, FunctionArgs, ResultColumn, Select, TableRef};
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, P4};
+use std::collections::HashMap;
+
+/// Identifies a subquery's own `Select` AST node by pointer identity —
+/// stable for the lifetime of a single compile pass, since no codegen
+/// step clones a `Select`/`Expr` tree once parsing has produced it. Used
+/// to key [`Scope::hoisted`] (#306): the same `Select` reference reached
+/// once (to hoist/materialize it before the enclosing scan's `Rewind`)
+/// and later, per outer row (from `compile_cond`/`compile_value`'s
+/// `InSubquery`/`Subquery` dispatch), must resolve to the same map key.
+pub(crate) fn select_id(select: &Select) -> usize {
+    std::ptr::from_ref(select) as usize
+}
+
+/// What a hoisted (materialized-once-before-the-scan) WHERE-clause
+/// subquery (#306) precomputed, stashed in [`Scope::hoisted`]: a scalar
+/// subquery's already-populated result register, or an uncorrelated
+/// `IN`-subquery's already-built ephemeral membership index's cursor.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HoistedSubquery {
+    Scalar { reg: i32 },
+    In { eph_cursor: i32 },
+}
 
 /// Resolves a subquery's own single-table `FROM` against `catalog`,
 /// rejecting anything this MVP pass doesn't materialize: no `FROM` at
 /// all is only valid when the subquery has no column references (e.g.
 /// `SELECT (SELECT 1)`), and a `JOIN`ed `FROM` isn't supported.
-fn resolve_subquery_schema(
+pub(crate) fn resolve_subquery_schema(
     subselect: &Select,
     catalog: &[TableSchema],
 ) -> Result<Option<TableSchema>, CodegenError> {
@@ -551,6 +573,12 @@ pub(crate) fn compile_exists(
 /// A strict N=1 case of [`compile_in_subquery_multi`] — this is a thin
 /// wrapper over it with a one-element LHS tuple, so both forms share the
 /// exact same ephemeral-index/`Found` codegen.
+///
+/// #306: if this subquery was hoisted (materialized once, before the
+/// enclosing scan's `Rewind`, because it's uncorrelated — see
+/// `hoist_uncorrelated_where_subqueries`), its ephemeral index is
+/// already built; reuse the cached cursor instead of delegating to
+/// `compile_in_subquery_multi`'s normal per-occurrence materialization.
 pub(crate) fn compile_in_subquery(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -560,15 +588,379 @@ pub(crate) fn compile_in_subquery(
     negated: bool,
     targets: CondTargets,
 ) -> Result<(), CodegenError> {
-    compile_in_subquery_multi(
-        em,
-        reg,
-        outer_scope,
-        std::slice::from_ref(lhs),
-        subselect,
-        negated,
-        targets,
+    let Some(HoistedSubquery::In { eph_cursor }) =
+        outer_scope.hoisted.get(&select_id(subselect)).copied()
+    else {
+        return compile_in_subquery_multi(
+            em,
+            reg,
+            outer_scope,
+            std::slice::from_ref(lhs),
+            subselect,
+            negated,
+            targets,
+        );
+    };
+
+    let l = compile_value(em, reg, outer_scope, lhs)?;
+
+    let (true_label, true_is_new) = crate::codegen::expr::ensure_label(em, targets.on_true);
+    let (false_label, false_is_new) = crate::codegen::expr::ensure_label(em, targets.on_false);
+    let (found_label, notfound_label) = if negated {
+        (false_label, true_label)
+    } else {
+        (true_label, false_label)
+    };
+    let null_label = match targets.on_null {
+        NullTarget::True => true_label,
+        NullTarget::False => false_label,
+    };
+
+    let null_addr = em.emit(Instruction::new(Opcode::IsNull, l, 0, 0));
+    em.patch_p2(null_addr, null_label);
+    let found_addr = em.emit(Instruction::with_p4(
+        Opcode::Found,
+        eph_cursor,
+        0,
+        l,
+        P4::Int(1),
+    ));
+    em.patch_p2(found_addr, found_label);
+    em.goto(notfound_label);
+
+    if false_is_new {
+        em.place(false_label);
+    }
+    if true_is_new {
+        em.place(true_label);
+    }
+    Ok(())
+}
+
+/// Materializes a single-column `IN`-subquery's result column into a
+/// fresh ephemeral membership index, returning the cursor. Used by
+/// [`try_hoist_conjunct`] to materialize a hoisted, uncorrelated
+/// `IN`-subquery exactly once, before the enclosing scan's `Rewind`
+/// (#306), instead of [`compile_in_subquery_multi`]'s normal
+/// per-occurrence materialization.
+fn materialize_in_subquery_index(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    outer_scope: &Scope,
+    subselect: &Select,
+) -> Result<i32, CodegenError> {
+    let catalog = outer_scope.catalog.clone();
+    let resolved = resolve_subquery_schema(subselect, &catalog)?;
+    let Some(schema) = resolved else {
+        return Err(CodegenError::Unsupported {
+            reason: "IN (SELECT ...) requires a FROM clause".to_string(),
+        });
+    };
+    let col_expr = single_result_expr(subselect)?;
+    let sub_cursor = reg.alloc_cursor();
+    let sub_scope = Scope::single(&schema, sub_cursor)
+        .with_catalog(catalog)
+        .with_outer(outer_scope.clone());
+
+    let eph_cursor = reg.alloc_cursor();
+    em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
+
+    em.emit(Instruction::new(
+        Opcode::OpenRead,
+        sub_cursor,
+        i32::try_from(schema.root_page).unwrap_or(0),
+        0,
+    ));
+    let scan_end = em.new_label();
+    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
+    em.patch_p2(rewind_addr, scan_end);
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
+    let skip = em.new_label();
+    if let Some(where_expr) = &subselect.where_clause {
+        compile_cond(
+            em,
+            reg,
+            &sub_scope,
+            where_expr,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
+        )?;
+    }
+    let v = compile_value(em, reg, &sub_scope, col_expr)?;
+    em.emit(Instruction::with_p4(
+        Opcode::IdxInsert,
+        eph_cursor,
+        v,
+        0,
+        P4::Int(1),
+    ));
+    em.place(skip);
+    let next_addr = em.emit(Instruction::new(Opcode::Next, sub_cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    em.place(scan_end);
+    Ok(eph_cursor)
+}
+
+/// Whether `subselect` is correlated — references a column that isn't
+/// one of its own `own_schema`'s columns (#306). `own_schema: None`
+/// (a `FROM`-less subquery) is always treated as correlated: a
+/// `FROM`-less subquery can only reference the enclosing scope, and
+/// hoisting has nothing to gain there anyway. Walks `subselect`'s own
+/// `WHERE` clause and projected result-column expressions; a nested
+/// subquery-bearing expression found anywhere in that walk is
+/// conservatively treated as correlated too, rather than reasoning
+/// through another scope level. Correlated=true is always the *safe*
+/// answer when this check is unsure — it only ever suppresses hoisting,
+/// never wrongly allows it.
+pub(crate) fn subquery_is_correlated(subselect: &Select, own_schema: Option<&TableSchema>) -> bool {
+    let Some(schema) = own_schema else {
+        return true;
+    };
+    // A column reference qualified by a table name (`other.a_id`) only
+    // counts as "this subquery's own" when the qualifier names the
+    // subquery's own table or its alias — matching `schema.name` alone
+    // would wrongly call `WHERE other.a_id = t.id` uncorrelated whenever
+    // the *outer* table happens to share a column name with the
+    // subquery's own table (`t.id`/`other.id` in #306's regression
+    // fixture), since a bare name-only check can't tell `t.id` isn't
+    // `other`'s own `id`.
+    let own_qualifiers: Vec<&str> = std::iter::once(schema.name.as_str())
+        .chain(
+            subselect
+                .from
+                .as_ref()
+                .and_then(|f| f.first.alias.as_deref()),
+        )
+        .collect();
+    let mut correlated = false;
+    if let Some(where_expr) = &subselect.where_clause {
+        walk_expr_for_correlation(where_expr, schema, &own_qualifiers, &mut correlated);
+    }
+    for col in &subselect.columns {
+        match col {
+            ResultColumn::Expr { expr, .. } => {
+                walk_expr_for_correlation(expr, schema, &own_qualifiers, &mut correlated);
+            }
+            // `*`/`table.*` project only the subquery's own columns —
+            // never a reference to the enclosing scope.
+            ResultColumn::Star | ResultColumn::TableStar { .. } => {}
+        }
+        if correlated {
+            break;
+        }
+    }
+    correlated
+}
+
+fn walk_expr_for_correlation(
+    expr: &Expr,
+    schema: &TableSchema,
+    own_qualifiers: &[&str],
+    correlated: &mut bool,
+) {
+    if *correlated {
+        return;
+    }
+    macro_rules! walk {
+        ($e:expr) => {
+            walk_expr_for_correlation($e, schema, own_qualifiers, correlated)
+        };
+    }
+    match &expr.kind {
+        ExprKind::Column { table, name, .. } => {
+            let qualifier_ok = match table {
+                Some(t) => own_qualifiers.iter().any(|q| q.eq_ignore_ascii_case(t)),
+                None => true,
+            };
+            if !qualifier_ok || !schema.columns.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+                *correlated = true;
+            }
+        }
+        ExprKind::Literal(_) | ExprKind::Param(_) => {}
+        ExprKind::FunctionCall { args, .. } => {
+            if let FunctionArgs::List(list) = args {
+                for a in list {
+                    walk!(a);
+                }
+            }
+        }
+        ExprKind::Unary { expr: e, .. }
+        | ExprKind::IsNull { expr: e, .. }
+        | ExprKind::Cast { expr: e, .. }
+        | ExprKind::Collate { expr: e, .. }
+        | ExprKind::Paren(e) => walk!(e),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Is { lhs, rhs, .. } => {
+            walk!(lhs);
+            walk!(rhs);
+        }
+        ExprKind::Between {
+            expr: e, lo, hi, ..
+        } => {
+            walk!(e);
+            walk!(lo);
+            walk!(hi);
+        }
+        ExprKind::In { expr: e, list, .. } => {
+            walk!(e);
+            for item in list {
+                walk!(item);
+            }
+        }
+        ExprKind::Like {
+            expr: e,
+            pattern,
+            escape,
+            ..
+        } => {
+            walk!(e);
+            walk!(pattern);
+            if let Some(esc) = escape {
+                walk!(esc);
+            }
+        }
+        ExprKind::Case {
+            operand,
+            whens,
+            else_,
+        } => {
+            if let Some(o) = operand {
+                walk!(o);
+            }
+            for (w, t) in whens {
+                walk!(w);
+                walk!(t);
+            }
+            if let Some(e) = else_ {
+                walk!(e);
+            }
+        }
+        // Nested subquery-bearing expressions: conservatively correlated
+        // rather than reasoning through another scope level (out of
+        // scope for #306's hoist pass).
+        ExprKind::Subquery(_)
+        | ExprKind::Exists { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::InSubqueryMulti { .. } => {
+            *correlated = true;
+        }
+    }
+}
+
+fn is_comparison_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
     )
+}
+
+/// Whether `subquery` is a candidate for #306's hoist: it has a
+/// (non-joined, single-table) `FROM` this pass can resolve, and it's
+/// not correlated against the enclosing query.
+fn subquery_hoistable(subquery: &Select, outer_scope: &Scope) -> bool {
+    let Ok(resolved) = resolve_subquery_schema(subquery, &outer_scope.catalog) else {
+        return false;
+    };
+    let Some(schema) = resolved else {
+        // FROM-less: nothing to gain from hoisting (no per-row scan
+        // cost to eliminate), and `subquery_is_correlated` already
+        // treats it as correlated anyway.
+        return false;
+    };
+    !subquery_is_correlated(subquery, Some(&schema))
+}
+
+/// The top-level `AND`-conjuncts of `expr` — splits only `AND` (and
+/// `Paren`-wrapped `AND`), leaving any `OR`/`NOT`/other nesting as a
+/// single opaque conjunct. Used by
+/// [`hoist_uncorrelated_where_subqueries`] to find a WHERE clause's
+/// directly-AND-joined subquery conjuncts without having to reason
+/// about deeper nesting.
+fn top_level_and_conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } => {
+            let mut out = top_level_and_conjuncts(lhs);
+            out.extend(top_level_and_conjuncts(rhs));
+            out
+        }
+        ExprKind::Paren(inner) => top_level_and_conjuncts(inner),
+        _ => vec![expr],
+    }
+}
+
+/// Recognizes and materializes one hoistable conjunct: a top-level
+/// `expr IN (SELECT ...)`, or a top-level comparison with a scalar
+/// subquery operand — the two shapes #306's reproduction actually hits.
+/// Returns the subquery's own `Select` (for the caller to key the
+/// returned map by [`select_id`]) plus what got precomputed, or `None`
+/// if `conjunct` doesn't match either shape or its subquery turns out to
+/// be correlated (in which case nothing is emitted and the caller's
+/// existing per-row path handles it unchanged).
+fn try_hoist_conjunct<'e>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    outer_scope: &Scope,
+    conjunct: &'e Expr,
+) -> Result<Option<(&'e Select, HoistedSubquery)>, CodegenError> {
+    match &conjunct.kind {
+        ExprKind::InSubquery { subquery, .. } if subquery_hoistable(subquery, outer_scope) => {
+            let eph_cursor = materialize_in_subquery_index(em, reg, outer_scope, subquery)?;
+            Ok(Some((subquery, HoistedSubquery::In { eph_cursor })))
+        }
+        ExprKind::Binary { op, lhs, rhs } if is_comparison_op(*op) => {
+            for side in [lhs.as_ref(), rhs.as_ref()] {
+                if let ExprKind::Subquery(subquery) = &side.kind {
+                    if subquery_hoistable(subquery, outer_scope) {
+                        let dest = compile_scalar_subquery(em, reg, outer_scope, subquery)?;
+                        return Ok(Some((subquery, HoistedSubquery::Scalar { reg: dest })));
+                    }
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Hoists every uncorrelated `IN`/scalar subquery found as a top-level
+/// `WHERE`-clause conjunct (#306) out of the enclosing single-table
+/// scan's per-row loop: each is materialized exactly once here, *before*
+/// the scan's `Rewind`, instead of being re-materialized on every outer
+/// row by `compile_in_subquery`/`compile_scalar_subquery`'s normal
+/// per-occurrence codegen. Returns a map (from [`select_id`] to what got
+/// precomputed) meant to be attached to the scan's own [`Scope`] via
+/// [`Scope::with_hoisted`] — `compile_cond`/`compile_value`'s
+/// `InSubquery`/`Subquery` dispatch then read the cheap precomputed
+/// cursor/register per row instead of rebuilding it.
+///
+/// Deliberately narrow, matching the issue's own reproduction: only a
+/// conjunct that is *exactly* `expr IN (SELECT ...)` or a top-level
+/// comparison with a scalar-subquery operand is recognized (see
+/// [`try_hoist_conjunct`]); `OR`, `NOT`, deeper nesting, multi-column
+/// `IN`, and any correlated subquery are left completely untouched and
+/// fall through to the existing, unmodified per-row path. Also
+/// deliberately scoped to the single-table scan path
+/// (`compile_direct_scan`/`compile_sorted_scan`) — the joined-query path
+/// (`compile_join_level`/`emit_join_final_row`) is a follow-up this pass
+/// does not attempt, so a joined query's WHERE-clause subquery keeps
+/// re-evaluating per candidate row exactly as before.
+pub(crate) fn hoist_uncorrelated_where_subqueries(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    outer_scope: &Scope,
+    where_clause: &Expr,
+) -> Result<HashMap<usize, HoistedSubquery>, CodegenError> {
+    let mut out = HashMap::new();
+    for conjunct in top_level_and_conjuncts(where_clause) {
+        if let Some((subquery, hoisted)) = try_hoist_conjunct(em, reg, outer_scope, conjunct)? {
+            out.insert(select_id(subquery), hoisted);
+        }
+    }
+    Ok(out)
 }
 
 /// Compiles `(a, b, ...) IN (SELECT ...)`/`... NOT IN (SELECT ...)`

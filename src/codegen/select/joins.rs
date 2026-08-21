@@ -396,6 +396,7 @@ where
         catalog: schemas.to_vec(),
         outer: None,
         dedup_star: dedup_star.clone(),
+        ..Scope::default()
     };
     let table_cursor_count = i32::try_from(n).unwrap_or(0);
 
@@ -490,6 +491,7 @@ pub(super) fn join_scope(
         catalog: catalog.to_vec(),
         outer: None,
         dedup_star: dedup_star.to_vec(),
+        ..Scope::default()
     }
 }
 

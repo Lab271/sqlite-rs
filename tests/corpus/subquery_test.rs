@@ -187,6 +187,131 @@ fn not_exists_subquery_matches_oracle() {
     );
 }
 
+/// The `-explain` bytecode listing for `db`/`sql`, one opcode row per
+/// line (`addr|opcode|p1|p2|p3|p4|p5|comment`) — used below to inspect
+/// *where* an opcode landed relative to the outer scan's `Rewind`,
+/// which correctness-only oracle comparison can't see.
+fn explain(db: &Path, sql: &str) -> String {
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg("-explain")
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query -explain {}: {e}", db.display()));
+    assert!(
+        output.status.success(),
+        "explain {sql:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The 0-based line index of the first opcode row whose `opcode` column
+/// is `name`, or `None`.
+fn first_opcode_line(program: &str, name: &str) -> Option<usize> {
+    program
+        .lines()
+        .position(|l| l.split('|').nth(1) == Some(name))
+}
+
+/// The 0-based line index of the outer single-table scan's own
+/// `Rewind` — its `p1` (cursor) column is always `0` in every query
+/// these tests compile, since `Scope::single`'s table cursor is
+/// allocated first, before any subquery's own cursor (subquery cursors
+/// start at 1000, `RegAlloc::next_cursor`'s default — see
+/// `codegen.rs`). A subquery's own `Rewind`, in contrast, always has a
+/// `p1` >= 1000, so filtering on `p1 == "0"` unambiguously picks out
+/// the *outer* scan's `Rewind` even when a hoisted subquery's own
+/// `Rewind` appears earlier in program order.
+fn outer_rewind_line(program: &str) -> usize {
+    program
+        .lines()
+        .position(|l| {
+            let mut fields = l.split('|');
+            fields.next(); // addr
+            fields.next() == Some("Rewind") && fields.next() == Some("0")
+        })
+        .expect("expected the outer scan's own Rewind opcode (cursor 0)")
+}
+
+/// #306 regression: an uncorrelated `IN (SELECT ...)` in a single-table
+/// `WHERE` clause must materialize its ephemeral membership index
+/// exactly once, *before* the outer scan's `Rewind` — not on every
+/// outer row. `OpenEphemeral`'s address must therefore land strictly
+/// before the outer table cursor's `Rewind`, which correctness-only
+/// (oracle-diff) coverage can't distinguish from the old per-row
+/// placement (both compile to a correct, but for large outer tables
+/// disastrously slow, result).
+#[test]
+fn uncorrelated_in_subquery_where_clause_hoists_ephemeral_before_outer_rewind() {
+    let db = subquery_fixture_db("hoist_in");
+    let program = explain(&db, "SELECT id FROM t WHERE id IN (SELECT a_id FROM other)");
+    let eph_addr =
+        first_opcode_line(&program, "OpenEphemeral").expect("expected an OpenEphemeral opcode");
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        eph_addr < rewind_addr,
+        "expected the IN-subquery's OpenEphemeral (addr {eph_addr}) to be hoisted before the \
+         outer scan's Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}
+
+/// #306 regression: a correlated `IN (SELECT ...)` — the subquery's own
+/// `WHERE` references the outer row (`other.a_id = t.id`) — must keep
+/// re-materializing per outer row: its `OpenEphemeral` stays *after* the
+/// outer `Rewind`, inside the loop. Proves the hoist's correlation check
+/// actually gates the optimization rather than firing unconditionally.
+#[test]
+fn correlated_in_subquery_where_clause_is_not_hoisted() {
+    let db = subquery_fixture_db("no_hoist_in");
+    let program = explain(
+        &db,
+        "SELECT id FROM t WHERE id IN (SELECT other.a_id FROM other WHERE other.a_id = t.id)",
+    );
+    let eph_addr =
+        first_opcode_line(&program, "OpenEphemeral").expect("expected an OpenEphemeral opcode");
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        eph_addr > rewind_addr,
+        "correlated subquery's OpenEphemeral (addr {eph_addr}) must stay inside the outer \
+         scan's loop, after Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}
+
+/// #306 regression: an uncorrelated scalar subquery in a single-table
+/// `WHERE` clause must materialize exactly once, before the outer
+/// scan's `Rewind` — its inner `OpenRead` (the subquery's own table
+/// cursor) lands before the outer `Rewind`, not after.
+#[test]
+fn uncorrelated_scalar_subquery_where_clause_hoists_before_outer_rewind() {
+    let db = subquery_fixture_db("hoist_scalar");
+    let program = explain(
+        &db,
+        "SELECT id FROM t WHERE x = (SELECT x FROM t WHERE id = 2)",
+    );
+    // Two `OpenRead`s total: the subquery's own (hoisted, first) and the
+    // outer scan's own (second). The outer `Rewind` must come after
+    // both.
+    let open_read_addrs: Vec<usize> = program
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.split('|').nth(1) == Some("OpenRead"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        open_read_addrs.len(),
+        2,
+        "expected exactly 2 OpenReads (subquery + outer scan); program:\n{program}"
+    );
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        open_read_addrs[0] < rewind_addr && open_read_addrs[1] < rewind_addr,
+        "expected both the hoisted scalar subquery's OpenRead and the outer scan's own \
+         OpenRead to precede the outer Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}
+
 /// A correlated subquery (referencing the enclosing query's `t.id`
 /// from inside the subquery's own WHERE clause) must fail cleanly with
 /// this pass's documented "correlated subqueries are not yet
