@@ -102,9 +102,9 @@ fn mixed_type_row() {
         decode_record(&payload, TextEncoding::Utf8),
         Ok(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::Text("hello".to_string().into()),
             Value::Real(3.14),
-            Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
+            Value::Blob(vec![0xde, 0xad, 0xbe, 0xef].into()),
             Value::Null,
         ])
     );

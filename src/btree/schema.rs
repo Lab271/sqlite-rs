@@ -116,7 +116,8 @@ mod tests {
 
         let table_root = create_empty_table_root(&mut pager).unwrap();
         for (rowid, name) in [(1i64, "a"), (2, "b"), (3, "c")] {
-            let payload = encode_record(&[Value::Text(name.to_string())], TextEncoding::Utf8);
+            let payload =
+                encode_record(&[Value::Text(name.to_string().into())], TextEncoding::Utf8);
             insert_row(&mut pager, &header, table_root, rowid, &payload).unwrap();
         }
         // Keep sqlite_master's own single row so `insert_master_row`

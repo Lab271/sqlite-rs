@@ -293,7 +293,7 @@ mod tests {
     }
 
     fn key(a: &str, rowid: i64) -> Vec<Value> {
-        vec![Value::Text(a.to_string()), Value::Integer(rowid)]
+        vec![Value::Text(a.to_string().into()), Value::Integer(rowid)]
     }
 
     #[test]
@@ -365,8 +365,14 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
 
         let filler = "x".repeat(190);
-        let k0 = vec![Value::Text(format!("{filler}-0001")), Value::Integer(1)];
-        let k1 = vec![Value::Text(format!("{filler}-0002")), Value::Integer(2)];
+        let k0 = vec![
+            Value::Text(format!("{filler}-0001").into()),
+            Value::Integer(1),
+        ];
+        let k1 = vec![
+            Value::Text(format!("{filler}-0002").into()),
+            Value::Integer(2),
+        ];
         insert_entry(&mut pager, &header, 1, &k0, TextEncoding::Utf8).unwrap();
         insert_entry(&mut pager, &header, 1, &k1, TextEncoding::Utf8).unwrap();
         delete_entry(&mut pager, &header, 1, &k1, TextEncoding::Utf8).unwrap();
@@ -386,7 +392,12 @@ mod tests {
         let filler = "x".repeat(190);
         let n = 30i64;
         let keys: Vec<Vec<Value>> = (1..=n)
-            .map(|i| vec![Value::Text(format!("{filler}-{i:04}")), Value::Integer(i)])
+            .map(|i| {
+                vec![
+                    Value::Text(format!("{filler}-{i:04}").into()),
+                    Value::Integer(i),
+                ]
+            })
             .collect();
         for k in &keys {
             insert_entry(&mut pager, &header, 1, k, TextEncoding::Utf8).unwrap();
@@ -461,7 +472,12 @@ mod tests {
         let filler = "x".repeat(190);
         let n = 30i64;
         let keys: Vec<Vec<Value>> = (1..=n)
-            .map(|i| vec![Value::Text(format!("{filler}-{i:04}")), Value::Integer(i)])
+            .map(|i| {
+                vec![
+                    Value::Text(format!("{filler}-{i:04}").into()),
+                    Value::Integer(i),
+                ]
+            })
             .collect();
         for k in &keys {
             insert_entry(&mut pager, &header, 1, k, TextEncoding::Utf8).unwrap();

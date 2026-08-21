@@ -1166,7 +1166,7 @@ pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             if let (Some(Value::Text(n)), Some(Value::Integer(seq))) =
                 (values.first(), values.get(1))
             {
-                if *n == table_name {
+                if *n == table_name.clone().into() {
                     tracked_seq = *seq;
                     break;
                 }
@@ -1491,7 +1491,7 @@ mod tests {
         assert_eq!(rowids[2999], Value::Integer(3000));
         assert_eq!(
             *vm.register(11).unwrap(),
-            Value::Text("row number 3000".to_string())
+            Value::Text("row number 3000".to_string().into())
         );
     }
 
@@ -1534,7 +1534,8 @@ mod tests {
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 1, 0)).unwrap();
 
         // Row "a": not found, insert, passes through.
-        vm.set_register(0, Value::Text("a".to_string())).unwrap();
+        vm.set_register(0, Value::Text("a".to_string().into()))
+            .unwrap();
         let found_a = found(
             &mut vm,
             &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Int(1)),
@@ -1556,7 +1557,8 @@ mod tests {
         assert_eq!(found_a_again, Step::Jump(99));
 
         // Row "b": not found, insert, passes through.
-        vm.set_register(0, Value::Text("b".to_string())).unwrap();
+        vm.set_register(0, Value::Text("b".to_string().into()))
+            .unwrap();
         let found_b = found(
             &mut vm,
             &Instruction::with_p4(Opcode::Found, 0, 99, 0, P4::Int(1)),
@@ -1616,7 +1618,8 @@ mod tests {
     fn delete_removes_the_just_probed_duplicate_row() {
         let mut vm = Vm::new();
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 1, 0)).unwrap();
-        vm.set_register(0, Value::Text("a".to_string())).unwrap();
+        vm.set_register(0, Value::Text("a".to_string().into()))
+            .unwrap();
         idx_insert(
             &mut vm,
             &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
@@ -1683,8 +1686,9 @@ mod tests {
 
         // MakeRecord over r1..r3 (with INTEGER/TEXT affinity applied to
         // text-literal-but-numeric-looking input in r1) -> r3.
-        vm.set_register(1, Value::Text("42".to_string())).unwrap();
-        vm.set_register(2, Value::Text("hello".to_string()))
+        vm.set_register(1, Value::Text("42".to_string().into()))
+            .unwrap();
+        vm.set_register(2, Value::Text("hello".to_string().into()))
             .unwrap();
         crate::vdbe::result::make_record(
             &mut vm,
@@ -1713,7 +1717,10 @@ mod tests {
         column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
         column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 11)).unwrap();
         assert_eq!(*vm.register(10).unwrap(), Value::Integer(42));
-        assert_eq!(*vm.register(11).unwrap(), Value::Text("hello".to_string()));
+        assert_eq!(
+            *vm.register(11).unwrap(),
+            Value::Text("hello".to_string().into())
+        );
         rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 12, 0)).unwrap();
         assert_eq!(*vm.register(12).unwrap(), Value::Integer(1));
     }
@@ -1775,7 +1782,8 @@ mod tests {
         open_write(&mut vm, &open_instr).unwrap();
 
         vm.set_register(0, Value::Integer(5)).unwrap();
-        vm.set_register(1, Value::Text("x".to_string())).unwrap();
+        vm.set_register(1, Value::Text("x".to_string().into()))
+            .unwrap();
         idx_insert(
             &mut vm,
             &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
@@ -1789,7 +1797,7 @@ mod tests {
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(
             values,
-            vec![Value::Integer(5), Value::Text("x".to_string())]
+            vec![Value::Integer(5), Value::Text("x".to_string().into())]
         );
     }
 
@@ -1801,7 +1809,8 @@ mod tests {
         open_write(&mut vm, &open_instr).unwrap();
 
         vm.set_register(0, Value::Integer(5)).unwrap();
-        vm.set_register(1, Value::Text("x".to_string())).unwrap();
+        vm.set_register(1, Value::Text("x".to_string().into()))
+            .unwrap();
         idx_insert(
             &mut vm,
             &Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(2)),
@@ -1828,7 +1837,8 @@ mod tests {
         open_write(&mut vm, &open_instr).unwrap();
 
         // One index entry: column value "v1", trailing rowid 42.
-        vm.set_register(0, Value::Text("v1".to_string())).unwrap();
+        vm.set_register(0, Value::Text("v1".to_string().into()))
+            .unwrap();
         vm.set_register(1, Value::Integer(42)).unwrap();
         idx_insert(
             &mut vm,
@@ -1838,7 +1848,8 @@ mod tests {
 
         // Probe with just the column value (no trailing rowid) at
         // register 5, reserving register 6 for the conflicting rowid.
-        vm.set_register(5, Value::Text("v1".to_string())).unwrap();
+        vm.set_register(5, Value::Text("v1".to_string().into()))
+            .unwrap();
         let step = no_conflict(
             &mut vm,
             &Instruction::with_p4(Opcode::NoConflict, 0, 999, 5, P4::Int(1)),
@@ -1855,7 +1866,8 @@ mod tests {
         open_instr.p5 = 1;
         open_write(&mut vm, &open_instr).unwrap();
 
-        vm.set_register(0, Value::Text("v1".to_string())).unwrap();
+        vm.set_register(0, Value::Text("v1".to_string().into()))
+            .unwrap();
         vm.set_register(1, Value::Integer(42)).unwrap();
         idx_insert(
             &mut vm,
@@ -1863,7 +1875,8 @@ mod tests {
         )
         .unwrap();
 
-        vm.set_register(5, Value::Text("v2".to_string())).unwrap();
+        vm.set_register(5, Value::Text("v2".to_string().into()))
+            .unwrap();
         let step = no_conflict(
             &mut vm,
             &Instruction::with_p4(Opcode::NoConflict, 0, 999, 5, P4::Int(1)),
@@ -1968,14 +1981,18 @@ mod tests {
     fn column_reads_through_an_open_pseudo_cursor() {
         let mut vm = Vm::new();
         vm.set_register(3, Value::Integer(7)).unwrap();
-        vm.set_register(4, Value::Text("hi".to_string())).unwrap();
+        vm.set_register(4, Value::Text("hi".to_string().into()))
+            .unwrap();
         crate::vdbe::result::make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 3, 2, 5))
             .unwrap();
         open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 5, 0)).unwrap();
         column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
         column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 11)).unwrap();
         assert_eq!(*vm.register(10).unwrap(), Value::Integer(7));
-        assert_eq!(*vm.register(11).unwrap(), Value::Text("hi".to_string()));
+        assert_eq!(
+            *vm.register(11).unwrap(),
+            Value::Text("hi".to_string().into())
+        );
     }
 
     #[test]
@@ -2015,7 +2032,8 @@ mod tests {
     fn seek_rowid_rejects_a_non_integer_target_register() {
         let mut vm = open_vm("table_multipage.db");
         open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
-        vm.set_register(5, Value::Text("nope".to_string())).unwrap();
+        vm.set_register(5, Value::Text("nope".to_string().into()))
+            .unwrap();
         let err = seek_rowid(&mut vm, &Instruction::new(Opcode::SeekRowid, 0, 42, 5)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
     }
@@ -2024,8 +2042,9 @@ mod tests {
     fn insert_rejects_a_non_integer_rowid_register() {
         let mut vm = writable_vm(0x0d);
         open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
-        vm.set_register(0, Value::Text("nope".to_string())).unwrap();
-        vm.set_register(3, Value::Blob(vec![])).unwrap();
+        vm.set_register(0, Value::Text("nope".to_string().into()))
+            .unwrap();
+        vm.set_register(3, Value::Blob(vec![].into())).unwrap();
         let err = insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 0, 3)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
     }
@@ -2157,8 +2176,14 @@ mod tests {
         column(&mut vm, &Instruction::new(Opcode::Column, 1, 0, 20)).unwrap();
         column(&mut vm, &Instruction::new(Opcode::Column, 1, 1, 21)).unwrap();
         column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 22)).unwrap();
-        assert_eq!(*vm.register(20).unwrap(), Value::Text("table".to_string()));
-        assert_eq!(*vm.register(21).unwrap(), Value::Text("t".to_string()));
+        assert_eq!(
+            *vm.register(20).unwrap(),
+            Value::Text("table".to_string().into())
+        );
+        assert_eq!(
+            *vm.register(21).unwrap(),
+            Value::Text("t".to_string().into())
+        );
         let root_page = match vm.register(22).unwrap() {
             Value::Integer(n) => u32::try_from(*n).unwrap(),
             other => panic!("expected integer rootpage, got {other:?}"),
@@ -2242,7 +2267,7 @@ mod tests {
                 vm.register(30).unwrap().clone(),
                 vm.register(31).unwrap().clone(),
             ));
-            if vm.register(30).unwrap() == &Value::Text("index".to_string()) {
+            if vm.register(30).unwrap() == &Value::Text("index".to_string().into()) {
                 if let Value::Integer(n) = vm.register(32).unwrap() {
                     index_root_for_drop = Some(u32::try_from(*n).unwrap());
                 }
@@ -2257,12 +2282,12 @@ mod tests {
             names,
             vec![
                 (
-                    Value::Text("table".to_string()),
-                    Value::Text("t".to_string())
+                    Value::Text("table".to_string().into()),
+                    Value::Text("t".to_string().into())
                 ),
                 (
-                    Value::Text("index".to_string()),
-                    Value::Text("idx".to_string())
+                    Value::Text("index".to_string().into()),
+                    Value::Text("idx".to_string().into())
                 ),
             ]
         );
@@ -2295,7 +2320,7 @@ mod tests {
                 other => panic!("unexpected step {other:?}"),
             }
         }
-        assert_eq!(remaining, vec![Value::Text("t".to_string())]);
+        assert_eq!(remaining, vec![Value::Text("t".to_string().into())]);
     }
 
     #[test]

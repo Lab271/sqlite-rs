@@ -33,7 +33,7 @@ proptest! {
     /// deliberately unconverted, for TEXT/BLOB) form and must be a no-op.
     #[test]
     fn affinity_is_idempotent(s in ".*", affinity in arb_affinity()) {
-        let mut once = Value::Text(s);
+        let mut once = Value::Text(s.into());
         apply_affinity(&mut once, affinity);
         let mut twice = once.clone();
         apply_affinity(&mut twice, affinity);

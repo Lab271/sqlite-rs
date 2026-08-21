@@ -219,6 +219,9 @@ fn delete_matching_nothing_leaves_all_rows_untouched() {
 
     assert_eq!(
         rows(&path, &header, page_size, 1),
-        vec![(1, vec![Value::Integer(1), Value::Text("x".to_string())])]
+        vec![(
+            1,
+            vec![Value::Integer(1), Value::Text("x".to_string().into())]
+        )]
     );
 }

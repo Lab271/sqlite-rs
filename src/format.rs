@@ -113,7 +113,7 @@ pub fn format_list_value(v: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Integer(i) => i.to_string(),
         Value::Real(r) => format_real(*r),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => s.to_string(),
         Value::Blob(b) => format_blob(b),
     }
 }
@@ -248,22 +248,22 @@ mod tests {
         assert_eq!(format_query_value(&Value::Integer(0)), b"0".to_vec());
         assert_eq!(format_query_value(&Value::Real(0.0)), b"0.0".to_vec());
         assert_eq!(
-            format_query_value(&Value::Text("hi".to_string())),
+            format_query_value(&Value::Text("hi".to_string().into())),
             b"hi".to_vec()
         );
         assert_eq!(
-            format_query_value(&Value::Blob(vec![0x41, 0xDE, 0xAD])),
+            format_query_value(&Value::Blob(vec![0x41, 0xDE, 0xAD].into())),
             vec![0x41, 0xDE, 0xAD]
         );
         // Verified against the pinned oracle: `-list` mode prints column
         // values through a null-terminated C string, so anything from the
         // first embedded NUL onward is silently dropped.
         assert_eq!(
-            format_query_value(&Value::Blob(vec![0x41, 0x00, 0xAD])),
+            format_query_value(&Value::Blob(vec![0x41, 0x00, 0xAD].into())),
             vec![0x41]
         );
         assert_eq!(
-            format_query_value(&Value::Text("ab\0cd".to_string())),
+            format_query_value(&Value::Text("ab\0cd".to_string().into())),
             b"ab".to_vec()
         );
     }
@@ -323,9 +323,9 @@ mod tests {
         );
         assert_eq!(csv_quote(""), "\"\"");
         assert_eq!(format_csv_value(&Value::Null), "");
-        assert_eq!(format_csv_value(&Value::Text(String::new())), "\"\"");
+        assert_eq!(format_csv_value(&Value::Text(String::new().into())), "\"\"");
         assert_eq!(
-            format_csv_value(&Value::Blob(vec![0xDE, 0xAD])),
+            format_csv_value(&Value::Blob(vec![0xDE, 0xAD].into())),
             "\"X'DEAD'\""
         );
     }

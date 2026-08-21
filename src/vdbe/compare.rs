@@ -70,8 +70,8 @@ mod tests {
     fn null_is_lower_than_every_other_class() {
         for other in [
             Value::Integer(1),
-            Value::Text("a".to_string()),
-            Value::Blob(vec![0]),
+            Value::Text("a".to_string().into()),
+            Value::Blob(vec![0].into()),
         ] {
             assert_eq!(
                 compare(&Value::Null, &other, Collation::Binary),
@@ -83,8 +83,8 @@ mod tests {
     #[test]
     fn numeric_sorts_below_text_below_blob() {
         let one = Value::Integer(1);
-        let a = Value::Text("a".to_string());
-        let blob = Value::Blob(vec![0]);
+        let a = Value::Text("a".to_string().into());
+        let blob = Value::Blob(vec![0].into());
         assert_eq!(compare(&one, &a, Collation::Binary), Ordering::Less);
         assert_eq!(compare(&one, &blob, Collation::Binary), Ordering::Less);
         assert_eq!(compare(&a, &blob, Collation::Binary), Ordering::Less);

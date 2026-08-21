@@ -56,13 +56,16 @@ fn full_scan_program_matches_oracle_row_for_row() {
     assert_eq!(rows.len(), 3000);
     assert_eq!(
         rows[0],
-        vec![Value::Integer(1), Value::Text("row number 1".to_string())]
+        vec![
+            Value::Integer(1),
+            Value::Text("row number 1".to_string().into())
+        ]
     );
     assert_eq!(
         rows[2999],
         vec![
             Value::Integer(3000),
-            Value::Text("row number 3000".to_string())
+            Value::Text("row number 3000".to_string().into())
         ]
     );
     for (i, row) in rows.iter().enumerate() {
@@ -164,8 +167,8 @@ fn distinct_program_discards_rows_already_seen() {
     assert_eq!(
         rows,
         vec![
-            vec![Value::Text("a".to_string())],
-            vec![Value::Text("b".to_string())],
+            vec![Value::Text("a".to_string().into())],
+            vec![Value::Text("b".to_string().into())],
         ]
     );
 }

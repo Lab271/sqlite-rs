@@ -750,11 +750,11 @@ mod tests {
         // exercises the "never an error" guarantee for anything this
         // naive reader genuinely can't make sense of.
         let values = vec![
-            Value::Text("table".to_string()),
-            Value::Text("weird".to_string()),
-            Value::Text("weird".to_string()),
+            Value::Text("table".to_string().into()),
+            Value::Text("weird".to_string().into()),
+            Value::Text("weird".to_string().into()),
             Value::Integer(5),
-            Value::Text("garbage with no parens".to_string()),
+            Value::Text("garbage with no parens".to_string().into()),
         ];
         let schema = table_schema(&values);
         assert_eq!(schema.name, "weird");
@@ -784,10 +784,10 @@ mod tests {
         let sql = "CREATE UNIQUE INDEX idx_ab ON t(a DESC, b)";
         let (table_name, index) = index_schema(&[
             Value::Null,
-            Value::Text("idx_ab".to_string()),
-            Value::Text("t".to_string()),
+            Value::Text("idx_ab".to_string().into()),
+            Value::Text("t".to_string().into()),
             Value::Integer(0),
-            Value::Text(sql.to_string()),
+            Value::Text(sql.to_string().into()),
         ])
         .expect("index_schema should parse a simple CREATE UNIQUE INDEX");
         assert_eq!(table_name, "t");
@@ -807,8 +807,8 @@ mod tests {
         // skipped rather than erroring.
         let result = index_schema(&[
             Value::Null,
-            Value::Text("sqlite_autoindex_t_1".to_string()),
-            Value::Text("t".to_string()),
+            Value::Text("sqlite_autoindex_t_1".to_string().into()),
+            Value::Text("t".to_string().into()),
             Value::Integer(0),
             Value::Null,
         ]);

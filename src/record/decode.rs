@@ -155,14 +155,14 @@ pub(crate) fn decode_serial_value(
         n if n % 2 == 0 => {
             let len = (n.wrapping_sub(12) / 2) as usize;
             let bytes = take(buf, pos, len)?;
-            Ok((Value::Blob(bytes.to_vec()), len))
+            Ok((Value::Blob(bytes.into()), len))
         }
         // n is guaranteed >= 13 here: odd, and 0..=11 handled above.
         n => {
             let len = (n.wrapping_sub(13) / 2) as usize;
             let bytes = take(buf, pos, len)?;
             let text = decode_text(bytes, encoding)?;
-            Ok((Value::Text(text), len))
+            Ok((Value::Text(text.into()), len))
         }
     }
 }
@@ -362,8 +362,8 @@ mod tests {
         assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
             Ok(vec![
-                Value::Blob(vec![]),
-                Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])
+                Value::Blob(vec![].into()),
+                Value::Blob(vec![0xde, 0xad, 0xbe, 0xef].into())
             ])
         );
     }
@@ -374,8 +374,8 @@ mod tests {
         assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
             Ok(vec![
-                Value::Text(String::new()),
-                Value::Text("hello".to_string())
+                Value::Text(String::new().into()),
+                Value::Text("hello".to_string().into())
             ])
         );
     }
@@ -390,13 +390,13 @@ mod tests {
         let payload_le = record_bytes(&[(13 + 2 * le_bytes.len() as u64, &le_bytes)]);
         assert_eq!(
             decode_record(&payload_le, TextEncoding::Utf16Le),
-            Ok(vec![Value::Text(s.to_string())])
+            Ok(vec![Value::Text(s.to_string().into())])
         );
 
         let payload_be = record_bytes(&[(13 + 2 * be_bytes.len() as u64, &be_bytes)]);
         assert_eq!(
             decode_record(&payload_be, TextEncoding::Utf16Be),
-            Ok(vec![Value::Text(s.to_string())])
+            Ok(vec![Value::Text(s.to_string().into())])
         );
     }
 

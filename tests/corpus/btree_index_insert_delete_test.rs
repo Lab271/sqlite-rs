@@ -81,7 +81,7 @@ fn root_page_of_name(oracle: &PathBuf, db: &PathBuf, name: &str) -> u32 {
 /// table's rowid — the same shape the codegen/VDBE write path would
 /// build for an ordinary secondary index entry.
 fn secondary_key(b: &str, rowid: i64) -> Vec<Value> {
-    vec![Value::Text(b.to_string()), Value::Integer(rowid)]
+    vec![Value::Text(b.to_string().into()), Value::Integer(rowid)]
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn insert_single_entry_into_a_secondary_index() {
         let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
         for (rowid, b) in [(1i64, "existing"), (2, "new row")] {
             let payload = encode_record(
-                &[Value::Null, Value::Text(b.to_string())],
+                &[Value::Null, Value::Text(b.to_string().into())],
                 TextEncoding::Utf8,
             );
             insert_row(&mut pager, &header, table_root, rowid, &payload).unwrap();
@@ -186,7 +186,10 @@ fn bulk_insert_forces_index_splits_and_reads_back_in_order() {
         let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
         for i in 1..=n {
             let b = format!("{filler}-{i:04}");
-            let payload = encode_record(&[Value::Null, Value::Text(b.clone())], TextEncoding::Utf8);
+            let payload = encode_record(
+                &[Value::Null, Value::Text(b.clone().into())],
+                TextEncoding::Utf8,
+            );
             insert_row(&mut pager, &header, table_root, i, &payload).unwrap();
             insert_entry(
                 &mut pager,
@@ -264,7 +267,10 @@ fn delete_all_entries_leaves_an_empty_index() {
     {
         let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
         for (rowid, b) in &rows {
-            let payload = encode_record(&[Value::Null, Value::Text(b.clone())], TextEncoding::Utf8);
+            let payload = encode_record(
+                &[Value::Null, Value::Text(b.clone().into())],
+                TextEncoding::Utf8,
+            );
             insert_row(&mut pager, &header, table_root, *rowid, &payload).unwrap();
             insert_entry(
                 &mut pager,
@@ -320,7 +326,12 @@ fn without_rowid_table_insert_and_delete_round_trip() {
     let header = read_header(&vfs, &db, page_size);
     let root = root_page_of_name(&oracle, &db, "t");
 
-    let row = |k: &str, v: &str| vec![Value::Text(k.to_string()), Value::Text(v.to_string())];
+    let row = |k: &str, v: &str| {
+        vec![
+            Value::Text(k.to_string().into()),
+            Value::Text(v.to_string().into()),
+        ]
+    };
 
     {
         let mut pager = Pager::open(&vfs, &db, page_size).unwrap();

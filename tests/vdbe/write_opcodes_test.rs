@@ -124,7 +124,7 @@ fn insert_round_trips_through_v1_reader_on_a_real_temp_file() {
     let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
     assert_eq!(
         values,
-        vec![Value::Integer(42), Value::Text("hello".to_string())]
+        vec![Value::Integer(42), Value::Text("hello".to_string().into())]
     );
 }
 

@@ -225,7 +225,7 @@ fn multi_arg_function_call_compiles_with_contiguous_registers() {
 fn zero_arg_function_call_compiles() {
     let (path, schema) = one_row_fixture();
     let out = run_select(&path, &schema, "SELECT sqlite_version() FROM t");
-    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string())]]);
+    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string().into())]]);
 }
 
 #[test]
@@ -239,7 +239,10 @@ fn from_less_select_compiles_a_bare_expression_list() {
     let out = execute(&program).unwrap();
     assert_eq!(
         out,
-        vec![vec![Value::Text("3.53.4".to_string()), Value::Integer(2)]]
+        vec![vec![
+            Value::Text("3.53.4".to_string().into()),
+            Value::Integer(2)
+        ]]
     );
 }
 
@@ -261,7 +264,7 @@ fn case_compiles_to_a_jump_chain() {
         &schema,
         "SELECT CASE WHEN a = 1 THEN 'one' WHEN a = 2 THEN 'two' ELSE 'other' END FROM t",
     );
-    assert_eq!(out, vec![vec![Value::Text("one".to_string())]]);
+    assert_eq!(out, vec![vec![Value::Text("one".to_string().into())]]);
 }
 
 /// Reads spike 008's kept oracle vectors
@@ -332,13 +335,14 @@ fn walker_vectors() -> Vec<(String, Value)> {
                     value_quoted
                         .trim_start_matches('\'')
                         .trim_end_matches('\'')
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ),
                 // Blob results aren't produced by any V2-scope
                 // expression this ticket compiles (no blob-literal or
                 // blob-returning function is in scope) — skip rather
                 // than modeling blob equality here.
-                "blob" => Value::Blob(Vec::new()),
+                "blob" => Value::Blob(Vec::new().into()),
                 other => panic!("unhandled vector type {other}"),
             };
             (expr, expected, type_)
@@ -609,7 +613,7 @@ fn bitwise_shift_and_concat_operators_compile() {
     let out4 = run_select(&path, &schema, "SELECT b >> 1 FROM t");
     assert_eq!(out4, vec![vec![Value::Integer(5)]]);
     let out5 = run_select(&path, &schema, "SELECT name || 'z' FROM t");
-    assert_eq!(out5, vec![vec![Value::Text("aaz".to_string())]]);
+    assert_eq!(out5, vec![vec![Value::Text("aaz".to_string().into())]]);
 }
 
 #[test]
@@ -623,7 +627,7 @@ fn integer_literal_beyond_i32_uses_int64_opcode() {
 fn blob_literal_compiles() {
     let (path, schema) = one_row_fixture();
     let out = run_select(&path, &schema, "SELECT x'414243' FROM t");
-    assert_eq!(out, vec![vec![Value::Blob(vec![0x41, 0x42, 0x43])]]);
+    assert_eq!(out, vec![vec![Value::Blob(vec![0x41, 0x42, 0x43].into())]]);
 }
 
 #[test]
@@ -635,7 +639,7 @@ fn case_with_column_branch_and_cast_branch() {
         &schema,
         "SELECT CASE WHEN a = 1 THEN name ELSE 'other' END FROM t",
     );
-    assert_eq!(out, vec![vec![Value::Text("aa".to_string())]]);
+    assert_eq!(out, vec![vec![Value::Text("aa".to_string().into())]]);
 
     // CAST as a standalone value expression.
     let out2 = run_select(&path, &schema, "SELECT CAST(name AS INTEGER) FROM t");
@@ -711,7 +715,7 @@ fn case_with_operand_and_various_branch_literal_types() {
         &schema,
         "SELECT CASE a WHEN 1 THEN 'match' ELSE 'no' END FROM t",
     );
-    assert_eq!(out, vec![vec![Value::Text("match".to_string())]]);
+    assert_eq!(out, vec![vec![Value::Text("match".to_string().into())]]);
 
     // Branch result literal types beyond Integer/Str exercise
     // `emit_branch_into`'s True/False/Float/Blob/Null arms.
@@ -732,7 +736,7 @@ fn case_with_operand_and_various_branch_literal_types() {
         &schema,
         "SELECT CASE WHEN a = 1 THEN x'41' ELSE x'42' END FROM t",
     );
-    assert_eq!(out4, vec![vec![Value::Blob(vec![0x41])]]);
+    assert_eq!(out4, vec![vec![Value::Blob(vec![0x41].into())]]);
     let out5 = run_select(
         &path,
         &schema,

@@ -106,7 +106,7 @@ fn dump_t_rows(path: &Path) -> Vec<(i64, String)> {
                 other => panic!("expected integer column a, got {other:?}"),
             };
             let b = match &row[1] {
-                Value::Text(s) => s.clone(),
+                Value::Text(s) => s.to_string(),
                 other => panic!("expected text column b, got {other:?}"),
             };
             (a, b)

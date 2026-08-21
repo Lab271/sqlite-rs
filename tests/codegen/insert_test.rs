@@ -168,7 +168,10 @@ fn valid_row_round_trips() {
     let got = rows(&path, &header, page_size, 1);
     assert_eq!(
         got,
-        vec![(1, vec![Value::Integer(42), Value::Text("hi".to_string())])]
+        vec![(
+            1,
+            vec![Value::Integer(42), Value::Text("hi".to_string().into())]
+        )]
     );
 }
 
@@ -205,7 +208,10 @@ fn default_value_applied_when_column_omitted() {
         got,
         vec![(
             1,
-            vec![Value::Integer(1), Value::Text("fallback".to_string())]
+            vec![
+                Value::Integer(1),
+                Value::Text("fallback".to_string().into())
+            ]
         )]
     );
 }
@@ -297,7 +303,7 @@ fn primary_key_conflict_aborts_by_default() {
     }
     assert_eq!(
         rows(&path, &header, page_size, 1),
-        vec![(1, vec![Value::Null, Value::Text("a".to_string())])]
+        vec![(1, vec![Value::Null, Value::Text("a".to_string().into())])]
     );
 }
 
@@ -339,7 +345,7 @@ fn primary_key_conflict_or_ignore_skips_the_row() {
 
     assert_eq!(
         rows(&path, &header, page_size, 1),
-        vec![(1, vec![Value::Null, Value::Text("a".to_string())])]
+        vec![(1, vec![Value::Null, Value::Text("a".to_string().into())])]
     );
 }
 
@@ -381,7 +387,7 @@ fn primary_key_conflict_or_replace_overwrites_the_row() {
 
     assert_eq!(
         rows(&path, &header, page_size, 1),
-        vec![(1, vec![Value::Null, Value::Text("b".to_string())])]
+        vec![(1, vec![Value::Null, Value::Text("b".to_string().into())])]
     );
 }
 
@@ -424,8 +430,8 @@ fn omitted_rowid_alias_is_auto_assigned() {
     assert_eq!(
         rows(&path, &header, page_size, 1),
         vec![
-            (1, vec![Value::Null, Value::Text("a".to_string())]),
-            (2, vec![Value::Null, Value::Text("b".to_string())]),
+            (1, vec![Value::Null, Value::Text("a".to_string().into())]),
+            (2, vec![Value::Null, Value::Text("b".to_string().into())]),
         ]
     );
 }

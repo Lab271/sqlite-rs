@@ -62,7 +62,7 @@ pub fn blob(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             })
         }
     };
-    vm.set_register(instr.p2, Value::Blob(bytes))?;
+    vm.set_register(instr.p2, Value::Blob(bytes.into()))?;
     Ok(Step::Next)
 }
 
@@ -103,7 +103,7 @@ pub fn string8(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             })
         }
     };
-    vm.set_register(instr.p2, Value::Text(s))?;
+    vm.set_register(instr.p2, Value::Text(s.into()))?;
     Ok(Step::Next)
 }
 
@@ -154,7 +154,7 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         values.push(value);
     }
     let payload = encode_record(&values, TextEncoding::Utf8);
-    vm.set_register(instr.p3, Value::Blob(payload))?;
+    vm.set_register(instr.p3, Value::Blob(payload.into()))?;
     Ok(Step::Next)
 }
 
@@ -191,7 +191,10 @@ mod tests {
 
         let instr = Instruction::with_p4(Opcode::String8, 0, 1, 0, P4::Str("hello".to_string()));
         string8(&mut vm, &instr).unwrap();
-        assert_eq!(*vm.register(1).unwrap(), Value::Text("hello".to_string()));
+        assert_eq!(
+            *vm.register(1).unwrap(),
+            Value::Text("hello".to_string().into())
+        );
     }
 
     #[test]
@@ -212,7 +215,7 @@ mod tests {
         blob(&mut vm, &instr).unwrap();
         assert_eq!(
             *vm.register(2).unwrap(),
-            Value::Blob(vec![0x41, 0x42, 0x43])
+            Value::Blob(vec![0x41, 0x42, 0x43].into())
         );
     }
 
@@ -246,18 +249,26 @@ mod tests {
     #[test]
     fn copy_duplicates_a_registers_value_leaving_the_source_untouched() {
         let mut vm = Vm::new();
-        vm.set_register(0, Value::Text("src".to_string())).unwrap();
+        vm.set_register(0, Value::Text("src".to_string().into()))
+            .unwrap();
         vm.set_register(1, Value::Integer(7)).unwrap();
         copy(&mut vm, &Instruction::new(Opcode::Copy, 0, 1, 0)).unwrap();
-        assert_eq!(*vm.register(1).unwrap(), Value::Text("src".to_string()));
-        assert_eq!(*vm.register(0).unwrap(), Value::Text("src".to_string()));
+        assert_eq!(
+            *vm.register(1).unwrap(),
+            Value::Text("src".to_string().into())
+        );
+        assert_eq!(
+            *vm.register(0).unwrap(),
+            Value::Text("src".to_string().into())
+        );
     }
 
     #[test]
     fn make_record_output_matches_spec_003_encoding() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(42)).unwrap();
-        vm.set_register(1, Value::Text("abc".to_string())).unwrap();
+        vm.set_register(1, Value::Text("abc".to_string().into()))
+            .unwrap();
         make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 0, 2, 2)).unwrap();
         let Value::Blob(payload) = vm.register(2).unwrap() else {
             panic!("expected a Blob");
@@ -265,7 +276,7 @@ mod tests {
         let decoded = crate::record::decode_record(payload, TextEncoding::Utf8).unwrap();
         assert_eq!(
             decoded,
-            vec![Value::Integer(42), Value::Text("abc".to_string())]
+            vec![Value::Integer(42), Value::Text("abc".to_string().into())]
         );
     }
 
@@ -277,8 +288,10 @@ mod tests {
         // against an INTEGER column, where codegen's compiled affinity
         // string, not the literal's own type, decides the stored type.
         let mut vm = Vm::new();
-        vm.set_register(0, Value::Text("42".to_string())).unwrap();
-        vm.set_register(1, Value::Text("abc".to_string())).unwrap();
+        vm.set_register(0, Value::Text("42".to_string().into()))
+            .unwrap();
+        vm.set_register(1, Value::Text("abc".to_string().into()))
+            .unwrap();
         make_record(
             &mut vm,
             &Instruction::with_p4(
@@ -296,23 +309,27 @@ mod tests {
         let decoded = crate::record::decode_record(payload, TextEncoding::Utf8).unwrap();
         assert_eq!(
             decoded,
-            vec![Value::Integer(42), Value::Text("abc".to_string())]
+            vec![Value::Integer(42), Value::Text("abc".to_string().into())]
         );
         // The source registers are untouched — affinity applies to a
         // copy, not the live register (mirrors the compare opcodes'
         // same rule, `exec.rs`'s `compare_jump`).
-        assert_eq!(*vm.register(0).unwrap(), Value::Text("42".to_string()));
+        assert_eq!(
+            *vm.register(0).unwrap(),
+            Value::Text("42".to_string().into())
+        );
     }
 
     #[test]
     fn make_record_without_affinity_p4_is_unchanged_from_pre_194_behavior() {
         let mut vm = Vm::new();
-        vm.set_register(0, Value::Text("42".to_string())).unwrap();
+        vm.set_register(0, Value::Text("42".to_string().into()))
+            .unwrap();
         make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 0, 1, 1)).unwrap();
         let Value::Blob(payload) = vm.register(1).unwrap() else {
             panic!("expected a Blob");
         };
         let decoded = crate::record::decode_record(payload, TextEncoding::Utf8).unwrap();
-        assert_eq!(decoded, vec![Value::Text("42".to_string())]);
+        assert_eq!(decoded, vec![Value::Text("42".to_string().into())]);
     }
 }

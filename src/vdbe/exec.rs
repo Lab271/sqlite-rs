@@ -828,7 +828,8 @@ mod tests {
         // INTEGER affinity coerces the text side to numeric first.
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(5)).unwrap();
-        vm.set_register(1, Value::Text("5".to_string())).unwrap();
+        vm.set_register(1, Value::Text("5".to_string().into()))
+            .unwrap();
         let eq = Instruction::with_p4(
             Opcode::Eq,
             0,
@@ -844,13 +845,17 @@ mod tests {
             Step::Jump(99)
         );
         // The source registers must not be mutated by the comparison.
-        assert_eq!(*vm.register(1).unwrap(), Value::Text("5".to_string()));
+        assert_eq!(
+            *vm.register(1).unwrap(),
+            Value::Text("5".to_string().into())
+        );
     }
 
     #[test]
     fn real_affinity_coerces_register_on_load_independent_of_comparison() {
         let mut vm = Vm::new();
-        vm.set_register(0, Value::Text("1.5".to_string())).unwrap();
+        vm.set_register(0, Value::Text("1.5".to_string().into()))
+            .unwrap();
         real_affinity(&mut vm, &Instruction::new(Opcode::RealAffinity, 0, 0, 0)).unwrap();
         assert_eq!(*vm.register(0).unwrap(), Value::Real(1.5));
     }

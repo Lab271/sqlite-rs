@@ -112,8 +112,8 @@ pub fn apply_affinity(value: &mut Value, affinity: Affinity) {
         // never touches BLOB (that's the shared early return above) or
         // an already-Text value.
         match value {
-            Value::Integer(i) => *value = Value::Text(i.to_string()),
-            Value::Real(r) => *value = Value::Text(format_real(*r)),
+            Value::Integer(i) => *value = Value::Text(i.to_string().into()),
+            Value::Real(r) => *value = Value::Text(format_real(*r).into()),
             Value::Text(_) | Value::Blob(_) | Value::Null => {}
         }
         return;
@@ -225,7 +225,7 @@ mod tests {
                 .to_string();
             let expect_text = line.contains(r#""affinity_probe_stored_type": "text""#);
             let affinity = affinity_of(&declared);
-            let mut value = Value::Text("1.5".to_string());
+            let mut value = Value::Text("1.5".to_string().into());
             apply_affinity(&mut value, affinity);
             let is_text = matches!(value, Value::Text(_));
             assert_eq!(

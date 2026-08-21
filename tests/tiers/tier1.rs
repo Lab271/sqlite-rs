@@ -82,7 +82,7 @@ fn t1_expression_kernel_affinity_and_collation_vectors() {
     assert_eq!(affinity_of("VARCHAR(10)"), Affinity::Text);
     assert_eq!(affinity_of(""), Affinity::Blob);
 
-    let mut v = Value::Text("1.5".to_string());
+    let mut v = Value::Text("1.5".to_string().into());
     apply_affinity(&mut v, Affinity::Real);
     assert_eq!(v, Value::Real(1.5));
 
