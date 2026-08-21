@@ -143,6 +143,21 @@ impl std::fmt::Debug for TableCursorState {
 /// most recently touched, so a following `Delete` (per spec 009 Req 4's
 /// "insert then delete the just-produced duplicate" DISTINCT dance)
 /// knows which entry to remove without a separate register operand.
+/// Row-count ceiling on an in-memory ephemeral table/index (#269): both
+/// back a plain `Vec`/`BTreeMap` with no spill-to-disk, unlike real
+/// SQLite's temp b-trees, so an unbounded subquery-in-FROM (#257) or a
+/// correlated `IN (SELECT ...)` rebuilding its index per outer row
+/// (`compile_in_subquery`, `src/codegen/subquery.rs`) could otherwise
+/// grow memory without limit. Sized in the same order of magnitude as
+/// `crate::btree::MAX_PAGES_VISITED`; not currently configurable, matching
+/// this codebase's other hardcoded limits (`MAX_REGISTERS`, `MAX_STEPS`).
+#[cfg(not(test))]
+pub(crate) const MAX_EPHEMERAL_ROWS: usize = 1_000_000;
+/// Kept small under test so the limit-exceeded regression tests don't have
+/// to insert a million rows to exercise the check.
+#[cfg(test)]
+pub(crate) const MAX_EPHEMERAL_ROWS: usize = 8;
+
 #[derive(Debug, Default)]
 pub(crate) struct EphemeralState {
     entries: BTreeMap<Vec<u8>, Vec<Value>>,
@@ -811,6 +826,12 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         CursorSlot::Ephemeral(_) => {
             let key = encode_record(&values, TextEncoding::Utf8);
             let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
+            if !state.entries.contains_key(&key) && state.entries.len() >= MAX_EPHEMERAL_ROWS {
+                return Err(ExecError::EphemeralRowLimitExceeded {
+                    opcode: "IdxInsert",
+                    limit: MAX_EPHEMERAL_ROWS,
+                });
+            }
             state.entries.insert(key.clone(), values);
             state.last_key = Some(key);
             Ok(Step::Next)
@@ -1085,6 +1106,12 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 })?;
             let state = vm.ephemeral_table_mut(instr.p1, "Insert")?;
+            if state.rows.len() >= MAX_EPHEMERAL_ROWS {
+                return Err(ExecError::EphemeralRowLimitExceeded {
+                    opcode: "Insert",
+                    limit: MAX_EPHEMERAL_ROWS,
+                });
+            }
             state.rows.push((rowid, values));
             Ok(Step::Next)
         }
@@ -2386,6 +2413,56 @@ mod tests {
         .unwrap();
         vm.set_register(31, Value::Integer(rowid)).unwrap();
         insert(vm, &Instruction::new(Opcode::Insert, cursor, 31, 30)).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_table_insert_errors_once_row_limit_exceeded() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        for i in 0..MAX_EPHEMERAL_ROWS as i64 {
+            insert_ephemeral_row(&mut vm, 0, i + 1, &[Value::Integer(i)]);
+        }
+        for (i, v) in [Value::Integer(999)].iter().enumerate() {
+            vm.set_register(20i32.saturating_add(i as i32), v.clone())
+                .unwrap();
+        }
+        crate::vdbe::result::make_record(&mut vm, &Instruction::new(Opcode::MakeRecord, 20, 1, 30))
+            .unwrap();
+        vm.set_register(31, Value::Integer(MAX_EPHEMERAL_ROWS as i64 + 1))
+            .unwrap();
+        let err = insert(&mut vm, &Instruction::new(Opcode::Insert, 0, 31, 30)).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::EphemeralRowLimitExceeded {
+                opcode: "Insert",
+                limit
+            } if limit == MAX_EPHEMERAL_ROWS
+        ));
+    }
+
+    #[test]
+    fn ephemeral_index_insert_errors_once_row_limit_exceeded() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        for i in 0..MAX_EPHEMERAL_ROWS as i64 {
+            vm.set_register(20, Value::Integer(i)).unwrap();
+            idx_insert(&mut vm, &Instruction::with_p4(Opcode::IdxInsert, 0, 20, 0, P4::Int(1)))
+                .unwrap();
+        }
+        vm.set_register(20, Value::Integer(MAX_EPHEMERAL_ROWS as i64))
+            .unwrap();
+        let err = idx_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxInsert, 0, 20, 0, P4::Int(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::EphemeralRowLimitExceeded {
+                opcode: "IdxInsert",
+                limit
+            } if limit == MAX_EPHEMERAL_ROWS
+        ));
     }
 
     #[test]
