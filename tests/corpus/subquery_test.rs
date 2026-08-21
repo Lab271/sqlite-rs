@@ -690,3 +690,114 @@ fn subquery_in_from_own_join_matches_oracle() {
         "subquery_in_from_own_join_matches_oracle",
     );
 }
+
+// #314: correlated scalar subquery memoized per distinct value of the
+// single outer column it's correlated against (ADR-0021's follow-up
+// from #303/#306). `catalog`'s `category` column repeats only 4
+// distinct values across 20 rows — well under the cache's cap — so
+// every repeat after the first should hit the cache instead of
+// re-scanning `lookup`.
+
+/// A fixture with a low-cardinality correlated column: `catalog.category`
+/// cycles through 0..3 across many rows, correlated against
+/// `lookup.cat`'s matching `val`.
+fn memoized_correlated_fixture_db(label: &str) -> PathBuf {
+    let db = scratch_db(label);
+    let ddls = [
+        "CREATE TABLE catalog(id INTEGER PRIMARY KEY, category INTEGER)",
+        "CREATE TABLE lookup(cat INTEGER PRIMARY KEY, val INTEGER)",
+    ];
+    let catalog_values: Vec<String> = (0..20).map(|i| format!("({}, {})", i + 1, i % 4)).collect();
+    let rows = [
+        format!("INSERT INTO catalog VALUES {}", catalog_values.join(", ")),
+        "INSERT INTO lookup VALUES (0, 5), (1, 10), (2, 100), (3, 1)".to_string(),
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    db
+}
+
+/// Correctness with repeated correlated values: every one of the 20
+/// rows shares its `category` with 4 others, so the memoization cache
+/// (if buggy) has plenty of opportunity to return a stale/wrong cached
+/// result for a repeat.
+#[test]
+fn memoized_correlated_subquery_with_repeated_values_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_repeated");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "memoized_correlated_subquery_with_repeated_values_matches_oracle",
+    );
+}
+
+/// A `NULL` correlated value must never hit or populate the cache
+/// (SQL's `NULL = NULL` is unknown) — verified by mixing a `NULL`
+/// `category` row in among the repeated non-NULL ones and confirming
+/// the oracle-matching result still holds (the `NULL` row's own
+/// subquery correlates on `cat = NULL`, always empty, so `id > (…)`
+/// is NULL — excluded — same as the oracle).
+#[test]
+fn memoized_correlated_subquery_with_null_correlated_value_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_null");
+    let insert_null = "INSERT INTO catalog VALUES (21, NULL)";
+    if let Some(oracle) = pinned_oracle() {
+        let status = Command::new(&oracle)
+            .arg(&db)
+            .arg(insert_null)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    } else {
+        let output = run_exec(&db, insert_null);
+        assert!(output.status.success());
+    }
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "memoized_correlated_subquery_with_null_correlated_value_matches_oracle",
+    );
+}
+
+/// #314 regression: a correlated, single-outer-column scalar subquery
+/// in a single-table `WHERE` clause must set up its memoization cache
+/// (`OpenEphemeral`, table mode) once, before the outer scan's
+/// `Rewind` — not on every outer row. Same `-explain`-based shape as
+/// the #306 hoist tests, but for the correlated (memoized, not hoisted)
+/// case: unlike #306's hoist, the subquery's own `OpenRead` is *not*
+/// expected before the outer `Rewind` (it only actually runs on a cache
+/// miss, inside the loop) — only the cache table's `OpenEphemeral` is.
+#[test]
+fn correlated_subquery_memoization_cache_opens_before_outer_rewind() {
+    let db = memoized_correlated_fixture_db("memo_explain");
+    let program = explain(
+        &db,
+        "SELECT id FROM catalog WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category)",
+    );
+    let eph_addr =
+        first_opcode_line(&program, "OpenEphemeral").expect("expected an OpenEphemeral opcode");
+    let rewind_addr = outer_rewind_line(&program);
+    assert!(
+        eph_addr < rewind_addr,
+        "expected the memoization cache's OpenEphemeral (addr {eph_addr}) to be set up before \
+         the outer scan's Rewind (addr {rewind_addr}); program:\n{program}"
+    );
+}

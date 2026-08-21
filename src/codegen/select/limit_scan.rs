@@ -219,6 +219,16 @@ where
         None => std::collections::HashMap::new(),
     };
     let scope = scope.with_hoisted(std::rc::Rc::new(hoisted));
+    // #314: memoize any correlated, single-outer-column WHERE-clause
+    // scalar subquery against the scan's per-row correlated value,
+    // instead of re-running it on every outer row.
+    let memoized = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::memoize_correlated_where_subqueries(
+            em, reg, &scope, schema, where_expr,
+        ),
+        None => std::collections::HashMap::new(),
+    };
+    let scope = scope.with_memoized(std::rc::Rc::new(memoized));
     let limit = compile_limit_setup(em, reg, &scope, select)?;
 
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
@@ -297,6 +307,14 @@ where
         None => std::collections::HashMap::new(),
     };
     let scope = scope.with_hoisted(std::rc::Rc::new(hoisted));
+    // #314: same memoization as `compile_direct_scan` — see its comment.
+    let memoized = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::memoize_correlated_where_subqueries(
+            em, reg, &scope, schema, where_expr,
+        ),
+        None => std::collections::HashMap::new(),
+    };
+    let scope = scope.with_memoized(std::rc::Rc::new(memoized));
 
     // LIMIT/OFFSET are set up here, before the sorter opens, rather than
     // just before pass 2 — so a combined bound register is ready in time
