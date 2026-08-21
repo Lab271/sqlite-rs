@@ -126,6 +126,7 @@ pub use entry::{compile_select, compile_select_compound, compile_select_with_cat
 pub use eqp::{explain_query_plan, EqpRow};
 pub use joins::compile_select_joined;
 
+pub(crate) use aggregate::{compile_grouped_scan, select_has_aggregate};
 pub(crate) use entry::{
     compile_select_scan, select_result_column_count, select_result_column_count_joined,
 };

@@ -328,6 +328,18 @@ impl Vm {
         Ok(())
     }
 
+    /// Clears aggregate-context slot `slot` back to `None` (#304) —
+    /// used by `AggFinal` so a slot's leftover accumulator from one
+    /// invocation of a compiled program can't leak into a later
+    /// invocation that skips `AggStep` entirely (a zero-row group).
+    pub(crate) fn clear_agg_context(&mut self, slot: i32) -> Result<(), ExecError> {
+        let idx = Self::index("agg context clear", slot)?;
+        if let Some(cell) = self.agg_contexts.get_mut(idx) {
+            *cell = None;
+        }
+        Ok(())
+    }
+
     pub fn emit_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
     }
@@ -619,6 +631,19 @@ fn agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// stepped (`P1` holds `None`) finalizes as the aggregate's own
 /// zero-row result (`count` → 0, `sum` → NULL) rather than erroring —
 /// an empty group is a legitimate outcome, not a malformed program.
+///
+/// Clears the slot back to `None` after finalizing (#304): a slot
+/// number is reused across groups within one query (each new group's
+/// first `AggStep` passes `reset: true`, discarding whatever was
+/// there), but a slot is also reused across separate *invocations* of
+/// the same compiled program — e.g. a correlated aggregate subquery
+/// re-run once per outer row (`src/codegen/subquery.rs`'s
+/// `compile_scalar_subquery`) — where a zero-row invocation skips
+/// `AggStep` entirely (see `compile_grouped_scan`'s
+/// `empty_sorter_target`) and goes straight to `AggFinal`. Without
+/// clearing here, that zero-row invocation would incorrectly finalize
+/// against the *previous* invocation's leftover accumulator instead of
+/// its own true zero-row result.
 fn agg_final(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let descriptor = match &instr.p4 {
         P4::Str(s) => s.as_str(),
@@ -642,6 +667,7 @@ fn agg_final(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         }
     })?;
     vm.set_register(instr.p3, result)?;
+    vm.clear_agg_context(instr.p1)?;
     Ok(Step::Next)
 }
 

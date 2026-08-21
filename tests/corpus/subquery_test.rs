@@ -109,11 +109,6 @@ fn subquery_fixture_db(label: &str) -> PathBuf {
     db
 }
 
-// Note: this codebase does not implement SQL aggregates at all yet
-// (`compile_value`'s `is_aggregate_call` guard rejects `max`/`min`/
-// `count`/etc. everywhere, not just inside a subquery — a pre-existing,
-// separate gap), so these tests use a non-aggregate scalar subquery
-// rather than the issue's illustrative `max(x)` example.
 #[test]
 fn scalar_subquery_matches_oracle() {
     let db = subquery_fixture_db("scalar");
@@ -353,6 +348,88 @@ fn correlated_scalar_subquery_matches_oracle() {
         "SELECT id, (SELECT other.id FROM other WHERE other.a_id = t.id) FROM t",
         "correlated_scalar_subquery_matches_oracle",
     );
+}
+
+/// #304: an aggregate call inside a scalar subquery's projection —
+/// `compile_scalar_subquery` routes this through the same #287
+/// implicit-whole-table-group machinery `compile_grouped_scan` gives a
+/// top-level `GROUP BY`-less aggregate query, instead of
+/// `compile_value`'s plain (aggregate-rejecting) expression path.
+#[test]
+fn aggregate_in_scalar_subquery_matches_oracle() {
+    let db = subquery_fixture_db("aggregate_scalar");
+    for (name, sql) in [
+        ("count", "SELECT (SELECT count(x) FROM t) FROM t LIMIT 1"),
+        ("sum", "SELECT (SELECT sum(x) FROM t) FROM t LIMIT 1"),
+        ("avg", "SELECT (SELECT avg(x) FROM t) FROM t LIMIT 1"),
+        ("min", "SELECT (SELECT min(x) FROM t) FROM t LIMIT 1"),
+        ("max", "SELECT (SELECT max(x) FROM t) FROM t LIMIT 1"),
+    ] {
+        assert_matches_oracle(&db, sql, &format!("aggregate_in_scalar_subquery_{name}"));
+    }
+}
+
+/// The correlated form of #304's aggregate-in-subquery: the
+/// subquery's own `WHERE` clause references the enclosing query's
+/// row (`t.id`), so the aggregate must be recomputed once per outer
+/// row rather than hoisted/computed once.
+#[test]
+fn correlated_aggregate_in_scalar_subquery_matches_oracle() {
+    let db = subquery_fixture_db("correlated_aggregate_scalar");
+    for (name, sql) in [
+        (
+            "max",
+            "SELECT id, (SELECT max(other.a_id) FROM other WHERE other.a_id = t.id) FROM t",
+        ),
+        (
+            "count",
+            "SELECT id, (SELECT count(other.a_id) FROM other WHERE other.a_id = t.id) FROM t",
+        ),
+    ] {
+        assert_matches_oracle(
+            &db,
+            sql,
+            &format!("correlated_aggregate_in_scalar_subquery_{name}"),
+        );
+    }
+}
+
+/// #304 + #287: an aggregate over a scalar subquery whose inner
+/// `WHERE` matches zero rows still produces exactly one group (the
+/// implicit whole-table group), with `count` = 0 and the other
+/// aggregates = NULL — same zero-rows semantics #287 established at
+/// the top level, now proven through the subquery-expression path too.
+#[test]
+fn aggregate_in_scalar_subquery_over_empty_result_matches_oracle() {
+    let db = subquery_fixture_db("aggregate_scalar_empty");
+    for (name, sql) in [
+        (
+            "count",
+            "SELECT (SELECT count(x) FROM t WHERE x = 999) FROM t LIMIT 1",
+        ),
+        (
+            "sum",
+            "SELECT (SELECT sum(x) FROM t WHERE x = 999) FROM t LIMIT 1",
+        ),
+        (
+            "avg",
+            "SELECT (SELECT avg(x) FROM t WHERE x = 999) FROM t LIMIT 1",
+        ),
+        (
+            "min",
+            "SELECT (SELECT min(x) FROM t WHERE x = 999) FROM t LIMIT 1",
+        ),
+        (
+            "max",
+            "SELECT (SELECT max(x) FROM t WHERE x = 999) FROM t LIMIT 1",
+        ),
+    ] {
+        assert_matches_oracle(
+            &db,
+            sql,
+            &format!("aggregate_in_scalar_subquery_over_empty_result_{name}"),
+        );
+    }
 }
 
 /// `IN (SELECT ...)` materializes an ephemeral index per evaluation —
