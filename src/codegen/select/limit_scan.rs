@@ -277,18 +277,53 @@ where
             0,
         ));
     }
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+
+    // LIMIT/OFFSET are set up here, before the sorter opens, rather than
+    // just before pass 2 — so a combined bound register is ready in time
+    // to cap the sorter's buffer to the top-K rows it actually needs
+    // (#129: an unbounded sort was the dominant cost of `ORDER BY ...
+    // LIMIT N` on large tables). Reuses `OffsetLimit` (already
+    // implemented for #89, previously unused by codegen — see this
+    // module's doc comment) for its `-1`-means-unbounded convention
+    // (`LIMIT -1`/no `LIMIT`), so the sorter falls back to its old
+    // unbounded behavior automatically whenever the bound can't be
+    // known to be safe. Bounding is skipped for `DISTINCT`: it dedupes
+    // *after* the sort, so a bound applied before dedup could evict a
+    // row DISTINCT would have deduped away, undercounting the result.
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+    let bound_reg = if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        None
+    } else {
+        limit.as_ref().map(|limit_state| {
+            let offset_reg = limit_state.offset_reg.unwrap_or_else(|| {
+                let zero = reg.alloc();
+                em.emit(Instruction::new(Opcode::Integer, 0, zero, 0));
+                zero
+            });
+            let combined = reg.alloc();
+            em.emit(Instruction::new(
+                Opcode::OffsetLimit,
+                limit_state.limit_reg.unwrap_or(0),
+                combined,
+                offset_reg,
+            ));
+            combined
+        })
+    };
+
     // The sort-key descriptor (which register each term reads) isn't
     // known until pass 1 below actually allocates the computed-expression
     // registers, so `SorterOpen` is emitted with a placeholder P4 and
     // patched once that layout is known — it must still precede the scan
     // loop in program order.
-    let sorter_open_addr = em.emit(Instruction::with_p4(
-        Opcode::SorterOpen,
-        cursors.sort,
-        0,
-        0,
-        P4::None,
-    ));
+    let mut sorter_open = Instruction::with_p4(Opcode::SorterOpen, cursors.sort, 0, 0, P4::None);
+    if let Some(bound_reg) = bound_reg {
+        sorter_open.p2 = bound_reg;
+        sorter_open.p5 = 1;
+    }
+    let sorter_open_addr = em.emit(sorter_open);
 
     // Pass 1: buffer every matching row's full column tuple — plus a
     // trailing register per computed ORDER BY expression — into the
@@ -303,7 +338,6 @@ where
     let scan_loop = em.new_label();
     em.place(scan_loop);
 
-    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let scan_skip = em.new_label();
     if let Some(where_expr) = &select.where_clause {
         compile_cond(
@@ -383,8 +417,6 @@ where
     em.place(sort_step);
     let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, cursors.sort, 0, 0));
     em.patch_p2(sort_addr, end_label);
-
-    let limit = compile_limit_setup(em, reg, &scope, select)?;
 
     let sorted_loop = em.new_label();
     em.place(sorted_loop);

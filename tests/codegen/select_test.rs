@@ -560,6 +560,105 @@ fn order_by_expression_with_limit_offset_and_second_key() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// #129: `ORDER BY ... LIMIT N` compiles a bounded (top-K) sorter —
+/// `SorterOpen`'s `P5` nonzero — rather than the old unbounded buffer,
+/// and produces the exact same rows a full sort would.
+#[test]
+fn order_by_limit_compiles_a_bounded_sorter_and_matches_full_sort() {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_test_topk_{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(a INTEGER, b INTEGER, name TEXT); \
+             INSERT INTO t SELECT value, value * 2, 'r' || value \
+             FROM (WITH RECURSIVE seq(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM seq WHERE value < 50) SELECT value FROM seq) \
+             ORDER BY random();",
+        )
+        .status()
+        .expect("creating scratch fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
+        column_types: vec![
+            "INTEGER".to_string(),
+            "INTEGER".to_string(),
+            "TEXT".to_string(),
+        ],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+
+    let select = match parse_select("SELECT a FROM t ORDER BY a DESC LIMIT 5;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    let sorter_open = rows
+        .iter()
+        .find(|r| r.opcode == "SorterOpen")
+        .expect("expected a SorterOpen instruction");
+    assert_ne!(
+        sorter_open.p5, 0,
+        "ORDER BY + LIMIT (no DISTINCT) should compile a bounded sorter: {rows:?}"
+    );
+
+    let our = our_rows(&path, &schema, "SELECT a FROM t ORDER BY a DESC LIMIT 5;")
+        .expect("query should compile and execute");
+    assert_eq!(
+        our,
+        vec![
+            vec![Value::Integer(50)],
+            vec![Value::Integer(49)],
+            vec![Value::Integer(48)],
+            vec![Value::Integer(47)],
+            vec![Value::Integer(46)],
+        ]
+    );
+    if let Some(oracle) = pinned_oracle() {
+        let oracle_out = oracle_rows(&oracle, &path, "SELECT a FROM t ORDER BY a DESC LIMIT 5;");
+        let ours_as_text: Vec<Vec<String>> = our
+            .iter()
+            .map(|row| row.iter().map(value_to_oracle_text).collect())
+            .collect();
+        assert_eq!(ours_as_text, oracle_out);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// #129: `DISTINCT` dedupes *after* the sort, so bounding the sorter's
+/// buffer before that dedup runs could evict a row `DISTINCT` would
+/// have kept — `SELECT DISTINCT ... ORDER BY ... LIMIT` must therefore
+/// leave the sorter unbounded (`SorterOpen`'s `P5` zero).
+#[test]
+fn distinct_with_order_by_and_limit_leaves_the_sorter_unbounded() {
+    let (path, schema) = scratch_fixture_labeled("distinct_limit_unbounded");
+    let select = match parse_select("SELECT DISTINCT b FROM t ORDER BY b LIMIT 2;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    let sorter_open = rows
+        .iter()
+        .find(|r| r.opcode == "SorterOpen")
+        .expect("expected a SorterOpen instruction");
+    assert_eq!(
+        sorter_open.p5, 0,
+        "DISTINCT + ORDER BY + LIMIT must not bound the sorter: {rows:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 /// #137: `WHERE rowid = <int literal>` compiles to `SeekRowid` — no
 /// `Rewind`/`Next` full-table scan — and still answers the same row
 /// the ordinary scan would.
