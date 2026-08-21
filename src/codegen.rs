@@ -375,6 +375,20 @@ pub(crate) struct Scope {
     /// is simply never inserted, so its lookup misses and it falls
     /// through to the unmodified per-row materialization path.
     pub(crate) hoisted: std::rc::Rc<HashMap<usize, subquery::HoistedSubquery>>,
+    /// Correlated WHERE-clause scalar subqueries memoized against a
+    /// single-table scan's per-row correlated value (#314) — keyed by
+    /// [`subquery::select_id`], same shape as [`Scope::hoisted`] but for
+    /// the correlated case #306 explicitly left untouched (a correlated
+    /// subquery's result can differ per row, so it can't be
+    /// materialized once — but it *can* be cached per distinct value of
+    /// the one outer column it's correlated against, which is what
+    /// [`subquery::memoize_correlated_where_subqueries`] sets up).
+    /// Empty (the default) outside a single-table scan's own scope, or
+    /// for any correlated subquery whose shape falls outside that
+    /// pass's narrow recognition (see its own doc comment) — such a
+    /// subquery's lookup simply misses and it falls through to the
+    /// unmodified per-row [`subquery::compile_scalar_subquery`] path.
+    pub(crate) memoized: std::rc::Rc<HashMap<usize, subquery::MemoizedSubquery>>,
 }
 
 impl Scope {
@@ -394,6 +408,7 @@ impl Scope {
             outer: None,
             dedup_star: vec![std::collections::HashSet::new()],
             hoisted: std::rc::Rc::default(),
+            memoized: std::rc::Rc::default(),
         }
     }
 
@@ -421,6 +436,16 @@ impl Scope {
         hoisted: std::rc::Rc<HashMap<usize, subquery::HoistedSubquery>>,
     ) -> Self {
         self.hoisted = hoisted;
+        self
+    }
+
+    /// Attaches a single-table scan's memoized-correlated-subquery map
+    /// (#314) — see [`Scope::memoized`]'s doc comment.
+    pub(crate) fn with_memoized(
+        mut self,
+        memoized: std::rc::Rc<HashMap<usize, subquery::MemoizedSubquery>>,
+    ) -> Self {
+        self.memoized = memoized;
         self
     }
 

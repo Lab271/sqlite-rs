@@ -1142,12 +1142,19 @@ pub(crate) fn compile_value(
         // already sitting in a register — reuse it instead of
         // re-running the subquery's whole scan on every outer row.
         ExprKind::Subquery(subquery) => {
-            match scope
-                .hoisted
-                .get(&crate::codegen::subquery::select_id(subquery))
-            {
+            let key = crate::codegen::subquery::select_id(subquery);
+            match scope.hoisted.get(&key) {
                 Some(crate::codegen::subquery::HoistedSubquery::Scalar { reg: r }) => Ok(*r),
-                _ => crate::codegen::subquery::compile_scalar_subquery(em, reg, scope, subquery),
+                _ => match scope.memoized.get(&key) {
+                    // #314: correlated, but memoized per distinct value
+                    // of the one outer column it's correlated against.
+                    Some(memo) => crate::codegen::subquery::compile_memoized_scalar_subquery(
+                        em, reg, scope, subquery, memo,
+                    ),
+                    None => {
+                        crate::codegen::subquery::compile_scalar_subquery(em, reg, scope, subquery)
+                    }
+                },
             }
         }
     }
