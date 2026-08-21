@@ -22,7 +22,7 @@ use super::*;
 /// per-column direction across `plans` that doesn't uniformly match (or
 /// uniformly reverse) the index's own per-column directions also falls
 /// through to `None` — the sorter path handles it instead.
-fn index_matches_ordering(
+pub(super) fn index_matches_ordering(
     schema: &TableSchema,
     index: &IndexSchema,
     plans: &[OrderByPlan],
@@ -58,7 +58,10 @@ fn index_matches_ordering(
     forward
 }
 
-fn find_ordering_index(schema: &TableSchema, plans: &[OrderByPlan]) -> Option<(usize, bool)> {
+pub(super) fn find_ordering_index(
+    schema: &TableSchema,
+    plans: &[OrderByPlan],
+) -> Option<(usize, bool)> {
     if plans.is_empty() {
         return None;
     }

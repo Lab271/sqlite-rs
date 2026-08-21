@@ -1,5 +1,5 @@
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard, LimitState};
-use super::order_by::{order_by_target_for_expr, OrderByTarget};
+use super::order_by::{order_by_target_for_expr, OrderByPlan, OrderByTarget};
 use super::projection::{compile_row_values, result_columns, ResultColumnPlan};
 use super::*;
 /// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
@@ -333,6 +333,264 @@ where
     )?;
     em.place(skip_tail_flush);
     Ok(())
+}
+
+/// Compiles an explicit `GROUP BY <indexed col(s)>` (#310) as a direct
+/// index b-tree walk feeding [`compile_grouped_scan`]'s pass-2
+/// boundary-detection/accumulate/flush logic directly, in place of pass
+/// 1's `SorterOpen`/full-table-buffer/`SorterSort` — mirroring #296's
+/// [`super::index_scan::try_compile_index_ordered_scan`] MVP, but for
+/// `GROUP BY` instead of `ORDER BY`. Since the index already produces
+/// rows in group-key order, there is nothing to sort: each row is
+/// fetched straight off `cursors.table` (via `IdxRowid` + `SeekRowid`,
+/// same as the `ORDER BY` fast path) and read directly through
+/// `table_scope`, with no pseudo cursor, no `MakeRecord`, and no
+/// sorter at all — `cursors.table` plays the role `cursors.pseudo`
+/// plays in [`compile_grouped_scan`]'s pass 2, since both are simply
+/// "the cursor positioned on the current row" as far as
+/// `read_row_columns_into`/[`emit_agg_step`] are concerned.
+///
+/// Returns `Ok(true)` when this fast path was taken; `Ok(false)` leaves
+/// `em`/`reg` untouched so the caller falls back to
+/// [`compile_grouped_scan`]. MVP guardrail (matching #296's own): only
+/// taken with no `WHERE` clause (no cardinality estimation to judge an
+/// index scan against a filtered table scan), an ordinary rowid table,
+/// and every `GROUP BY` term a bare column (a computed `GROUP BY`
+/// expression has no corresponding index column to match against).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_index_ordered_group_by<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    implicit_group: bool,
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if implicit_group || select.group_by.is_empty() {
+        // No GROUP BY key at all: nothing for an index to order by,
+        // and #287's implicit whole-table group has exactly one group
+        // regardless — sorting a single group is already free.
+        return Ok(false);
+    }
+    if select.where_clause.is_some() || schema.without_rowid {
+        return Ok(false);
+    }
+    let group_targets: Vec<OrderByTarget> = select
+        .group_by
+        .iter()
+        .map(|expr| order_by_target_for_expr(expr, schema))
+        .collect::<Result<_, _>>()?;
+    // Every target must be a bare column — a computed GROUP BY
+    // expression has no corresponding index column to match against.
+    // Collected into `group_col_indices` up front (rather than
+    // re-matching `OrderByTarget::Column` inside the per-row loop
+    // below) so that loop has no "already-rejected, can't happen"
+    // branch to justify with an `unreachable!` the qualified-subset
+    // gate (`make mvl-limit`) doesn't allow.
+    let Some(group_col_indices): Option<Vec<usize>> = group_targets
+        .iter()
+        .map(|t| match t {
+            OrderByTarget::Column(idx) => Some(*idx),
+            OrderByTarget::Expr(_) => None,
+        })
+        .collect()
+    else {
+        return Ok(false);
+    };
+    let plans: Vec<OrderByPlan> = select
+        .group_by
+        .iter()
+        .zip(&group_targets)
+        .map(|(expr, target)| OrderByPlan {
+            target: target.clone(),
+            descending: false,
+            collation: collation_of(expr).unwrap_or(Collation::Binary),
+            nulls_first: true,
+        })
+        .collect();
+    let Some((index_idx, forward)) = super::index_scan::find_ordering_index(schema, &plans) else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_idx) else {
+        return Ok(false);
+    };
+
+    let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+
+    // No dedicated cursor slot exists for this path's index cursor —
+    // reuse the sort cursor number, since `SorterOpen`/`SorterInsert`
+    // never run on this branch (matching #296's own convention).
+    let index_cursor = cursors.sort;
+    let root_page = i32::try_from(index.root_page).unwrap_or(0);
+    let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+    open_instr.p5 = 1;
+    em.emit(open_instr);
+
+    let limit = compile_limit_setup(em, reg, &table_scope, select)?;
+
+    let aggs = collect_aggregates(select)?;
+    let zero_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, zero_reg, 0));
+    let have_group_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, have_group_reg, 0));
+
+    let prev_key_regs: Vec<i32> = group_targets.iter().map(|_| reg.alloc()).collect();
+    let snapshot_regs: Vec<i32> = schema.columns.iter().map(|_| reg.alloc()).collect();
+    for &r in &snapshot_regs {
+        em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+    }
+    let agg_slots: Vec<AggSlot> = aggs
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (call, name, arg))| {
+            let slot = i32::try_from(slot).unwrap_or(0);
+            AggSlot {
+                call,
+                name,
+                arg,
+                slot,
+            }
+        })
+        .collect();
+
+    let (rewind_op, next_op) = if forward {
+        (Opcode::IdxRewind, Opcode::IdxNext)
+    } else {
+        (Opcode::IdxLast, Opcode::IdxPrev)
+    };
+    let empty_index_target = end_label;
+    let rewind_addr = em.emit(Instruction::new(rewind_op, index_cursor, 0, 0));
+    em.patch_p2(rewind_addr, empty_index_target);
+
+    let indexed_loop = em.new_label();
+    em.place(indexed_loop);
+    let rowid_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::IdxRowid,
+        index_cursor,
+        rowid_reg,
+        0,
+    ));
+    let row_skip = em.new_label();
+    let table_seek_addr = em.emit(Instruction::new(
+        Opcode::SeekRowid,
+        cursors.table,
+        0,
+        rowid_reg,
+    ));
+    em.patch_p2(table_seek_addr, row_skip);
+
+    // Compute this row's GROUP BY key straight off the table cursor —
+    // `group_col_indices` (checked above) means this is always a plain
+    // column read, never `compile_value`.
+    let cur_key_regs: Vec<i32> = group_col_indices
+        .iter()
+        .map(|&idx| {
+            let r = reg.alloc();
+            read_pseudo_column(em, schema, cursors.table, idx, r)?;
+            Ok(r)
+        })
+        .collect::<Result<_, CodegenError>>()?;
+
+    let group_key_p4s: Vec<P4> = select
+        .group_by
+        .iter()
+        .map(|expr| {
+            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let affinity = comparison_affinity(expr_affinity(&table_scope, expr), None);
+            p4_coll_seq(collation, affinity)
+        })
+        .collect();
+
+    let boundary_label = em.new_label();
+    let not_boundary_label = em.new_label();
+    let first_row_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(first_row_check, boundary_label);
+    for ((&cur, &prev), p4) in cur_key_regs.iter().zip(&prev_key_regs).zip(&group_key_p4s) {
+        let a_null = em.new_label();
+        let same_col = em.new_label();
+        let a_null_addr = em.emit(Instruction::new(Opcode::IsNull, cur, 0, 0));
+        em.patch_p2(a_null_addr, a_null);
+        let b_null_addr = em.emit(Instruction::new(Opcode::IsNull, prev, 0, 0));
+        em.patch_p2(b_null_addr, boundary_label);
+        let eq_addr = em.emit(Instruction::with_p4(Opcode::Eq, cur, 0, prev, p4.clone()));
+        em.patch_p2(eq_addr, same_col);
+        let goto_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(goto_boundary, boundary_label);
+        em.place(a_null);
+        let b_not_null_addr = em.emit(Instruction::new(Opcode::NotNull, prev, 0, 0));
+        em.patch_p2(b_not_null_addr, boundary_label);
+        em.place(same_col);
+    }
+    let goto_not_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_not_boundary, not_boundary_label);
+
+    em.place(boundary_label);
+    let skip_flush = em.new_label();
+    let flush_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(flush_check, skip_flush);
+    flush_group(
+        em,
+        reg,
+        select,
+        schema,
+        catalog,
+        &snapshot_regs,
+        &agg_slots,
+        limit.as_ref(),
+        end_label,
+        sink,
+    )?;
+    em.place(skip_flush);
+    for (&cur, &prev) in cur_key_regs.iter().zip(&prev_key_regs) {
+        em.emit(Instruction::new(Opcode::Copy, cur, prev, 0));
+    }
+    em.emit(Instruction::new(Opcode::Integer, 1, have_group_reg, 0));
+    for agg in &agg_slots {
+        emit_agg_step(em, reg, &table_scope, agg, true)?;
+    }
+    let after_accumulate = em.new_label();
+    let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_after_accumulate, after_accumulate);
+
+    em.place(not_boundary_label);
+    for agg in &agg_slots {
+        emit_agg_step(em, reg, &table_scope, agg, false)?;
+    }
+
+    em.place(after_accumulate);
+    read_row_columns_into(em, schema, cursors.table, &snapshot_regs)?;
+
+    em.place(row_skip);
+    let idx_next_addr = em.emit(Instruction::new(next_op, index_cursor, 0, 0));
+    em.patch_p2(idx_next_addr, indexed_loop);
+
+    // Tail flush: the very last group never sees another row to
+    // trigger `boundary_label`'s mid-loop flush. Zero matching rows
+    // (an empty table) means `empty_index_target == end_label` was
+    // taken above, so this tail flush is only reached having seen at
+    // least one row — `have_group_reg` is unconditionally set by then,
+    // matching the explicit-`GROUP BY` (non-implicit) case in
+    // `compile_grouped_scan`.
+    flush_group(
+        em,
+        reg,
+        select,
+        schema,
+        catalog,
+        &snapshot_regs,
+        &agg_slots,
+        limit.as_ref(),
+        end_label,
+        sink,
+    )?;
+    Ok(true)
 }
 
 /// One aggregate call's `AggStep`/`AggFinal` binding (#263): `name`
