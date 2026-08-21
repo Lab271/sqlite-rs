@@ -25,3 +25,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0019](0019-aggstep-p4-collation-and-p5-reset.md) | `AggStep` gains a collation-carrying `P4` and a `P5` reset flag | 2026-08-21 |
 | [0020](0020-index-ordered-scan-opcodes-reopen-frozen-set.md) | `IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` reopen the frozen V2 opcode set | 2026-08-21 |
 | [0021](0021-correlated-subquery-rematerialization-cost.md) | Defer a coroutine rewrite for correlated subqueries; scope an incremental hoist instead | 2026-08-21 |
+| [0022](0022-pager-has-no-page-cache.md) | `Pager` has no page cache — repeated-seek workloads pay full I/O every row | 2026-08-21 |
