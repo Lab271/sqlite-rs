@@ -41,7 +41,8 @@ sql-stmt        ::= select-stmt        (* V2 *)
                   | drop-stmt          (* V3 *)
                   | explain-stmt ;     (* V4 *)
                   (* V4+: CTEs, views -- see Future blocks;
-                     #237 landed the INNER/LEFT/CROSS JOIN subset (see from-clause),
+                     #237 landed the INNER/LEFT/CROSS JOIN subset, #250 extended it
+                     with NATURAL/RIGHT/FULL/USING/comma-join (see from-clause),
                      #240 landed the UNION ALL compound-select tail (see select-stmt),
                      #243 pulled EXPLAIN [QUERY PLAN] forward from its original
                      V7 slot -- see explain-stmt below -- because the planner's
@@ -54,11 +55,11 @@ explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
 (* ===================== SELECT (V2 slice, FROM/JOIN + GROUP BY/HAVING + UNION ALL V4 slice) =====================
  * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :750 from, :925 orderby_opt, :967 limit_opt, :1002 where_opt]
  * V2 restrictions vs full parse.y: no window clause (V9). The FROM
- * clause itself (`from-clause` below) is now the V4 INNER/LEFT
- * [OUTER]/CROSS `JOIN ... ON` slice (#237) rather than V2's
- * single-table-only restriction — NATURAL/RIGHT/FULL joins,
- * `USING (...)`, comma-style `FROM a, b`, and subqueries in FROM
- * (#238) remain future-block stubs, see below. `group-by-clause`
+ * clause itself (`from-clause` below) is now the V4 full JOIN slice
+ * (#237's INNER/LEFT/CROSS `JOIN ... ON`, extended by #250 with
+ * NATURAL, RIGHT/FULL, `USING (...)`, and comma-style `FROM a, b`)
+ * rather than V2's single-table-only restriction — subqueries in FROM
+ * (#238) remain a future-block stub, see below. `group-by-clause`
  * below is the V4 GROUP BY/HAVING slice (#239). The compound-select
  * tail is now the V4 `UNION ALL` slice (#240) — plain `UNION` (dedup),
  * `INTERSECT`, and `EXCEPT` remain future-block stubs.
@@ -85,21 +86,40 @@ result-column   ::= "*"                                   (* V2 [parse.y:717 sel
 table-ref       ::= table-name [ [ "AS" ] identifier ] ;  (* V2 [parse.y:762 seltablist, single-table shape only --
                                                               no schema-qualifier, subquery, or INDEXED BY/NOT INDEXED] *)
 
-(* #237: an INNER/plain JOIN, LEFT [OUTER] JOIN, or CROSS JOIN chain,
+(* #237 landed the INNER/plain JOIN, LEFT [OUTER] JOIN, and CROSS JOIN
+ * subset of this chain; #250 extended it with NATURAL, RIGHT [OUTER]/
+ * FULL [OUTER] JOIN, `USING (col, ...)`, and comma-style `FROM a, b` --
  * left-to-right -- `a JOIN b ON .. JOIN c ON ..` joins b against a,
  * then c against that result (`src/codegen/select.rs::compile_join_level`'s
- * nested-loop shape). Only the `ON <expr>` constraint form is
- * represented; CROSS JOIN takes no constraint at all. A bare `JOIN`/
- * `INNER JOIN`/`LEFT [OUTER] JOIN` with no ON/USING (valid SQL, a
- * constraint-less cross join) is deliberately still `unsupported(..)`
- * -- see `src/parser/grammar.rs::parse_from_clause`.
+ * nested-loop shape). A comma is sugar for an unconstrained CROSS JOIN
+ * step in the same chain (`src/parser/grammar.rs::parse_from_clause`);
+ * NATURAL joins take no ON/USING clause at all (the join columns are
+ * same-named columns in both tables, resolved by codegen, not the
+ * parser) and NATURAL CROSS JOIN is rejected (not legal SQLite
+ * grammar -- CROSS is defined by the *absence* of a join condition,
+ * which NATURAL's implied condition contradicts). A bare `JOIN`/
+ * `INNER JOIN`/`LEFT/RIGHT/FULL [OUTER] JOIN` with no ON/USING (valid
+ * SQL, a constraint-less cross join) is deliberately still
+ * `unsupported(..)`. #250 is parser-only: codegen still only
+ * implements INNER/LEFT/CROSS with an `ON` constraint --
+ * `compile_select_joined` rejects NATURAL/RIGHT/FULL/USING joins with a
+ * clean `Unsupported` error as an interim stopgap.
  *)
-from-clause     ::= table-ref { join-op table-ref "ON" expr } ;          (* V4 [parse.y:750 from, :758 stl_prefix,
-                                                                              :762 seltablist, :894 on_using] *)
-join-op         ::= [ "INNER" ] "JOIN"                                   (* V4 [parse.y:866 joinop] *)
-                  | "LEFT" [ "OUTER" ] "JOIN"                            (* V4 [parse.y:868 joinop] *)
+from-clause     ::= table-ref { ( "," | join-op ) table-ref
+                       [ "ON" expr | "USING" "(" column-name { "," column-name } ")" ] } ;
+                                                                          (* V4 [parse.y:750 from, :758 stl_prefix,
+                                                                              :762 seltablist, :894 on_using,
+                                                                              :895 on_using USING] *)
+join-op         ::= [ "NATURAL" ] [ "INNER" ] "JOIN"                     (* V4 [parse.y:866 joinop COMMA|JOIN,
+                                                                              :868 joinop JOIN_KW JOIN] *)
+                  | [ "NATURAL" ] "LEFT" [ "OUTER" ] "JOIN"               (* V4 [parse.y:870 joinop JOIN_KW nm JOIN] *)
+                  | [ "NATURAL" ] "RIGHT" [ "OUTER" ] "JOIN"              (* V4 [parse.y:870 joinop JOIN_KW nm JOIN] --
+                                                                              #250 *)
+                  | [ "NATURAL" ] "FULL" [ "OUTER" ] "JOIN"               (* V4 [parse.y:872 joinop JOIN_KW nm nm JOIN] --
+                                                                              #250 *)
                   | "CROSS" "JOIN" ;                                     (* V4 [parse.y:872 joinop] --
-                                                                              CROSS JOIN takes no ON/USING here *)
+                                                                              CROSS JOIN takes no ON here, but
+                                                                              #250 allows USING with it *)
 
 ordering-term   ::= expr [ "COLLATE" collation-name ]
                      [ "ASC" | "DESC" ]
@@ -258,9 +278,10 @@ column-name     ::= identifier ;                                          (* V2 
 identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -- V2 tokenizer (#60) *)
 
 (* ===================== Future blocks (stubs -- the denominator) =====================
- * V4:  NATURAL/RIGHT/FULL joins, USING (...), comma-style FROM a, b
- *      (#237 landed the INNER/LEFT [OUTER]/CROSS `JOIN ... ON` subset --
- *      see from-clause/join-op above), subqueries in FROM (table-valued),
+ * V4:  subqueries in FROM (table-valued)
+ *      (#237 landed the INNER/LEFT [OUTER]/CROSS `JOIN ... ON` subset,
+ *      #250 landed NATURAL/RIGHT/FULL joins, USING (...), and
+ *      comma-style FROM a, b -- see from-clause/join-op above),
  *      ANY/ALL/SOME quantified comparisons, multi-column IN
  *      (#238 landed scalar/IN/EXISTS subquery expressions, including
  *      correlated ones -- see equality-tail/primary-expr above;

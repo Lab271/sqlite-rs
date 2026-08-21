@@ -1027,28 +1027,57 @@ impl Parser {
         Ok(None)
     }
 
-    /// Parses `FROM <table_ref> (<join_op> <table_ref> [ON <expr>])*`
-    /// (#237, the V4 join slice): an INNER/plain `JOIN`, `LEFT [OUTER]
-    /// JOIN`, or `CROSS JOIN` chain, left-to-right. `NATURAL`/`RIGHT`/
-    /// `FULL`, `USING (...)`, and comma-style `FROM a, b` are still
-    /// explicit `unsupported(..)` errors rather than silently
-    /// mis-parsed.
+    /// Parses `USING ( col { , col } )` (#250) — at least one
+    /// parenthesized, comma-separated column name.
+    fn using_columns(&mut self) -> PResult<Vec<String>> {
+        self.expect_kw(Keyword::USING)?;
+        self.expect_punct(TokenKind::LParen, "'(' after USING")?;
+        let mut cols = vec![self.identifier()?.0];
+        while self.eat_punct(&TokenKind::Comma) {
+            cols.push(self.identifier()?.0);
+        }
+        self.expect_punct(TokenKind::RParen, "')' to close USING column list")?;
+        Ok(cols)
+    }
+
+    /// Parses `FROM <table_ref> ( "," <table_ref>
+    /// | [NATURAL] <join_op> <table_ref> [ON <expr> | USING (col, ...)]
+    /// )*` (#237's INNER/LEFT/CROSS slice, extended by #250 with
+    /// NATURAL, RIGHT/FULL, USING, and comma-style joins). Comma-joins
+    /// are synthesized as constraint-less `JoinOp::Cross` steps (ANSI
+    /// comma-join is definitionally an unconstrained cross join). A
+    /// bare `JOIN`/`INNER JOIN`/`LEFT/RIGHT/FULL [OUTER] JOIN` with no
+    /// `ON`/`USING` at all, and `NATURAL CROSS JOIN` (not legal SQLite
+    /// grammar — NATURAL requires an implied constraint, which CROSS's
+    /// definition-by-absence-of-constraint contradicts), stay explicit
+    /// `unsupported(..)` errors.
     fn parse_from_clause(&mut self) -> PResult<FromClause> {
         let first = self.table_ref()?;
         let mut joins = Vec::new();
         loop {
-            if matches!(self.peek().kind, TokenKind::Comma) {
-                return self.unsupported("comma-style JOIN (FROM a, b) not yet supported");
+            if self.eat_punct(&TokenKind::Comma) {
+                // Real SQLite grammar treats `,` as a `joinop` just like
+                // `JOIN` (`stl_prefix ::= seltablist joinop`, parse.y:758,
+                // where `joinop ::= COMMA|JOIN`, parse.y:867) — so an
+                // `ON`/`USING` clause is legal after a comma-joined table
+                // too (`FROM a, b ON a.x = b.y`), not just constraint-less.
+                let table = self.table_ref()?;
+                let constraint = if self.eat_kw(Keyword::ON) {
+                    Some(JoinConstraint::On(self.expr()?))
+                } else if self.at_kw(Keyword::USING) {
+                    Some(JoinConstraint::Using(self.using_columns()?))
+                } else {
+                    None
+                };
+                joins.push(Join {
+                    op: JoinOp::Cross,
+                    table,
+                    constraint,
+                    natural: false,
+                });
+                continue;
             }
-            if self.at_kw(Keyword::NATURAL) {
-                return self.unsupported("NATURAL joins not yet supported");
-            }
-            if self.at_kw(Keyword::RIGHT) {
-                return self.unsupported("RIGHT joins not yet supported");
-            }
-            if self.at_kw(Keyword::FULL) {
-                return self.unsupported("FULL joins not yet supported");
-            }
+            let natural = self.eat_kw(Keyword::NATURAL);
             // A bare `OUTER` only ever appears right after `LEFT`/
             // `RIGHT`/`FULL` (consumed together with those, below) —
             // seeing it here means some other/malformed join-operator
@@ -1063,17 +1092,23 @@ impl Parser {
             }
             if self.eat_kw(Keyword::CROSS) {
                 self.expect_kw(Keyword::JOIN)?;
+                if natural {
+                    return self.unsupported("NATURAL CROSS JOIN is not valid SQLite grammar");
+                }
                 let table = self.table_ref()?;
                 if self.at_kw(Keyword::ON) {
                     return self.unsupported("CROSS JOIN with an ON clause not yet supported");
                 }
-                if self.at_kw(Keyword::USING) {
-                    return self.unsupported("USING clause not yet supported");
-                }
+                let constraint = if self.at_kw(Keyword::USING) {
+                    Some(JoinConstraint::Using(self.using_columns()?))
+                } else {
+                    None
+                };
                 joins.push(Join {
                     op: JoinOp::Cross,
                     table,
-                    constraint: None,
+                    constraint,
+                    natural: false,
                 });
                 continue;
             }
@@ -1081,6 +1116,14 @@ impl Parser {
                 self.eat_kw(Keyword::OUTER);
                 self.expect_kw(Keyword::JOIN)?;
                 Some(JoinOp::Left)
+            } else if self.eat_kw(Keyword::RIGHT) {
+                self.eat_kw(Keyword::OUTER);
+                self.expect_kw(Keyword::JOIN)?;
+                Some(JoinOp::Right)
+            } else if self.eat_kw(Keyword::FULL) {
+                self.eat_kw(Keyword::OUTER);
+                self.expect_kw(Keyword::JOIN)?;
+                Some(JoinOp::Full)
             } else if self.eat_kw(Keyword::INNER) {
                 self.expect_kw(Keyword::JOIN)?;
                 Some(JoinOp::Inner)
@@ -1089,13 +1132,37 @@ impl Parser {
             } else {
                 None
             };
-            let Some(op) = op else { break };
+            let Some(op) = op else {
+                if natural {
+                    return self.unsupported("NATURAL not followed by a recognized join operator");
+                }
+                break;
+            };
             let table = self.table_ref()?;
-            if self.at_kw(Keyword::USING) {
-                return self.unsupported("USING clause not yet supported");
+            if natural {
+                // NATURAL joins carry no explicit ON/USING clause — the
+                // join columns are same-named columns in both tables,
+                // resolved by codegen, not the parser.
+                joins.push(Join {
+                    op,
+                    table,
+                    constraint: None,
+                    natural: true,
+                });
+                continue;
             }
-            // A real `JOIN`/`INNER JOIN`/`LEFT [OUTER] JOIN` with no
-            // `ON`/`USING` at all is valid SQL (equivalent to a
+            if self.at_kw(Keyword::USING) {
+                let cols = self.using_columns()?;
+                joins.push(Join {
+                    op,
+                    table,
+                    constraint: Some(JoinConstraint::Using(cols)),
+                    natural: false,
+                });
+                continue;
+            }
+            // A real `JOIN`/`INNER JOIN`/`LEFT/RIGHT/FULL [OUTER] JOIN`
+            // with no `ON`/`USING` at all is valid SQL (equivalent to a
             // constraint-less cross join) — real SQLite accepts it, so
             // this stays a graceful `unsupported(..)` rather than the
             // hard parse error `expect_kw` would raise, which would
@@ -1112,6 +1179,7 @@ impl Parser {
                 op,
                 table,
                 constraint: Some(JoinConstraint::On(on_expr)),
+                natural: false,
             });
         }
         Ok(FromClause { first, joins })

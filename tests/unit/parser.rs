@@ -415,9 +415,27 @@ fn test_unsupported_join() {
 }
 
 #[test]
-fn test_unsupported_comma_join() {
-    let msg = unsupported("SELECT * FROM a, b");
-    assert!(msg.contains("JOIN"), "message: {msg}");
+fn test_accept_comma_join() {
+    // #250: `FROM a, b` is ANSI comma-join sugar for an unconstrained
+    // CROSS JOIN, synthesized as such in the same `joins` chain.
+    let select = accept("SELECT * FROM a, b");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins.len(), 1);
+    assert_eq!(from.joins[0].op, JoinOp::Cross);
+    assert!(from.joins[0].constraint.is_none());
+    assert!(!from.joins[0].natural);
+    assert_eq!(from.joins[0].table.name, "b");
+}
+
+#[test]
+fn test_accept_comma_join_mixed_with_explicit_join() {
+    // A leading comma and an explicit JOIN keyword can appear in the
+    // same FROM clause.
+    let select = accept("SELECT * FROM a, b JOIN c ON b.x = c.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins.len(), 2);
+    assert_eq!(from.joins[0].op, JoinOp::Cross);
+    assert_eq!(from.joins[1].op, JoinOp::Inner);
 }
 
 /// #237: `JOIN`/`INNER JOIN ... ON`, `LEFT [OUTER] JOIN ... ON`, and
@@ -478,27 +496,94 @@ fn test_accept_multi_way_join_chain() {
 }
 
 #[test]
-fn test_unsupported_join_using() {
-    let msg = unsupported("SELECT * FROM a JOIN b USING (x)");
-    assert!(msg.contains("USING"), "message: {msg}");
+fn test_accept_join_using() {
+    let select = accept("SELECT * FROM a JOIN b USING (x)");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert_eq!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::Using(vec!["x".to_string()]))
+    );
 }
 
 #[test]
-fn test_unsupported_natural_join() {
-    let msg = unsupported("SELECT * FROM a NATURAL JOIN b");
+fn test_accept_join_using_multiple_columns() {
+    let select = accept("SELECT * FROM a JOIN b USING (x, y)");
+    let from = select.from.unwrap();
+    assert_eq!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::Using(vec![
+            "x".to_string(),
+            "y".to_string()
+        ]))
+    );
+}
+
+#[test]
+fn test_accept_cross_join_using() {
+    let select = accept("SELECT * FROM a CROSS JOIN b USING (x)");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Cross);
+    assert_eq!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::Using(vec!["x".to_string()]))
+    );
+}
+
+#[test]
+fn test_accept_natural_join() {
+    let select = accept("SELECT * FROM a NATURAL JOIN b");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Inner);
+    assert!(from.joins[0].natural);
+    assert!(from.joins[0].constraint.is_none());
+}
+
+#[test]
+fn test_accept_natural_left_join() {
+    let select = accept("SELECT * FROM a NATURAL LEFT JOIN b");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Left);
+    assert!(from.joins[0].natural);
+}
+
+#[test]
+fn test_unsupported_natural_cross_join() {
+    // NATURAL CROSS JOIN is not valid SQLite grammar.
+    let msg = unsupported("SELECT * FROM a NATURAL CROSS JOIN b");
     assert!(msg.contains("NATURAL"), "message: {msg}");
 }
 
 #[test]
-fn test_unsupported_right_join() {
-    let msg = unsupported("SELECT * FROM a RIGHT JOIN b ON a.x = b.y");
-    assert!(msg.contains("RIGHT"), "message: {msg}");
+fn test_accept_right_join() {
+    let select = accept("SELECT * FROM a RIGHT JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Right);
+    assert!(matches!(
+        from.joins[0].constraint,
+        Some(JoinConstraint::On(_))
+    ));
 }
 
 #[test]
-fn test_unsupported_full_join() {
-    let msg = unsupported("SELECT * FROM a FULL JOIN b ON a.x = b.y");
-    assert!(msg.contains("FULL"), "message: {msg}");
+fn test_accept_right_outer_join() {
+    let select = accept("SELECT * FROM a RIGHT OUTER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Right);
+}
+
+#[test]
+fn test_accept_full_join() {
+    let select = accept("SELECT * FROM a FULL JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Full);
+}
+
+#[test]
+fn test_accept_full_outer_join() {
+    let select = accept("SELECT * FROM a FULL OUTER JOIN b ON a.x = b.y");
+    let from = select.from.unwrap();
+    assert_eq!(from.joins[0].op, JoinOp::Full);
 }
 
 #[test]
@@ -697,6 +782,14 @@ fn test_roundtrip_fixpoint() {
         "SELECT a FROM t ORDER BY a NULLS FIRST",
         // CASE without an operand and without ELSE.
         "SELECT CASE WHEN a THEN 1 END",
+        // #250: NATURAL/RIGHT/FULL/USING/comma-join round-trip.
+        "SELECT * FROM a NATURAL JOIN b",
+        "SELECT * FROM a NATURAL LEFT JOIN b",
+        "SELECT * FROM a RIGHT JOIN b ON a.x = b.y",
+        "SELECT * FROM a FULL JOIN b ON a.x = b.y",
+        "SELECT * FROM a JOIN b USING (x, y)",
+        "SELECT * FROM a, b",
+        "SELECT * FROM a, b JOIN c ON b.x = c.y",
     ];
     for src in cases {
         let select1 = accept(src);

@@ -66,12 +66,13 @@
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
 use crate::codegen::select::{
-    compile_select_scan, select_result_column_count, CodegenError, ScanCursors,
+    compile_select_joined_scan, compile_select_scan, select_result_column_count,
+    select_result_column_count_joined, CodegenError, ScanCursors,
 };
 use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
     ColumnConstraint, ConflictAction, DefaultValue, Expr, ExprKind, Insert, InsertSource, Literal,
-    TableConstraint,
+    TableConstraint, TableRef,
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
@@ -174,14 +175,17 @@ fn emit_new_rowid(em: &mut Emitter, dest: i32, schema: &TableSchema, is_autoincr
 }
 
 /// Compiles `insert` against `schema` (the resolved target table) into
-/// a `Program`. `select_schema` is only consulted when `insert.source`
-/// is `InsertSource::Select` — it's the resolved schema for that
-/// `SELECT`'s `FROM` table (#208); pass `None` if the caller couldn't
-/// resolve it (or `insert.source` isn't `Select`).
+/// a `Program`. `select_schemas` is only consulted when `insert.source`
+/// is `InsertSource::Select` — it's the resolved schema for every table
+/// in that `SELECT`'s `FROM` clause, one per table in `FROM`-clause
+/// order (the first table, then each `JOIN`'s table, #208/#250); pass
+/// `None` if the caller couldn't resolve it (or `insert.source` isn't
+/// `Select`). A single-element slice is the pre-#250 single-table case;
+/// more than one element means the `SELECT` has a JOIN.
 pub fn compile_insert(
     insert: &Insert,
     schema: &TableSchema,
-    select_schema: Option<&TableSchema>,
+    select_schemas: Option<&[TableSchema]>,
 ) -> Result<Program, CodegenError> {
     if schema.without_rowid {
         return Err(CodegenError::Unsupported {
@@ -264,11 +268,21 @@ pub fn compile_insert(
     // reported before any code is emitted, matching the literal-`VALUES`
     // check above.
     if let InsertSource::Select(select) = &insert.source {
-        let found = match select_schema {
-            Some(select_schema) => select_result_column_count(select, select_schema),
-            None => {
+        let found = match select_schemas {
+            Some([single]) => select_result_column_count(select, single),
+            Some(joined) if joined.len() > 1 => {
+                let Some(from) = &select.from else {
+                    return Err(CodegenError::NoFromClause);
+                };
+                let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
+                    .chain(from.joins.iter().map(|j| &j.table))
+                    .collect();
+                select_result_column_count_joined(select, joined, &table_refs)?
+            }
+            Some(_) | None => {
                 return Err(CodegenError::Unsupported {
-                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
+                    reason: "INSERT ... SELECT: the SELECT's FROM table schema(s) were not \
+                             resolved"
                         .to_string(),
                 })
             }
@@ -348,12 +362,11 @@ pub fn compile_insert(
         }
         InsertSource::Select(select) => {
             // Re-checked (rather than trusted from the validation above)
-            // so this arm never needs an infallible unwrap: `Option` is
-            // `Copy` for a `&TableSchema`, so this is the same value,
-            // not a second lookup.
-            let Some(select_schema) = select_schema else {
+            // so this arm never needs an infallible unwrap.
+            let Some(select_schemas) = select_schemas else {
                 return Err(CodegenError::Unsupported {
-                    reason: "INSERT ... SELECT: the SELECT's FROM table schema was not resolved"
+                    reason: "INSERT ... SELECT: the SELECT's FROM table schema(s) were not \
+                             resolved"
                         .to_string(),
                 });
             };
@@ -364,18 +377,6 @@ pub fn compile_insert(
             // FIRST_INDEX_CURSOR+schema.indexes.len()`).
             let select_table_cursor =
                 FIRST_INDEX_CURSOR.saturating_add(i32::try_from(schema.indexes.len()).unwrap_or(0));
-            let select_cursors = ScanCursors {
-                table: select_table_cursor,
-                sort: select_table_cursor.saturating_add(1),
-                pseudo: select_table_cursor.saturating_add(2),
-                distinct: select_table_cursor.saturating_add(3),
-            };
-            em.emit(Instruction::new(
-                Opcode::OpenRead,
-                select_cursors.table,
-                i32::try_from(select_schema.root_page).unwrap_or(0),
-                0,
-            ));
             let end_label = em.new_label();
             let mut sink = |em: &mut Emitter, reg: &mut RegAlloc, first: i32, count: i32| {
                 let count = usize::try_from(count).unwrap_or(0);
@@ -397,16 +398,54 @@ pub fn compile_insert(
                     is_autoincrement,
                 )
             };
-            compile_select_scan(
-                &mut em,
-                &mut reg,
-                select,
-                select_schema,
-                select_cursors,
-                end_label,
-                std::slice::from_ref(select_schema),
-                &mut sink,
-            )?;
+            if select_schemas.len() > 1 {
+                // #250: the SELECT's FROM clause has a JOIN — drive the
+                // same nested-loop join scan `compile_select_joined`
+                // uses, with cursor numbers offset above this INSERT's
+                // own cursors (`compile_select_joined_scan` opens every
+                // source-table cursor itself, unlike the single-table
+                // `compile_select_scan` path below, which expects its
+                // one cursor already open).
+                compile_select_joined_scan(
+                    &mut em,
+                    &mut reg,
+                    select,
+                    select_schemas,
+                    select_table_cursor,
+                    end_label,
+                    &mut sink,
+                )?;
+            } else {
+                let Some(select_schema) = select_schemas.first() else {
+                    return Err(CodegenError::Unsupported {
+                        reason: "INSERT ... SELECT: the SELECT's FROM table schema was not \
+                                 resolved"
+                            .to_string(),
+                    });
+                };
+                let select_cursors = ScanCursors {
+                    table: select_table_cursor,
+                    sort: select_table_cursor.saturating_add(1),
+                    pseudo: select_table_cursor.saturating_add(2),
+                    distinct: select_table_cursor.saturating_add(3),
+                };
+                em.emit(Instruction::new(
+                    Opcode::OpenRead,
+                    select_cursors.table,
+                    i32::try_from(select_schema.root_page).unwrap_or(0),
+                    0,
+                ));
+                compile_select_scan(
+                    &mut em,
+                    &mut reg,
+                    select,
+                    select_schema,
+                    select_cursors,
+                    end_label,
+                    std::slice::from_ref(select_schema),
+                    &mut sink,
+                )?;
+            }
             em.place(end_label);
         }
     }

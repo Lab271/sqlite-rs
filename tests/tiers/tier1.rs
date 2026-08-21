@@ -26,10 +26,11 @@ fn t1_tokenizer_roundtrip_never_panics() {
     }
 }
 
-/// V2 phase 1 SELECT-core parser (#61), plus the V4 join slice (#237):
-/// single-table SELECT and an INNER/LEFT/CROSS `JOIN ... ON` chain are
-/// accepted; still-unsupported constructs (a comma-style `FROM a, b`)
-/// are distinguished from genuine syntax errors, per the three-way
+/// V2 phase 1 SELECT-core parser (#61), plus the V4 join slice (#237,
+/// extended by #250): single-table SELECT and a full JOIN chain —
+/// INNER/LEFT/RIGHT/FULL/CROSS, NATURAL, `USING (...)`, and comma-style
+/// `FROM a, b` — are accepted; genuinely invalid SQL is still
+/// distinguished from Accepted/Unsupported, per the three-way
 /// [`ParseOutcome`] contract (spec 002-parser Requirement 4).
 #[test]
 fn t1_select_core_accepts_and_rejects() {
@@ -43,17 +44,18 @@ fn t1_select_core_accepts_and_rejects() {
         "SELECT * FROM t JOIN u ON t.a = u.a",
         "SELECT * FROM t LEFT JOIN u ON t.a = u.a",
         "SELECT * FROM t CROSS JOIN u",
+        // #250: NATURAL, RIGHT/FULL, USING, and comma-style joins.
+        "SELECT * FROM t NATURAL JOIN u",
+        "SELECT * FROM t RIGHT JOIN u ON t.a = u.a",
+        "SELECT * FROM t FULL JOIN u ON t.a = u.a",
+        "SELECT * FROM t JOIN u USING (a)",
+        "SELECT * FROM t, u",
     ] {
         assert!(
             matches!(parse_select(accepted), ParseOutcome::Accepted(_)),
             "expected Accepted for {accepted:?}"
         );
     }
-
-    assert!(matches!(
-        parse_select("SELECT * FROM t, u"),
-        ParseOutcome::Unsupported { .. }
-    ));
 
     for invalid in ["SELECT FROM", "SELECT * WHERE", "not sql at all"] {
         assert!(

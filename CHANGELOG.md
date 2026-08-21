@@ -6,6 +6,33 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-21
+
+JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what
+#237 deferred. Parser: `NATURAL` joins, `RIGHT`/`FULL [OUTER] JOIN`,
+`USING (col, ...)`, and comma-style `FROM a, b` (parsed as CROSS-join
+sugar, which needed no codegen work — it already compiles through
+#237's CROSS JOIN path). Codegen: `NATURAL`/`USING` synthesize the
+`ON`-equivalent equality constraint from schema column names and
+de-duplicate the shared column in `SELECT *` output; `RIGHT JOIN`
+reorders the execution loop nesting so the right-hand table becomes
+outer (`A RIGHT JOIN B == B LEFT JOIN A`), generalizing the `LEFT
+JOIN` matched/null-extension machinery; `FULL JOIN` adds a second
+ephemeral-index-tracked pass (same mechanism as `DISTINCT`) for
+right-side-unmatched rows. `ORDER BY`, `DISTINCT`, and
+`INSERT ... SELECT` are now all generalized to work with a JOIN in the
+`FROM` clause (previously rejected outright). Deliberate, narrower-
+than-full-generality scope, each returning a clean `Unsupported` error
+rather than a silently wrong result: only one `RIGHT JOIN` per `FROM`
+clause; `FULL JOIN` restricted to a single two-table case; a computed
+`SELECT`-list expression combined with a joined `ORDER BY`; and
+`DISTINCT` + `ORDER BY` combined with a JOIN. `tests/tiers/tier3.rs`'s
+`t3_multi_table_joins_and_aggregates` (the tier-contract acceptance
+gate for #250) is un-ignored. Spend: ran well past the ticket's
+"Medium" estimate once `RIGHT`/`FULL JOIN`'s loop-reordering and
+two-pass tracking turned out to need real architectural generalization
+rather than a local tweak.
+
 Planner: join-level WHERE/`ON` equality index selection (#243, V4 phase
 1 epic #235). An inner join table's `ON` equality against the outer
 table's rowid, or against a `UNIQUE` single-column index, now compiles

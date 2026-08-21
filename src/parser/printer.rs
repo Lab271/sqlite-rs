@@ -146,10 +146,17 @@ impl fmt::Display for Join {
             JoinOp::Inner => "JOIN",
             JoinOp::Left => "LEFT JOIN",
             JoinOp::Cross => "CROSS JOIN",
+            JoinOp::Right => "RIGHT JOIN",
+            JoinOp::Full => "FULL JOIN",
         };
+        if self.natural {
+            write!(f, "NATURAL ")?;
+        }
         write!(f, "{op} {}", self.table)?;
-        if let Some(JoinConstraint::On(expr)) = &self.constraint {
-            write!(f, " ON {expr}")?;
+        match &self.constraint {
+            Some(JoinConstraint::On(expr)) => write!(f, " ON {expr}")?,
+            Some(JoinConstraint::Using(cols)) => write!(f, " USING ({})", cols.join(", "))?,
+            None => {}
         }
         Ok(())
     }
