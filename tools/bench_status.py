@@ -40,6 +40,26 @@ TIER1_SCENARIOS = [
     "agg_subquery",
     # #323: IN (SELECT ...) subquery inside an aggregate outer query.
     "in_subquery_agg_outer",
+    # tests/performance/crud.rs: 15-scenario full-CRUD tier-1 bench
+    # (Create/Read/Update/Delete), bench_1mb.db only — see that file's
+    # own module doc comment for why writes don't also run against
+    # bench_50mb.db. Was entirely missing from this list (a pre-existing
+    # gap noticed while triaging #336).
+    "read_pk",
+    "read_indexed_range",
+    "read_full_scan",
+    "read_join",
+    "read_group_by_agg",
+    "insert_single",
+    "insert_batch_10",
+    "insert_no_explicit_pk",
+    "update_pk",
+    "update_filtered_range",
+    "update_indexed_column",
+    "update_multi_column",
+    "delete_pk",
+    "delete_filtered_range",
+    "delete_equality_bucket",
 ]
 FIXTURES = ["bench_1mb.db", "bench_50mb.db"]
 

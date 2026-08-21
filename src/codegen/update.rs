@@ -17,22 +17,30 @@
 //! `SET col = NULL` on a NOT NULL column is correctly a violation, not
 //! a default substitution — unlike `INSERT ... OR REPLACE`, `UPDATE`
 //! has no "explicit NULL means take the default" convention in stock
-//! SQLite either), no rowid-equality `SeekRowid` fast path for the scan
-//! itself, and no "skip unchanged indexed columns" optimization — every
-//! index is fully rebuilt (delete old key, insert new key) on every
-//! matched row regardless of whether the `SET` clause actually touched
-//! that index's columns. All correctness-neutral; `insert.rs`/`select.rs`
-//! already document precedent for the rowid-seek and index-optimization
-//! simplifications.
+//! SQLite either), and no "skip unchanged indexed columns" optimization
+//! — every index is fully rebuilt (delete old key, insert new key) on
+//! every matched row regardless of whether the `SET` clause actually
+//! touched that index's columns. All correctness-neutral;
+//! `insert.rs`/`select.rs` already document precedent for the
+//! index-optimization simplification.
+//!
+//! #336: `WHERE rowid = <int literal|param>` (or the table's `INTEGER
+//! PRIMARY KEY` rowid-alias column) compiles to `SeekRowid` instead of
+//! the `Rewind`/`Next` scan — same narrow recognition as `delete.rs`'s
+//! own #336 fast path (a single top-level equality, nothing compound),
+//! reusing the exact same per-row body (`col_regs` construction,
+//! constraint checks, index maintenance) either way.
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
 use crate::codegen::insert::{
     column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_NOTNULL,
 };
-use crate::codegen::select::CodegenError;
+use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
-use crate::parser::ast::{ConflictAction, Expr, TableConstraint, Update};
+use crate::parser::ast::{
+    ConflictAction, Expr, ExprKind, Literal, ParamKind, TableConstraint, Update,
+};
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
 use crate::schema::{rowid_alias_column, TableSchema};
@@ -124,23 +132,63 @@ pub fn compile_update_with_catalog(
     ));
     open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
 
-    let end_label = em.new_label();
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
-    em.patch_p2(rewind_addr, end_label);
-    let loop_start = em.new_label();
-    em.place(loop_start);
-
     let scope = crate::codegen::Scope::single(schema, TABLE_CURSOR).with_catalog(catalog.to_vec());
-    let row_skip = em.new_label();
-    if let Some(where_expr) = &update.where_clause {
-        compile_cond(
-            &mut em,
-            &mut reg,
-            &scope,
-            where_expr,
-            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
-        )?;
-    }
+    let end_label = em.new_label();
+
+    let rowid_seek_operand = update
+        .where_clause
+        .as_ref()
+        .and_then(|where_expr| top_level_equality_operands(where_expr))
+        .and_then(|(lhs, rhs)| {
+            if is_rowid_reference(schema, lhs) {
+                Some(rhs)
+            } else if is_rowid_reference(schema, rhs) {
+                Some(lhs)
+            } else {
+                None
+            }
+        })
+        .filter(|operand| {
+            matches!(
+                &operand.kind,
+                ExprKind::Literal(Literal::Integer(_))
+                    | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+            )
+        });
+
+    // #336: on a seek, `row_skip` and `end_label` are the same target —
+    // there's exactly one candidate row, so "skip this row" (a
+    // constraint violation under `OR IGNORE`) and "no more rows" both
+    // mean "we're done". On the ordinary scan, they differ as usual:
+    // `row_skip` continues the loop, `end_label` exits it.
+    let (loop_start, row_skip) = if let Some(operand) = rowid_seek_operand {
+        let value_reg = compile_value(&mut em, &mut reg, &scope, operand)?;
+        let seek_addr = em.emit(Instruction::new(
+            Opcode::SeekRowid,
+            TABLE_CURSOR,
+            0,
+            value_reg,
+        ));
+        em.patch_p2(seek_addr, end_label);
+        (None, end_label)
+    } else {
+        let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
+        em.patch_p2(rewind_addr, end_label);
+        let loop_start = em.new_label();
+        em.place(loop_start);
+
+        let row_skip = em.new_label();
+        if let Some(where_expr) = &update.where_clause {
+            compile_cond(
+                &mut em,
+                &mut reg,
+                &scope,
+                where_expr,
+                CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
+            )?;
+        }
+        (Some(loop_start), row_skip)
+    };
 
     // Every value the new row needs — including a possibly-reassigned
     // rowid — is read from the cursor's *current* row before `Delete`
@@ -315,9 +363,11 @@ pub fn compile_update_with_catalog(
         em.place(seek_ok);
     }
 
-    em.place(row_skip);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
-    em.patch_p2(next_addr, loop_start);
+    if let Some(loop_start) = loop_start {
+        em.place(row_skip);
+        let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
+        em.patch_p2(next_addr, loop_start);
+    }
 
     em.place(end_label);
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
