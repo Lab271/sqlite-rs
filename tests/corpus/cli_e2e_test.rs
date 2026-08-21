@@ -502,10 +502,11 @@ fn query_unsupported_sql_fails_cleanly_and_says_so() {
         // A comma-join (`FROM a, b`) used to be a still-unsupported
         // construct, but #250 gave it real grammar (CROSS JOIN sugar),
         // so it now parses and instead fails on table lookup. A
-        // subquery in FROM is still parser-`unsupported(..)` regardless
-        // of what tables exist, so it's used here as the generic
-        // "unsupported construct fails cleanly" vehicle instead.
-        .arg("SELECT a FROM (SELECT a FROM t) AS sub")
+        // subquery in FROM was the next stand-in, but #257 gave that
+        // real support too. `WITH` / CTEs remain parser-`unsupported(..)`
+        // regardless of what tables exist, so that's used here as the
+        // generic "unsupported construct fails cleanly" vehicle instead.
+        .arg("WITH cte AS (SELECT a FROM t) SELECT * FROM cte")
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);
