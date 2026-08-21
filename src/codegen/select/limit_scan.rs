@@ -74,7 +74,7 @@ pub(super) fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: 
 /// `expr` alone would need one. The caller also needs `schema` (to pick
 /// the non-rowid side via [`is_rowid_reference`]), so that step happens
 /// in [`try_compile_rowid_seek`] itself, which already holds both.
-pub(super) fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)> {
+pub(crate) fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)> {
     let ExprKind::Binary {
         op: BinaryOp::Eq,
         lhs,
@@ -86,7 +86,7 @@ pub(super) fn top_level_equality_operands(expr: &Expr) -> Option<(&Expr, &Expr)>
     Some((lhs, rhs))
 }
 
-pub(super) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
+pub(crate) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
     let ExprKind::Column { name, .. } = &expr.kind else {
         return false;
     };

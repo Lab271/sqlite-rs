@@ -131,3 +131,4 @@ pub(crate) use entry::{
     compile_select_scan, select_result_column_count, select_result_column_count_joined,
 };
 pub(crate) use joins::compile_select_joined_scan;
+pub(crate) use limit_scan::{is_rowid_reference, top_level_equality_operands};

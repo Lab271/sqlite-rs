@@ -290,6 +290,134 @@ fn not_null_violation_halts_and_leaves_the_row_unchanged() {
     );
 }
 
+/// #336 regression: `WHERE rowid = <int literal>` compiles to
+/// `SeekRowid`, not a `Rewind`/`Next` scan.
+#[test]
+fn rowid_equality_update_compiles_to_seek_rowid() {
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+    let update = match parse_update("UPDATE t SET b = 'x' WHERE rowid = 2") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekRowid"),
+        "expected SeekRowid in the compiled program: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "Rewind"),
+        "rowid-equality update must not also emit a full scan: {rows:?}"
+    );
+}
+
+/// #336 regression: a compound `WHERE` must NOT take the seek fast
+/// path — only a single top-level equality does, matching #137's own
+/// narrow scope for `SELECT`. Uses `a` as the rowid alias so the
+/// fallback scan's ordinary column resolution can compile `WHERE a =
+/// ...` (resolving the bare `rowid` keyword outside the seek fast paths
+/// is a separate, pre-existing gap this test isn't about).
+#[test]
+fn compound_where_with_rowid_alias_equality_falls_back_to_scan() {
+    let schema = schema_with_columns(
+        "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)",
+        &["a", "b"],
+        &["INTEGER", "TEXT"],
+    );
+    let update = match parse_update("UPDATE t SET b = 'x' WHERE a = 2 OR a = 5") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "Rewind"),
+        "expected the compound WHERE to still fall back to a full scan: {rows:?}"
+    );
+}
+
+#[test]
+fn rowid_equality_update_touches_only_the_matching_row() {
+    let path = scratch_db("rowid-seek");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+
+    for i in 1..=5 {
+        run_insert(
+            &path,
+            &header,
+            page_size,
+            &format!("INSERT INTO t(a, b) VALUES ({i}, 'v{i}')"),
+            &schema,
+        );
+    }
+
+    run_update(
+        &path,
+        &header,
+        page_size,
+        "UPDATE t SET b = 'x' WHERE rowid = 3",
+        &schema,
+    )
+    .unwrap();
+
+    let got = rows(&path, &header, page_size, 1);
+    let texts: Vec<(i64, String)> = got
+        .into_iter()
+        .map(|(rowid, values)| match &values[1] {
+            Value::Text(s) => (rowid, s.to_string()),
+            other => panic!("expected TEXT, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            (1, "v1".to_string()),
+            (2, "v2".to_string()),
+            (3, "x".to_string()),
+            (4, "v4".to_string()),
+            (5, "v5".to_string()),
+        ]
+    );
+}
+
+/// A rowid that doesn't exist: the seek misses cleanly, no row updated.
+#[test]
+fn rowid_equality_update_with_no_such_rowid_is_a_no_op() {
+    let path = scratch_db("rowid-seek-miss");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+
+    run_insert(
+        &path,
+        &header,
+        page_size,
+        "INSERT INTO t(a, b) VALUES (1, 'x')",
+        &schema,
+    );
+
+    run_update(
+        &path,
+        &header,
+        page_size,
+        "UPDATE t SET b = 'z' WHERE rowid = 999",
+        &schema,
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows(&path, &header, page_size, 1),
+        vec![(
+            1,
+            vec![Value::Integer(1), Value::Text("x".to_string().into())]
+        )]
+    );
+}
+
 #[test]
 fn check_violation_halts_and_leaves_the_row_unchanged() {
     let path = scratch_db("update-check");

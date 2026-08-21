@@ -225,3 +225,108 @@ fn delete_matching_nothing_leaves_all_rows_untouched() {
         )]
     );
 }
+
+/// #336 regression: `WHERE rowid = <int literal>` compiles to
+/// `SeekRowid`, not a `Rewind`/`Next` scan.
+#[test]
+fn rowid_equality_delete_compiles_to_seek_rowid() {
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+    let delete = match parse_delete("DELETE FROM t WHERE rowid = 2") {
+        ParseOutcome::Accepted(d) => *d,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_delete(&delete, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekRowid"),
+        "expected SeekRowid in the compiled program: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "Rewind"),
+        "rowid-equality delete must not also emit a full scan: {rows:?}"
+    );
+}
+
+/// #336 regression: a compound `WHERE` (even one built entirely from
+/// rowid-alias equalities) must NOT take the seek fast path — only a
+/// single top-level equality does, matching #137's own narrow scope for
+/// `SELECT`. Uses `a` as the table's `INTEGER PRIMARY KEY` rowid alias
+/// (rather than the bare `rowid` keyword) so the fallback scan's
+/// ordinary column resolution can actually compile `WHERE a = ...` —
+/// resolving the bare `rowid` keyword itself outside the seek fast
+/// paths is a separate, pre-existing gap this test isn't about.
+#[test]
+fn compound_where_with_rowid_alias_equality_falls_back_to_scan() {
+    let schema = schema("CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)");
+    let delete = match parse_delete("DELETE FROM t WHERE a = 2 OR a = 5") {
+        ParseOutcome::Accepted(d) => *d,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_delete(&delete, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "Rewind"),
+        "expected the compound WHERE to still fall back to a full scan: {rows:?}"
+    );
+}
+
+#[test]
+fn rowid_equality_delete_removes_only_the_matching_row() {
+    let path = scratch_db("rowid-seek");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+
+    for i in 1..=5 {
+        run_insert(
+            &path,
+            &header,
+            page_size,
+            &format!("INSERT INTO t(a, b) VALUES ({i}, 'v{i}')"),
+            &schema,
+        );
+    }
+
+    run_delete(
+        &path,
+        &header,
+        page_size,
+        "DELETE FROM t WHERE rowid = 3",
+        &schema,
+    )
+    .unwrap();
+
+    let got = rows(&path, &header, page_size, 1);
+    let remaining: Vec<i64> = got.iter().map(|(rowid, _)| *rowid).collect();
+    assert_eq!(remaining, vec![1, 2, 4, 5]);
+}
+
+/// A rowid that doesn't exist: the seek misses cleanly, no row deleted.
+#[test]
+fn rowid_equality_delete_with_no_such_rowid_is_a_no_op() {
+    let path = scratch_db("rowid-seek-miss");
+    let vfs = UnixVfs;
+    let page_size = 512u32;
+    let header = seed_minimal_db(&vfs, &path, page_size);
+    let schema = schema("CREATE TABLE t(a INTEGER, b TEXT)");
+
+    run_insert(
+        &path,
+        &header,
+        page_size,
+        "INSERT INTO t(a, b) VALUES (1, 'x')",
+        &schema,
+    );
+
+    run_delete(
+        &path,
+        &header,
+        page_size,
+        "DELETE FROM t WHERE rowid = 999",
+        &schema,
+    )
+    .unwrap();
+
+    assert_eq!(rows(&path, &header, page_size, 1).len(), 1);
+}
