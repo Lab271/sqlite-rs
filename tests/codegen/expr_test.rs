@@ -21,7 +21,7 @@ use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::record::Value;
 use sqlite_rs::schema::TableSchema;
-use sqlite_rs::vdbe::{execute_with_db, explain};
+use sqlite_rs::vdbe::{execute, execute_with_db, explain};
 use sqlite_rs::vfs::{UnixVfs, Vfs, VfsPageSource};
 
 /// A single-row fixture table `t(a, b, name)`, scratch-built via a real
@@ -229,6 +229,34 @@ fn zero_arg_function_call_compiles() {
         out,
         vec![vec![Value::Text(env!("ORACLE_VERSION").to_string())]]
     );
+}
+
+#[test]
+fn from_less_select_compiles_a_bare_expression_list() {
+    let (_path, schema) = one_row_fixture();
+    // A single column only — a multi-column list mixing computed
+    // expressions hits the pre-existing register-contiguity limitation
+    // tracked separately by #141/#260's sibling ticket, not this one.
+    let select = match parse_select("SELECT sqlite_version()") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected parse, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).unwrap();
+    let out = execute(&program).unwrap();
+    assert_eq!(
+        out,
+        vec![vec![Value::Text(env!("ORACLE_VERSION").to_string())]]
+    );
+}
+
+#[test]
+fn from_less_select_rejects_star() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT *") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected parse, got {other:?}"),
+    };
+    assert!(compile_select(&select, &schema).is_err());
 }
 
 #[test]

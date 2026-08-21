@@ -128,7 +128,7 @@ pub fn compile_select_with_catalog(
     catalog: &[TableSchema],
 ) -> Result<Program, CodegenError> {
     let Some(from) = &select.from else {
-        return Err(CodegenError::NoFromClause);
+        return compile_select_no_from(select, catalog);
     };
     if !from.joins.is_empty() {
         return Err(CodegenError::Unsupported {
@@ -170,6 +170,75 @@ pub fn compile_select_with_catalog(
     )?;
 
     em.place(end_label);
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+
+    Ok(em.finish())
+}
+
+/// A FROM-less `SELECT <expr>[, ...]` (#260) — SQLite's normal way to
+/// call a zero-arg built-in (`SELECT sqlite_version();`) or evaluate a
+/// bare expression (`SELECT 1 + 1;`). No cursor, no scan loop: the
+/// column list is compiled once against an empty schema and emitted
+/// as exactly one row. `*`/`tbl.*` and any clause that presumes a
+/// table (WHERE/GROUP BY/HAVING/ORDER BY/LIMIT/DISTINCT/compound) has
+/// nothing to operate over here and is rejected as unsupported rather
+/// than silently no-op'd.
+fn compile_select_no_from(
+    select: &Select,
+    catalog: &[TableSchema],
+) -> Result<Program, CodegenError> {
+    if select
+        .columns
+        .iter()
+        .any(|col| !matches!(col, ResultColumn::Expr { .. }))
+    {
+        return Err(CodegenError::Unsupported {
+            reason: "`*`/`tbl.*` has no table to expand in a FROM-less SELECT".to_string(),
+        });
+    }
+    if select.where_clause.is_some()
+        || !select.group_by.is_empty()
+        || select.having.is_some()
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.distinct.is_some()
+        || !select.compound.is_empty()
+    {
+        return Err(CodegenError::Unsupported {
+            reason: "a FROM-less SELECT only supports a bare expression list — no WHERE/GROUP \
+                     BY/HAVING/ORDER BY/LIMIT/DISTINCT/compound clause"
+                .to_string(),
+        });
+    }
+
+    let mut em = Emitter::new();
+    let mut reg = RegAlloc::new();
+
+    let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
+    let body_start = em.new_label();
+    em.place(body_start);
+    em.patch_p2(init_addr, body_start);
+
+    let no_table = TableSchema {
+        name: String::new(),
+        root_page: 0,
+        columns: vec![],
+        column_types: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    let cols = result_columns(select, &no_table);
+    let (first, count) =
+        compile_row_values(&mut em, &mut reg, &no_table, &cols, -1, false, catalog)?;
+    em.emit(Instruction::new(
+        Opcode::ResultRow,
+        first,
+        i32::try_from(count).unwrap_or(0),
+        0,
+    ));
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
 
     Ok(em.finish())

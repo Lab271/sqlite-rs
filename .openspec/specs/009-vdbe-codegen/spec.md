@@ -555,6 +555,19 @@ VDBE-private serialization.
 
 **Tests:** `src/vdbe/result.rs::tests::result_row_emits_fixed_register_range`
 
+#### Scenario: A FROM-less SELECT emits exactly one row with no cursor/scan (#260)
+
+- GIVEN `SELECT sqlite_version()` — no `FROM` clause at all, SQLite's
+  normal way to call a zero-arg built-in
+- THEN codegen compiles the column list once against an empty schema
+  and emits a single `ResultRow` with no `OpenRead`/scan-loop
+  bracketing it; `*`/`tbl.*` and any clause presuming a table
+  (WHERE/GROUP BY/HAVING/ORDER BY/LIMIT/DISTINCT/compound) is rejected
+  as unsupported rather than silently no-op'd
+
+**Tests:** `tests/codegen/expr_test.rs::from_less_select_compiles_a_bare_expression_list`,
+`tests/codegen/expr_test.rs::from_less_select_rejects_star`
+
 #### Scenario: MakeRecord's output is byte-identical to spec 003's record format
 
 - GIVEN `SELECT DISTINCT note FROM products` (harvested: `MakeRecord` 7
