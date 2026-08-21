@@ -128,7 +128,7 @@ rusqlite = "0.32"
 # <md5>"` result blocks, #96) — not a project cryptographic dependency, so
 # pulling in a maintained implementation beats hand-rolling a bit-exact
 # digest for a test-only concern.
-md-5 = "0.10"
+md-5 = "0.11"
 
 [[bench]]
 name = "engine"
