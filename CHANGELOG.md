@@ -99,6 +99,23 @@ three pieces of missing infrastructure (index-seek opcode, EXPLAIN
 QUERY PLAN parsing, and the V7→V4 grammar pull-forward) beyond the
 issue's original "basic WHERE analysis" framing.
 
+Subqueries in `FROM` (#257, V4 phase 1 epic #235, split off from #251).
+Parser: `table-ref` gains a `"(" select-stmt ")" AS identifier`
+alternative (`TableRef` is now `Name`/`Subquery`-shaped in the AST).
+Codegen: a `FROM`-subquery materializes into a new VDBE table-mode
+ephemeral cursor (`OpenEphemeral` with `P5` nonzero — `Rewind`/`Next`/
+`Column`/`Insert`/`Rowid` now work against an in-memory row list with
+assigned rowids, alongside the existing index-mode ephemeral cursor
+DISTINCT already used), bound into `Scope` via a synthetic `TableSchema`
+derived from the subquery's own projected columns — then scanned like
+any real table. Works standalone, as one slot of a joined outer `FROM`,
+and when the subquery's own `FROM` itself has a `JOIN`. `ANY`/`ALL`/
+`SOME` remain out of scope (never implemented by the pinned oracle).
+Spend: ran past the issue's own "Medium-Large" estimate — the ephemeral
+table-mode cursor (Rewind/Next/Insert/Rowid over an in-memory row list)
+didn't exist yet and had to be added to the VDBE engine, beyond the
+issue's parser/codegen framing.
+
 `UNION ALL` compound `SELECT` (#240, V4 phase 1 epic #235): parser
 chains `SELECT ... UNION ALL SELECT ...` arms into `Select::compound`,
 with `ORDER BY`/`LIMIT` binding to the whole compound statement rather

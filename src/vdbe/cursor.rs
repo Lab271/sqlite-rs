@@ -3,9 +3,12 @@
 //! `Rowid`/`SeekRowid`/`NullRow`), an in-memory ephemeral index for
 //! DISTINCT (`OpenEphemeral`/`Sequence`/`Found`/`IdxInsert`/`IdxLE`/
 //! `Delete`, per the epic's #87 scope decision — never the on-disk file
-//! format), and a single-row pseudo-cursor (`OpenPseudo`) that lets
-//! `Column` read an already-computed record (the sorter's output row)
-//! without a special case.
+//! format), an in-memory ephemeral **table** (#257, `OpenEphemeral` with
+//! `P5` nonzero) that materializes a subquery-in-FROM and is then scanned
+//! with the same `Rewind`/`Last`/`Next`/`Column`/`Rowid`/`Insert` opcodes
+//! a real table cursor uses, and a single-row pseudo-cursor (`OpenPseudo`)
+//! that lets `Column` read an already-computed record (the sorter's
+//! output row) without a special case.
 //!
 //! Register/cursor-slot conventions used by this module's opcodes (this
 //! ticket's own choice — codegen, #91, is what will actually decide
@@ -15,7 +18,8 @@
 //! - `OpenRead(p1=cursor, p2=root page)`
 //! - `OpenEphemeral(p1=cursor)` — key-column count isn't needed by this
 //!   in-memory implementation (the whole register range passed to
-//!   `Found`/`IdxInsert` *is* the key), so `P2` is unused here.
+//!   `Found`/`IdxInsert` *is* the key), so `P2` is unused here. `P5`
+//!   nonzero (#257) opens the table-mode variant instead (see below).
 //! - `OpenPseudo(p1=cursor, p2=register holding the row's record blob)`
 //! - `Rewind`/`Last(p1=cursor, p2=jump target if the table is empty)`
 //! - `Next(p1=cursor, p2=jump target if another row was found)` —
@@ -26,7 +30,8 @@
 //! - `SeekRowid(p1=cursor, p2=jump target if not found, p3=register
 //!   holding the target rowid)`
 //! - `NullRow(p1=cursor)`
-//! - `Sequence(p1=cursor, p2=dest register)`
+//! - `Sequence(p1=cursor, p2=dest register)` — also works on a table-mode
+//!   ephemeral cursor (#257), handing out fresh rowids starting at `1`.
 //! - `Found(p1=cursor, p2=jump target if the key is present, p3=first
 //!   key register, p4=Int(key column count))`
 //! - `IdxInsert(p1=cursor, p2=first key register, p4=Int(key column
@@ -73,6 +78,15 @@ pub(crate) enum CursorSlot {
         last_rowid: Option<i64>,
     },
     Ephemeral(EphemeralState),
+    /// An in-memory ephemeral **table** cursor (#257) — opened by
+    /// `OpenEphemeral` with `P5` nonzero, unlike the index-mode
+    /// [`CursorSlot::Ephemeral`] above (`P5` zero/default). Backs a
+    /// materialized subquery-in-FROM: rows are appended via `Insert`
+    /// (decoding the `MakeRecord`-encoded payload, same as a real table
+    /// cursor) and then scanned with `Rewind`/`Next`/`Column`/`Rowid`
+    /// exactly like [`CursorSlot::Table`], just without any on-disk
+    /// b-tree backing it.
+    EphemeralTable(EphemeralTableState),
     Pseudo {
         register: i32,
     },
@@ -86,6 +100,7 @@ impl CursorSlot {
             CursorSlot::IndexWrite { .. } => "index write cursor",
             CursorSlot::IndexRead { .. } => "index read cursor",
             CursorSlot::Ephemeral(_) => "ephemeral cursor",
+            CursorSlot::EphemeralTable(_) => "ephemeral table cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
             CursorSlot::Sorter(_) => "sorter cursor",
         }
@@ -135,6 +150,35 @@ pub(crate) struct EphemeralState {
     last_key: Option<Vec<u8>>,
 }
 
+/// Backing store for [`CursorSlot::EphemeralTable`] (#257): rows appended
+/// in insertion order, each tagged with the rowid `Insert`'s caller
+/// computed (codegen assigns sequential rowids starting at 1 — see
+/// `src/codegen/subquery.rs`'s FROM-subquery materialization). `pos` is
+/// the row index `Rewind`/`Last`/`Next` most recently positioned on
+/// (`None` before any positioning call or once exhausted), mirroring
+/// `TableCursorState::current`.
+#[derive(Debug)]
+pub(crate) struct EphemeralTableState {
+    rows: Vec<(i64, Vec<Value>)>,
+    pos: Option<usize>,
+    /// Monotonic counter `Sequence` hands out (#257) — codegen uses it to
+    /// assign each materialized row a fresh rowid before `Insert`,
+    /// mirroring how the index-mode [`EphemeralState::sequence`] is used
+    /// for DISTINCT. Starts at `1` (rather than `0`, unlike
+    /// `EphemeralState::sequence`) to match a real table's first rowid.
+    sequence: i64,
+}
+
+impl Default for EphemeralTableState {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            pos: None,
+            sequence: 1,
+        }
+    }
+}
+
 // Methods rather than free functions so the borrow of `self` elides — see the
 // note on the equivalent helpers in sorter.rs.
 impl Vm {
@@ -166,6 +210,22 @@ impl Vm {
                 slot,
                 found: other.type_name(),
                 expected: "ephemeral cursor",
+            }),
+        }
+    }
+
+    fn ephemeral_table_mut(
+        &mut self,
+        slot: i32,
+        opcode: &'static str,
+    ) -> Result<&mut EphemeralTableState, ExecError> {
+        match self.cursor_mut(slot)? {
+            CursorSlot::EphemeralTable(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "ephemeral table cursor",
             }),
         }
     }
@@ -278,8 +338,18 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 }
 
 /// `OpenEphemeral`: opens an empty in-memory ephemeral index (DISTINCT's
-/// dedup table, #87) into cursor slot `P1`.
+/// dedup table, #87) into cursor slot `P1`. `P5` nonzero (#257, mirroring
+/// `OpenRead`/`OpenWrite`'s own table-vs-index `P5` dispatch) instead
+/// opens a [`CursorSlot::EphemeralTable`] — an ephemeral table cursor for
+/// a materialized subquery-in-FROM.
 pub fn open_ephemeral(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    if instr.p5 != 0 {
+        vm.set_cursor(
+            instr.p1,
+            CursorSlot::EphemeralTable(EphemeralTableState::default()),
+        )?;
+        return Ok(Step::Next);
+    }
     vm.set_cursor(instr.p1, CursorSlot::Ephemeral(EphemeralState::default()))?;
     Ok(Step::Next)
 }
@@ -294,56 +364,115 @@ pub fn open_pseudo(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 }
 
 /// `Rewind`: positions cursor `P1` at its first row, jumping to `P2` if
-/// the table is empty (mirrors the oracle's own `OP_Rewind` shape).
+/// the table is empty (mirrors the oracle's own `OP_Rewind` shape). Works
+/// against both a real [`CursorSlot::Table`] and (#257) an in-memory
+/// [`CursorSlot::EphemeralTable`].
 pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = vm.table_cursor_mut(instr.p1, "Rewind")?;
-    state.forced_null = false;
-    state.current = state
-        .cursor
-        .first()
-        .map_err(|e| ExecError::MalformedInstruction {
-            opcode: "Rewind",
-            reason: e.to_string(),
-        })?;
-    Ok(if state.current.is_none() {
-        Step::Jump(to_pc(instr.p2))
-    } else {
+    let found = match vm.cursor_mut(instr.p1)? {
+        CursorSlot::Table(state) => {
+            state.forced_null = false;
+            state.current = state
+                .cursor
+                .first()
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode: "Rewind",
+                    reason: e.to_string(),
+                })?;
+            state.current.is_some()
+        }
+        CursorSlot::EphemeralTable(state) => {
+            state.pos = if state.rows.is_empty() { None } else { Some(0) };
+            state.pos.is_some()
+        }
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "Rewind",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "table or ephemeral table cursor",
+            })
+        }
+    };
+    Ok(if found {
         Step::Next
+    } else {
+        Step::Jump(to_pc(instr.p2))
     })
 }
 
 /// `Last`: positions cursor `P1` at its last row (highest rowid),
-/// jumping to `P2` if the table is empty.
+/// jumping to `P2` if the table is empty. Works against both a real
+/// [`CursorSlot::Table`] and (#257) an in-memory
+/// [`CursorSlot::EphemeralTable`].
 pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = vm.table_cursor_mut(instr.p1, "Last")?;
-    state.forced_null = false;
-    state.current = state
-        .cursor
-        .last()
-        .map_err(|e| ExecError::MalformedInstruction {
-            opcode: "Last",
-            reason: e.to_string(),
-        })?;
-    Ok(if state.current.is_none() {
-        Step::Jump(to_pc(instr.p2))
-    } else {
+    let found = match vm.cursor_mut(instr.p1)? {
+        CursorSlot::Table(state) => {
+            state.forced_null = false;
+            state.current = state
+                .cursor
+                .last()
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode: "Last",
+                    reason: e.to_string(),
+                })?;
+            state.current.is_some()
+        }
+        CursorSlot::EphemeralTable(state) => {
+            state.pos = state.rows.len().checked_sub(1);
+            state.pos.is_some()
+        }
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "Last",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "table or ephemeral table cursor",
+            })
+        }
+    };
+    Ok(if found {
         Step::Next
+    } else {
+        Step::Jump(to_pc(instr.p2))
     })
 }
 
 /// `Next`: advances cursor `P1` to the following row, jumping to `P2`
 /// (typically back to the loop body's start) if another row was found —
-/// falls through (ending the loop) once exhausted.
+/// falls through (ending the loop) once exhausted. Works against both a
+/// real [`CursorSlot::Table`] and (#257) an in-memory
+/// [`CursorSlot::EphemeralTable`].
 pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let state = vm.table_cursor_mut(instr.p1, "Next")?;
-    state.current = state
-        .cursor
-        .next()
-        .map_err(|e| ExecError::MalformedInstruction {
-            opcode: "Next",
-            reason: e.to_string(),
-        })?;
-    Ok(if state.current.is_some() {
+    let found = match vm.cursor_mut(instr.p1)? {
+        CursorSlot::Table(state) => {
+            state.current = state
+                .cursor
+                .next()
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode: "Next",
+                    reason: e.to_string(),
+                })?;
+            state.current.is_some()
+        }
+        CursorSlot::EphemeralTable(state) => {
+            let next_pos = state.pos.map(|p| p.saturating_add(1)).unwrap_or(0);
+            state.pos = if next_pos < state.rows.len() {
+                Some(next_pos)
+            } else {
+                None
+            };
+            state.pos.is_some()
+        }
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "Next",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "table or ephemeral table cursor",
+            })
+        }
+    };
+    Ok(if found {
         Step::Jump(to_pc(instr.p2))
     } else {
         Step::Next
@@ -385,11 +514,20 @@ fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<V
                 }),
             }
         }
+        CursorSlot::EphemeralTable(state) => Ok(state
+            .pos
+            .and_then(|p| state.rows.get(p))
+            .ok_or(ExecError::MalformedInstruction {
+                opcode,
+                reason: "cursor has no current row".to_string(),
+            })?
+            .1
+            .clone()),
         other => Err(ExecError::CursorTypeMismatch {
             opcode,
             slot,
             found: other.type_name(),
-            expected: "table or pseudo cursor",
+            expected: "table, pseudo, or ephemeral table cursor",
         }),
     }
 }
@@ -433,12 +571,21 @@ pub fn rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                 Value::Integer(row.rowid)
             }
         }
+        CursorSlot::EphemeralTable(state) => {
+            let (rowid, _) = state.pos.and_then(|p| state.rows.get(p)).ok_or(
+                ExecError::MalformedInstruction {
+                    opcode: "Rowid",
+                    reason: "cursor has no current row".to_string(),
+                },
+            )?;
+            Value::Integer(*rowid)
+        }
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode: "Rowid",
                 slot: instr.p1,
                 found: other.type_name(),
-                expected: "table cursor",
+                expected: "table or ephemeral table cursor",
             })
         }
     };
@@ -591,11 +738,25 @@ pub fn null_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// value into register `P2` (independent of the dedup key — used to
 /// allocate a synthetic rowid for an ephemeral-table row).
 pub fn sequence(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let value = {
-        let state = vm.ephemeral_mut(instr.p1, "Sequence")?;
-        let v = state.sequence;
-        state.sequence = state.sequence.saturating_add(1);
-        v
+    let value = match vm.cursor_mut(instr.p1)? {
+        CursorSlot::Ephemeral(state) => {
+            let v = state.sequence;
+            state.sequence = state.sequence.saturating_add(1);
+            v
+        }
+        CursorSlot::EphemeralTable(state) => {
+            let v = state.sequence;
+            state.sequence = state.sequence.saturating_add(1);
+            v
+        }
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "Sequence",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "ephemeral or ephemeral table cursor",
+            })
+        }
     };
     vm.set_register(instr.p2, Value::Integer(value))?;
     Ok(Step::Next)
@@ -881,14 +1042,16 @@ pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 }
 
 /// `Insert` (#194): inserts a row into the table b-tree cursor `P1` is
-/// open on (must be a real [`CursorSlot::Table`] write cursor, opened
-/// via `OpenWrite`). `P2` holds the row's rowid (an integer register),
-/// `P3` holds the already-`MakeRecord`-encoded payload blob. Delegates
-/// to [`btree::insert_row`]; `OR REPLACE`/`OR IGNORE`-style `P5`
-/// conflict-resolution flags are not modeled — every insert is an
-/// unconditional add, matching `insert_row`'s own contract.
+/// open on (must be a real [`CursorSlot::Table`] write cursor, opened via
+/// `OpenWrite`), OR (#257) appends a row into an in-memory
+/// [`CursorSlot::EphemeralTable`] (opened by `OpenEphemeral` with `P5`
+/// nonzero) — used to materialize a subquery-in-FROM. Either way, `P2`
+/// holds the row's rowid (an integer register) and `P3` holds the
+/// already-`MakeRecord`-encoded payload blob. The real-table path
+/// delegates to [`btree::insert_row`]; `OR REPLACE`/`OR IGNORE`-style
+/// `P5` conflict-resolution flags are not modeled there — every insert is
+/// an unconditional add, matching `insert_row`'s own contract.
 pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let root_page = vm.table_cursor_mut(instr.p1, "Insert")?.root_page;
     let rowid = match vm.register(instr.p2)? {
         Value::Integer(i) => *i,
         other => {
@@ -907,17 +1070,33 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             })
         }
     };
-    let pager = vm.writer("Insert")?;
-    let db = vm.db()?;
-    let header = db.header;
-    let mut pager = pager.borrow_mut();
-    btree::insert_row(&mut pager, &header, root_page, rowid, &payload).map_err(|e| {
-        ExecError::MalformedInstruction {
-            opcode: "Insert",
-            reason: e.to_string(),
+    match vm.cursor(instr.p1)? {
+        CursorSlot::EphemeralTable(_) => {
+            let values = decode_record(&payload, TextEncoding::Utf8).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "Insert",
+                    reason: e.to_string(),
+                }
+            })?;
+            let state = vm.ephemeral_table_mut(instr.p1, "Insert")?;
+            state.rows.push((rowid, values));
+            Ok(Step::Next)
         }
-    })?;
-    Ok(Step::Next)
+        _ => {
+            let root_page = vm.table_cursor_mut(instr.p1, "Insert")?.root_page;
+            let pager = vm.writer("Insert")?;
+            let db = vm.db()?;
+            let header = db.header;
+            let mut pager = pager.borrow_mut();
+            btree::insert_row(&mut pager, &header, root_page, rowid, &payload).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode: "Insert",
+                    reason: e.to_string(),
+                }
+            })?;
+            Ok(Step::Next)
+        }
+    }
 }
 
 /// `NewRowid` (#194): computes a fresh rowid for table cursor `P1`
@@ -2146,6 +2325,110 @@ mod tests {
     fn drop_index_rejects_a_mismatched_p4() {
         let mut vm = writable_vm(0x0d);
         let err = drop_index(&mut vm, &Instruction::new(Opcode::DropIndex, 0, 0, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    fn open_ephemeral_table(vm: &mut Vm, cursor: i32) {
+        open_ephemeral(
+            vm,
+            &Instruction {
+                opcode: Opcode::OpenEphemeral,
+                p1: cursor,
+                p2: 0,
+                p3: 0,
+                p4: P4::None,
+                p5: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    fn insert_ephemeral_row(vm: &mut Vm, cursor: i32, rowid: i64, values: &[Value]) {
+        for (i, v) in values.iter().enumerate() {
+            vm.set_register(20i32.saturating_add(i as i32), v.clone())
+                .unwrap();
+        }
+        crate::vdbe::result::make_record(
+            vm,
+            &Instruction::new(Opcode::MakeRecord, 20, values.len() as i32, 30),
+        )
+        .unwrap();
+        vm.set_register(31, Value::Integer(rowid)).unwrap();
+        insert(vm, &Instruction::new(Opcode::Insert, cursor, 31, 30)).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_table_rewind_on_empty_cursor_jumps_to_p2() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn ephemeral_table_insert_then_full_scan_reads_rows_in_order() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        insert_ephemeral_row(&mut vm, 0, 1, &[Value::Integer(10)]);
+        insert_ephemeral_row(&mut vm, 0, 2, &[Value::Integer(20)]);
+        insert_ephemeral_row(&mut vm, 0, 3, &[Value::Integer(30)]);
+
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+
+        let mut seen = Vec::new();
+        loop {
+            rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap();
+            column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 11)).unwrap();
+            seen.push((
+                vm.register(10).unwrap().clone(),
+                vm.register(11).unwrap().clone(),
+            ));
+            match next(&mut vm, &Instruction::new(Opcode::Next, 0, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                (Value::Integer(1), Value::Integer(10)),
+                (Value::Integer(2), Value::Integer(20)),
+                (Value::Integer(3), Value::Integer(30)),
+            ]
+        );
+    }
+
+    #[test]
+    fn ephemeral_table_last_positions_on_the_final_row() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        insert_ephemeral_row(&mut vm, 0, 1, &[Value::Integer(10)]);
+        insert_ephemeral_row(&mut vm, 0, 2, &[Value::Integer(20)]);
+
+        let step = last(&mut vm, &Instruction::new(Opcode::Last, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(2));
+    }
+
+    #[test]
+    fn ephemeral_table_index_mode_default_still_rejects_rewind() {
+        // P5 zero (the default) must keep opening the existing index-mode
+        // ephemeral cursor — DISTINCT's dedup path must not regress.
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let err = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 99, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn ephemeral_table_rowid_with_no_current_row_errors() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        let err = rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
     }
 }

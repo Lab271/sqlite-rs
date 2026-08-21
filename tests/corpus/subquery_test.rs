@@ -254,7 +254,6 @@ fn still_unsupported_subquery_forms_fail_cleanly() {
     for sql in [
         "SELECT id FROM t WHERE x > ANY (SELECT x FROM t)",
         "SELECT id FROM t WHERE x > ALL (SELECT x FROM t)",
-        "SELECT * FROM (SELECT * FROM t) AS sub",
     ] {
         let output = run_query(&db, sql);
         assert!(!output.status.success(), "expected {sql:?} to fail");
@@ -355,5 +354,45 @@ fn delete_where_exists_correlated_matches_oracle() {
         &db,
         "SELECT id, x FROM t ORDER BY id",
         "delete_where_exists_correlated_matches_oracle",
+    );
+}
+
+// #257: subqueries in FROM — materialized into an ephemeral table and
+// scanned like any other FROM table.
+
+/// Acceptance criterion 1: a single-table subquery in FROM.
+#[test]
+fn subquery_in_from_single_table_matches_oracle() {
+    let db = subquery_fixture_db("from_subquery_single");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT id, x FROM t WHERE x > 15) AS sub ORDER BY id",
+        "subquery_in_from_single_table_matches_oracle",
+    );
+}
+
+/// Acceptance criterion 2: a joined outer query with a subquery in one
+/// FROM slot.
+#[test]
+fn subquery_in_from_joined_outer_matches_oracle() {
+    let db = subquery_fixture_db("from_subquery_joined_outer");
+    assert_matches_oracle(
+        &db,
+        "SELECT sub.id, other.a_id FROM (SELECT id, x FROM t WHERE x > 10) AS sub \
+         JOIN other ON other.a_id = sub.id ORDER BY sub.id",
+        "subquery_in_from_joined_outer_matches_oracle",
+    );
+}
+
+/// Acceptance criterion 3: a subquery in FROM whose own FROM clause has
+/// a JOIN.
+#[test]
+fn subquery_in_from_own_join_matches_oracle() {
+    let db = subquery_fixture_db("from_subquery_own_join");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT t.id, other.a_id FROM t JOIN other ON other.a_id = t.id) AS sub \
+         ORDER BY sub.id",
+        "subquery_in_from_own_join_matches_oracle",
     );
 }

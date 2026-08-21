@@ -26,6 +26,7 @@ pub use select::{
     compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
     explain_query_plan, CodegenError, EqpRow,
 };
+pub use subquery::resolve_from_table_schema;
 pub use update::{compile_update, compile_update_with_catalog};
 
 use std::collections::HashMap;
