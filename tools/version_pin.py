@@ -76,6 +76,7 @@ RUNTIME_READERS = [
     "tools/extract_sql_corpus.py",
     "tools/gen_fixtures.sh",
     "tools/bench_env.sh",
+    "build.rs",
 ]
 VERSION_LITERAL_RE = re.compile(r'"3\.\d+\.\d+"')
 

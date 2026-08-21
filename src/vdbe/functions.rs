@@ -160,6 +160,10 @@ fn substr(args: &[Value]) -> Result<Value, FunctionError> {
     }
 }
 
+fn sqlite_version(_args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(Value::Text(env!("ORACLE_VERSION").to_string()))
+}
+
 fn abs(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(match &args[0] {
         Value::Null => Value::Null,
@@ -641,6 +645,7 @@ pub fn call(name: &str, args: &[Value]) -> Result<Value, FunctionError> {
         ("upper", 1) => Some(upper),
         ("lower", 1) => Some(lower),
         ("substr", 2 | 3) => Some(substr),
+        ("sqlite_version", 0) => Some(sqlite_version),
         ("abs", 1) => Some(abs),
         ("coalesce", n) if n >= 2 => Some(coalesce),
         ("ifnull", 2) => Some(coalesce),

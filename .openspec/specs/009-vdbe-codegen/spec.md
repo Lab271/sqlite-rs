@@ -434,6 +434,17 @@ it callable via this opcode, with no VDBE-layer change required.
 `tests/codegen/expr_test.rs::single_arg_function_call_compiles`,
 `tests/codegen/expr_test.rs::multi_arg_function_call_compiles_with_contiguous_registers`
 
+#### Scenario: Zero-arg function call compiles with no argument registers
+
+- GIVEN `SELECT sqlite_version() FROM t`, a registered arity-0 scalar
+  function (#136)
+- THEN codegen's `FunctionCall` zero-arg branch allocates a scratch
+  register for P2 (never read, since the argument loop is `0..arity`)
+  and emits a single `Function` instance with P4 `"sqlite_version(0)"`,
+  writing the registry's return value to P3
+
+**Tests:** `tests/codegen/expr_test.rs::zero_arg_function_call_compiles`
+
 ### Requirement 8: Result-Row Opcodes [MUST]
 
 The 10 result-category opcodes — `Integer`, `Int64`, `Real`, `Blob`,

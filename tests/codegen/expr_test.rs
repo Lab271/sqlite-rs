@@ -222,6 +222,16 @@ fn multi_arg_function_call_compiles_with_contiguous_registers() {
 }
 
 #[test]
+fn zero_arg_function_call_compiles() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT sqlite_version() FROM t");
+    assert_eq!(
+        out,
+        vec![vec![Value::Text(env!("ORACLE_VERSION").to_string())]]
+    );
+}
+
+#[test]
 fn case_compiles_to_a_jump_chain() {
     let (path, schema) = one_row_fixture();
     let out = run_select(
