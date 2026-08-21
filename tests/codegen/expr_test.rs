@@ -21,7 +21,7 @@ use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::record::Value;
 use sqlite_rs::schema::TableSchema;
-use sqlite_rs::vdbe::{execute_with_db, explain};
+use sqlite_rs::vdbe::{execute, execute_with_db, explain};
 use sqlite_rs::vfs::{UnixVfs, Vfs, VfsPageSource};
 
 /// A single-row fixture table `t(a, b, name)`, scratch-built via a real
@@ -219,6 +219,38 @@ fn multi_arg_function_call_compiles_with_contiguous_registers() {
     let (path, schema) = one_row_fixture();
     let out = run_select(&path, &schema, "SELECT instr(name, 'a') FROM t");
     assert_eq!(out, vec![vec![Value::Integer(1)]]);
+}
+
+#[test]
+fn zero_arg_function_call_compiles() {
+    let (path, schema) = one_row_fixture();
+    let out = run_select(&path, &schema, "SELECT sqlite_version() FROM t");
+    assert_eq!(out, vec![vec![Value::Text("3.53.4".to_string())]]);
+}
+
+#[test]
+fn from_less_select_compiles_a_bare_expression_list() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT sqlite_version(), 1 + 1") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected parse, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).unwrap();
+    let out = execute(&program).unwrap();
+    assert_eq!(
+        out,
+        vec![vec![Value::Text("3.53.4".to_string()), Value::Integer(2)]]
+    );
+}
+
+#[test]
+fn from_less_select_rejects_star() {
+    let (_path, schema) = one_row_fixture();
+    let select = match parse_select("SELECT *") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected parse, got {other:?}"),
+    };
+    assert!(compile_select(&select, &schema).is_err());
 }
 
 #[test]

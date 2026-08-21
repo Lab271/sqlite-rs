@@ -717,11 +717,11 @@ fn export_write_failure_reports_warning_and_degrades_exit_code() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A `SELECT` with no `FROM` clause is syntactically valid but out of this
-/// compiler's single-table scope; `query` must reject it cleanly rather
-/// than panic on the missing table resolution step.
+/// A `SELECT` with no `FROM` clause is real SQLite syntax (`SELECT 1;`,
+/// `SELECT sqlite_version();`) and compiles/executes as a single-row
+/// result (#260) — no table resolution step to reject it at.
 #[test]
-fn query_with_no_from_clause_fails_cleanly() {
+fn query_with_no_from_clause_evaluates_a_bare_expression() {
     let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
     let dir = scratch_dir("query-no-from");
     let db = copy_fixture(&fixture, &dir);
@@ -730,6 +730,30 @@ fn query_with_no_from_clause_fails_cleanly() {
         .arg("query")
         .arg(&db)
         .arg("SELECT 1")
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout.trim_end(), "1");
+    assert!(stderr.is_empty(), "expected no diagnostic; got {stderr}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn query_with_no_from_clause_and_star_fails_cleanly() {
+    // `*` has no table to expand against in a FROM-less SELECT — still
+    // rejected, just no longer via the earlier blanket NoFromClause gate.
+    let fixture = crate::oracle::corpus_dir().join("btrees/table_multipage.db");
+    let dir = scratch_dir("query-no-from-star");
+    let db = copy_fixture(&fixture, &dir);
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("SELECT *")
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);

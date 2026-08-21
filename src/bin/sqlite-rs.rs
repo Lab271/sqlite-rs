@@ -291,10 +291,6 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
             }
         }
     };
-    let Some(from) = &select.from else {
-        return fatal(path, &CodegenError::NoFromClause);
-    };
-
     let (header, pager) = match dump::open(&UnixVfs, path) {
         Ok(v) => v,
         Err(e) => return fatal(path, &e),
@@ -312,6 +308,37 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
             .find(|s| s.name.eq_ignore_ascii_case(name))
             .cloned()
     };
+
+    // A FROM-less SELECT (#260, e.g. `SELECT sqlite_version();`) has no
+    // table to resolve at all — `compile_select_with_catalog` handles
+    // this itself once `select.from` is `None`, so this path skips
+    // straight to codegen with a throwaway schema/catalog neither one
+    // is read.
+    let Some(from) = &select.from else {
+        if eqp_mode {
+            return fatal(
+                path,
+                &"EXPLAIN QUERY PLAN requires a FROM clause".to_string(),
+            );
+        }
+        let no_table = sqlite_rs::schema::TableSchema {
+            name: String::new(),
+            root_page: 0,
+            columns: vec![],
+            column_types: vec![],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: String::new(),
+            indexes: vec![],
+        };
+        let program = match compile_select_with_catalog(&select, &no_table, &[]) {
+            Ok(p) => p,
+            Err(e) => return fatal(path, &e),
+        };
+        return finish_query(path, &program, source, header, explain_flag, csv);
+    };
+
     let Some(schema) = find_schema(&from.first.name) else {
         return fatal(path, &format!("no such table: {}", from.first.name));
     };
@@ -368,8 +395,21 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         }
     };
 
+    finish_query(path, &program, source, header, explain_flag, csv)
+}
+
+/// `EXPLAIN`-render-or-execute-and-print tail shared by every `run_query`
+/// codegen path (single-table, joined, compound, and #260's FROM-less).
+fn finish_query(
+    path: &Path,
+    program: &sqlite_rs::vdbe::Program,
+    source: Rc<dyn PageSource>,
+    header: sqlite_rs::header::DatabaseHeader,
+    explain_flag: bool,
+    csv: bool,
+) -> ExitCode {
     if explain_flag {
-        for row in explain(&program) {
+        for row in explain(program) {
             println!(
                 "{}|{}|{}|{}|{}|{}|{}|{}",
                 row.addr, row.opcode, row.p1, row.p2, row.p3, row.p4, row.p5, row.comment
@@ -378,7 +418,7 @@ fn run_query(raw_args: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let rows = match execute_with_db(&program, source, header) {
+    let rows = match execute_with_db(program, source, header) {
         Ok(r) => r,
         Err(e) => return fatal(path, &e),
     };

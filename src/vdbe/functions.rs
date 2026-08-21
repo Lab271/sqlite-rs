@@ -160,6 +160,15 @@ fn substr(args: &[Value]) -> Result<Value, FunctionError> {
     }
 }
 
+/// Returns the pinned oracle version (`Cargo.toml`'s
+/// `[package.metadata.oracle] version`) — `tools/version_pin.py`
+/// checks this literal for drift against that pin. Can't read the pin
+/// via `env!` at compile time here: `env!` is outside `src/`'s
+/// qualified-subset allowlist (`make mvl-limit`).
+fn sqlite_version(_args: &[Value]) -> Result<Value, FunctionError> {
+    Ok(Value::Text("3.53.4".to_string()))
+}
+
 fn abs(args: &[Value]) -> Result<Value, FunctionError> {
     Ok(match &args[0] {
         Value::Null => Value::Null,
@@ -641,6 +650,7 @@ pub fn call(name: &str, args: &[Value]) -> Result<Value, FunctionError> {
         ("upper", 1) => Some(upper),
         ("lower", 1) => Some(lower),
         ("substr", 2 | 3) => Some(substr),
+        ("sqlite_version", 0) => Some(sqlite_version),
         ("abs", 1) => Some(abs),
         ("coalesce", n) if n >= 2 => Some(coalesce),
         ("ifnull", 2) => Some(coalesce),

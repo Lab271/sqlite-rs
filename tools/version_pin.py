@@ -54,6 +54,11 @@ PINNED_LITERALS = [
         re.compile(r'pub const ORACLE_VERSION: &str = "([^"]+)"'),
         "tier-1 bench ORACLE_VERSION const",
     ),
+    (
+        "src/vdbe/functions.rs",
+        re.compile(r'fn sqlite_version.*?Value::Text\("([^"]+)"', re.DOTALL),
+        "sqlite_version() return literal",
+    ),
 ]
 
 # CI names the source tarball by SQLite's zero-padded encoding of the version
