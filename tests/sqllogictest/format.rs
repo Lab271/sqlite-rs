@@ -14,6 +14,10 @@
 //! already committed to, so the threshold itself is never consulted.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "matches sqllogictest's own sort-mode vocabulary"
+)]
 pub enum SortMode {
     NoSort,
     RowSort,
@@ -137,7 +141,9 @@ pub fn parse_script(text: &str) -> Vec<Record> {
             let mut words = line.split_whitespace();
             match words.next() {
                 Some(directive @ ("onlyif" | "skipif")) => {
-                    let rest_of_line = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+                    let rest_of_line = line
+                        .split_once(char::is_whitespace)
+                        .map_or("", |(_, rest)| rest);
                     if !engine_condition_holds(directive, rest_of_line) {
                         applicable = false;
                     }

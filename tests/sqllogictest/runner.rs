@@ -21,7 +21,7 @@ use std::rc::Rc;
 use md5::{Digest, Md5};
 
 use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{compile_select, CodegenError};
+use sqlite_rs::codegen::{compile_select, resolve_from_table_schema, CodegenError};
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_blob, format_real};
 use sqlite_rs::parser::{parse_select, ParseOutcome};
@@ -153,7 +153,7 @@ fn flatten_sorted(mut rows: Vec<Vec<String>>, mode: SortMode) -> Vec<String> {
             // NOT `Vec<String>`'s element-wise ordering, which ranks
             // `["a", "bb"]` before `["ab", "b"]` where the joined forms
             // compare equal up to the separator.
-            rows.sort_by(|a, b| a.join("\n").cmp(&b.join("\n")));
+            rows.sort_by_key(|a| a.join("\n"));
             rows.into_iter().flatten().collect()
         }
         SortMode::ValueSort => {
@@ -188,6 +188,11 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
     let Some(from) = &select.from else {
         return Outcome::Skip;
     };
+    if !from.joins.is_empty() {
+        // Multi-table FROM is out-of-slice for V2 — see this module's
+        // doc comment ("multi-table/view FROM" is a skip, not a fail).
+        return Outcome::Skip;
+    }
 
     let (header, pager) = match dump::open(&UnixVfs, db_path) {
         Ok(v) => v,
@@ -200,16 +205,14 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
         Ok(s) => s,
         Err(e) => return Outcome::Suspect(format!("reading fixture schema: {e}")),
     };
-    let Some(schema) = schemas
-        .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(&from.name))
-    else {
+    let Ok(schema) = resolve_from_table_schema(&from.first, &schemas) else {
         // Not a suspect: `read_schema` returns only `type = 'table'`
         // rows, so a name it doesn't know is most likely a VIEW —
         // out-of-slice for V2, and indistinguishable from a genuinely
         // missing table without reading sqlite_master's other row types.
         return Outcome::Skip;
     };
+    let schema = &schema;
 
     let program = match compile_select(&select, schema) {
         Ok(p) => p,
@@ -217,6 +220,8 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
             CodegenError::NoFromClause
             | CodegenError::UnknownColumn { .. }
             | CodegenError::Unsupported { .. }
+            | CodegenError::AmbiguousColumn { .. }
+            | CodegenError::CompoundColumnMismatch { .. }
             // `compile_select` never actually returns this — it's an
             // INSERT-only variant (#195) — but `CodegenError` is a
             // shared enum, so this match must stay exhaustive as new

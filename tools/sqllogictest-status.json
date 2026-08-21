@@ -12,8 +12,8 @@
     {"file": "slt_lang_reindex.test", "pass": 0, "skip": 0, "suspect": 0, "fail": 0},
     {"file": "slt_lang_replace.test", "pass": 6, "skip": 0, "suspect": 0, "fail": 0},
     {"file": "slt_lang_update.test", "pass": 0, "skip": 9, "suspect": 0, "fail": 0},
-    {"file": "select1.test", "pass": 150, "skip": 850, "suspect": 0, "fail": 0},
-    {"file": "select2.test", "pass": 143, "skip": 857, "suspect": 0, "fail": 0}
+    {"file": "select1.test", "pass": 475, "skip": 525, "suspect": 0, "fail": 0},
+    {"file": "select2.test", "pass": 469, "skip": 531, "suspect": 0, "fail": 0}
   ],
-  "total": {"pass": 349, "skip": 1969, "suspect": 0, "fail": 0, "queries": 2318, "attempted": 349, "pass_rate": 1.0000, "coverage": 0.1506}
+  "total": {"pass": 1000, "skip": 1318, "suspect": 0, "fail": 0, "queries": 2318, "attempted": 1000, "pass_rate": 1.0000, "coverage": 0.4314}
 }

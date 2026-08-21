@@ -6,6 +6,25 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: `tests/sqllogictest/runner.rs` failed to compile (`&FromClause`
+has no `name` field — a stale reference left over from #276's
+`TableRef`/`FromClause` refactor, invisible to `cargo build
+--all-targets`/`make lint` since `sqllogictest` is a `test = false`
+target neither reaches). Fixed by reusing
+`codegen::resolve_from_table_schema` (already used elsewhere for the
+same lookup) against `from.first`, skipping multi-table `FROM`
+(out-of-slice for V2, per this module's own doc comment) instead of
+silently mis-resolving it. Also caught two other pre-existing gaps in
+the same blind spot: an unhandled `CodegenError` variant (again
+invisible to normal `cargo build`) and three clippy violations in
+`tests/sqllogictest/{runner,format}.rs` (`make lint` doesn't reach
+`test = false` targets at all — filed as #299 to close that gap
+properly). Once compiling, the slice's actual coverage jumped from
+349→1000 passing queries (15%→43% of the vendored corpus) — the
+committed `tools/sqllogictest-status.json` baseline had gone stale
+while this runner was broken, silently, since CI's own `sqllogictest`
+step is `continue-on-error: true` (informational, not a gate).
+
 chore: cap ephemeral table/index materialization at 1M rows (#269).
 `EphemeralTableState.rows`/`EphemeralState.entries` (`src/vdbe/cursor.rs`)
 backed a plain in-memory `Vec`/`BTreeMap` with no ceiling — a
