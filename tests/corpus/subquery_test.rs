@@ -109,11 +109,11 @@ fn subquery_fixture_db(label: &str) -> PathBuf {
     db
 }
 
-// Note: this codebase does not implement SQL aggregates at all yet
-// (`compile_value`'s `is_aggregate_call` guard rejects `max`/`min`/
-// `count`/etc. everywhere, not just inside a subquery — a pre-existing,
-// separate gap), so these tests use a non-aggregate scalar subquery
-// rather than the issue's illustrative `max(x)` example.
+// Note: plain aggregates and GROUP BY work at the top level (#239/#242/
+// #263), but an aggregate call inside a subquery's SELECT list is still
+// rejected (`compile_value`'s `is_aggregate_call` guard) — tracked by
+// #304. These tests use a non-aggregate scalar subquery rather than the
+// issue's illustrative `max(x)` example until that lands.
 #[test]
 fn scalar_subquery_matches_oracle() {
     let db = subquery_fixture_db("scalar");
