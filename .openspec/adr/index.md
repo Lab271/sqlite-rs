@@ -22,3 +22,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0016](0016-hot-journal-auto-recovery.md) | Hot-journal recovery is automatic in `Pager::open`, not a separate opt-in call | 2026-08-18 |
 | [0017](0017-writable-vm-shares-pager-via-refcell-pagesource.md) | A writable `Vm` shares one `Pager` via `RefCell<Pager>: PageSource` | 2026-08-19 |
 | [0018](0018-copy-opcode-reopens-frozen-set.md) | `Copy` (and `AggStep`/`AggFinal`) reopen the frozen V2 opcode set | 2026-08-21 |
+| [0019](0019-aggstep-p4-collation-and-p5-reset.md) | `AggStep` gains a collation-carrying `P4` and a `P5` reset flag | 2026-08-21 |

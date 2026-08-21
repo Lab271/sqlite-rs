@@ -338,6 +338,14 @@ pub enum P4 {
         collation: Collation,
         affinity: u8,
     },
+    /// `AggStep`'s `"name(arity)"` descriptor plus the collation
+    /// `min`/`max` compares under (#263) — `AggFinal` has no
+    /// comparison to perform, so it keeps the plain `Str` descriptor.
+    AggFunc {
+        name: String,
+        arity: usize,
+        collation: Collation,
+    },
     SortKey(Vec<SortKeyColumn>),
     /// `MakeRecord`'s (#194) per-column affinity string, one
     /// [`crate::vdbe::affinity::Affinity`] byte

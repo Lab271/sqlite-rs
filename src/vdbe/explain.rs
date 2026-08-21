@@ -53,6 +53,11 @@ fn render_p4(p4: &P4) -> String {
         } => {
             format!("{}-{affinity}", collation_name(*collation))
         }
+        P4::AggFunc {
+            name,
+            arity,
+            collation,
+        } => format!("{name}({arity})-{}", collation_name(*collation)),
         P4::SortKey(cols) => render_sort_key(cols),
         P4::Affinity(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         P4::Bool(b) => b.to_string(),

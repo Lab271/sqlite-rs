@@ -6,6 +6,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+refactor: consolidate aggregate codegen onto `AggStep`/`AggFinal` (#263,
+ADR-0019). `src/codegen/select/aggregate.rs`'s `GROUP BY`/plain-aggregate
+compilation (`compile_grouped_scan`) now emits `Opcode::AggStep`/
+`Opcode::AggFinal` — implemented since #241/#242 but never actually
+emitted by codegen (ADR-0018 tracked this gap) — instead of the
+`AggKind`/`AggSlot` hand-rolled register-arithmetic scheme (`reset_agg`/
+`accumulate_agg`), now retired. Surfaced two VM-side gaps along the
+way: `AggStep`'s `min`/`max` comparisons were hardcoded to `BINARY`
+collation (the same class of bug #265 just fixed in the old scheme —
+fixed here via a new `P4::AggFunc{name, arity, collation}` descriptor),
+and there was no way to reset an aggregate-context slot for a new
+`GROUP BY` group reusing the same slot number (fixed via `AggStep`'s
+previously-unused `P5` operand as a reset flag). See ADR-0019 for the
+full design and rejected alternatives (a dedicated reset opcode,
+threading comparison affinity through as well, folding in plain
+non-`GROUP BY` aggregate support).
+
 refactor: tighten `src/btree` and `src/codegen` module layout (#273,
 #276). Pure module reorganization, no behavior change: `src/btree/`
 groups table b-tree write ops (`insert`/`delete`) under `table.rs` +

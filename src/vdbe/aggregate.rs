@@ -85,11 +85,14 @@ impl AggState {
 /// updated state. `name` is only consulted to build the *initial*
 /// state — `state.is_some()` calls ignore it, matching how a real
 /// VDBE program always steps the same aggregate for a given context
-/// slot.
+/// slot. `collation` governs `min`/`max`'s comparison only (#263) —
+/// every other kind ignores it, same as `compare_jump`'s collation
+/// argument is a no-op for non-comparison opcodes.
 pub fn step(
     name: &str,
     state: Option<AggState>,
     args: &[Value],
+    collation: Collation,
 ) -> Result<AggState, FunctionError> {
     let mut state = match state {
         Some(s) => s,
@@ -144,7 +147,7 @@ pub fn step(
             if let Some(v) = args.first().filter(|v| !matches!(v, Value::Null)) {
                 if current
                     .as_ref()
-                    .is_none_or(|c| compare(v, c, Collation::Binary) == Ordering::Less)
+                    .is_none_or(|c| compare(v, c, collation) == Ordering::Less)
                 {
                     *current = Some(v.clone());
                 }
@@ -154,7 +157,7 @@ pub fn step(
             if let Some(v) = args.first().filter(|v| !matches!(v, Value::Null)) {
                 if current
                     .as_ref()
-                    .is_none_or(|c| compare(v, c, Collation::Binary) == Ordering::Greater)
+                    .is_none_or(|c| compare(v, c, collation) == Ordering::Greater)
                 {
                     *current = Some(v.clone());
                 }
@@ -229,7 +232,7 @@ mod tests {
     fn count_star_counts_every_row_regardless_of_args() {
         let mut state = None;
         for _ in 0..4 {
-            state = Some(step("count", state, &[]).unwrap());
+            state = Some(step("count", state, &[], Collation::Binary).unwrap());
         }
         assert_eq!(
             finalize("count", state.as_ref()).unwrap(),
@@ -241,7 +244,7 @@ mod tests {
     fn count_x_skips_null_args() {
         let mut state = None;
         for v in [Value::Integer(1), Value::Null, Value::Integer(2)] {
-            state = Some(step("count", state, &[v]).unwrap());
+            state = Some(step("count", state, &[v], Collation::Binary).unwrap());
         }
         assert_eq!(
             finalize("count", state.as_ref()).unwrap(),
@@ -258,7 +261,7 @@ mod tests {
     fn sum_of_all_integers_stays_exact_integer() {
         let mut state = None;
         for v in [1i64, 2, 3] {
-            state = Some(step("sum", state, &[Value::Integer(v)]).unwrap());
+            state = Some(step("sum", state, &[Value::Integer(v)], Collation::Binary).unwrap());
         }
         assert_eq!(finalize("sum", state.as_ref()).unwrap(), Value::Integer(6));
     }
@@ -266,15 +269,15 @@ mod tests {
     #[test]
     fn sum_promotes_to_real_once_any_real_input_seen() {
         let mut state = None;
-        state = Some(step("sum", state, &[Value::Integer(1)]).unwrap());
-        state = Some(step("sum", state, &[Value::Real(0.5)]).unwrap());
+        state = Some(step("sum", state, &[Value::Integer(1)], Collation::Binary).unwrap());
+        state = Some(step("sum", state, &[Value::Real(0.5)], Collation::Binary).unwrap());
         assert_eq!(finalize("sum", state.as_ref()).unwrap(), Value::Real(1.5));
     }
 
     #[test]
     fn sum_skips_null_and_finalizes_null_on_zero_rows() {
         assert_eq!(finalize("sum", None).unwrap(), Value::Null);
-        let state = step("sum", None, &[Value::Null]).unwrap();
+        let state = step("sum", None, &[Value::Null], Collation::Binary).unwrap();
         assert_eq!(finalize("sum", Some(&state)).unwrap(), Value::Null);
     }
 
@@ -282,7 +285,7 @@ mod tests {
     fn avg_of_integers_divides_to_real() {
         let mut state = None;
         for v in [1i64, 2, 3] {
-            state = Some(step("avg", state, &[Value::Integer(v)]).unwrap());
+            state = Some(step("avg", state, &[Value::Integer(v)], Collation::Binary).unwrap());
         }
         assert_eq!(finalize("avg", state.as_ref()).unwrap(), Value::Real(2.0));
     }
@@ -290,15 +293,15 @@ mod tests {
     #[test]
     fn avg_promotes_to_real_once_any_real_input_seen() {
         let mut state = None;
-        state = Some(step("avg", state, &[Value::Integer(1)]).unwrap());
-        state = Some(step("avg", state, &[Value::Real(3.0)]).unwrap());
+        state = Some(step("avg", state, &[Value::Integer(1)], Collation::Binary).unwrap());
+        state = Some(step("avg", state, &[Value::Real(3.0)], Collation::Binary).unwrap());
         assert_eq!(finalize("avg", state.as_ref()).unwrap(), Value::Real(2.0));
     }
 
     #[test]
     fn avg_skips_null_and_finalizes_null_on_zero_rows() {
         assert_eq!(finalize("avg", None).unwrap(), Value::Null);
-        let state = step("avg", None, &[Value::Null]).unwrap();
+        let state = step("avg", None, &[Value::Null], Collation::Binary).unwrap();
         assert_eq!(finalize("avg", Some(&state)).unwrap(), Value::Null);
     }
 
@@ -311,7 +314,7 @@ mod tests {
             Value::Integer(2),
             Value::Integer(9),
         ] {
-            state = Some(step("min", state, &[v]).unwrap());
+            state = Some(step("min", state, &[v], Collation::Binary).unwrap());
         }
         assert_eq!(finalize("min", state.as_ref()).unwrap(), Value::Integer(2));
     }
@@ -325,7 +328,7 @@ mod tests {
             Value::Integer(2),
             Value::Integer(9),
         ] {
-            state = Some(step("max", state, &[v]).unwrap());
+            state = Some(step("max", state, &[v], Collation::Binary).unwrap());
         }
         assert_eq!(finalize("max", state.as_ref()).unwrap(), Value::Integer(9));
     }
@@ -334,10 +337,35 @@ mod tests {
     fn min_max_use_type_ordering_for_mixed_types() {
         let mut state = None;
         for v in [Value::Integer(1), Value::Text("a".into())] {
-            state = Some(step("max", state, &[v]).unwrap());
+            state = Some(step("max", state, &[v], Collation::Binary).unwrap());
         }
         assert_eq!(
             finalize("max", state.as_ref()).unwrap(),
+            Value::Text("a".into())
+        );
+    }
+
+    /// #263: `min`/`max` honour a non-BINARY collation — ASCII binary
+    /// order puts every uppercase letter before every lowercase one,
+    /// so `{'B', 'a'}` distinguishes BINARY (`min` picks `'B'`) from
+    /// NOCASE (`min` picks `'a'`).
+    #[test]
+    fn min_max_honour_the_given_collation() {
+        let mut state = None;
+        for v in [Value::Text("B".into()), Value::Text("a".into())] {
+            state = Some(step("min", state, &[v], Collation::Binary).unwrap());
+        }
+        assert_eq!(
+            finalize("min", state.as_ref()).unwrap(),
+            Value::Text("B".into())
+        );
+
+        let mut state = None;
+        for v in [Value::Text("B".into()), Value::Text("a".into())] {
+            state = Some(step("min", state, &[v], Collation::NoCase).unwrap());
+        }
+        assert_eq!(
+            finalize("min", state.as_ref()).unwrap(),
             Value::Text("a".into())
         );
     }
@@ -351,7 +379,7 @@ mod tests {
     #[test]
     fn unknown_aggregate_name_errors() {
         assert!(matches!(
-            step("median", None, &[Value::Integer(1)]),
+            step("median", None, &[Value::Integer(1)], Collation::Binary),
             Err(FunctionError::Unknown { .. })
         ));
     }
