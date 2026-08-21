@@ -6,6 +6,7 @@
 
 pub mod ddl;
 pub mod delete;
+pub mod dispatch;
 pub mod expr;
 pub(crate) mod index_maintenance;
 pub mod insert;
@@ -15,6 +16,7 @@ pub mod update;
 
 pub use ddl::{compile_create_index, compile_create_table, compile_drop_index, compile_drop_table};
 pub use delete::{compile_delete, compile_delete_with_catalog};
+pub use dispatch::{compile_statement, leading_keywords, DispatchError};
 pub use insert::compile_insert;
 pub use select::{
     compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
