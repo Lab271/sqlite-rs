@@ -22,11 +22,150 @@ use super::SharedLockGuard;
 /// SQLite's `PENDING_BYTE` (`os_unix.c`): base of the reserved lock-byte
 /// page.
 const PENDING_BYTE: off_t = 0x40000000;
+/// `RESERVED_BYTE` (`os_unix.c`): `PENDING_BYTE + 1`.
+const RESERVED_BYTE: off_t = PENDING_BYTE + 1;
 /// `SHARED_FIRST` (`os_unix.c`): first byte of the SHARED-lock range.
-/// `PENDING_BYTE + 1` is `RESERVED_BYTE`, not used by a reader.
 const SHARED_FIRST: off_t = PENDING_BYTE + 2;
 /// `SHARED_SIZE` (`os_unix.c`): width of the SHARED-lock range.
 const SHARED_SIZE: off_t = 510;
+
+/// SQLite's 5-state journal-mode lock ladder (`os_unix.c`'s `unixLock`),
+/// ordered `Unlocked < Shared < Reserved < Pending < Exclusive` so callers
+/// can compare levels directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LockLevel {
+    /// No lock held.
+    Unlocked,
+    /// Read lock on the SHARED byte range — any number of readers may hold
+    /// this concurrently.
+    Shared,
+    /// Write lock on `RESERVED_BYTE`, held alongside the SHARED read lock —
+    /// signals "about to write" to other readers/writers without blocking
+    /// them yet. At most one holder at a time.
+    Reserved,
+    /// Write lock on `PENDING_BYTE`, held alongside RESERVED — blocks any
+    /// *new* SHARED lock attempt (existing readers may finish and drop
+    /// out) while this writer waits for them to drain before going
+    /// EXCLUSIVE.
+    Pending,
+    /// Write lock across the whole SHARED byte range (upgraded from the
+    /// read lock), held alongside PENDING and RESERVED — exclusive access,
+    /// blocks every other lock level.
+    Exclusive,
+}
+
+/// A file's held lock, tracking its current [`LockLevel`] and transitioning
+/// between levels via real `fcntl` byte-range locks — SQLite's journal-mode
+/// lock ladder (`os_unix.c`'s `unixLock`/`unixUnlock`), byte-identical so it
+/// interoperates with a live stock `sqlite3` process (validated by spike
+/// 005, `tests/spike/005_locking_interop/findings.md`). All locks are
+/// released when dropped.
+pub struct FileLockState {
+    file: File,
+    level: LockLevel,
+}
+
+impl FileLockState {
+    /// Wraps `file` with no lock held yet (`LockLevel::Unlocked`).
+    pub fn new(file: File) -> Self {
+        FileLockState {
+            file,
+            level: LockLevel::Unlocked,
+        }
+    }
+
+    /// The lock level currently held.
+    pub fn lock_state(&self) -> LockLevel {
+        self.level
+    }
+
+    /// Whether the held level reserves the right to write (`Reserved`,
+    /// `Pending`, or `Exclusive` — the levels past plain `Shared` reading).
+    pub fn is_write_locked(&self) -> bool {
+        self.level >= LockLevel::Reserved
+    }
+
+    /// Transitions to `target`, acquiring or releasing the intermediate
+    /// byte ranges one step at a time so the level actually held always
+    /// matches a real level in the ladder — never a half-acquired state.
+    /// `Err` (lock contention or I/O failure) leaves `self.level` at the
+    /// last level successfully reached.
+    pub fn set_level(&mut self, target: LockLevel) -> io::Result<()> {
+        while self.level < target {
+            self.step_up()?;
+        }
+        while self.level > target {
+            self.step_down()?;
+        }
+        Ok(())
+    }
+
+    fn step_up(&mut self) -> io::Result<()> {
+        match self.level {
+            LockLevel::Unlocked => {
+                // `os_unix.c`'s `unixLock`: a plain fcntl read lock on
+                // SHARED_FIRST wouldn't itself conflict with a writer's
+                // PENDING_BYTE write lock (different byte ranges), so a
+                // new reader must explicitly probe PENDING_BYTE first —
+                // that's what actually stops a new SHARED lock from
+                // starting once a writer is mid-ladder.
+                fcntl_lock(&self.file, libc::F_RDLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, libc::F_UNLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
+                self.level = LockLevel::Shared;
+            }
+            LockLevel::Shared => {
+                fcntl_lock(&self.file, libc::F_WRLCK, RESERVED_BYTE, 1)?;
+                self.level = LockLevel::Reserved;
+            }
+            LockLevel::Reserved => {
+                fcntl_lock(&self.file, libc::F_WRLCK, PENDING_BYTE, 1)?;
+                self.level = LockLevel::Pending;
+            }
+            LockLevel::Pending => {
+                fcntl_lock(&self.file, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
+                self.level = LockLevel::Exclusive;
+            }
+            LockLevel::Exclusive => {}
+        }
+        Ok(())
+    }
+
+    fn step_down(&mut self) -> io::Result<()> {
+        match self.level {
+            LockLevel::Exclusive => {
+                // Downgrade the SHARED range back to a read lock rather
+                // than dropping it — PENDING is still held below, so this
+                // stays a real ladder level (Pending), not a gap.
+                fcntl_lock(&self.file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
+                self.level = LockLevel::Pending;
+            }
+            LockLevel::Pending => {
+                fcntl_lock(&self.file, libc::F_UNLCK, PENDING_BYTE, 1)?;
+                self.level = LockLevel::Reserved;
+            }
+            LockLevel::Reserved => {
+                fcntl_lock(&self.file, libc::F_UNLCK, RESERVED_BYTE, 1)?;
+                self.level = LockLevel::Shared;
+            }
+            LockLevel::Shared => {
+                fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE)?;
+                self.level = LockLevel::Unlocked;
+            }
+            LockLevel::Unlocked => {}
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FileLockState {
+    fn drop(&mut self) {
+        // Best-effort, matching `UnixSharedLock`'s `Drop` above: a `drop`
+        // can't propagate failure, and there's nothing more to do about
+        // one anyway.
+        self.set_level(LockLevel::Unlocked).ok();
+    }
+}
 
 /// A held SHARED lock on a database file's journal-mode lock bytes,
 /// released on drop. Holds its own duplicated `File` (via `try_clone`)
@@ -168,6 +307,148 @@ mod tests {
             Err(other) => panic!("expected VfsError::Locked, got {other:?}"),
             Ok(_) => panic!("expected VfsError::Locked, got Ok"),
         }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn reserved_lock_available(path: &std::path::Path) -> bool {
+        crate::vfs::test_lock_probe::lock_available(path, "wrlock", RESERVED_BYTE, 1)
+    }
+
+    fn pending_lock_available(path: &std::path::Path) -> bool {
+        crate::vfs::test_lock_probe::lock_available(path, "wrlock", PENDING_BYTE, 1)
+    }
+
+    fn shared_read_available(path: &std::path::Path) -> bool {
+        crate::vfs::test_lock_probe::lock_available(path, "rdlock", SHARED_FIRST, SHARED_SIZE)
+    }
+
+    #[test]
+    fn levels_climb_and_report_write_locked_from_reserved_up() {
+        let (file, _path) = temp_file();
+        let mut lock = FileLockState::new(file);
+
+        assert_eq!(lock.lock_state(), LockLevel::Unlocked);
+        assert!(!lock.is_write_locked());
+
+        lock.set_level(LockLevel::Shared).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Shared);
+        assert!(!lock.is_write_locked());
+
+        lock.set_level(LockLevel::Reserved).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Reserved);
+        assert!(lock.is_write_locked());
+
+        lock.set_level(LockLevel::Pending).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Pending);
+        assert!(lock.is_write_locked());
+
+        lock.set_level(LockLevel::Exclusive).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Exclusive);
+        assert!(lock.is_write_locked());
+    }
+
+    #[test]
+    fn set_level_can_jump_straight_to_exclusive_and_back_to_unlocked() {
+        let (file, _path) = temp_file();
+        let mut lock = FileLockState::new(file);
+
+        lock.set_level(LockLevel::Exclusive).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Exclusive);
+
+        lock.set_level(LockLevel::Unlocked).unwrap();
+        assert_eq!(lock.lock_state(), LockLevel::Unlocked);
+    }
+
+    #[test]
+    fn reserved_blocks_a_second_reserved_but_not_new_shared_readers() {
+        let (file, path) = temp_file();
+        let mut lock = FileLockState::new(file);
+        lock.set_level(LockLevel::Reserved).unwrap();
+
+        assert!(
+            !reserved_lock_available(&path),
+            "RESERVED must be exclusive: at most one holder at a time"
+        );
+        assert!(
+            shared_read_available(&path),
+            "RESERVED must not block new SHARED readers"
+        );
+
+        drop(lock);
+        assert!(reserved_lock_available(&path));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn pending_blocks_new_shared_readers() {
+        // A raw fcntl read lock on the SHARED range is a different byte
+        // range from PENDING_BYTE, so the OS alone would never stop a new
+        // reader — SQLite's protection is a cooperating-process convention
+        // (`unixLock`'s own PENDING_BYTE probe before taking SHARED),
+        // which is exactly what `FileLockState::set_level` implements. So
+        // this contends via a real subprocess holding PENDING_BYTE (POSIX
+        // record locks don't contend with themselves within one process),
+        // not the in-process `FileLockState` used elsewhere in this file.
+        let (file, path) = temp_file();
+
+        let (level_while_blocked, was_err, pending_still_exclusive) =
+            lock_held_by_subprocess(&path, "wrlock", PENDING_BYTE, 1, || {
+                let mut reader = FileLockState::new(file);
+                let err = reader.set_level(LockLevel::Shared);
+                (
+                    reader.lock_state(),
+                    err.is_err(),
+                    !pending_lock_available(&path),
+                )
+            });
+        assert!(was_err, "PENDING must block a new SHARED lock attempt");
+        assert_eq!(level_while_blocked, LockLevel::Unlocked);
+        assert!(
+            pending_still_exclusive,
+            "PENDING must be exclusive: at most one holder at a time"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn exclusive_blocks_shared_readers() {
+        let (file, path) = temp_file();
+        let mut lock = FileLockState::new(file);
+        lock.set_level(LockLevel::Exclusive).unwrap();
+
+        assert!(
+            !shared_read_available(&path),
+            "EXCLUSIVE must block every other lock level, including SHARED reads"
+        );
+
+        drop(lock);
+        assert!(shared_read_available(&path));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn downgrading_from_exclusive_to_shared_releases_write_locks_but_keeps_reading() {
+        let (file, path) = temp_file();
+        let mut lock = FileLockState::new(file);
+        lock.set_level(LockLevel::Exclusive).unwrap();
+        lock.set_level(LockLevel::Shared).unwrap();
+
+        assert_eq!(lock.lock_state(), LockLevel::Shared);
+        assert!(!lock.is_write_locked());
+        assert!(
+            reserved_lock_available(&path),
+            "downgrading past RESERVED must release the RESERVED_BYTE write lock"
+        );
+        assert!(
+            pending_lock_available(&path),
+            "downgrading past PENDING must release the PENDING_BYTE write lock"
+        );
+        assert!(
+            !exclusive_lock_available(&path),
+            "the SHARED read lock itself must still block a concurrent EXCLUSIVE"
+        );
 
         std::fs::remove_file(&path).unwrap();
     }

@@ -20,6 +20,7 @@ pub(crate) mod shm;
 pub(crate) mod test_lock_probe;
 mod unix;
 
+pub use lock::{FileLockState, LockLevel};
 pub use memory::MemoryVfs;
 pub use page_source::{PageError, PageSource, VfsPageSource, WritablePageSource};
 pub use unix::UnixVfs;

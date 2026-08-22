@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+feat: `src/vfs/lock.rs` gains `LockLevel`/`FileLockState`, a full 5-state
+journal-mode lock ladder (UNLOCKED → SHARED → RESERVED → PENDING →
+EXCLUSIVE) built on byte-identical `fcntl` byte-range locks, matching
+`os_unix.c`'s `unixLock`/`unixUnlock` transition order and PENDING_BYTE
+probe semantics. Exposed from `sqlite_rs::vfs` for the follow-up `Pager`
+write-path wiring (#45); `Pager`/`VfsFile::lock_shared` are unchanged.
+Verified against a live stock `sqlite3` process in both directions
+(`tests/corpus/lock_state_interop_test.rs`). Closes #357. No version
+bump (VFS primitive only, not yet wired into any write path). Spend:
+matched estimate.
+
 test: `src/vdbe/cursor.rs` was the largest coverage gap in the repo
 (82.37% lines / 68.39% functions). Adds hand-assembled `Program` tests
 for opcodes no current codegen path emits (`Last`, `NullRow`, `IdxLE`)
