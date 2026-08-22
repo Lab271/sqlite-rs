@@ -1861,6 +1861,59 @@ mod tests {
         assert!(!spliced, "no contiguous gap must decline the fast path");
     }
 
+    /// #52 tagged MC/DC vector (obligation `btree_1037`, decision
+    /// `content_start < ptr_end || content_start.saturating_sub(ptr_end)
+    /// < needed`): leaf A (`content_start < ptr_end`) true independently
+    /// flips the outcome to true regardless of leaf B — a corrupt/
+    /// degenerate layout where `content_start` already sits before the
+    /// end of the pointer array. Paired against
+    /// `splice_insert_cell_appends_into_the_gap_when_it_fits` (both
+    /// leaves false) for A's independence pair.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__btree_1037__v1_content_start_before_ptr_end() {
+        let mut buf = vec![0u8; 32];
+        put_u8(&mut buf, 0, LEAF_TABLE, 1).unwrap();
+        write_content_start(&mut buf, 0, 4, 1).unwrap(); // ptr_base(8) + 0 cells == 8 > content_start(4)
+        let cell = vec![1u8, 2, 3];
+        let spliced = splice_insert_cell(&mut buf, 0, 1, 0, &cell).unwrap();
+        assert!(
+            !spliced,
+            "content_start before ptr_end must decline regardless of gap size"
+        );
+    }
+
+    /// #52 tagged MC/DC vector (obligation `btree_1037`): both leaves
+    /// false — the fast path proceeds. Independence pair for leaf A
+    /// against `mcdc__btree_1037__v1_content_start_before_ptr_end`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__btree_1037__v2_both_leaves_false() {
+        let mut buf = leaf_page_with_cells(512, &[]);
+        let cell = build_interior_cell(0, 42);
+        let spliced = splice_insert_cell(&mut buf, 0, 1, 0, &cell).unwrap();
+        assert!(
+            spliced,
+            "content_start at/after ptr_end with enough gap must splice"
+        );
+    }
+
+    /// #52 tagged MC/DC vector (obligation `btree_1037`): leaf B
+    /// (`content_start.saturating_sub(ptr_end) < needed`) true while A is
+    /// false independently flips the outcome to true — a zero-size gap.
+    /// Independence pair for leaf B against
+    /// `mcdc__btree_1037__v2_both_leaves_false`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__btree_1037__v3_gap_too_small() {
+        let mut buf = vec![0u8; 32];
+        put_u8(&mut buf, 0, LEAF_TABLE, 1).unwrap();
+        write_content_start(&mut buf, 0, 8, 1).unwrap(); // ptr_base(8) + 0 cells == 8, zero gap
+        let cell = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let spliced = splice_insert_cell(&mut buf, 0, 1, 0, &cell).unwrap();
+        assert!(!spliced, "zero-size gap must decline the fast path");
+    }
+
     /// #337: deleting a cell that borders `content_start` must grow
     /// `content_start` past it (reclaiming the space directly into the
     /// gap) rather than creating a freeblock.
