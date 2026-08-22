@@ -9,6 +9,11 @@ license = "Apache-2.0"
 nix = { version = "0.31.3", features = ["fs"] }
 thiserror = "1"
 
+# Spike #371: rust-refine proof-of-concept on header.rs. Path dependency to
+# a local mvl-rust checkout, not a published crate — this is exploratory
+# and stays on a spike branch, not merged.
+mvl = { path = "/Users/iheitlager/wc/mvl-lang/mvl-rust/crates/mvl" }
+
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a
 # `#[[test]]` itself — spawned via `Command`/`CARGO_BIN_EXE_lock_probe`.

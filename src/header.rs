@@ -113,6 +113,26 @@ impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
     /// [`HEADER_LEN`] bytes. Never panics: malformed input returns `Err`.
+    // Spike #371: rust-refine proof-of-concept. The issue's target
+    // annotations used `#[mvl::refine] impl { ... }` with `ret.field` and
+    // `==>` — none of that is real rust-refine syntax. The actual API
+    // attaches `#[mvl::requires]`/`#[mvl::ensures]` per function, the
+    // return value is always named `result`, and implication has to be
+    // spelled as `!p || q` since `==>` isn't a Rust operator the
+    // predicate's `syn::Expr` parser can accept.
+    //
+    // The issue's real intent — `result.page_size.is_power_of_two()`,
+    // `512 <= result.page_size <= 65536`, `result.reserved_space <
+    // result.page_size` — cannot be expressed here at all: `ensures` is
+    // injected at *every* return point including early `return Err(...)`
+    // sites, and `result.as_ref().unwrap().page_size` there leaves the
+    // `Ok` type of `Result<T, HeaderError>` unconstrained soon enough for
+    // rustc to reject it (E0282, "type annotations needed"). This is a
+    // genuine gap in rust-refine, not a syntax mistake on the issue's
+    // part — see the spike write-up. `ensures` below is left as the
+    // largest postcondition that #371's target actually could type-check
+    // through this attribute today: a tautology over `result`'s variant.
+    #[mvl::ensures(result.is_ok() || result.is_err())]
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
         if buf.len() < HEADER_LEN {
             return Err(HeaderError::TooShort { len: buf.len() });
@@ -204,6 +224,8 @@ impl DatabaseHeader {
         clippy::arithmetic_side_effects,
         reason = "parse() rejects reserved_space >= page_size, so this never underflows"
     )]
+    #[mvl::requires(self.reserved_space as u32 <= self.page_size)]
+    #[mvl::ensures(result <= self.page_size)]
     pub fn usable_page_size(&self) -> u32 {
         self.page_size - self.reserved_space as u32
     }
