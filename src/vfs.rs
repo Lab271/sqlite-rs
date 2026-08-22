@@ -161,6 +161,22 @@ impl AnyVfsFile {
     pub fn sync(&self) -> Result<()> {
         self.0.sync()
     }
+
+    /// Acquires a SHARED lock on the underlying file — see
+    /// [`VfsFile::lock_shared`].
+    pub fn lock_shared(&self) -> Result<FileLock> {
+        self.0.lock_shared()
+    }
+
+    /// Unwraps back to the boxed [`VfsFile`] this was built from — for
+    /// [`WritablePageSource::from_file`](crate::vfs::WritablePageSource::from_file),
+    /// the one place outside `src/vfs/` allowed to hold the underlying
+    /// `Box<dyn VfsFile>` directly (that module is `mvl-limit`-exempt;
+    /// `AnyVfsFile`'s whole purpose elsewhere is letting callers avoid
+    /// naming `dyn` themselves).
+    pub(crate) fn into_inner(self) -> Box<dyn VfsFile> {
+        self.0
+    }
 }
 
 /// A boxed [`Vfs`], for a long-lived struct outside `src/vfs/` that needs
@@ -201,9 +217,7 @@ impl AnyVfs {
 /// `src/vfs/` (e.g. [`crate::pager::Pager`]) never need to write `dyn`
 /// themselves — this module is the qualified-subset gate's designated
 /// `dyn` boundary (see the `mvl-limit` Makefile target).
-pub struct FileLock(
-    #[allow(dead_code, reason = "held only for its Drop side effect")] Box<dyn SharedLockGuard>,
-);
+pub struct FileLock(Box<dyn SharedLockGuard>);
 
 impl std::fmt::Debug for FileLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -211,9 +225,54 @@ impl std::fmt::Debug for FileLock {
     }
 }
 
+impl FileLock {
+    /// Non-blocking probe: does some *other* process hold a RESERVED (or
+    /// higher) lock on this file right now? Used by hot-journal recovery
+    /// (`src/pager.rs::Pager::open`) to decide whether replaying a hot
+    /// journal is safe — SQLite's `sqlite3OsCheckReservedLock`. Default
+    /// `Ok(false)` for backends with no real concurrent process to
+    /// coordinate with (e.g. [`MemoryVfs`]).
+    pub(crate) fn check_reserved(&self) -> Result<bool> {
+        self.0.check_reserved()
+    }
+
+    /// Escalates this held SHARED lock straight to EXCLUSIVE, deliberately
+    /// skipping RESERVED — SQLite never takes RESERVED on the hot-journal
+    /// path (`os_unix.c`'s `sqlite3PagerSharedLock`): a live RESERVED lock
+    /// is how a second opener recognizes "someone already validated this
+    /// journal and is rolling it back", so acquiring it here would let a
+    /// racing opener wrongly conclude the database is safe to read while
+    /// recovery is still in flight.
+    pub(crate) fn escalate_to_exclusive(&mut self) -> Result<()> {
+        self.0.escalate_to_exclusive()
+    }
+
+    /// Reverses [`FileLock::escalate_to_exclusive`] once recovery finishes,
+    /// returning to the plain reader lock.
+    pub(crate) fn de_escalate_to_shared(&mut self) -> Result<()> {
+        self.0.de_escalate_to_shared()
+    }
+}
+
 /// Implemented next to each [`VfsFile`] backend (e.g. the Unix backend's
 /// real `fcntl` lock, or a no-op for the in-memory backend).
-trait SharedLockGuard {}
+trait SharedLockGuard {
+    /// See [`FileLock::check_reserved`]. Default: no other process to
+    /// contend with.
+    fn check_reserved(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// See [`FileLock::escalate_to_exclusive`]. Default: no-op.
+    fn escalate_to_exclusive(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// See [`FileLock::de_escalate_to_shared`]. Default: no-op.
+    fn de_escalate_to_shared(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[allow(

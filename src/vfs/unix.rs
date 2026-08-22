@@ -1,12 +1,14 @@
 //! Unix `Vfs` implementation, backed by `std::fs`.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use nix::libc;
 
-use super::{companion_path, lock, shm, FileLock, Result, Vfs, VfsError, VfsFile};
+use super::{companion_path, lock, shm, FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 
 /// Reads database files directly from the local filesystem via `std::fs`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -15,10 +17,7 @@ pub struct UnixVfs;
 impl Vfs for UnixVfs {
     fn open_read(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
         let file = File::open(path).map_err(|source| to_vfs_error(path, source))?;
-        Ok(Box::new(UnixVfsFile {
-            file,
-            path: path.to_path_buf(),
-        }))
+        Ok(Box::new(UnixVfsFile::new(file, path)))
     }
 
     fn open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
@@ -27,10 +26,7 @@ impl Vfs for UnixVfs {
             .write(true)
             .open(path)
             .map_err(|source| to_vfs_error(path, source))?;
-        Ok(Box::new(UnixVfsFile {
-            file,
-            path: path.to_path_buf(),
-        }))
+        Ok(Box::new(UnixVfsFile::new(file, path)))
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
@@ -46,10 +42,7 @@ impl Vfs for UnixVfs {
             .truncate(false)
             .open(path)
             .map_err(|source| to_vfs_error(path, source))?;
-        Ok(Box::new(UnixVfsFile {
-            file,
-            path: path.to_path_buf(),
-        }))
+        Ok(Box::new(UnixVfsFile::new(file, path)))
     }
 
     fn delete(&self, path: &Path) -> Result<()> {
@@ -68,47 +61,122 @@ impl Vfs for UnixVfs {
     }
 }
 
+/// A single fd, shared (via `Rc`) between this file's I/O and any
+/// [`FileLock`] `lock_shared` hands out — never a second, independently-
+/// opened fd to the same path. `Pager::open`'s hot-journal recovery reads,
+/// writes, and locks the main database file through this one handle end to
+/// end, sidestepping the "`close()` drops all `fcntl` locks on the inode"
+/// trap (POSIX `fcntl` locks are scoped to `(process, inode)`, not the open
+/// file description — see [`lock::FileLockState::file`]).
 struct UnixVfsFile {
-    file: File,
+    lock: Rc<RefCell<lock::FileLockState>>,
     path: PathBuf,
+}
+
+impl UnixVfsFile {
+    fn new(file: File, path: &Path) -> Self {
+        UnixVfsFile {
+            lock: Rc::new(RefCell::new(lock::FileLockState::new(file))),
+            path: path.to_path_buf(),
+        }
+    }
 }
 
 impl VfsFile for UnixVfsFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        self.file
+        self.lock
+            .borrow()
+            .file()
             .read_at(buf, offset)
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
     fn size(&self) -> Result<u64> {
-        self.file
+        self.lock
+            .borrow()
+            .file()
             .metadata()
             .map(|m| m.len())
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
     fn lock_shared(&self) -> Result<FileLock> {
-        lock::lock_shared(&self.file)
-            .map(|guard| FileLock(Box::new(guard)))
-            .map_err(|source| to_lock_error(&self.path, source))
+        self.lock
+            .borrow_mut()
+            .set_level(lock::LockLevel::Shared)
+            .map_err(|source| to_lock_error(&self.path, source))?;
+        Ok(FileLock(Box::new(UnixLockGuard {
+            lock: Rc::clone(&self.lock),
+            path: self.path.clone(),
+        })))
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-        self.file
+        self.lock
+            .borrow()
+            .file()
             .write_all_at(buf, offset)
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
     fn truncate(&self, len: u64) -> Result<()> {
-        self.file
+        self.lock
+            .borrow()
+            .file()
             .set_len(len)
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
     fn sync(&self) -> Result<()> {
-        self.file
+        self.lock
+            .borrow()
+            .file()
             .sync_data()
             .map_err(|source| to_vfs_error(&self.path, source))
+    }
+}
+
+/// Returned by [`UnixVfsFile::lock_shared`]: holds the fd's shared lock
+/// ladder at `Shared` (or, briefly, `Exclusive` for hot-journal recovery —
+/// [`FileLock::escalate_to_exclusive`]) until dropped.
+struct UnixLockGuard {
+    lock: Rc<RefCell<lock::FileLockState>>,
+    path: PathBuf,
+}
+
+impl SharedLockGuard for UnixLockGuard {
+    fn check_reserved(&self) -> Result<bool> {
+        self.lock
+            .borrow()
+            .check_reserved()
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
+    fn escalate_to_exclusive(&mut self) -> Result<()> {
+        self.lock
+            .borrow_mut()
+            .set_level(lock::LockLevel::Exclusive)
+            .map_err(|source| to_lock_error(&self.path, source))
+    }
+
+    fn de_escalate_to_shared(&mut self) -> Result<()> {
+        self.lock
+            .borrow_mut()
+            .set_level(lock::LockLevel::Shared)
+            .map_err(|source| to_lock_error(&self.path, source))
+    }
+}
+
+impl Drop for UnixLockGuard {
+    fn drop(&mut self) {
+        // Best-effort, matching `FileLockState`'s own `Drop`: a `drop`
+        // can't propagate failure, and there is nothing more to do about
+        // one anyway. The fd stays open via `UnixVfsFile`'s own `Rc`
+        // clone — only the lock level this guard represents is released.
+        self.lock
+            .borrow_mut()
+            .set_level(lock::LockLevel::Unlocked)
+            .ok();
     }
 }
 
