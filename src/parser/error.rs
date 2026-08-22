@@ -6,7 +6,8 @@
 //! feature reads identically to a typo.
 
 use super::ast::{
-    CreateIndex, CreateTable, Delete, DropIndex, DropTable, Explain, Insert, Select, Update,
+    Begin, Commit, CreateIndex, CreateTable, Delete, DropIndex, DropTable, Explain, Insert,
+    Rollback, Select, Update,
 };
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
@@ -213,6 +214,69 @@ pub fn parse_drop_index(src: &str) -> ParseOutcome<DropIndex> {
     let tokens = Tokenizer::tokenize(src);
     let mut parser = Parser::new(tokens);
     match parser.parse_drop_index_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single BEGIN statement (grammar `.openspec/grammar/sqlite.ebnf`
+/// V5 block, #356). Never panics — any input produces one of the three
+/// [`ParseOutcome`] variants.
+pub fn parse_begin(src: &str) -> ParseOutcome<Begin> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_begin_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single COMMIT/END statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V5 block, #356). Never panics — any input
+/// produces one of the three [`ParseOutcome`] variants.
+pub fn parse_commit(src: &str) -> ParseOutcome<Commit> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_commit_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single ROLLBACK statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V5 block, #356). Never panics — any input
+/// produces one of the three [`ParseOutcome`] variants.
+pub fn parse_rollback(src: &str) -> ParseOutcome<Rollback> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_rollback_stmt() {
         Ok(stmt) => match parser.expect_end() {
             Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
             Err(ParseFail::Unsupported { message, span }) => {

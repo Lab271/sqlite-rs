@@ -600,6 +600,39 @@ impl fmt::Display for DropIndex {
     }
 }
 
+impl fmt::Display for TransactionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            TransactionMode::Deferred => "DEFERRED",
+            TransactionMode::Immediate => "IMMEDIATE",
+            TransactionMode::Exclusive => "EXCLUSIVE",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl fmt::Display for Begin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BEGIN")?;
+        if let Some(mode) = self.mode {
+            write!(f, " {mode}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Commit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "COMMIT")
+    }
+}
+
+impl fmt::Display for Rollback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ROLLBACK")
+    }
+}
+
 impl fmt::Display for ParamKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

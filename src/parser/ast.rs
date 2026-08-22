@@ -461,6 +461,29 @@ pub struct DropIndex {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionMode {
+    Deferred,
+    Immediate,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Begin {
+    pub mode: Option<TransactionMode>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Commit {
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rollback {
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Or,
     And,
