@@ -7,6 +7,7 @@ use super::projection::{compile_row_values, ResultColumnPlan};
 use super::*;
 
 pub(crate) use accum::select_has_aggregate;
+use accum::FLUSH_CURSOR;
 pub(super) use accum::{
     collect_aggregates, emit_agg_step, flush_group, read_pseudo_column, read_row_columns_into,
     AggSlot,
@@ -220,13 +221,15 @@ where
     let agg_slots: Vec<AggSlot> = aggs
         .into_iter()
         .enumerate()
-        .map(|(slot, (call, name, arg))| {
+        .map(|(slot, (call, name, arg, distinct))| {
             let slot = i32::try_from(slot).unwrap_or(0);
+            let eph_cursor = distinct.then(|| FLUSH_CURSOR.saturating_add(1).saturating_add(slot));
             AggSlot {
                 call,
                 name,
                 arg,
                 slot,
+                eph_cursor,
             }
         })
         .collect();
@@ -483,13 +486,15 @@ where
     let agg_slots: Vec<AggSlot> = aggs
         .into_iter()
         .enumerate()
-        .map(|(slot, (call, name, arg))| {
+        .map(|(slot, (call, name, arg, distinct))| {
             let slot = i32::try_from(slot).unwrap_or(0);
+            let eph_cursor = distinct.then(|| FLUSH_CURSOR.saturating_add(1).saturating_add(slot));
             AggSlot {
                 call,
                 name,
                 arg,
                 slot,
+                eph_cursor,
             }
         })
         .collect();
