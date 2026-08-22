@@ -73,19 +73,23 @@ where
         .collect::<Result<_, _>>()?;
 
     let aggs = collect_aggregates(select)?;
-    for (_, _, arg) in &aggs {
+    for (_, _, arg, _) in &aggs {
         if let Some(expr) = arg {
             joined_bare_column_offset(full_scope, expr)?;
         }
     }
+    // DISTINCT-aggregate ephemeral dedup cursors start right after
+    // `flush_cursor`, the highest cursor number this scan already uses.
+    let eph_base = flush_cursor.saturating_add(1);
     let agg_slots: Vec<AggSlot> = aggs
         .into_iter()
         .enumerate()
-        .map(|(slot, (call, name, arg))| AggSlot {
+        .map(|(slot, (call, name, arg, distinct))| AggSlot {
             call,
             name,
             arg,
             slot: i32::try_from(slot).unwrap_or(0),
+            eph_cursor: distinct.then(|| eph_base.saturating_add(i32::try_from(slot).unwrap_or(0))),
         })
         .collect();
     validate_joined_group_projection(select, &agg_slots)?;

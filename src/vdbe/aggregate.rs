@@ -13,9 +13,25 @@
 use std::cmp::Ordering;
 
 use crate::record::Value;
+use crate::vdbe::coerce::coerce_text_to_numeric;
 use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 use crate::vdbe::functions::FunctionError;
+
+/// `sum()`/`avg()`'s per-row argument, normalized to `Integer`/`Real`
+/// (`None` for a missing/`NULL` arg, which the caller skips exactly
+/// like today). A TEXT/BLOB argument (R-29052-00975) is coerced via its
+/// longest numeric prefix — the same rule `CAST(x AS NUMERIC)` applies
+/// (`coerce_text_to_numeric`) — so a non-numeric-looking string becomes
+/// `0` rather than being skipped like a `NULL` argument.
+fn numeric_arg(arg: Option<&Value>) -> Option<Value> {
+    match arg {
+        None | Some(Value::Null) => None,
+        Some(v @ (Value::Integer(_) | Value::Real(_))) => Some(v.clone()),
+        Some(Value::Text(s)) => Some(coerce_text_to_numeric(s)),
+        Some(Value::Blob(b)) => Some(coerce_text_to_numeric(&String::from_utf8_lossy(b))),
+    }
+}
 
 /// One aggregate's running accumulator state, addressed by
 /// `Vm::agg_context`/`Vm::set_agg_context` the same way a [`CursorSlot`](crate::vdbe::cursor::CursorSlot)
@@ -109,39 +125,60 @@ pub fn step(
             real_total,
             saw_real,
             saw_any,
-        } => match args.first() {
-            None | Some(Value::Null) => {}
+        } => match numeric_arg(args.first()) {
+            None => {}
             Some(Value::Integer(i)) => {
                 *saw_any = true;
-                *int_total = int_total.saturating_add(i128::from(*i));
+                // Once a REAL input has switched this accumulator over,
+                // every later integer folds straight into `real_total`
+                // (`int_total` stays frozen at 0) — matching SQLite's own
+                // incremental int-to-double switchover, whose rounding at
+                // extreme magnitudes (#folding order matters once the
+                // running total exceeds a double's exact-integer range)
+                // a single combine-at-the-end pass over `int_total`
+                // doesn't reproduce bit-for-bit.
+                if *saw_real {
+                    *real_total += i as f64;
+                } else {
+                    *int_total = int_total.saturating_add(i128::from(i));
+                }
             }
             Some(Value::Real(r)) => {
                 *saw_any = true;
-                *saw_real = true;
-                *real_total += *r;
+                if !*saw_real {
+                    *real_total += *int_total as f64;
+                    *int_total = 0;
+                    *saw_real = true;
+                }
+                *real_total += r;
             }
-            // Text/blob inputs to sum()/avg() are non-numeric here (no
-            // numeric-text coercion) — out of scope for this ticket's
-            // minimal count/sum proof.
-            Some(Value::Text(_) | Value::Blob(_)) => {}
+            Some(Value::Null | Value::Text(_) | Value::Blob(_)) => {}
         },
         AggState::Avg {
             int_total,
             real_total,
             saw_real,
             count,
-        } => match args.first() {
-            None | Some(Value::Null) => {}
+        } => match numeric_arg(args.first()) {
+            None => {}
             Some(Value::Integer(i)) => {
                 *count = count.saturating_add(1);
-                *int_total = int_total.saturating_add(i128::from(*i));
+                if *saw_real {
+                    *real_total += i as f64;
+                } else {
+                    *int_total = int_total.saturating_add(i128::from(i));
+                }
             }
             Some(Value::Real(r)) => {
                 *count = count.saturating_add(1);
-                *saw_real = true;
-                *real_total += *r;
+                if !*saw_real {
+                    *real_total += *int_total as f64;
+                    *int_total = 0;
+                    *saw_real = true;
+                }
+                *real_total += r;
             }
-            Some(Value::Text(_) | Value::Blob(_)) => {}
+            Some(Value::Null | Value::Text(_) | Value::Blob(_)) => {}
         },
         AggState::Min(current) => {
             if let Some(v) = args.first().filter(|v| !matches!(v, Value::Null)) {

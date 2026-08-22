@@ -14,6 +14,11 @@ pub(in crate::codegen::select) struct AggSlot {
     pub(in crate::codegen::select) name: String,
     pub(in crate::codegen::select) arg: Option<Expr>,
     pub(in crate::codegen::select) slot: i32,
+    /// `count(DISTINCT x)`/`sum(DISTINCT x)`/`avg(DISTINCT x)`: this
+    /// slot's `AggStep` is guarded by an ephemeral dedup cursor (see
+    /// [`super::emit_agg_step`]) numbered `eph_cursor`, `None` for a
+    /// plain (non-`DISTINCT`) aggregate.
+    pub(in crate::codegen::select) eph_cursor: Option<i32>,
 }
 
 /// Recognizes `expr` as an aggregate call this compiler can accumulate,
@@ -24,8 +29,13 @@ pub(in crate::codegen::select) struct AggSlot {
 /// set the old register-arithmetic scheme supported.
 pub(in crate::codegen::select) fn classify_aggregate(
     expr: &Expr,
-) -> Result<(String, Option<Expr>), CodegenError> {
-    let ExprKind::FunctionCall { name, args, .. } = &expr.kind else {
+) -> Result<(String, Option<Expr>, bool), CodegenError> {
+    let ExprKind::FunctionCall {
+        name,
+        args,
+        distinct,
+    } = &expr.kind
+    else {
         return Err(CodegenError::Unsupported {
             reason: "classify_aggregate called on a non-call expression".to_string(),
         });
@@ -57,8 +67,18 @@ pub(in crate::codegen::select) fn classify_aggregate(
             })
         }
     }
-    Ok((name, arg))
+    // `count(*)` has no argument to dedup against — `DISTINCT` is a
+    // parser-accepted no-op there, same as SQLite's own `count(DISTINCT *)`
+    // rejection is not modeled here since `*` never reaches this branch
+    // with `arg = None` from anything but `count`.
+    let distinct = *distinct && arg.is_some();
+    Ok((name, arg, distinct))
 }
+
+/// One collected aggregate call: the call expression itself, its
+/// lowercase name, its (at most one) argument, and whether it was
+/// written with `DISTINCT`.
+pub(in crate::codegen::select) type CollectedAggregate = (Expr, String, Option<Expr>, bool);
 
 /// Finds every aggregate-call sub-expression reachable from `select`'s
 /// result columns and `HAVING` clause through `Paren`/`Collate`/`Unary`/
@@ -67,7 +87,7 @@ pub(in crate::codegen::select) fn classify_aggregate(
 /// a call with a `count(*)` result column accumulates into one slot.
 pub(in crate::codegen::select) fn collect_aggregates(
     select: &Select,
-) -> Result<Vec<(Expr, String, Option<Expr>)>, CodegenError> {
+) -> Result<Vec<CollectedAggregate>, CodegenError> {
     let mut found: Vec<Expr> = Vec::new();
     for col in &select.columns {
         if let ResultColumn::Expr { expr, .. } = col {
@@ -80,8 +100,8 @@ pub(in crate::codegen::select) fn collect_aggregates(
     found
         .into_iter()
         .map(|call| {
-            let (name, arg) = classify_aggregate(&call)?;
-            Ok((call, name, arg))
+            let (name, arg, distinct) = classify_aggregate(&call)?;
+            Ok((call, name, arg, distinct))
         })
         .collect()
 }
@@ -276,7 +296,38 @@ pub(in crate::codegen::select) fn emit_agg_step(
     if reset {
         instr.p5 = 1;
     }
+
+    // `count(DISTINCT x)`/`sum(DISTINCT x)`/`avg(DISTINCT x)`: guard the
+    // fold with the same `OpenEphemeral`/`Found`/`IdxInsert` dedup shape
+    // `emit_distinct_guard` uses for a top-level `SELECT DISTINCT` — one
+    // ephemeral index per slot, reset (reopened, which discards its prior
+    // contents) on this slot's group-boundary row so each group gets its
+    // own DISTINCT set.
+    let Some(eph_cursor) = agg.eph_cursor else {
+        em.emit(instr);
+        return Ok(());
+    };
+    if reset {
+        em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
+    }
+    let skip_step = em.new_label();
+    let found_addr = em.emit(Instruction::with_p4(
+        Opcode::Found,
+        eph_cursor,
+        0,
+        p2,
+        P4::Int(1),
+    ));
+    em.patch_p2(found_addr, skip_step);
+    em.emit(Instruction::with_p4(
+        Opcode::IdxInsert,
+        eph_cursor,
+        p2,
+        0,
+        P4::Int(1),
+    ));
     em.emit(instr);
+    em.place(skip_step);
     Ok(())
 }
 
