@@ -786,6 +786,66 @@ impl Parser {
         })
     }
 
+    /// `begin-stmt` (#356, grammar V5): `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE]
+    /// [TRANSACTION]`.
+    pub(super) fn parse_begin_stmt(&mut self) -> PResult<Begin> {
+        let start = self.expect_kw(Keyword::BEGIN)?;
+        let mut end = start;
+        let mode = if let Some(span) = self.opt_kw_span(Keyword::DEFERRED) {
+            end = span;
+            Some(TransactionMode::Deferred)
+        } else if let Some(span) = self.opt_kw_span(Keyword::IMMEDIATE) {
+            end = span;
+            Some(TransactionMode::Immediate)
+        } else if let Some(span) = self.opt_kw_span(Keyword::EXCLUSIVE) {
+            end = span;
+            Some(TransactionMode::Exclusive)
+        } else {
+            None
+        };
+        if let Some(span) = self.opt_kw_span(Keyword::TRANSACTION) {
+            end = span;
+        }
+        Ok(Begin {
+            mode,
+            span: join_span(start, end),
+        })
+    }
+
+    /// `commit-stmt` (#356, grammar V5): `(COMMIT|END) [TRANSACTION]`.
+    pub(super) fn parse_commit_stmt(&mut self) -> PResult<Commit> {
+        let mut span = if self.at_kw(Keyword::COMMIT) {
+            self.expect_kw(Keyword::COMMIT)?
+        } else {
+            self.expect_kw(Keyword::END)?
+        };
+        if let Some(end) = self.opt_kw_span(Keyword::TRANSACTION) {
+            span = join_span(span, end);
+        }
+        Ok(Commit { span })
+    }
+
+    /// `rollback-stmt` (#356, grammar V5): `ROLLBACK [TRANSACTION]`.
+    ///
+    /// `ROLLBACK ... TO SAVEPOINT ...` is out of scope here (tracked
+    /// separately for the SAVEPOINT/RELEASE follow-up).
+    pub(super) fn parse_rollback_stmt(&mut self) -> PResult<Rollback> {
+        let mut span = self.expect_kw(Keyword::ROLLBACK)?;
+        if let Some(end) = self.opt_kw_span(Keyword::TRANSACTION) {
+            span = join_span(span, end);
+        }
+        Ok(Rollback { span })
+    }
+
+    /// Consumes `kw` if present, returning its span.
+    fn opt_kw_span(&mut self, kw: Keyword) -> Option<Span> {
+        if self.at_kw(kw) {
+            Some(self.advance().span)
+        } else {
+            None
+        }
+    }
+
     /// `explain-stmt` (#243, grammar V4): `EXPLAIN [QUERY PLAN]
     /// select-stmt`. Only a `SELECT` body is supported — wrapping any
     /// other statement kind (or bare `EXPLAIN` with no `QUERY PLAN`, the

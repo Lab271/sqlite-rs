@@ -49,6 +49,10 @@ name = "unit_ddl_parser"
 path = "tests/unit/ddl_parser.rs"
 
 [[test]]
+name = "unit_transaction_parser"
+path = "tests/unit/transaction_parser.rs"
+
+[[test]]
 name = "unit_codegen"
 path = "tests/unit/codegen.rs"
 
