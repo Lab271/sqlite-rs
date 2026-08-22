@@ -73,8 +73,14 @@ pub fn halt(instr: &Instruction) -> Result<Step, ExecError> {
 /// an explicit `AutoCommit` (SQL `COMMIT`/`ROLLBACK`) instead. Schema-
 /// cookie/lock-mode machinery (`P1`/`P2` beyond that) still lives
 /// outside the bytecode interpreter (V1's pager), so both operands are
-/// otherwise unused here.
+/// otherwise unused here. Errors rather than silently re-entering if a
+/// transaction is already open (`vm.autocommit` already `false`) —
+/// stock SQLite's "cannot start a transaction within a transaction"
+/// (#396).
 pub fn transaction(vm: &mut Vm) -> Result<Step, ExecError> {
+    if !vm.autocommit {
+        return Err(ExecError::TransactionAlreadyActive);
+    }
     vm.autocommit = false;
     Ok(Step::Next)
 }
@@ -85,8 +91,18 @@ pub fn transaction(vm: &mut Vm) -> Result<Step, ExecError> {
 /// [`crate::pager::Pager::rollback`]. Either way `Vm::autocommit` is
 /// restored to `true` so a subsequent `Halt` (or another
 /// `Transaction`/`AutoCommit` pair later in the same program) behaves
-/// exactly as if this were a fresh connection.
+/// exactly as if this were a fresh connection. Errors rather than
+/// silently no-opping if no transaction is open (`vm.autocommit`
+/// already `true`) — stock SQLite's "cannot commit/rollback, no
+/// transaction is active" wording (#396).
 pub fn auto_commit(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    if vm.autocommit {
+        return Err(if instr.p2 == 1 {
+            ExecError::NoActiveTransactionToCommit
+        } else {
+            ExecError::NoActiveTransactionToRollback
+        });
+    }
     let db = vm.db()?;
     if let Some(writer) = db.writer.clone() {
         if instr.p2 == 1 {
@@ -408,6 +424,42 @@ mod tests {
         let instr = Instruction::new(Opcode::AutoCommit, 0, 0, 0);
         assert_eq!(auto_commit(&mut vm, &instr).unwrap(), Step::Next);
         assert!(vm.autocommit);
+    }
+
+    /// `BEGIN; BEGIN;` errors rather than silently re-entering — matches
+    /// stock sqlite3's "cannot start a transaction within a transaction"
+    /// (verified against the oracle binary, #396).
+    #[test]
+    fn transaction_errors_when_already_active() {
+        let mut vm = VmType::new();
+        assert_eq!(transaction(&mut vm).unwrap(), Step::Next);
+        assert!(matches!(
+            transaction(&mut vm),
+            Err(ExecError::TransactionAlreadyActive)
+        ));
+        assert!(!vm.autocommit, "the failed re-entry must not disturb state");
+    }
+
+    /// Bare `COMMIT`/`ROLLBACK` with no open transaction errors rather than
+    /// silently no-opping — matches stock sqlite3's "cannot commit/rollback,
+    /// no transaction is active" wording (verified against the oracle
+    /// binary, #396).
+    #[test]
+    fn auto_commit_errors_with_no_active_transaction() {
+        let mut vm = writable_vm();
+        assert!(vm.autocommit);
+
+        let commit = Instruction::new(Opcode::AutoCommit, 0, 1, 0);
+        assert!(matches!(
+            auto_commit(&mut vm, &commit),
+            Err(ExecError::NoActiveTransactionToCommit)
+        ));
+
+        let rollback = Instruction::new(Opcode::AutoCommit, 0, 0, 0);
+        assert!(matches!(
+            auto_commit(&mut vm, &rollback),
+            Err(ExecError::NoActiveTransactionToRollback)
+        ));
     }
 
     #[test]

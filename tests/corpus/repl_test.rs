@@ -167,6 +167,38 @@ fn bad_statement_reports_error_and_session_continues() {
     assert_eq!(stdout, "1\n");
 }
 
+/// Nested `BEGIN` and a bare `COMMIT` both report an error (matching
+/// stock sqlite3's "cannot start a transaction within a transaction" /
+/// "cannot commit - no transaction is active") rather than silently
+/// succeeding, and the session continues afterward (#396).
+#[test]
+fn nested_begin_and_bare_commit_report_errors_and_session_continues() {
+    let db = seed_db("txn_state_errors");
+    let output = run_repl(
+        &db,
+        &[
+            "BEGIN;",
+            "BEGIN;",
+            "ROLLBACK;",
+            "COMMIT;",
+            "SELECT 1;",
+            ".quit",
+        ],
+    );
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot start a transaction within a transaction"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot commit - no transaction is active"),
+        "stderr: {stderr}"
+    );
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
 /// `.exit` behaves the same as `.quit`.
 #[test]
 fn dot_exit_also_ends_the_session() {
