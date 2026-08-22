@@ -58,7 +58,7 @@ def main() -> int:
     multi_leaf = [r for r in records if not r["compiler_void"] and r["vectors_required"] >= 3]
     total_discharged = sum(1 for r in records if r["discharged"])
 
-    print(color(use_color, BOLD, "MC/DC dashboard (src/btree.rs + src/btree/ — #52, more modules to follow)"))
+    print(color(use_color, BOLD, "MC/DC dashboard (btree #52; vdbe/functions, parser/grammar, parser/tokenizer, vdbe/exec, record/encode #368)"))
     print(f"  total obligations:        {len(records)}")
     print(f"  compiler-void (free):     {len(void)}")
     print(f"  single-leaf branches:     {len(single_leaf)} (plain branch coverage, not tagged by convention)")

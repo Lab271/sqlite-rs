@@ -1172,4 +1172,85 @@ mod tests {
         .unwrap();
         assert_eq!(*vm.register(1).unwrap(), Value::Text("a".into()));
     }
+
+    /// #368 tagged MC/DC vector (obligation `exec_258`, decision
+    /// `reg < 0 || reg as usize > MAX_REGISTERS`): leaf A (`reg < 0`) true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_258__v1_negative_register() {
+        assert!(matches!(
+            Vm::index("Test", -1),
+            Err(ExecError::RegisterOutOfRange { index: -1, .. })
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `exec_258`): both leaves false.
+    /// Independence pair for A against
+    /// `mcdc__exec_258__v1_negative_register`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_258__v2_in_range() {
+        assert_eq!(Vm::index("Test", 5).unwrap(), 5);
+    }
+
+    /// #368 tagged MC/DC vector (obligation `exec_258`): leaf B
+    /// (`reg as usize > MAX_REGISTERS`) true, leaf A false. Independence
+    /// pair for B against `mcdc__exec_258__v2_in_range`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_258__v3_over_max_registers() {
+        let over = (MAX_REGISTERS as i32).saturating_add(1);
+        assert!(matches!(
+            Vm::index("Test", over),
+            Err(ExecError::RegisterOutOfRange { .. })
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `exec_406`, decision
+    /// `matches!(a, Value::Null) || matches!(b, Value::Null)`): leaf A
+    /// true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_406__v1_left_operand_null() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Null).unwrap();
+        vm.set_register(1, Value::Integer(1)).unwrap();
+        let eq = Instruction::new(Opcode::Eq, 0, 99, 1);
+        assert_eq!(
+            compare_jump(&vm, &eq, |o| o == Ordering::Equal).unwrap(),
+            Step::Next
+        );
+    }
+
+    /// #368 tagged MC/DC vector (obligation `exec_406`): both leaves
+    /// false. Independence pair for A against
+    /// `mcdc__exec_406__v1_left_operand_null`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_406__v2_neither_operand_null() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        vm.set_register(1, Value::Integer(1)).unwrap();
+        let eq = Instruction::new(Opcode::Eq, 0, 99, 1);
+        assert_eq!(
+            compare_jump(&vm, &eq, |o| o == Ordering::Equal).unwrap(),
+            Step::Jump(99)
+        );
+    }
+
+    /// #368 tagged MC/DC vector (obligation `exec_406`): leaf B true,
+    /// leaf A false. Independence pair for B against
+    /// `mcdc__exec_406__v2_neither_operand_null`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__exec_406__v3_right_operand_null() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        vm.set_register(1, Value::Null).unwrap();
+        let eq = Instruction::new(Opcode::Eq, 0, 99, 1);
+        assert_eq!(
+            compare_jump(&vm, &eq, |o| o == Ordering::Equal).unwrap(),
+            Step::Next
+        );
+    }
 }

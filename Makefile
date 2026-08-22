@@ -83,21 +83,27 @@ test-tcl: ## Run the TCL-sourced extracted-SQL corpus checks (tokenizer totality
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3
 
-test-mcdc: ## MC/DC dashboard for src/btree.rs + src/btree/ (VERBOSE=1 for per-obligation detail — #52)
+# Scanned file set for `test-mcdc`. Grown module-by-module as tagged
+# obligations land: btree (#52), then vdbe/functions, parser/grammar,
+# parser/tokenizer, vdbe/exec, record/encode (#368).
+MCDC_FILES := src/btree.rs src/btree/*.rs src/btree/table/*.rs src/btree/index/*.rs \
+	src/vdbe/functions.rs src/parser/grammar.rs src/parser/tokenizer.rs \
+	src/vdbe/exec.rs src/record/encode.rs
+
+test-mcdc: ## MC/DC dashboard for the scanned file set (VERBOSE=1 for per-obligation detail — #52, #368)
 	@command -v cargo-mvl-mcdc >/dev/null 2>&1 || { \
 		echo "cargo-mvl-mcdc not found — install with:"; \
 		echo "  cargo install --git https://github.com/mvl-lang/mvl-rust rust-mcdc --bin cargo-mvl-mcdc"; \
 		exit 1; \
 	}
 	@mkdir -p target/mcdc
-	cargo-mvl-mcdc scan -o target/mcdc/btree-obligations.json \
-		src/btree.rs src/btree/*.rs src/btree/table/*.rs src/btree/index/*.rs
+	cargo-mvl-mcdc scan -o target/mcdc/obligations.json $(MCDC_FILES)
 	# `harvest` re-runs `cargo test` itself and joins on tagged test names
 	# regardless of overall suite pass/fail (per-test outcome, not exit
 	# status) — the tagged tests are ordinary #[test] fns already run
 	# under `make test`/`make test-lib`; this target is an additional
 	# coverage *view*, not a separate test run.
-	cargo-mvl-mcdc harvest --obligations=target/mcdc/btree-obligations.json --run-dir=. 2>/dev/null \
+	cargo-mvl-mcdc harvest --obligations=target/mcdc/obligations.json --run-dir=. 2>/dev/null \
 		| python3 tools/mcdc_report.py $(if $(filter 1,$(VERBOSE)),--verbose,)
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
