@@ -42,7 +42,7 @@ fn fixture(row_count: u32, label: &str) -> (PathBuf, TableSchema) {
         "sqlite_rs_point_lookup_perf_{}_{label}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 
     let mut sql = String::from("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT);\n");
     sql.push_str("INSERT INTO t(payload) SELECT 'row-' || value FROM generate_series(1, ");
@@ -146,7 +146,7 @@ fn point_lookup_scan_ratio_widens_with_table_size() {
         eprintln!("rows={row_count}: full_scan={scan_time:?} seek={seek_time:?} ratio={ratio:.1}x");
         ratios.push((row_count, ratio));
 
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     // A generous floor (not the ~2500x the issue's 1M-row estimate
@@ -197,7 +197,7 @@ fn join_fixture(row_count: u32, indexed: bool, label: &str) -> PathBuf {
         "sqlite_rs_point_lookup_join_perf_{}_{label}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 
     let mut sql = String::from(
         "CREATE TABLE bench_lookup(code TEXT, label TEXT);\n\
@@ -324,8 +324,8 @@ fn join_lookup_indexed_beats_unindexed_at_every_outer_table_size() {
         );
         ratios.push((row_count, ratio));
 
-        let _ = std::fs::remove_file(&unindexed_path);
-        let _ = std::fs::remove_file(&indexed_path);
+        std::fs::remove_file(&unindexed_path).ok();
+        std::fs::remove_file(&indexed_path).ok();
     }
 
     // Same generous-floor rationale as the rowid-seek test above: pin

@@ -333,7 +333,7 @@ mod tests {
     fn garbage_input_never_panics() {
         for len in 0..40 {
             let bytes = vec![0xaau8; len];
-            let _ = WalHeader::parse(&bytes);
+            WalHeader::parse(&bytes).ok();
         }
         let header = WalHeader {
             native_checksum: true,

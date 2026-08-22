@@ -33,7 +33,7 @@ fn regeneration_is_reproducible() {
     let run1 = std::env::temp_dir().join("sqlite_rs_corpus_regen_run1");
     let run2 = std::env::temp_dir().join("sqlite_rs_corpus_regen_run2");
     for dir in [&run1, &run2] {
-        let _ = std::fs::remove_dir_all(dir);
+        std::fs::remove_dir_all(dir).ok();
         let status = Command::new(gen_fixtures_script())
             .env("FIXTURES_DIR", dir)
             .status()
@@ -48,8 +48,8 @@ fn regeneration_is_reproducible() {
         "regeneration is not reproducible: {mismatches:?}"
     );
 
-    let _ = std::fs::remove_dir_all(&run1);
-    let _ = std::fs::remove_dir_all(&run2);
+    std::fs::remove_dir_all(&run1).ok();
+    std::fs::remove_dir_all(&run2).ok();
 }
 
 /// Requirement 2 explicitly allows this: "byte-identity not required where

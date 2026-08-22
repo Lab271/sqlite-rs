@@ -33,7 +33,7 @@ fn scratch_db(label: &str) -> PathBuf {
         "sqlite-rs-tier2-{label}-{}-{n}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("scratch.db")
 }

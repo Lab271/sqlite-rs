@@ -113,7 +113,7 @@ fn scratch_db(suffix: &str) -> PathBuf {
         "sqlite_rs_parser_oracle_test_{}_{suffix}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(a INTEGER, b INTEGER, c INTEGER); CREATE TABLE u(x INTEGER);")
@@ -177,7 +177,7 @@ fn parser_matches_oracle_three_way_outcome() {
         }
     }
 
-    let _ = std::fs::remove_file(&db);
+    std::fs::remove_file(&db).ok();
 }
 
 /// Issue #190: UPDATE three-way parity against the same oracle/scratch-db
@@ -213,5 +213,5 @@ fn parser_matches_oracle_three_way_outcome_update() {
         }
     }
 
-    let _ = std::fs::remove_file(&db);
+    std::fs::remove_file(&db).ok();
 }

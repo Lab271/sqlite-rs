@@ -36,7 +36,7 @@ fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         std::process::id(),
         label
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(
@@ -73,7 +73,7 @@ fn empty_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         std::process::id(),
         label
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(a INTEGER, b INTEGER, name TEXT);")
@@ -234,7 +234,7 @@ fn two_computed_result_columns_do_not_collide() {
             vec![Value::Integer(4), Value::Integer(2)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn coalesce_and_ifnull_result_columns_do_not_collide() {
             vec![Value::Integer(3), Value::Text("cc".to_string().into())],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// Regression fixture for #140: `ORDER BY ... NULLS FIRST/LAST` was
@@ -266,7 +266,7 @@ fn nulls_fixture(label: &str) -> (PathBuf, TableSchema) {
         std::process::id(),
         label
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(
@@ -305,7 +305,7 @@ fn order_by_asc_nulls_last_matches_oracle() {
             vec![Value::Null],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn order_by_desc_nulls_first_matches_oracle() {
             vec![Value::Integer(-7)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn order_by_asc_default_places_nulls_first() {
             vec![Value::Integer(5)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn order_by_desc_default_places_nulls_last() {
             vec![Value::Null],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #144: `ORDER BY <ordinal>` resolves 1-based against the result-column
@@ -381,7 +381,7 @@ fn order_by_ordinal_resolves_result_column() {
             vec![Value::Integer(2), Value::Integer(5)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #144: an out-of-range ordinal is rejected rather than silently
@@ -390,7 +390,7 @@ fn order_by_ordinal_resolves_result_column() {
 fn order_by_ordinal_out_of_range_is_rejected() {
     let (path, schema) = scratch_fixture_labeled("ordinal_oor");
     assert!(our_rows(&path, &schema, "SELECT a, b FROM t ORDER BY 3;").is_none());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #144: `ORDER BY <alias>` resolves against the result-column alias
@@ -408,7 +408,7 @@ fn order_by_alias_resolves_result_column() {
             vec![Value::Integer(2), Value::Integer(5)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #144: an unknown alias/column name in ORDER BY is still rejected.
@@ -416,7 +416,7 @@ fn order_by_alias_resolves_result_column() {
 fn order_by_unknown_name_is_rejected() {
     let (path, schema) = scratch_fixture_labeled("unknown_name");
     assert!(our_rows(&path, &schema, "SELECT a FROM t ORDER BY nope;").is_none());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #144: `ORDER BY ... COLLATE NOCASE` is honoured rather than always
@@ -427,7 +427,7 @@ fn order_by_collate_nocase_is_case_insensitive() {
         "sqlite_rs_codegen_select_collate_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(
@@ -462,7 +462,7 @@ fn order_by_collate_nocase_is_case_insensitive() {
             vec![Value::Text("cc".to_string().into())],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #155: `ORDER BY <unary expr>` sorts by the computed value, not the
@@ -481,7 +481,7 @@ fn order_by_unary_expression_matches_oracle() {
             vec![Value::Integer(1)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #155: `ORDER BY <binary expr>` over a column.
@@ -498,7 +498,7 @@ fn order_by_binary_expression_matches_oracle() {
             vec![Value::Integer(3), Value::Integer(20)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #155: `ORDER BY <scalar function call>` over a column.
@@ -519,7 +519,7 @@ fn order_by_function_call_matches_oracle() {
             vec![Value::Text("aa".to_string().into())],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #155: an alias whose own result expression is computed (not a bare
@@ -542,7 +542,7 @@ fn order_by_alias_to_computed_expression_matches_oracle() {
             vec![Value::Integer(-1)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// `LIMIT 0` must return zero rows on every scan shape this compiler
@@ -570,7 +570,7 @@ fn limit_zero_returns_no_rows_on_every_scan_shape() {
         Vec::<Vec<Value>>::new(),
         "SeekRowid fast path"
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #155: a computed ORDER BY expression composes with LIMIT/OFFSET and
@@ -591,7 +591,7 @@ fn order_by_expression_with_limit_offset_and_second_key() {
             vec![Value::Integer(1), Value::Integer(10)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #129: `ORDER BY ... LIMIT N` compiles a bounded (top-K) sorter —
@@ -603,7 +603,7 @@ fn order_by_limit_compiles_a_bounded_sorter_and_matches_full_sort() {
         "sqlite_rs_codegen_select_test_topk_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(
@@ -666,7 +666,7 @@ fn order_by_limit_compiles_a_bounded_sorter_and_matches_full_sort() {
             .collect();
         assert_eq!(ours_as_text, oracle_out);
     }
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #129: `DISTINCT` dedupes *after* the sort, so bounding the sorter's
@@ -690,7 +690,7 @@ fn distinct_with_order_by_and_limit_leaves_the_sorter_unbounded() {
         sorter_open.p5, 0,
         "DISTINCT + ORDER BY + LIMIT must not bound the sorter: {rows:?}"
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #137: `WHERE rowid = <int literal>` compiles to `SeekRowid` — no
@@ -733,7 +733,7 @@ fn rowid_equality_seeks_and_matches_oracle() {
             ]]
         );
     }
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #137: a rowid seek by a missing rowid returns no rows (the
@@ -745,7 +745,7 @@ fn rowid_equality_seek_missing_row_returns_empty() {
     let rows = our_rows(&path, &schema, "SELECT a FROM t WHERE rowid = 999;")
         .expect("query should compile and execute");
     assert!(rows.is_empty());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #137: `WHERE rowid = ?` compiles to `Variable` + `SeekRowid`, and
@@ -784,7 +784,7 @@ fn rowid_equality_against_bound_parameter_seeks() {
             Value::Text("cc".to_string().into())
         ]]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #239: `GROUP BY` / `HAVING` fixture — `cat` groups rows unevenly (2
@@ -797,7 +797,7 @@ fn group_by_fixture(label: &str) -> (PathBuf, TableSchema) {
         std::process::id(),
         label
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(
@@ -845,7 +845,7 @@ fn group_by_single_column_count_matches_oracle() {
             vec![Value::Text("z".to_string().into()), Value::Integer(3)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #265: `MIN`/`MAX` over `x COLLATE NOCASE` must compare
@@ -859,7 +859,7 @@ fn min_max_aggregate_honours_collate_nocase() {
         "sqlite_rs_codegen_select_agg_collate_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(name TEXT); INSERT INTO t VALUES ('B'), ('a'), ('C');")
@@ -890,7 +890,7 @@ fn min_max_aggregate_honours_collate_nocase() {
             Value::Text("C".to_string().into()),
         ]]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #265: `GROUP BY x COLLATE NOCASE`'s boundary detection must compare
@@ -903,7 +903,7 @@ fn group_by_boundary_honours_collate_nocase() {
         "sqlite_rs_codegen_select_group_by_collate_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(name TEXT); INSERT INTO t VALUES ('Aa'), ('aa'), ('B');")
@@ -929,7 +929,7 @@ fn group_by_boundary_honours_collate_nocase() {
     .expect("query should compile and execute");
     rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -970,7 +970,7 @@ fn group_by_aggregates_sum_avg_min_max() {
             ],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -1008,7 +1008,7 @@ fn group_by_multiple_columns() {
             ],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -1028,7 +1028,7 @@ fn group_by_having_filters_groups() {
             vec![Value::Text("z".to_string().into()), Value::Integer(3)],
         ]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #268: a `HAVING` clause that filters out every group must return an
@@ -1043,7 +1043,7 @@ fn group_by_having_filters_out_every_group() {
     )
     .expect("query should compile and execute");
     assert_eq!(rows, Vec::<Vec<Value>>::new());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 /// #287: `SELECT count(*) FROM t;` (and friends) with no `GROUP BY` at
@@ -1081,7 +1081,7 @@ fn aggregate_without_group_by_implicit_whole_table_group() {
             Value::Integer(3),
         ]]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 
     let (path, schema) = empty_fixture_labeled("aggregate_no_group_by_empty");
     let rows = our_rows(&path, &schema, "SELECT count(*) FROM t;")
@@ -1104,7 +1104,7 @@ fn aggregate_without_group_by_implicit_whole_table_group() {
             Value::Null,
         ]]
     );
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -1119,7 +1119,7 @@ fn having_without_group_by_filters_the_implicit_group() {
     )
     .expect("HAVING without GROUP BY should compile and execute");
     assert_eq!(rows, vec![vec![Value::Integer(3)]]);
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 
     let (path, schema) = scratch_fixture_labeled("having_no_group_by_fail");
     let rows = our_rows(
@@ -1129,7 +1129,7 @@ fn having_without_group_by_filters_the_implicit_group() {
     )
     .expect("HAVING without GROUP BY should compile and execute");
     assert_eq!(rows, Vec::<Vec<Value>>::new());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -1145,5 +1145,5 @@ fn group_by_expression() {
     // Every `cat` value in the fixture is a single character, so
     // `length(cat)` groups all six rows into one bucket.
     assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(6)]]);
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
 }

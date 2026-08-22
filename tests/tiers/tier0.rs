@@ -86,7 +86,7 @@ impl IsolatedFixture {
 
 impl Drop for IsolatedFixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        std::fs::remove_dir_all(&self.dir).ok();
     }
 }
 

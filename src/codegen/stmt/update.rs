@@ -33,10 +33,10 @@
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
 use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
+use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::stmt::insert::{
     column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_NOTNULL,
 };
-use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
     ConflictAction, Expr, ExprKind, Literal, ParamKind, TableConstraint, Update,
