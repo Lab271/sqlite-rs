@@ -909,6 +909,41 @@ impl Tokenizer {
     }
 }
 
+/// Splits a multi-statement script into individual statement source
+/// slices at top-level `;` boundaries — a `;` inside a string/blob
+/// literal or a comment never splits, since this goes through the real
+/// tokenizer rather than a naive `str::split(';')` (#358's CLI session
+/// wiring: `sqlite-rs exec <db> "BEGIN; UPDATE ...; ROLLBACK;"` needs
+/// each statement compiled and run separately, sharing one `Pager`).
+/// Empty statements (a bare `;`, leading/trailing whitespace-only) are
+/// dropped, matching `sqlite3`'s own script handling.
+pub fn split_statements(sql: &str) -> Vec<String> {
+    let tokens = Tokenizer::tokenize(sql);
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    for tok in &tokens {
+        match tok.kind {
+            TokenKind::Semicolon => {
+                let end = tok.span.offset as usize;
+                push_trimmed(&mut statements, &sql[start..end]);
+                start = (tok.span.offset as usize).saturating_add(tok.span.len as usize);
+            }
+            TokenKind::Eof => {
+                push_trimmed(&mut statements, &sql[start..]);
+            }
+            _ => {}
+        }
+    }
+    statements
+}
+
+fn push_trimmed(statements: &mut Vec<String>, slice: &str) {
+    let trimmed = slice.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+}
+
 fn is_ident_start(c: char) -> bool {
     c == '_' || c.is_alphabetic()
 }
@@ -927,6 +962,30 @@ fn is_ident_continue(c: char) -> bool {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_statements_splits_on_top_level_semicolons_and_trims_whitespace() {
+        let stmts = split_statements("BEGIN;  UPDATE t SET a = 99 ;ROLLBACK");
+        assert_eq!(stmts, vec!["BEGIN", "UPDATE t SET a = 99", "ROLLBACK"]);
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolons_inside_string_literals() {
+        let stmts = split_statements("INSERT INTO t VALUES ('a;b'); SELECT 1");
+        assert_eq!(
+            stmts,
+            vec![
+                "INSERT INTO t VALUES ('a;b')".to_string(),
+                "SELECT 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn split_statements_drops_empty_and_whitespace_only_statements() {
+        let stmts = split_statements("  ; BEGIN ;  ; ROLLBACK ; ");
+        assert_eq!(stmts, vec!["BEGIN", "ROLLBACK"]);
+    }
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         Tokenizer::tokenize(src)

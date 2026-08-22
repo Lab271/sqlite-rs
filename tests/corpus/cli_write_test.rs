@@ -604,3 +604,81 @@ fn full_lifecycle_schema_to_export_round_trips() {
         skip_no_oracle("full_lifecycle_schema_to_export_round_trips (oracle cross-check)");
     }
 }
+
+/// #358/#360: `exec`'s single SQL argument can now be a `;`-separated
+/// multi-statement script sharing one connection — `BEGIN`/a write/
+/// `ROLLBACK` must leave the row exactly as `sqlite3` would.
+#[test]
+fn begin_update_rollback_script_discards_the_write() {
+    let db = seed_db("txn_rollback");
+    assert!(run_exec(&db, "INSERT INTO t VALUES (1, 'x')")
+        .status
+        .success());
+
+    let output = run_exec(&db, "BEGIN; UPDATE t SET a = 99 WHERE a = 1; ROLLBACK;");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = run_query(&db, "SELECT * FROM t");
+    assert_eq!(rows, "1|x\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+        assert_eq!(oracle_select(&oracle, &db, "SELECT * FROM t"), "1|x\n");
+    } else {
+        skip_no_oracle("begin_update_rollback_script_discards_the_write (oracle cross-check)");
+    }
+}
+
+/// Same script shape as above, but `COMMIT` instead of `ROLLBACK` — the
+/// write must persist.
+#[test]
+fn begin_update_commit_script_persists_the_write() {
+    let db = seed_db("txn_commit");
+    assert!(run_exec(&db, "INSERT INTO t VALUES (1, 'x')")
+        .status
+        .success());
+
+    let output = run_exec(&db, "BEGIN; UPDATE t SET a = 99 WHERE a = 1; COMMIT;");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = run_query(&db, "SELECT * FROM t");
+    assert_eq!(rows, "99|x\n");
+
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+        assert_eq!(oracle_select(&oracle, &db, "SELECT * FROM t"), "99|x\n");
+    } else {
+        skip_no_oracle("begin_update_commit_script_persists_the_write (oracle cross-check)");
+    }
+}
+
+/// A script that creates a table and writes to it, all in one `exec`
+/// call, needs the schema re-read between statements (#358) — this is
+/// the regression test for that.
+#[test]
+fn script_can_create_table_then_write_to_it_in_the_same_call() {
+    let db = seed_db("txn_create_then_write");
+
+    let output = run_exec(
+        &db,
+        "CREATE TABLE fresh(x INTEGER); \
+         INSERT INTO fresh VALUES (5); \
+         BEGIN; UPDATE fresh SET x = 42; ROLLBACK;",
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = run_query(&db, "SELECT * FROM fresh");
+    assert_eq!(rows, "5\n");
+}
