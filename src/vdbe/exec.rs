@@ -122,7 +122,7 @@ impl std::fmt::Debug for VmDb {
 /// and a disjoint cursor-slot table (Requirement 2), plus the
 /// accumulated output rows and the one-shot-guard bookkeeping `Once`
 /// needs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Vm {
     registers: Vec<Value>,
     /// Cursor-slot storage: a disjoint address space from `registers`,
@@ -144,6 +144,30 @@ pub struct Vm {
     /// 1-based by `Opcode::Variable`'s `P1` (SQLite's
     /// `sqlite3_bind_*` convention) — see [`Vm::param`]/[`Vm::bind_params`].
     params: Vec<Value>,
+    /// `false` from a `Transaction` opcode until a matching `AutoCommit`
+    /// closes it (#360) — mirrors stock SQLite's per-connection
+    /// autocommit flag. Starts `true`: a program with no explicit
+    /// `BEGIN` commits at `Halt` exactly as it always has. While `false`,
+    /// `Halt` neither commits nor rolls back on its own — the program is
+    /// expected to reach an explicit `AutoCommit` first; see `run`'s
+    /// `Halt` handling for the "BEGIN with no matching COMMIT/ROLLBACK"
+    /// safety fallback.
+    pub(crate) autocommit: bool,
+}
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self {
+            registers: Vec::new(),
+            cursors: Vec::new(),
+            agg_contexts: Vec::new(),
+            db: None,
+            rows: Vec::new(),
+            once_fired: HashSet::new(),
+            params: Vec::new(),
+            autocommit: true,
+        }
+    }
 }
 
 /// Caps a single register index and, separately, a register-range
@@ -184,13 +208,25 @@ impl Vm {
     /// the read-only path), the other kept concrete so write opcodes can
     /// borrow it mutably — see [`VmDb`]'s doc.
     pub fn with_writable_db(pager: crate::pager::Pager, header: DatabaseHeader) -> Self {
-        let shared = Rc::new(std::cell::RefCell::new(pager));
-        let source: Rc<dyn PageSource> = Rc::clone(&shared) as Rc<dyn PageSource>;
+        Self::with_shared_writable_db(Rc::new(std::cell::RefCell::new(pager)), header)
+    }
+
+    /// Like [`Vm::with_writable_db`], but for a `pager` a caller already
+    /// holds as a shared `Rc<RefCell<_>>` (#360) — needed to run more
+    /// than one program against the *same* `Pager` in sequence (e.g.
+    /// `BEGIN` / some writes / `COMMIT`), since a fresh `Vm` is built
+    /// per program but the transaction they share must see one
+    /// `Pager`'s `dirty` set, not each get its own.
+    pub fn with_shared_writable_db(
+        pager: Rc<std::cell::RefCell<crate::pager::Pager>>,
+        header: DatabaseHeader,
+    ) -> Self {
+        let source: Rc<dyn PageSource> = Rc::clone(&pager) as Rc<dyn PageSource>;
         Self {
             db: Some(VmDb {
                 source,
                 header,
-                writer: Some(shared),
+                writer: Some(pager),
             }),
             ..Self::default()
         }
@@ -420,9 +456,9 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, AggFinal, AggStep, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column, Concat,
-        Copy, CreateIndex, CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable, Eq,
-        Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext,
+        Add, AggFinal, AggStep, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
+        Concat, Copy, CreateIndex, CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable,
+        Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext,
         IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos, Init, Insert, Int64, Integer,
         IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict, Not,
         NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite,
@@ -437,7 +473,8 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         BeginSubrtn => control::begin_subrtn(),
         Return => control::r#return(vm, instr),
         Halt => control::halt(instr),
-        Transaction => control::transaction(),
+        Transaction => control::transaction(vm),
+        AutoCommit => control::auto_commit(vm, instr),
         IfNot => control::if_not(vm, instr),
         IfNotZero => control::if_not_zero(vm, instr),
         IfPos => control::if_pos(vm, instr),
@@ -701,7 +738,7 @@ fn parse_function_descriptor(descriptor: &str) -> Option<(&str, usize)> {
 const MAX_STEPS: u32 = 50_000_000;
 
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::new(), program)
+    run(Vm::new(), program).map(|(rows, _)| rows)
 }
 
 /// Like [`execute`], but binds `params` for `Opcode::Variable` to read
@@ -714,7 +751,7 @@ pub fn execute_with_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::new();
     vm.bind_params(params);
-    run(vm, program)
+    run(vm, program).map(|(rows, _)| rows)
 }
 
 /// Like [`execute`], but the `Vm` can service `OpenRead` (cursor
@@ -725,7 +762,7 @@ pub fn execute_with_db(
     source: Rc<dyn PageSource>,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_db(source, header), program)
+    run(Vm::with_db(source, header), program).map(|(rows, _)| rows)
 }
 
 /// Like [`execute_with_db`], but the `Vm` can also service the write
@@ -736,7 +773,7 @@ pub fn execute_with_writable_db(
     pager: crate::pager::Pager,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_writable_db(pager, header), program)
+    run(Vm::with_writable_db(pager, header), program).map(|(rows, _)| rows)
 }
 
 /// Combines [`execute_with_db`] and [`execute_with_params`].
@@ -748,10 +785,30 @@ pub fn execute_with_db_and_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::with_db(source, header);
     vm.bind_params(params);
+    run(vm, program).map(|(rows, _)| rows)
+}
+
+/// Runs one statement's `program` against a `pager` shared across
+/// multiple calls (#360) — the piece that makes `BEGIN`/`COMMIT`/
+/// `ROLLBACK` mean something: each SQL statement compiles to its own
+/// `Program` and gets its own `Vm`, but a transaction spanning several
+/// statements needs one `Pager` (for its `dirty` set) and one
+/// autocommit flag threaded through all of them. `autocommit_in` is
+/// `true` for a connection's first statement (or one issued outside any
+/// transaction); pass back the returned flag as the next call's
+/// `autocommit_in` to keep the transaction state connected.
+pub fn execute_transaction_step(
+    program: &Program,
+    pager: Rc<std::cell::RefCell<crate::pager::Pager>>,
+    header: DatabaseHeader,
+    autocommit_in: bool,
+) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
+    let mut vm = Vm::with_shared_writable_db(pager, header);
+    vm.autocommit = autocommit_in;
     run(vm, program)
 }
 
-fn run(mut vm: Vm, program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
+fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
     let mut pc = 0usize;
     let mut steps = 0u32;
     loop {
@@ -770,21 +827,31 @@ fn run(mut vm: Vm, program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
             }
             Step::Jump(target) => pc = target,
             Step::Halt { code: 0, .. } => {
-                // #194: this VM has no explicit COMMIT/ROLLBACK opcode
-                // yet (`Transaction` is still a no-op, see
-                // `control::transaction`) — a successful `Halt` is
-                // therefore treated as an implicit commit, flushing any
-                // pending write-opcode changes to the underlying file
-                // before returning. A `Vm::with_db` (read-only) or a
-                // writable `Vm` that never actually wrote anything both
-                // take the cheap `writer.is_none()`/`dirty.is_empty()`
-                // no-op path.
+                // A program with no explicit `Transaction` (#194's
+                // original behavior, unchanged) treats a successful
+                // `Halt` as an implicit commit, flushing any pending
+                // write-opcode changes before returning. A `Vm::with_db`
+                // (read-only) or a writable `Vm` that never actually
+                // wrote anything both take the cheap
+                // `writer.is_none()`/`dirty.is_empty()` no-op path.
+                //
+                // #360: a program that opened an explicit transaction
+                // (`Transaction` opcode, `vm.autocommit == false`) and
+                // hasn't reached a matching `AutoCommit` yet does
+                // neither — one SQL statement is one `Program`/`Vm`
+                // (see `execute_transaction_step`), so `BEGIN`'s own
+                // `Halt` running with `autocommit == false` is the
+                // normal, expected case: the transaction stays open,
+                // `vm.autocommit` carries that forward to whichever
+                // `Vm` runs the next statement on this same `Pager`.
                 if let Some(db) = &vm.db {
-                    if let Some(writer) = &db.writer {
-                        writer.borrow_mut().flush()?;
+                    if vm.autocommit {
+                        if let Some(writer) = &db.writer {
+                            writer.borrow_mut().flush()?;
+                        }
                     }
                 }
-                return Ok(vm.rows);
+                return Ok((vm.rows, vm.autocommit));
             }
             Step::Halt { code, message } => return Err(ExecError::Halted { code, message }),
         }
