@@ -419,3 +419,75 @@ fn duplicate_key_insert_is_rejected_against_a_real_fixture() {
 
     std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
 }
+
+/// #337 regression: deleting the highest-key (lowest-offset,
+/// content_start-adjacent) entry from an index leaf, then re-inserting a
+/// key that sorts into the same position, must not corrupt a surviving
+/// neighbor cell. `splice_delete_cell` decoding an index leaf cell's head
+/// as if it carried a table cell's rowid varint (it doesn't — the rowid
+/// rides inside the index entry's own payload record) mis-locates the
+/// freed byte range, silently zeroing/misclassifying part of the
+/// remaining cell's bytes.
+#[test]
+fn delete_then_reinsert_on_an_index_leaf_preserves_the_surviving_entry() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("delete_then_reinsert_on_an_index_leaf_preserves_the_surviving_entry");
+        return;
+    };
+
+    let db = scratch_db("delete_reinsert");
+    seed(
+        &oracle,
+        &db,
+        "create table t(a integer primary key, b text); create index idx_b on t(b); \
+         insert into t values (1, 'a'), (2, 'b');",
+    );
+
+    let vfs = UnixVfs;
+    let page_size = page_size_of(&vfs, &db);
+    let header = read_header(&vfs, &db, page_size);
+    let root = root_page_of_name(&oracle, &db, "idx_b");
+
+    {
+        let mut pager = Pager::open(&vfs, &db, page_size).unwrap();
+        delete_entry(
+            &mut pager,
+            &header,
+            root,
+            &secondary_key("b", 2),
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        insert_entry(
+            &mut pager,
+            &header,
+            root,
+            &secondary_key("b", 2),
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+        pager.flush().unwrap();
+    }
+
+    assert_integrity_check_ok(&oracle, &db);
+
+    let pager_ro = Pager::open(&vfs, &db, page_size).unwrap();
+    let mut cursor = sqlite_rs::btree::IndexCursor::new(pager_ro, header.usable_page_size(), root);
+    let mut rows = Vec::new();
+    let mut row = cursor.first().unwrap();
+    while let Some(r) = row {
+        rows.push(r);
+        row = cursor.next().unwrap();
+    }
+    let decoded: Vec<Vec<Value>> = rows
+        .iter()
+        .map(|r| sqlite_rs::record::decode_record(&r.payload, TextEncoding::Utf8).unwrap())
+        .collect();
+    assert_eq!(
+        decoded,
+        vec![secondary_key("a", 1), secondary_key("b", 2)],
+        "the untouched 'a' entry must survive the delete+reinsert of 'b' intact"
+    );
+
+    std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+}

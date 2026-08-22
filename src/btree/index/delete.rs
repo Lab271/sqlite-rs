@@ -39,10 +39,12 @@ use std::cmp::Ordering;
 
 use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
-    compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
-    IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
+    compare_keys, descend_index_tree, write_index_interior_page, IndexDescent, INTERIOR_INDEX,
+    LEAF_INDEX,
 };
-use crate::btree::{page1_header_start, read_page_type, BtreeError, MAX_PAGES_VISITED};
+use crate::btree::{
+    page1_header_start, read_page_type, splice_delete_cell, BtreeError, MAX_PAGES_VISITED,
+};
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{TextEncoding, Value};
@@ -84,18 +86,16 @@ fn delete_from_leaf(
 ) -> Result<(), BtreeError> {
     let header_start = page1_header_start(leaf_page);
     let buf = pager.get_page_mut(leaf_page)?.clone();
-    let mut cells =
+    let cells =
         collect_index_leaf_cells(pager, &buf, header_start, leaf_page, usable_size, encoding)?;
 
     let pos = cells
         .iter()
         .position(|(existing_key, _)| compare_keys(existing_key, key) == Ordering::Equal)
         .ok_or(BtreeError::KeyNotFound)?;
-    cells.remove(pos);
 
-    let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
     let buf = pager.get_page_mut(leaf_page)?;
-    write_index_leaf_page(buf, header_start, leaf_page, &remaining)
+    splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, false)
 }
 
 /// Handles a delete target found at interior level — see the module doc
@@ -176,14 +176,14 @@ fn extract_max_entry(
     let page_type = read_page_type(&buf, header_start, page_num)?;
 
     if page_type == LEAF_INDEX {
-        let mut cells =
+        let cells =
             collect_index_leaf_cells(pager, &buf, header_start, page_num, usable_size, encoding)?;
-        let Some((_, max_bytes)) = cells.pop() else {
+        let Some((_, max_bytes)) = cells.last().cloned() else {
             return Ok(None);
         };
-        let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
+        let last_idx = cells.len().saturating_sub(1);
         let buf = pager.get_page_mut(page_num)?;
-        write_index_leaf_page(buf, header_start, page_num, &remaining)?;
+        splice_delete_cell(buf, header_start, page_num, usable_size, last_idx, false)?;
         return Ok(Some(max_bytes));
     }
     if page_type != INTERIOR_INDEX {
@@ -270,6 +270,7 @@ fn remove_entry_by_child(
 mod tests {
     use super::*;
     use crate::btree::index::insert::insert_entry;
+    use crate::btree::index::write_index_leaf_page;
     use crate::vfs::{MemoryVfs, PageSource};
     use std::path::Path;
 

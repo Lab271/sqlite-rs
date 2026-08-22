@@ -5,8 +5,10 @@
 //! (`page1_header_start`, `read_page_type`, `find_leaf_page`,
 //! `collect_leaf_cells`, `collect_interior_entries`, `build_interior_cell`,
 //! `write_leaf_page`, `write_interior_page`) are reused directly from the
-//! parent `btree` module — see `insert.rs`'s module doc for the "every
-//! page mutation fully rebuilds the page" simplification they share.
+//! parent `btree` module. A single-cell delete that doesn't empty (or
+//! collapse) the page goes through `splice_delete_cell` instead (O(1)
+//! relative to the page's other cells) — see `insert.rs`'s module doc and
+//! `.openspec/adr/0023-leaf-cell-splice.md` (#337).
 //!
 //! Underflow policy (this ticket's "page merge/rebalance" scope item):
 //! rather than porting SQLite's exact 3-sibling balance algorithm (which
@@ -26,7 +28,8 @@
 use crate::btree::{
     build_interior_cell, collect_interior_entries, collect_leaf_cells, decode_cell_head,
     find_leaf_page, local_payload_size, page1_header_start, read_page_type, read_u32,
-    write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
+    splice_delete_cell, write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE,
+    LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -53,19 +56,22 @@ pub fn delete_row(
         .iter()
         .position(|(existing_rowid, _)| *existing_rowid == rowid)
         .ok_or(BtreeError::RowidNotFound { rowid })?;
-    let (_, removed_cell) = cells.remove(pos);
-    let overflow_page = cell_overflow_page(&removed_cell, leaf_page, usable_size)?;
+    let removed_cell = &cells.get(pos).ok_or(BtreeError::RowidNotFound { rowid })?.1;
+    let overflow_page = cell_overflow_page(removed_cell, leaf_page, usable_size)?;
 
-    let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
-    if !remaining.is_empty() || ancestors.is_empty() {
-        // Either the leaf still holds rows, or it's the root itself (which
-        // can't be removed/collapsed — an empty root leaf is a valid,
-        // empty table).
+    if cells.len() > 1 || ancestors.is_empty() {
+        // Either the leaf still holds rows after this delete, or it's the
+        // root itself (which can't be removed/collapsed — an empty root
+        // leaf is a valid, empty table). Splice the one cell out in place
+        // (O(1) relative to the page's other cells) rather than
+        // collecting and rewriting every surviving cell.
         let buf = pager.get_page_mut(leaf_page)?;
-        write_leaf_page(buf, header_start, leaf_page, &remaining)?;
+        splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, true)?;
         return free_overflow_chain(pager, overflow_page);
     }
 
+    cells.remove(pos);
+    let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
     let buf = pager.get_page_mut(leaf_page)?;
     write_leaf_page(buf, header_start, leaf_page, &remaining)?;
     pager.deallocate_page(leaf_page)?;

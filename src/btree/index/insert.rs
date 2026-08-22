@@ -23,7 +23,9 @@ use crate::btree::index::{
     compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
     IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
 };
-use crate::btree::{local_payload_size, page1_header_start, put, read_page_type, BtreeError};
+use crate::btree::{
+    local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell, BtreeError,
+};
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{encode_record, encode_varint, TextEncoding, Value};
@@ -161,7 +163,7 @@ fn insert_into_index_leaf(
     }
     // No duplicate found — safe to allocate overflow pages (if any) now.
     let cell = encode_index_cell(pager, usable_size, payload)?;
-    cells.insert(insert_pos, (key.to_vec(), cell));
+    cells.insert(insert_pos, (key.to_vec(), cell.clone()));
 
     let total_bytes: usize = cells.iter().map(|(_, c)| c.len()).sum();
     let header_len = 8;
@@ -171,12 +173,17 @@ fn insert_into_index_leaf(
         .saturating_add(total_bytes);
     if needed <= page_len {
         let buf = pager.get_page_mut(leaf_page)?;
-        write_index_leaf_page(
-            buf,
-            header_start,
-            leaf_page,
-            &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-        )?;
+        // Fast path: splice directly into the page (O(1) relative to the
+        // other cells) when there's enough contiguous free space; falls
+        // back to a full rebuild otherwise (see #337).
+        if !splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)? {
+            write_index_leaf_page(
+                buf,
+                header_start,
+                leaf_page,
+                &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
+            )?;
+        }
         return Ok(());
     }
 
