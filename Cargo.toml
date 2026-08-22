@@ -9,10 +9,12 @@ license = "Apache-2.0"
 nix = { version = "0.31.3", features = ["fs"] }
 thiserror = "1"
 
-# Spike #371: rust-refine proof-of-concept on header.rs. Path dependency to
-# a local mvl-rust checkout, not a published crate — this is exploratory
-# and stays on a spike branch, not merged.
-mvl = { path = "/Users/iheitlager/wc/mvl-lang/mvl-rust/crates/mvl" }
+# Spike #371: rust-refine proof-of-concept on header.rs. Not a published
+# crate — pinned to the same mvl-rust revision CI's mvl-limit gate already
+# builds from GitHub (MVL_RUST_REV in .github/workflows/ci.yml), not a
+# local filesystem path (#374 merged that by mistake — a path dependency
+# only resolves on the machine that happens to have that exact checkout).
+mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "a64eb33e7c9ef9ad031d22a70405e59aa1ad3cb0", version = "0.3.0" }
 
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a
