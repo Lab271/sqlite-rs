@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc-btree assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -83,7 +83,7 @@ test-tcl: ## Run the TCL-sourced extracted-SQL corpus checks (tokenizer totality
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3
 
-test-mcdc-btree: ## Scan src/btree.rs + src/btree/ for MC/DC obligations and harvest tagged `mcdc__<id>__v<N>` unit tests (#52)
+test-mcdc: ## Scan src/btree.rs + src/btree/ for MC/DC obligations and harvest tagged `mcdc__<id>__v<N>` unit tests (#52)
 	@command -v cargo-mvl-mcdc >/dev/null 2>&1 || { \
 		echo "cargo-mvl-mcdc not found — install with:"; \
 		echo "  cargo install --git https://github.com/mvl-lang/mvl-rust rust-mcdc --bin cargo-mvl-mcdc"; \
