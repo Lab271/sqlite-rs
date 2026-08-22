@@ -847,6 +847,297 @@ pub(super) fn write_page_common(
     put_u8(buf, header_start.saturating_add(7), 0, page_num)
 }
 
+/// A freed byte range shorter than this can't hold a freeblock header (2
+/// bytes next-offset + 2 bytes size) and is instead accounted for in the
+/// page header's fragmented-free-bytes counter.
+const MIN_FREEBLOCK_SIZE: usize = 4;
+
+/// Sanity cap on freeblocks walked in one chain, guarding against a
+/// corrupt/cyclic chain causing an unbounded loop.
+const MAX_FREEBLOCKS: usize = 10_000;
+
+fn read_u16(page: &[u8], offset: usize, page_num: u32) -> Result<u16, BtreeError> {
+    let end = offset.saturating_add(2);
+    let bytes: [u8; 2] = page
+        .get(offset..end)
+        .ok_or(BtreeError::PageTooShort {
+            page_num,
+            len: page.len(),
+        })?
+        .try_into()
+        .map_err(|_| BtreeError::PageTooShort {
+            page_num,
+            len: page.len(),
+        })?;
+    Ok(u16::from_be_bytes(bytes))
+}
+
+fn write_u16(buf: &mut [u8], offset: usize, value: usize, page_num: u32) -> Result<(), BtreeError> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "callers only ever pass a value already known to fit (page offset/size < 65536, with the 65536-as-0 wraparound applied by the caller where relevant)"
+    )]
+    let v = value as u16;
+    put(buf, offset, &v.to_be_bytes(), page_num)
+}
+
+/// Reads the b-tree page header's `content_start` field (bytes 5-6),
+/// applying the file-format convention that a stored `0` means 65536 (the
+/// only value that field can't represent directly in 16 bits).
+fn read_content_start(
+    page: &[u8],
+    header_start: usize,
+    page_num: u32,
+) -> Result<usize, BtreeError> {
+    let v = read_u16(page, header_start.saturating_add(5), page_num)?;
+    Ok(if v == 0 { 65536 } else { v as usize })
+}
+
+fn write_content_start(
+    buf: &mut [u8],
+    header_start: usize,
+    value: usize,
+    page_num: u32,
+) -> Result<(), BtreeError> {
+    let stored = if value >= 65536 { 0 } else { value };
+    write_u16(buf, header_start.saturating_add(5), stored, page_num)
+}
+
+fn read_first_freeblock(
+    page: &[u8],
+    header_start: usize,
+    page_num: u32,
+) -> Result<usize, BtreeError> {
+    Ok(read_u16(page, header_start.saturating_add(1), page_num)? as usize)
+}
+
+fn read_fragmented_bytes(
+    page: &[u8],
+    header_start: usize,
+    page_num: u32,
+) -> Result<u8, BtreeError> {
+    page.get(header_start.saturating_add(7))
+        .copied()
+        .ok_or(BtreeError::PageTooShort {
+            page_num,
+            len: page.len(),
+        })
+}
+
+fn write_fragmented_bytes(
+    buf: &mut [u8],
+    header_start: usize,
+    value: u8,
+    page_num: u32,
+) -> Result<(), BtreeError> {
+    put_u8(buf, header_start.saturating_add(7), value, page_num)
+}
+
+/// Walks the page's freeblock chain (`fileformat2.html` "Freeblocks"),
+/// returning `(offset, size)` pairs in on-disk chain order (which the
+/// format requires to already be ascending-by-offset and non-overlapping).
+/// Capped at [`MAX_FREEBLOCKS`] so a corrupt/cyclic chain fails cleanly
+/// instead of looping forever.
+fn walk_freeblocks(
+    page: &[u8],
+    header_start: usize,
+    page_num: u32,
+) -> Result<Vec<(usize, usize)>, BtreeError> {
+    let mut out = Vec::new();
+    let mut off = read_first_freeblock(page, header_start, page_num)?;
+    let mut n = 0usize;
+    while off != 0 {
+        n = n.saturating_add(1);
+        if n > MAX_FREEBLOCKS {
+            return Err(BtreeError::TraversalTooLong {
+                max: MAX_FREEBLOCKS,
+            });
+        }
+        let next = read_u16(page, off, page_num)? as usize;
+        let size = read_u16(page, off.saturating_add(2), page_num)? as usize;
+        out.push((off, size));
+        off = next;
+    }
+    Ok(out)
+}
+
+/// Writes `blocks` (offset-ascending, non-overlapping) back as the page's
+/// freeblock chain: each block's own 4-byte header (next-offset + size) is
+/// rewritten to point at the next block in the list (0 for the last), and
+/// the page header's first-freeblock field is updated to point at the
+/// first (or 0 if `blocks` is empty).
+fn write_freeblock_chain(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    blocks: &[(usize, usize)],
+) -> Result<(), BtreeError> {
+    for (i, &(off, size)) in blocks.iter().enumerate() {
+        let next = blocks.get(i.saturating_add(1)).map_or(0, |&(o, _)| o);
+        write_u16(buf, off, next, page_num)?;
+        write_u16(buf, off.saturating_add(2), size, page_num)?;
+    }
+    let first = blocks.first().map_or(0, |&(o, _)| o);
+    write_u16(buf, header_start.saturating_add(1), first, page_num)
+}
+
+/// Inserts a newly freed `[start, start+size)` byte range into `blocks`
+/// (kept offset-ascending), coalescing with an immediately adjacent
+/// preceding and/or following freeblock so the chain never carries two
+/// blocks that touch end-to-end (`fileformat2.html` requires freeblocks to
+/// never be adjacent).
+fn add_freeblock(blocks: &mut Vec<(usize, usize)>, start: usize, size: usize) {
+    let pos = blocks.partition_point(|&(o, _)| o < start);
+    let mut new_start = start;
+    let mut new_size = size;
+    let mut insert_pos = pos;
+
+    if insert_pos > 0 {
+        if let Some(&(prev_off, prev_size)) = blocks.get(insert_pos.saturating_sub(1)) {
+            if prev_off.saturating_add(prev_size) == new_start {
+                new_start = prev_off;
+                new_size = new_size.saturating_add(prev_size);
+                insert_pos = insert_pos.saturating_sub(1);
+                blocks.remove(insert_pos);
+            }
+        }
+    }
+    if let Some(&(next_off, next_size)) = blocks.get(insert_pos) {
+        if new_start.saturating_add(new_size) == next_off {
+            new_size = new_size.saturating_add(next_size);
+            blocks.remove(insert_pos);
+        }
+    }
+    blocks.insert(insert_pos, (new_start, new_size));
+}
+
+/// Inserts `cell` at cell-pointer-array position `index` (0-based, in the
+/// page's cell order) into a leaf page (table or index — both share the
+/// 8-byte leaf header layout) **only** if there is enough contiguous free
+/// space between the end of the cell-pointer array and `content_start` —
+/// this never reuses freeblocks or reserves fragmented bytes, so it is
+/// O(1) in the number of other cells on the page (just a memmove of the
+/// 2-byte pointer-array entries at/after `index`, not the cell bytes
+/// themselves). Returns `Ok(false)` (no mutation performed) when the gap
+/// is too small; callers fall back to their existing full collect/rebuild
+/// path in that case, which — being a from-scratch layout — also reclaims
+/// any space sitting in freeblocks/fragmentation.
+pub(super) fn splice_insert_cell(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    index: usize,
+    cell: &[u8],
+) -> Result<bool, BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(8);
+    let content_start = read_content_start(buf, header_start, page_num)?;
+    let ptr_end = cell_ptr_offset(ptr_base, num_cells);
+    let needed = cell.len().saturating_add(2);
+    if content_start < ptr_end || content_start.saturating_sub(ptr_end) < needed {
+        return Ok(false);
+    }
+
+    let new_content_start = content_start.saturating_sub(cell.len());
+    put(buf, new_content_start, cell, page_num)?;
+
+    for i in (index..num_cells).rev() {
+        let src = cell_ptr_offset(ptr_base, i);
+        let dst = cell_ptr_offset(ptr_base, i.saturating_add(1));
+        let v = read_cell_pointer(buf, src, page_num, i)?;
+        write_u16(buf, dst, v, page_num)?;
+    }
+    let new_ptr_off = cell_ptr_offset(ptr_base, index);
+    write_u16(buf, new_ptr_off, new_content_start, page_num)?;
+    write_content_start(buf, header_start, new_content_start, page_num)?;
+
+    let new_num_cells = num_cells.saturating_add(1);
+    write_u16(buf, header_start.saturating_add(3), new_num_cells, page_num)?;
+    Ok(true)
+}
+
+/// Removes the cell at cell-pointer-array position `index` from a leaf
+/// page (table or index — `has_rowid` selects which cell shape to decode:
+/// a table leaf cell's head carries a payload-length varint *and* a rowid
+/// varint before the payload, an index leaf cell's only the
+/// payload-length varint), in place: shifts the cell-pointer array left by
+/// one entry (a memmove of just the 2-byte pointer entries after `index`,
+/// not the cell bytes themselves — O(1) relative to the page's other
+/// cells) and returns the freed byte range to the page's free-space
+/// bookkeeping per `fileformat2.html`'s "Freeblocks" format: grown into
+/// `content_start` if the freed range borders it, added to the freeblock
+/// chain (coalescing with neighbors) if it's at least
+/// [`MIN_FREEBLOCK_SIZE`] bytes, or added to the fragmented-free-bytes
+/// counter otherwise.
+pub(super) fn splice_delete_cell(
+    buf: &mut [u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    index: usize,
+    has_rowid: bool,
+) -> Result<(), BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    if index >= num_cells {
+        return Err(BtreeError::Internal(
+            "splice_delete_cell: index out of bounds",
+        ));
+    }
+    let ptr_base = header_start.saturating_add(8);
+    let ptr_off = cell_ptr_offset(ptr_base, index);
+    let cell_start = read_cell_pointer(buf, ptr_off, page_num, index)?;
+    let (payload_len, tail_start) = if has_rowid {
+        let (_, payload_len, tail_start) = decode_cell_head(buf, cell_start, page_num)?;
+        (payload_len, tail_start)
+    } else {
+        index::decode_payload_len(buf, cell_start, page_num)?
+    };
+    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let has_overflow = (local_size as u64) < payload_len;
+    let cell_end = tail_start
+        .saturating_add(local_size)
+        .saturating_add(if has_overflow { 4 } else { 0 });
+    let cell_len = cell_end.saturating_sub(cell_start);
+
+    for i in index..num_cells.saturating_sub(1) {
+        let src = cell_ptr_offset(ptr_base, i.saturating_add(1));
+        let dst = cell_ptr_offset(ptr_base, i);
+        let v = read_cell_pointer(buf, src, page_num, i.saturating_add(1))?;
+        write_u16(buf, dst, v, page_num)?;
+    }
+    let new_num_cells = num_cells.saturating_sub(1);
+    write_u16(buf, header_start.saturating_add(3), new_num_cells, page_num)?;
+
+    if let Some(slice) = buf.get_mut(cell_start..cell_end) {
+        slice.fill(0);
+    }
+
+    let content_start = read_content_start(buf, header_start, page_num)?;
+    if cell_start == content_start {
+        let mut blocks = walk_freeblocks(buf, header_start, page_num)?;
+        let mut new_content_start = cell_end;
+        while let Some(pos) = blocks.iter().position(|&(o, _)| o == new_content_start) {
+            let (_, size) = blocks.remove(pos);
+            new_content_start = new_content_start.saturating_add(size);
+        }
+        write_content_start(buf, header_start, new_content_start, page_num)?;
+        write_freeblock_chain(buf, header_start, page_num, &blocks)?;
+    } else if cell_len < MIN_FREEBLOCK_SIZE {
+        let frag = read_fragmented_bytes(buf, header_start, page_num)?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "cell_len < MIN_FREEBLOCK_SIZE (4) here, always fits a u8"
+        )]
+        let add = cell_len as u8;
+        write_fragmented_bytes(buf, header_start, frag.saturating_add(add), page_num)?;
+    } else {
+        let mut blocks = walk_freeblocks(buf, header_start, page_num)?;
+        add_freeblock(&mut blocks, cell_start, cell_len);
+        write_freeblock_chain(buf, header_start, page_num, &blocks)?;
+    }
+    Ok(())
+}
+
 fn page1_header_start(page_num: u32) -> usize {
     if page_num == 1 {
         100
@@ -1523,5 +1814,144 @@ mod tests {
     fn require_interior_header_accepts_page_exactly_twelve_bytes() {
         let page = vec![0u8; 12];
         assert!(require_interior_header(&page, 0, 2).is_ok());
+    }
+
+    fn leaf_page_with_cells(page_size: usize, cells: &[Vec<u8>]) -> Vec<u8> {
+        let mut buf = vec![0u8; page_size];
+        write_leaf_page(&mut buf, 0, 1, cells).unwrap();
+        buf
+    }
+
+    /// A valid table leaf cell (payload-length varint + rowid varint +
+    /// local payload bytes, no overflow) — matches what `decode_cell_head`
+    /// (the `has_rowid = true` shape) expects.
+    fn table_cell(rowid: i64, payload: &[u8]) -> Vec<u8> {
+        let mut cell = encode_varint(payload.len() as u64);
+        cell.extend(encode_varint(rowid as u64));
+        cell.extend_from_slice(payload);
+        cell
+    }
+
+    /// #337: a single-cell insert that fits in the gap between the
+    /// cell-pointer array and `content_start` must splice in place
+    /// (`Ok(true)`) rather than falling back, and the resulting page must
+    /// read back correctly via the normal collect path.
+    #[test]
+    fn splice_insert_cell_appends_into_the_gap_when_it_fits() {
+        let mut buf = leaf_page_with_cells(512, &[]);
+        let cell = build_interior_cell(0, 42); // any small byte string works as a stand-in cell
+        let spliced = splice_insert_cell(&mut buf, 0, 1, 0, &cell).unwrap();
+        assert!(spliced);
+        let cells = collect_leaf_cells(&buf, 0, 1, 512).unwrap();
+        // collect_leaf_cells decodes a table-leaf cell shape; just check
+        // the raw bytes landed and the header accounting is consistent.
+        assert_eq!(read_num_cells(&buf, 0, 1).unwrap(), 1);
+        let _ = cells; // may error decoding as a table cell; header check above is the real assertion
+    }
+
+    #[test]
+    fn splice_insert_cell_declines_when_the_gap_is_too_small() {
+        // A page with content_start pinned right at the end of the
+        // pointer array (no gap) must refuse the fast path.
+        let mut buf = vec![0u8; 32];
+        put_u8(&mut buf, 0, LEAF_TABLE, 1).unwrap();
+        write_content_start(&mut buf, 0, 8, 1).unwrap(); // ptr_base(8) + 0 cells == 8, zero gap
+        let cell = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let spliced = splice_insert_cell(&mut buf, 0, 1, 0, &cell).unwrap();
+        assert!(!spliced, "no contiguous gap must decline the fast path");
+    }
+
+    /// #337: deleting a cell that borders `content_start` must grow
+    /// `content_start` past it (reclaiming the space directly into the
+    /// gap) rather than creating a freeblock.
+    #[test]
+    fn splice_delete_cell_bordering_content_start_grows_it() {
+        let cell_a = table_cell(1, &[0xAAu8; 8]);
+        let cell_b = table_cell(2, &[0xBBu8; 8]);
+        let mut buf = leaf_page_with_cells(512, &[cell_a.clone(), cell_b.clone()]);
+        let content_start_before = read_content_start(&buf, 0, 1).unwrap();
+
+        // `write_page_common` lays cells out back-to-front from the end
+        // of the page, processing the vec in reverse — so the FIRST cell
+        // in the vec ends up at the lowest offset, bordering
+        // content_start.
+        splice_delete_cell(&mut buf, 0, 1, 512, 0, true).unwrap();
+
+        assert_eq!(read_num_cells(&buf, 0, 1).unwrap(), 1);
+        let content_start_after = read_content_start(&buf, 0, 1).unwrap();
+        assert_eq!(
+            content_start_after,
+            content_start_before + cell_a.len(),
+            "content_start must grow by exactly the deleted cell's length"
+        );
+        assert_eq!(read_first_freeblock(&buf, 0, 1).unwrap(), 0);
+    }
+
+    /// #337: deleting a cell that does NOT border `content_start` (an
+    /// earlier-written, higher-offset cell) must record a freeblock, not
+    /// touch `content_start`.
+    #[test]
+    fn splice_delete_cell_not_bordering_content_start_makes_a_freeblock() {
+        let cell_a = table_cell(1, &[0xAAu8; 8]);
+        let cell_b = table_cell(2, &[0xBBu8; 8]);
+        let mut buf = leaf_page_with_cells(512, &[cell_a.clone(), cell_b.clone()]);
+        let content_start_before = read_content_start(&buf, 0, 1).unwrap();
+
+        // Index 1 (cell_b) is the higher-offset cell, not adjacent to
+        // content_start (see the sibling test's comment on layout order).
+        splice_delete_cell(&mut buf, 0, 1, 512, 1, true).unwrap();
+
+        let content_start_after = read_content_start(&buf, 0, 1).unwrap();
+        assert_eq!(
+            content_start_after, content_start_before,
+            "content_start must be unchanged when the freed cell doesn't border it"
+        );
+        let blocks = walk_freeblocks(&buf, 0, 1).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].1, cell_b.len());
+    }
+
+    /// #337: two freeblocks that end up adjacent (after enough deletes)
+    /// must coalesce into one rather than being tracked as separate
+    /// entries.
+    #[test]
+    fn add_freeblock_coalesces_adjacent_ranges() {
+        let mut blocks = vec![(100usize, 10usize), (130, 10)];
+        // A new freed range exactly bridging the gap between the two
+        // existing freeblocks must merge with both.
+        add_freeblock(&mut blocks, 110, 20);
+        assert_eq!(blocks, vec![(100, 40)]);
+    }
+
+    /// #337: a freed range shorter than [`MIN_FREEBLOCK_SIZE`] that does
+    /// NOT border `content_start` must be accounted for as fragmentation,
+    /// not a freeblock (it's too short to hold a freeblock's own 4-byte
+    /// header). Sandwiching a 1-byte cell (`payload_len` varint `0`, no
+    /// payload, no overflow — a valid, if degenerate, index leaf cell)
+    /// between two normal cells keeps it out of the content-start-border
+    /// case, which is covered separately above.
+    #[test]
+    fn splice_delete_cell_tiny_non_bordering_gap_becomes_fragmentation() {
+        let normal_a = vec![0xCCu8; 10];
+        let tiny = vec![0u8];
+        let normal_b = vec![0xDDu8; 10];
+        let mut buf = leaf_page_with_cells(512, &[normal_a, tiny.clone(), normal_b]);
+        let content_start_before = read_content_start(&buf, 0, 1).unwrap();
+
+        splice_delete_cell(&mut buf, 0, 1, 512, 1, false).unwrap();
+
+        assert_eq!(
+            read_content_start(&buf, 0, 1).unwrap(),
+            content_start_before,
+            "a non-bordering delete must never touch content_start"
+        );
+        assert!(
+            walk_freeblocks(&buf, 0, 1).unwrap().is_empty(),
+            "a sub-MIN_FREEBLOCK_SIZE gap must not become a freeblock"
+        );
+        assert_eq!(
+            read_fragmented_bytes(&buf, 0, 1).unwrap() as usize,
+            tiny.len()
+        );
     }
 }

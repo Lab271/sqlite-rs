@@ -7,18 +7,24 @@
 //! directly from the parent `btree` module — they're private to `btree` but
 //! visible here as a descendant module.
 //!
-//! Simplifications made for this ticket (documented rather than hidden):
-//! every page mutation here fully rebuilds the page's cell-pointer array
-//! and content area from scratch (no freeblock/fragmented-byte reuse), and
-//! reserved-space-per-page (`usable_size < page_size`) is not accounted for
-//! in the rebuild — both match this codebase's current at-rest fixtures
-//! (reserved bytes always 0) but would need generalizing before a `PRAGMA
-//! reserve_bytes` fixture is supported.
+//! Single-cell inserts that fit without a split go through
+//! [`crate::btree::splice_insert_cell`] (O(1) relative to the page's other
+//! cells — a memmove of the cell-pointer array only, not the cell bytes),
+//! falling back to a full collect/rebuild only when there isn't enough
+//! contiguous free space (see #337). That fallback — and split/merge/root
+//! rebuild, which always go through [`write_leaf_page`]/
+//! [`write_interior_page`] — still rebuilds the page's cell-pointer array
+//! and content area from scratch, which is also how freeblock/fragmented
+//! space gets reclaimed (see `.openspec/adr/0023-leaf-cell-splice.md`).
+//! Reserved-space-per-page (`usable_size < page_size`) is still not
+//! accounted for in the rebuild — matches this codebase's current at-rest
+//! fixtures (reserved bytes always 0) but would need generalizing before a
+//! `PRAGMA reserve_bytes` fixture is supported.
 
 use crate::btree::{
     build_interior_cell, collect_interior_entries, collect_leaf_cells, find_leaf_page,
-    local_payload_size, page1_header_start, put, read_page_type, write_interior_page,
-    write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
+    local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell,
+    write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -137,7 +143,7 @@ fn insert_into_leaf(
             break;
         }
     }
-    cells.insert(insert_pos, (rowid, cell));
+    cells.insert(insert_pos, (rowid, cell.clone()));
 
     let total_bytes: usize = cells.iter().map(|(_, c)| c.len()).sum();
     let header_len = 8;
@@ -147,12 +153,18 @@ fn insert_into_leaf(
         .saturating_add(total_bytes);
     if needed <= page_len {
         let buf = pager.get_page_mut(leaf_page)?;
-        write_leaf_page(
-            buf,
-            header_start,
-            leaf_page,
-            &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-        )?;
+        // Fast path: splice the new cell directly into the page (O(1)
+        // relative to the other cells) when there's enough contiguous
+        // free space. Falls back to a full rebuild — which also reclaims
+        // any freeblock/fragmentation space — otherwise.
+        if !splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)? {
+            write_leaf_page(
+                buf,
+                header_start,
+                leaf_page,
+                &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
+            )?;
+        }
         return Ok(());
     }
 
