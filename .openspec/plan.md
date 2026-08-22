@@ -45,20 +45,20 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ## Value Blocks
 
-| Block | Value delivered | One-liner |
-|-------|-----------------|-----------|
-| **V1** | Read existing SQLite files | "Open any .sqlite file, extract the data" |
-| **V2** | Single-table queries | "Query it with real SQL" |
-| **V3** | Full CRUD | "It's a database now" |
-| **V4** | Multi-table SQL | "Joins, subqueries, aggregates" |
-| **V5** | Transactions (rollback journal) | "ACID with a journal" |
-| **V6** | WAL & concurrency | "Readers don't block writers" |
-| **V7** | PRAGMAs & introspection | "Operate it like SQLite" |
-| **V8** | Integrity & triggers | "The schema enforces itself" |
-| **V9** | Modern SQL | "UPSERT, RETURNING, window functions" |
-| **V10** | Storage forms & operations | "STRICT, WITHOUT ROWID, VACUUM, ATTACH" |
-| **V11** | Virtual tables & JSON | "Extension foundation + json1" |
-| **V12** | Search & spatial | "FTS5, R-Tree" |
+| Block | Version | Value delivered | One-liner |
+|-------|---------|-----------------|-----------|
+| **V1** | 0.1–0.5 | Read existing SQLite files | "Open any .sqlite file, extract the data" |
+| **V2** | 0.6–0.9 | Single-table queries | "Query it with real SQL" |
+| **V3** | 0.10–0.12 | Full CRUD | "It's a database now" |
+| **V4** | 0.13–0.14 | Multi-table SQL | "Joins, subqueries, aggregates" |
+| **V5 Slim** | 0.15 | Core transactions | "ACID with a journal" |
+| **V6 Slim** | 0.16 / **1.0** | WAL & basic CTEs | "Readers don't block writers" |
+| **V7** | 1.1+ | Polish & compatibility | "Everything else" |
+| **V8** | — | Integrity & triggers | "The schema enforces itself" |
+| **V9** | — | Modern SQL | "UPSERT, RETURNING, window functions" |
+| **V10** | — | Storage forms & operations | "STRICT, WITHOUT ROWID, VACUUM, ATTACH" |
+| **V11** | — | Virtual tables & JSON | "Extension foundation + json1" |
+| **V12** | — | Search & spatial | "FTS5, R-Tree" |
 
 ---
 
@@ -165,58 +165,100 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ---
 
-## V5 — Transactions (Rollback Journal)
+## V5 Slim — Core Transactions (0.15.0)
 
-**Value:** ACID in the classic journal mode. BEGIN/COMMIT/ROLLBACK, savepoints, hot-journal crash recovery. After this block a power cut cannot corrupt a database.
+**Value:** ACID in the classic journal mode. BEGIN/COMMIT/ROLLBACK, hot-journal crash recovery. After this block a power cut cannot corrupt a database.
 
-**Scope:**
+**Scope (Slim):**
 
 | Layer | Subset |
 |-------|--------|
-| Parser | BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE, DEFERRED/IMMEDIATE/EXCLUSIVE |
-| Pager | Journal modes (DELETE/TRUNCATE/PERSIST/MEMORY), hot-journal recovery, all 5 lock states |
-| VDBE | Transaction opcodes, statement journals (partial rollback of failed statements) |
+| Parser | BEGIN/COMMIT/ROLLBACK, DEFERRED/IMMEDIATE/EXCLUSIVE |
+| Pager | Journal mode DELETE, hot-journal recovery, all 5 lock states |
+| VDBE | Transaction opcodes |
 
-**Grammar slice:** +~10 productions.
+**Deferred to V7:**
 
-**Corpus:** `trans*.test`, `savepoint*.test`, `journal*.test`; crash simulation (kill -9 mid-commit, verify recovery).
+| Feature | Rationale |
+|---------|-----------|
+| SAVEPOINT/RELEASE | Nested transactions — power user feature |
+| Statement journals | Partial rollback — edge case |
+| TRUNCATE/PERSIST/MEMORY journal | Alternative modes — DELETE is default |
+
+**Grammar slice:** +~5 productions.
+
+**Corpus:** `trans*.test`, `journal*.test`; crash simulation (kill -9 mid-commit, verify recovery).
 
 **Demo:** power-cut torture test — loop of writes with random kill; database always recovers consistent, verified by stock sqlite3 `integrity_check`.
 
+**Estimate:** 2-3 weeks.
+
 ---
 
-## V6 — WAL & Concurrency + Deferred Relational
+## V6 Slim — WAL & Basic CTEs (0.16.0 / 1.0 candidate)
 
-**Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file. Also completes relational features deferred from V4.
+**Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file. Plus basic relational completeness.
 
-**Scope:**
+**Scope (Slim):**
 
 | Layer | Subset |
 |-------|--------|
 | WAL | WAL file format, SHM index (wal-index), reader marks |
-| Checkpoint | All 4 modes (PASSIVE/FULL/RESTART/TRUNCATE), auto-checkpoint |
-| Concurrency | Multi-reader single-writer, busy handler, `busy_timeout` |
+| Checkpoint | PASSIVE mode |
+| Concurrency | Multi-reader single-writer |
 | Pager | `journal_mode=WAL` switching in both directions |
-| Parser | Non-recursive WITH/CTE, UNION (dedup), recursive CTEs, CREATE VIEW |
+| Parser | Non-recursive WITH/CTE, UNION (dedup), CREATE VIEW |
 | Codegen | CTE materialization, sorter for UNION dedup |
-| Planner | Join ordering heuristics |
-| Aggregates | group_concat |
 
-**Deferred from V4:** non-recursive CTEs, UNION dedup, views, recursive CTEs, INTERSECT/EXCEPT, group_concat, join ordering heuristics.
+**Deferred to V7:**
 
-**Grammar slice:** +~30 productions (CTEs, views, compound selects).
+| Feature | Rationale |
+|---------|-----------|
+| Recursive CTEs | Complex fixpoint evaluation |
+| FULL/RESTART/TRUNCATE checkpoint | PASSIVE sufficient for most apps |
+| Auto-checkpoint | Manual checkpoint works |
+| busy_handler/busy_timeout | Concurrency tuning, not core |
+| Join ordering heuristics | Optimization, not correctness |
+| group_concat | Convenience aggregate |
+| INTERSECT/EXCEPT | Rare set operations |
 
-**Corpus:** `wal*.test`, `walthread*.test`, `with*.test`, `view.test`; interop: sqlite3 and sqlite-rs alternating reads/writes on the same WAL-mode database, including cross-process SHM coordination.
+**Grammar slice:** +~20 productions (CTEs, views, UNION).
+
+**Corpus:** `wal*.test`, `with*.test` (non-recursive), `view.test`; interop: sqlite3 and sqlite-rs alternating reads/writes on the same WAL-mode database.
 
 **Demo:** sqlite-rs writing while stock `sqlite3` reads the same file live — and the reverse.
 
+**Estimate:** 3-4 weeks.
+
+**1.0 Line:** After V6 Slim, sqlite-rs is feature-complete for most applications: full read/write path, JOINs, subqueries, indexes, ACID transactions, WAL concurrency, CTEs, views.
+
 ---
 
-## V7 — PRAGMAs & Introspection
+## V7 — Polish & Compatibility (0.17.0+)
 
-**Value:** Operability. Tooling, ORMs, and admin scripts assume PRAGMAs work. Cheap to implement once V1–V6 exist; huge compatibility payoff.
+**Value:** Completeness. Everything deferred from V5/V6 plus operability features. After V7, sqlite-rs handles the long tail of SQLite compatibility.
 
-**Scope (priority order):**
+**Deferred from V5 (Transactions):**
+
+| Feature | Description |
+|---------|-------------|
+| SAVEPOINT/RELEASE | Nested transactions |
+| Statement journals | Partial rollback of failed statements |
+| TRUNCATE/PERSIST/MEMORY journal | Alternative journal modes |
+
+**Deferred from V6 (WAL/Relational):**
+
+| Feature | Description |
+|---------|-------------|
+| Recursive CTEs | WITH RECURSIVE — fixpoint evaluation |
+| FULL/RESTART/TRUNCATE checkpoint | Advanced checkpoint modes |
+| Auto-checkpoint | Automatic WAL checkpoint |
+| busy_handler/busy_timeout | Concurrency tuning |
+| Join ordering heuristics | Query optimization |
+| group_concat | Aggregate function |
+| INTERSECT/EXCEPT | Set operations |
+
+**PRAGMAs (priority order):**
 
 | Tier | PRAGMAs |
 |------|---------|
@@ -226,7 +268,7 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 Plus: `EXPLAIN` / `EXPLAIN QUERY PLAN` (bytecode listing — nearly free since the VDBE is real bytecode) and `ANALYZE` (sqlite_stat1 for the planner).
 
-**Corpus:** `pragma*.test`, `analyze*.test`.
+**Corpus:** `pragma*.test`, `analyze*.test`, `savepoint*.test`, `walthread*.test`.
 
 **Demo:** point an existing tool (e.g. `sqlite-utils`, Datasette, or an ORM's introspection) at sqlite-rs and have it work.
 
