@@ -6,6 +6,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+perf: `tests/performance/engine.rs` gains four transaction-batching
+benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
+`insert_batch_tx_1000`, `update_batch_tx`), each running a
+`BEGIN`/statement(s)/`COMMIT` session through `execute_transaction_step`
+(#360) against a fresh scratch copy of `bench_1mb.db` per iteration, with
+an `oracle` counterpart (`rusqlite::execute_batch`) alongside each —
+surfacing the per-statement journal/fsync overhead V5's rollback-journal
+path pays outside a transaction vs. amortizing it across a batch, and
+letting `make bench` check the issue's "within 5× of oracle" batch
+criterion directly. Current numbers (`bench_1mb.db`, `--quick`):
+`insert_single_tx` 16ms vs oracle 3ms (~5×), `insert_batch_tx_1000` 61ms
+vs oracle 4ms (~17×) — batching cuts our per-row cost far faster than
+linear, but the ratio to oracle isn't at 5× yet outside the single-row
+case; left as a follow-up rather than in scope here. Closes #373. No
+version bump (V5 phase in progress). Spend: matched the small estimate.
+
 fix: `Pager::open` recovered a hot rollback journal from its header magic
 alone, with no check for a live second connection — a race against the
 oracle's own `hasHotJournal`/`sqlite3PagerSharedLock` (`os_unix.c`/

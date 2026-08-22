@@ -15,23 +15,27 @@
 //! Run via `make bench` (sources `tools/bench_env.sh` first) or directly:
 //! `source tools/bench_env.sh && cargo bench --bench engine`.
 
+use std::cell::RefCell;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rusqlite::Connection;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_select_joined, compile_select_with_catalog, resolve_from_table_schema,
+    compile_select_joined, compile_select_with_catalog, compile_statement,
+    resolve_from_table_schema,
 };
 use sqlite_rs::dump;
 use sqlite_rs::header::DatabaseHeader;
+use sqlite_rs::pager::Pager;
 use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::schema::{read_schema, TableSchema};
-use sqlite_rs::vdbe::{execute_with_db, Program};
+use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db, Program};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 pub const ORACLE_VERSION: &str = "3.53.4";
@@ -278,10 +282,153 @@ fn bench_fixture(c: &mut Criterion, fixture_name: &str) {
     }
 }
 
+/// #373: transaction-batching scenarios, using `bench_1mb.db` as the
+/// starting state for every iteration. Each iteration gets a fresh
+/// scratch copy of the fixture (via `iter_batched`'s `setup`, excluded
+/// from timing) so N iterations don't compound row growth or diverge
+/// from each other — only the `BEGIN`/statement(s)/`COMMIT` sequence
+/// itself is measured. Mirrors `tests/corpus/transaction_oracle_test.rs`'s
+/// `run_our_session` pattern: one shared `Pager` + threaded `autocommit`
+/// flag across statements, each compiled fresh via `compile_statement`
+/// (dispatches BEGIN/COMMIT/INSERT/UPDATE from raw SQL, same as the CLI
+/// driver).
+fn scratch_copy(fixture: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sqlite-rs-bench-tx-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(format!("mkdir {dir:?}: {e}")));
+    let dst = dir.join("bench.db");
+    std::fs::copy(fixture, &dst).unwrap_or_else(|e| fail(format!("copy fixture: {e}")));
+    dst
+}
+
+fn run_our_session(pager: &Rc<RefCell<Pager>>, header: DatabaseHeader, stmts: &[String]) {
+    let schemas = {
+        let borrowed = pager.borrow();
+        let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
+        read_schema(&mut schema_cursor, header.text_encoding)
+            .unwrap_or_else(|e| fail(format!("read_schema: {e}")))
+    };
+    let mut autocommit = true;
+    for stmt in stmts {
+        let program = compile_statement(stmt, &schemas)
+            .unwrap_or_else(|e| fail(format!("compile {stmt:?}: {e}")));
+        let (rows, ac) = execute_transaction_step(&program, Rc::clone(pager), header, autocommit)
+            .unwrap_or_else(|e| fail(format!("execute {stmt:?}: {e}")));
+        black_box(rows);
+        autocommit = ac;
+    }
+}
+
+fn insert_stmts(n: usize) -> Vec<String> {
+    let mut stmts = Vec::with_capacity(n.saturating_add(2));
+    stmts.push("BEGIN".to_string());
+    for i in 0..n {
+        stmts.push(format!(
+            "INSERT INTO bench_data(id, n, x, f, s, bucket) \
+             VALUES (NULL, {i}, {i}, {i}.0, 'row{i}', {})",
+            i % 100
+        ));
+    }
+    stmts.push("COMMIT".to_string());
+    stmts
+}
+
+fn header_of(path: &Path) -> DatabaseHeader {
+    let (header, _pager) =
+        dump::open(&UnixVfs, path).unwrap_or_else(|e| fail(format!("open {path:?}: {e}")));
+    header
+}
+
+/// Joins `stmts` into a single `;`-separated script for
+/// `rusqlite::Connection::execute_batch` — the oracle-side counterpart of
+/// `run_our_session`'s per-statement loop. `execute_batch` runs the whole
+/// script non-parameterized, same as our own `compile_statement` path
+/// here, so both sides pay for the identical SQL text.
+fn oracle_script(stmts: &[String]) -> String {
+    stmts
+        .iter()
+        .map(|s| format!("{s};"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs `stmts` (an explicit `BEGIN`/…/`COMMIT` script) against a fresh
+/// scratch copy of `fixture` on both engines, one `criterion` group per
+/// scenario — mirrors `bench_fixture`'s ours/oracle pairing above and
+/// `crud.rs`'s `bench_write`, but threading multiple statements through
+/// one session/transaction instead of one autocommit statement.
+fn bench_tx_scenario(c: &mut Criterion, label: &str, fixture: &Path, stmts: &[String]) {
+    let group_name = format!("{label}/bench_1mb.db");
+    let mut group = c.benchmark_group(group_name);
+
+    group.bench_function("ours", |b| {
+        b.iter_batched(
+            || {
+                let path = scratch_copy(fixture);
+                let header = header_of(&path);
+                let pager = Rc::new(RefCell::new(
+                    Pager::open(&UnixVfs, &path, header.page_size)
+                        .unwrap_or_else(|e| fail(format!("open {path:?}: {e}"))),
+                ));
+                (path, header, pager)
+            },
+            |(path, header, pager)| {
+                run_our_session(&pager, header, stmts);
+                drop(pager);
+                if let Some(dir) = path.parent() {
+                    std::fs::remove_dir_all(dir).unwrap_or(());
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    let script = oracle_script(stmts);
+    group.bench_function("oracle", |b| {
+        b.iter_batched(
+            || {
+                let path = scratch_copy(fixture);
+                let conn = open_theirs(&path);
+                (path, conn)
+            },
+            |(path, conn)| {
+                conn.execute_batch(&script)
+                    .unwrap_or_else(|e| fail(format!("oracle execute_batch {script:?}: {e}")));
+                drop(conn);
+                if let Some(dir) = path.parent() {
+                    std::fs::remove_dir_all(dir).unwrap_or(());
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_transactions(c: &mut Criterion) {
+    let fixture = fixture_path("bench_1mb.db");
+    bench_tx_scenario(c, "insert_single_tx", &fixture, &insert_stmts(1));
+    bench_tx_scenario(c, "insert_batch_tx_100", &fixture, &insert_stmts(100));
+    bench_tx_scenario(c, "insert_batch_tx_1000", &fixture, &insert_stmts(1000));
+    bench_tx_scenario(
+        c,
+        "update_batch_tx",
+        &fixture,
+        &[
+            "BEGIN".to_string(),
+            "UPDATE bench_data SET x = x + 1 WHERE bucket = 5".to_string(),
+            "COMMIT".to_string(),
+        ],
+    );
+}
+
 fn bench_all(c: &mut Criterion) {
     for fixture_name in ["bench_1mb.db", "bench_50mb.db"] {
         bench_fixture(c, fixture_name);
     }
+    bench_transactions(c);
 }
 
 criterion_group!(benches, bench_all);
