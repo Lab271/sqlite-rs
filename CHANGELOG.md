@@ -29,6 +29,40 @@ two shared helpers (`valid_table_root_page`, `valid_index_root_page`)
 and applied them everywhere. Found via `make silent-swallow`'s #342
 audit (#349).
 
+fix: honor DISTINCT in aggregates and coerce TEXT/BLOB in sum()/avg()
+— `count(DISTINCT x)`/`sum(DISTINCT x)`/`avg(DISTINCT x)` previously
+silently ignored `DISTINCT`, and `sum()`/`avg()` skipped TEXT/BLOB
+inputs instead of coercing them to their numeric-prefix value per
+SQLite's own text-coercion rule (R-29052-00975). Found via the
+vendored sqllogictest suite, which now passes in full (#348).
+
+perf: hoist uncorrelated WHERE-clause subquery in aggregate scan too
+(#322, #323) — extends #314's per-outer-value memoization/hoisting to
+the aggregate-scan codegen path, not just plain SELECTs.
+
+perf: UPDATE/DELETE rowid/index-equality seek fast path (#336) — point
+mutations no longer pay a full table/index scan to find the target row.
+
+perf: in-place leaf/index cell splice instead of collect-all/rewrite-all
+on single-row mutation (#337) — single-row INSERT/UPDATE/DELETE on
+table and secondary-index leaf pages now splices the cell-pointer array
+in place (O(1) relative to the page's other cells) instead of decoding
+and rewriting every cell on the page, when there's enough contiguous
+free space. Adds real freeblock-chain and fragmented-byte bookkeeping
+per `fileformat2.html` (previously always written zero — see
+`.openspec/adr/0023-leaf-cell-splice.md`). `delete` always takes the
+O(1) path; `insert`/`update` fall back to the existing full-rebuild
+path when the page's contiguous gap is too small, which also
+defragments the page as a side effect.
+
+(#338, hash-based aggregation for unindexed GROUP BY, investigated and
+closed as not applicable — stock sqlite3 has no hash-aggregation
+strategy either; it always sorts via a temporary B-tree for the
+unindexed case, so our existing sort-then-group codegen already
+matches oracle's algorithm choice. Left open as an `enhancement` —
+optional follow-up if profiling ever justifies closing the constant-factor
+gap independently of the algorithm.)
+
 ## [0.13.2] - 2026-08-22
 
 fix: aggregate functions (`count`/`sum`/`avg`/`min`/`max`) combined
