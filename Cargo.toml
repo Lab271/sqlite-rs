@@ -9,15 +9,16 @@ license = "Apache-2.0"
 nix = { version = "0.31.3", features = ["fs"] }
 thiserror = "1"
 
-# Spike #371 retry: rust-refine proof-of-concept on header.rs. Not a
-# published crate — pinned to the same mvl-rust revision CI's mvl-limit
-# gate already builds from GitHub (MVL_RUST_REV in
+# Spike #371 retry (2nd pass): rust-refine proof-of-concept on header.rs.
+# Not a published crate — pinned to the same mvl-rust revision CI's
+# mvl-limit gate already builds from GitHub (MVL_RUST_REV in
 # .github/workflows/ci.yml), not a local filesystem path (#374 merged
 # that by mistake — a path dependency only resolves on the machine that
-# happens to have that exact checkout). Bumped past v0.4.2, which shipped
-# mvl-lang/mvl-rust#90/#371 (`fix: rust-refine — check impl methods, not
-# just free functions`) — the exact blocker the first spike attempt found.
-mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "1d3b8ef4668a47ce6f76bb01fd68381e34341388", version = "0.4.2" }
+# happens to have that exact checkout). Bumped past v0.5.1, which shipped
+# mvl-lang/mvl-rust#93/#92 (`fix(mvl-macros): pin result's type at every
+# ensures return-site`) — the E0282 blocker the first retry found, on top
+# of #90/#89's earlier impl-method fixes.
+mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "0fe5f55930eb32528b01832a3243b45ce4d0762b", version = "0.5.1" }
 
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a

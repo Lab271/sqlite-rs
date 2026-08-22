@@ -157,10 +157,70 @@ separate `ensures`-at-early-return type-inference bug. Recommend:
 surface Finding 2 to `mvl-lang/mvl-rust` next (same channel that
 produced #90 — posting it as a sqlite-rs issue comment was enough to get
 Finding 1 fixed same-day), and re-run this spike's field-level `ensures`
-once it lands. Until then, `rust-refine` on this
-codebase is limited to `requires`/simple-return-value `ensures` that
-don't need to inspect a `Result`'s `Ok` payload at an early-return site,
-which excludes most of what `header.rs`'s invariants actually are.
+once it lands.
+
+## Second retry, against mvl-rust v0.5.1 (mvl-lang/mvl-rust#93)
+
+Finding 2 was posted as a comment on [mvl-lang/mvl-rust#90] with a
+minimal repro; fixed same-day as [mvl-lang/mvl-rust#93] (`fix(mvl-macros):
+pin result's type at every ensures return-site`, closing
+[mvl-lang/mvl-rust#92]) — `inject_ensures` now annotates every
+instrumented `let result` binding with the function's declared return
+type instead of leaving it to inference. Released as v0.5.1 (`0fe5f55`,
+which also carries [mvl-lang/mvl-rust#89]'s `impl`-support extension to
+`rust-total`/`rust-effect`). Bumped `sqlite-rs`'s pin again, reinstalled
+`cargo-mvl`, and restored `parse`'s `ensures` to the full field-level
+postcondition from the issue's original target.
+
+**Finding 2 confirmed fixed.** The exact predicate the issue asked for —
+`result.as_ref().unwrap().page_size.is_power_of_two() && 512 <=
+... <= 65536 && reserved_space < page_size` — now compiles without
+E0282, and `cargo mvl prove` returns it as a real obligation at the
+declaration site and at all 8 return sites (one per early `return
+Err(...)` plus the `Ok` tail). Needed one addition beyond the predicate
+itself: `#[allow(clippy::unwrap_used, reason = "...")]` on `parse`, since
+this workspace denies `unwrap_used` project-wide and clippy can't see
+that the leading `result.is_err() ||` short-circuits the `unwrap()`s
+before they'd ever run on an `Err`. `unit_header`'s 5 tests still pass,
+now with the *real* invariant enforced at runtime on every call, not a
+tautology.
+
+Confirmed unchanged from the first retry: every obligation here —
+including this one — still lands at `layer: "runtime"`, per #93's own
+scope note ("does not change what rust-refine can prove... the L1–L4
+native solver doesn't reason about struct-field access or method calls
+like `is_power_of_two()`"). Nothing in this spike has yet produced a
+static L1–L4 proof on real header-parsing code; see the "simple L1–L4
+addition" discussion below for what would.
+
+## Go/no-go (current)
+
+**Go for runtime-enforcement use; still no static proof exercised.**
+Both blocking gaps found by this spike are fixed upstream (same-day, in
+both cases) and adopted here: `impl` methods are scanned, and a
+`Result`-returning function's `ensures` can inspect the `Ok` payload
+from any return site. The issue's original target annotation compiles
+and is enforced, verbatim in intent. What `rust-refine` still doesn't
+give this codebase is a compile-time *proof* of any of it — `page_size`/
+`reserved_space` validation involves `is_power_of_two()` and struct
+construction, neither in the linear-arithmetic fragment `L1`–`L4` reason
+over, so every obligation here is discharged at `layer: "runtime"`
+(equivalent to a hand-written `assert!`, not stronger).
+
+Recommended next step for a real L1–L4 win: extract the pure-arithmetic
+core of `usable_page_size` (`page_size - reserved_space`) into a free
+function over bare `u32` params rather than `&self` field access — the
+interval solver reasons over plain identifiers, not struct-field
+projections, so `self.reserved_space`/`self.page_size` are opaque to it
+even though the same subtraction the `mask_low_nibble` demo function
+proves at L1/L2 for a masking case would very likely close here too. If
+that lands, it's worth sweeping the codebase's existing
+`#[allow(clippy::arithmetic_side_effects, reason = "...")]` sites —
+each is already a hand-written, unenforced precondition claim, and a
+free-function `requires`/`ensures` pair could upgrade some of them from
+"comment asserting an invariant" to "compiler-checked precondition."
 
 [mvl-lang/mvl-rust#90]: https://github.com/mvl-lang/mvl-rust/pull/90
 [mvl-lang/mvl-rust#89]: https://github.com/mvl-lang/mvl-rust/issues/89
+[mvl-lang/mvl-rust#92]: https://github.com/mvl-lang/mvl-rust/issues/92
+[mvl-lang/mvl-rust#93]: https://github.com/mvl-lang/mvl-rust/pull/93

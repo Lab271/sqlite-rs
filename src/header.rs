@@ -113,27 +113,43 @@ impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
     /// [`HEADER_LEN`] bytes. Never panics: malformed input returns `Err`.
-    // Spike #371 retry, against mvl-rust v0.4.2+ (mvl-lang/mvl-rust#90),
-    // which fixed the first attempt's blocking finding: `impl` methods are
-    // now scanned. The issue's target annotations used `#[mvl::refine]
-    // impl { ... }` with `ret.field` and `==>` — none of that is real
-    // rust-refine syntax. The actual API attaches
+    // Spike #371, second retry, against mvl-rust v0.5.1
+    // (mvl-lang/mvl-rust#90/#89/#93), which fixed both prior blockers:
+    // `impl` methods are scanned (#90/#89), and `ensures` referencing an
+    // `Ok`-field at an early `return Err(...)` site no longer hits E0282
+    // (#93/#92 — `inject_ensures` now annotates every instrumented
+    // `result` binding with the function's declared return type instead
+    // of leaving it to inference). The issue's target annotations used
+    // `#[mvl::refine] impl { ... }` with `ret.field` and `==>` — none of
+    // that is real rust-refine syntax. The actual API attaches
     // `#[mvl::requires]`/`#[mvl::ensures]` per function, the return value
     // is always named `result`, and implication has to be spelled as
     // `!p || q` since `==>` isn't a Rust operator the predicate's
     // `syn::Expr` parser can accept.
+    //
     // No `requires(buf.len() >= HEADER_LEN)` here, unlike the issue's
     // target: `parse` is documented and tested to handle a too-short
     // `buf` gracefully (`Err(TooShort)`), not to assume it away. A
     // `requires` on this would turn `empty_file_is_too_short_not_a_panic`
     // into an actual panic — the opposite of what that test exists to
     // pin. This is on the issue itself, not rust-refine.
-    // Reproduces the same E0282 as the first spike attempt, independent
-    // of the impl-scanning fix: `result.as_ref().unwrap().page_size` at
-    // an early `return Err(...)` site leaves `Result<T, HeaderError>`'s
-    // `T` unconstrained too late for rustc to accept. Kept as a tautology
-    // so this function still demonstrates the impl-scanning fix below.
-    #[mvl::ensures(result.is_ok() || result.is_err())]
+    //
+    // `result.as_ref().unwrap()` below is unreachable on the `Err` path:
+    // the leading `result.is_err() ||` short-circuits before any
+    // `unwrap()` runs. clippy can't see that from the predicate alone —
+    // this codebase denies `unwrap_used` project-wide.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "guarded by the leading `result.is_err() ||` short-circuit"
+    )]
+    #[mvl::ensures(
+        result.is_err()
+            || (result.as_ref().unwrap().page_size.is_power_of_two()
+                && result.as_ref().unwrap().page_size >= 512
+                && result.as_ref().unwrap().page_size <= 65536
+                && (result.as_ref().unwrap().reserved_space as u32)
+                    < result.as_ref().unwrap().page_size)
+    )]
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
         if buf.len() < HEADER_LEN {
             return Err(HeaderError::TooShort { len: buf.len() });
