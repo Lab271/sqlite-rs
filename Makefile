@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -143,6 +143,16 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	done; \
 	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
+
+silent-swallow: ## Robustness audit: count error-discarding patterns in src/ (#342); VERBOSE=1 for file:line listing
+	@echo "let _ = ...        (should be ~0 — clippy::let_underscore_must_use denies this, #343)"
+	@grep -rn "let _ = " src/ $(if $(VERBOSE),,| wc -l | sed 's/^/  /') || true
+	@echo "---"
+	@echo ".ok()               (Result -> Option, error silently discarded)"
+	@grep -rn "\.ok()" src/ $(if $(VERBOSE),,| wc -l | sed 's/^/  /') || true
+	@echo "---"
+	@echo ".unwrap_or(...)     (fallible call papered over with a default)"
+	@grep -rn "\.unwrap_or" src/ $(if $(VERBOSE),,| wc -l | sed 's/^/  /') || true
 
 version: ## Print the crate's current version (Cargo.toml [package].version)
 	@sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1
