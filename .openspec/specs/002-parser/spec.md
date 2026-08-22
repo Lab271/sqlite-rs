@@ -430,7 +430,7 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 The hand-curated corpus above is complemented by SQL extracted from the two
 external suites SQLite itself is validated against. `tools/extract_sql_corpus.py`
-performs the extraction; `make sql-corpus` regenerates it offline.
+performs the extraction; `make extract-sql-corpus` regenerates it offline.
 
 - **Sources.** sqllogictest (`gregrahn/sqllogictest` mirror, pinned by commit
   SHA — sqlite.org's Fossil tarball endpoint serves an HTML anti-robot page

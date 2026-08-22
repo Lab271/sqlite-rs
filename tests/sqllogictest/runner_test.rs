@@ -20,7 +20,7 @@
 //!
 //! - Vendoring (or fetching) the remaining `test/random/**` and
 //!   `test/index/**` files `tools/extract_sql_corpus.py` currently
-//!   skips as "generated, enormously repetitive" — `make sql-corpus
+//!   skips as "generated, enormously repetitive" — `make extract-sql-corpus
 //!   FETCH=1` already knows how to pull the pinned mirror commit.
 //! - This runner's `run_file` already replays arbitrary `statement ok`
 //!   setup and skips (not fails) anything outside the engine's
@@ -182,7 +182,7 @@ fn sqllogictest_slice() {
         files.len(),
         EXPECTED_FILE_COUNT,
         "expected the {EXPECTED_FILE_COUNT} vendored slice files (#70), found {}: \
-         re-run `make sql-corpus FETCH=1`",
+         re-run `make extract-sql-corpus FETCH=1`",
         files.len()
     );
 

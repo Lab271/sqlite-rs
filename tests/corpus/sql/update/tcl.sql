@@ -1,6 +1,6 @@
 -- Extracted by tools/extract_sql_corpus.py from the vendored SQLite
 -- TCL suite subset (version 3.53.4) under tests/corpus/sql/vendor/tcl/.
--- Do not edit by hand; run `make sql-corpus` to regenerate (#70).
+-- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70).
 UPDATE tbl3 SET a = 'G' where a = 'g'
 UPDATE mytable SET geom = X'1234'
 UPDATE y SET f1 = 'x' WHERE f1 = 1

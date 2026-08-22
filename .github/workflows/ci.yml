@@ -181,7 +181,7 @@ jobs:
       # a merge on its own.
       - name: sqllogictest slice (informational)
         continue-on-error: true
-        run: make sqllogictest
+        run: make test-sqllogictest
 
       # The runner rewrites tools/sqllogictest-status.json in place, and
       # tools/assurance.py publishes those numbers. Without this, the
@@ -192,5 +192,5 @@ jobs:
         continue-on-error: true
         run: |
           if ! git diff --exit-code -- tools/sqllogictest-status.json; then
-            echo "::warning::tools/sqllogictest-status.json is stale — re-run 'make sqllogictest' and commit the result"
+            echo "::warning::tools/sqllogictest-status.json is stale — re-run 'make test-sqllogictest' and commit the result"
           fi

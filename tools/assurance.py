@@ -250,7 +250,7 @@ def sqllogictest_model():
 
     Returns (pass, attempted, queries) or None if the runner has never
     been run. Unlike the other models here this file is *generated* by
-    `make sqllogictest` rather than derived from source, so a stale
+    `make test-sqllogictest` rather than derived from source, so a stale
     file reports the last run, not the current tree — the CI job
     regenerates it on every push.
 

@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status sql-corpus test-corpus test-parity sqllogictest test-tiers test-point-lookup-perf test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint deny grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -74,15 +74,14 @@ test-corpus: ## Run the fixture corpus / oracle harness against a pinned real sq
 test-parity: ## Run the per-V-block parity mirror against a pinned real sqlite3 (see #72)
 	cargo test --locked --test parity
 
-sqllogictest: ## Run the sqllogictest slice against a pinned real sqlite3, refreshing tools/sqllogictest-status.json (#96)
+test-sqllogictest: ## Run the sqllogictest slice against a pinned real sqlite3, refreshing tools/sqllogictest-status.json (#96)
 	cargo test --locked --test sqllogictest
+
+test-tcl: ## Run the TCL-sourced extracted-SQL corpus checks (tokenizer totality, no-false-invalid) standalone
+	cargo test --locked --test extracted_sql_corpus tcl
 
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3
-
-test-point-lookup-perf: ## Quick wall-clock demos: rowid seek vs scan (#137), and indexed vs unindexed JOIN lookup (V4)
-	cargo test --locked --test point_lookup_perf -- --nocapture
-
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
 
@@ -177,7 +176,7 @@ fixtures: ## Regenerate the fixture corpus (tests/corpus/fixtures/) from tools/g
 opcodes: ## Harvest V2 (single-table SELECT) opcodes via pinned oracle EXPLAIN, write tools/opcodes-v2.json (spike 007, #58; needs a pinned, non-codec sqlite3 matching Cargo.toml's [package.metadata.oracle] version — override with --oracle)
 	python3 tools/harvest_opcodes.py
 
-sql-corpus: ## Regenerate tests/corpus/sql/{select,insert,update,delete,ddl}/ from the vendored sqllogictest + TCL subsets (#70; offline. Add FETCH=1 to refresh the vendored subsets from upstream)
+extract-sql-corpus: ## Regenerate tests/corpus/sql/{select,insert,update,delete,ddl}/ from the vendored sqllogictest + TCL subsets (#70; offline. Add FETCH=1 to refresh the vendored subsets from upstream)
 	python3 tools/extract_sql_corpus.py $(if $(FETCH),--fetch,)
 
 # === Bench (#111/#112 — three-tier perf regime) ===
@@ -193,6 +192,9 @@ bench-cli: fixtures-bench ## Tier 2 (CLI-to-CLI): hyperfine, sqlite-rs dump/quer
 
 bench-status: ## Assemble tools/bench-status.json from the latest `make bench`/`make bench-cli` raw output
 	python3 tools/bench_status.py
+
+bench-point-lookup: ## Quick wall-clock demos: rowid seek vs scan (#137), and indexed vs unindexed JOIN lookup (V4)
+	cargo test --locked --test point_lookup_perf -- --nocapture
 
 # === Assurance ===
 
