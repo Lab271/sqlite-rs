@@ -113,25 +113,26 @@ impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
     /// [`HEADER_LEN`] bytes. Never panics: malformed input returns `Err`.
-    // Spike #371: rust-refine proof-of-concept. The issue's target
-    // annotations used `#[mvl::refine] impl { ... }` with `ret.field` and
-    // `==>` — none of that is real rust-refine syntax. The actual API
-    // attaches `#[mvl::requires]`/`#[mvl::ensures]` per function, the
-    // return value is always named `result`, and implication has to be
-    // spelled as `!p || q` since `==>` isn't a Rust operator the
-    // predicate's `syn::Expr` parser can accept.
-    //
-    // The issue's real intent — `result.page_size.is_power_of_two()`,
-    // `512 <= result.page_size <= 65536`, `result.reserved_space <
-    // result.page_size` — cannot be expressed here at all: `ensures` is
-    // injected at *every* return point including early `return Err(...)`
-    // sites, and `result.as_ref().unwrap().page_size` there leaves the
-    // `Ok` type of `Result<T, HeaderError>` unconstrained soon enough for
-    // rustc to reject it (E0282, "type annotations needed"). This is a
-    // genuine gap in rust-refine, not a syntax mistake on the issue's
-    // part — see the spike write-up. `ensures` below is left as the
-    // largest postcondition that #371's target actually could type-check
-    // through this attribute today: a tautology over `result`'s variant.
+    // Spike #371 retry, against mvl-rust v0.4.2+ (mvl-lang/mvl-rust#90),
+    // which fixed the first attempt's blocking finding: `impl` methods are
+    // now scanned. The issue's target annotations used `#[mvl::refine]
+    // impl { ... }` with `ret.field` and `==>` — none of that is real
+    // rust-refine syntax. The actual API attaches
+    // `#[mvl::requires]`/`#[mvl::ensures]` per function, the return value
+    // is always named `result`, and implication has to be spelled as
+    // `!p || q` since `==>` isn't a Rust operator the predicate's
+    // `syn::Expr` parser can accept.
+    // No `requires(buf.len() >= HEADER_LEN)` here, unlike the issue's
+    // target: `parse` is documented and tested to handle a too-short
+    // `buf` gracefully (`Err(TooShort)`), not to assume it away. A
+    // `requires` on this would turn `empty_file_is_too_short_not_a_panic`
+    // into an actual panic — the opposite of what that test exists to
+    // pin. This is on the issue itself, not rust-refine.
+    // Reproduces the same E0282 as the first spike attempt, independent
+    // of the impl-scanning fix: `result.as_ref().unwrap().page_size` at
+    // an early `return Err(...)` site leaves `Result<T, HeaderError>`'s
+    // `T` unconstrained too late for rustc to accept. Kept as a tautology
+    // so this function still demonstrates the impl-scanning fix below.
     #[mvl::ensures(result.is_ok() || result.is_err())]
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
         if buf.len() < HEADER_LEN {
