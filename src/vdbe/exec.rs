@@ -76,6 +76,15 @@ pub enum ExecError {
 
     #[error("failed to flush pending writes on statement commit: {0}")]
     FlushFailed(#[from] crate::pager::PagerError),
+
+    #[error("cannot start a transaction within a transaction")]
+    TransactionAlreadyActive,
+
+    #[error("cannot commit - no transaction is active")]
+    NoActiveTransactionToCommit,
+
+    #[error("cannot rollback - no transaction is active")]
+    NoActiveTransactionToRollback,
 }
 
 /// The outcome of executing one instruction: fall through to PC+1, jump
