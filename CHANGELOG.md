@@ -6,6 +6,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-08-22
+
+fix: 16 codegen call sites (INSERT/UPDATE/DELETE/SELECT/subquery)
+defaulted an out-of-range `sqlite_master.rootpage` to `0` instead of
+rejecting it — `index_maintenance.rs::open_index_cursors` already had
+the correct `CodegenError::Unsupported` rejection for an index's root
+page, but 16 other table/index root-page sites used the naive
+`i32::try_from(...).unwrap_or(0)` shortcut instead. A corrupt or
+adversarial `sqlite_master` entry could silently produce a cursor
+pointed at page 0 (the reserved header page) instead of a compile
+error — wrong results, no diagnostic. Factored the existing check into
+two shared helpers (`valid_table_root_page`, `valid_index_root_page`)
+and applied them everywhere. Found via `make silent-swallow`'s #342
+audit (#349).
+
 ## [0.13.2] - 2026-08-22
 
 fix: aggregate functions (`count`/`sum`/`avg`/`min`/`max`) combined
