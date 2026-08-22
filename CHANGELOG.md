@@ -6,7 +6,7 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-perf: `tests/performance/engine.rs` gains four transaction-batching
+bench: `tests/performance/engine.rs` gains four transaction-batching
 benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
 `insert_batch_tx_1000`, `update_batch_tx`), each running a
 `BEGIN`/statement(s)/`COMMIT` session through `execute_transaction_step`
