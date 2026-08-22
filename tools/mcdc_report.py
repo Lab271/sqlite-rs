@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """MC/DC harvest dashboard — summarizes `cargo-mvl-mcdc harvest`'s raw output
 (a JSON array of DischargeRecord followed by a summary line and a plain-text
-`undischarged: ...` listing) into a short dashboard by default, or a full
-per-obligation breakdown with `--verbose`.
+`undischarged: ...` listing) into a short dashboard by default, or a binary
+per-obligation action list with `--verbose`.
 
 `vectors_required` doubles as a leaf-count signal: 0 means compiler-void
 (free discharge, exhaustive `match`), 2 means a single-leaf `if`/`while`
 (plain branch coverage, not a real MC/DC candidate), and 3+ means a genuine
 multi-leaf `&&`/`||` decision — the obligations this project's tagged-test
-convention (#52) actually targets.
+convention (#52) actually targets. `leafs = vectors_required - 1`.
 
 Usage:
     cargo-mvl-mcdc harvest --obligations=FILE --run-dir=. | python3 tools/mcdc_report.py
@@ -18,6 +18,16 @@ Usage:
 import argparse
 import json
 import sys
+
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def color(enabled: bool, code: str, text: str) -> str:
+    return f"{code}{text}{RESET}" if enabled else text
 
 
 def parse_records(raw: str) -> list[dict]:
@@ -35,8 +45,10 @@ def parse_records(raw: str) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--verbose", action="store_true", help="list every obligation, not just the dashboard")
+    parser.add_argument("--verbose", action="store_true", help="binary action list instead of the dashboard table")
+    parser.add_argument("--no-color", action="store_true", help="disable ANSI color (auto-disabled when not a tty)")
     args = parser.parse_args()
+    use_color = sys.stdout.isatty() and not args.no_color
 
     raw = sys.stdin.read()
     records = parse_records(raw)
@@ -46,7 +58,7 @@ def main() -> int:
     multi_leaf = [r for r in records if not r["compiler_void"] and r["vectors_required"] >= 3]
     total_discharged = sum(1 for r in records if r["discharged"])
 
-    print("MC/DC dashboard (src/btree.rs + src/btree/ — #52, more modules to follow)")
+    print(color(use_color, BOLD, "MC/DC dashboard (src/btree.rs + src/btree/ — #52, more modules to follow)"))
     print(f"  total obligations:        {len(records)}")
     print(f"  compiler-void (free):     {len(void)}")
     print(f"  single-leaf branches:     {len(single_leaf)} (plain branch coverage, not tagged by convention)")
@@ -55,19 +67,18 @@ def main() -> int:
     print(f"  overall discharged:       {total_discharged}/{len(records)} "
           f"({100 * total_discharged / len(records):.1f}%)")
 
-    if multi_leaf:
-        print()
-        print("  multi-leaf obligations (leafs = conditions, vectors = leafs + 1 required cases):")
-        for r in multi_leaf:
-            leafs = r["vectors_required"] - 1
-            mark = "OK" if r["discharged"] else "--"
-            print(f"    [{mark}] {r['id']:<14} {leafs} leafs, "
-                  f"{r['vectors_discharged']}/{r['vectors_required']} vectors fulfilled  "
-                  f"({r['file']}:{r['line']})")
-
     if not args.verbose:
+        if multi_leaf:
+            print()
+            print("  multi-leaf obligations (leafs = conditions, vectors = leafs + 1 required cases):")
+            for r in multi_leaf:
+                leafs = r["vectors_required"] - 1
+                mark = color(use_color, GREEN, "OK") if r["discharged"] else color(use_color, RED, "--")
+                print(f"    [{mark}] {r['id']:<14} {leafs} leafs, "
+                      f"{r['vectors_discharged']}/{r['vectors_required']} vectors fulfilled  "
+                      f"({r['file']}:{r['line']})")
         print()
-        print("Run with VERBOSE=1 for the per-obligation action list (multi-leaf only).")
+        print("Run with VERBOSE=1 for a binary per-obligation action list.")
         return 0
 
     # Single-leaf branches and compiler-void obligations are out of scope by
@@ -80,17 +91,18 @@ def main() -> int:
         passing_vectors = {t["vector"] for t in r["tagged_tests"] if t["passed"]}
         failing_tests = [t for t in r["tagged_tests"] if not t["passed"]]
         tag = f"{r['id']} [{leafs} leafs, {r['vectors_discharged']}/{r['vectors_required']} vectors]"
+        loc = f"({r['file']}:{r['line']})"
 
         if r["discharged"]:
-            print(f"DISCHARGED  {tag} ({r['file']}:{r['line']})")
+            print(f"{color(use_color, GREEN, 'DISCHARGED')}  {tag} {loc}")
             continue
 
         missing_vectors = sorted(set(range(1, r["vectors_required"] + 1)) - passing_vectors)
         for v in missing_vectors:
-            print(f"ADD TEST    {tag} ({r['file']}:{r['line']}) -- "
+            print(f"{color(use_color, YELLOW, 'ADD TEST')}    {tag} {loc} -- "
                   f"tag a test mcdc__{r['id']}__v{v}_<description>")
         for t in failing_tests:
-            print(f"FIX TEST    {tag} ({r['file']}:{r['line']}) -- {t['name']} is failing")
+            print(f"{color(use_color, RED, 'FIX TEST')}    {tag} {loc} -- {t['name']} is failing")
 
     return 0
 

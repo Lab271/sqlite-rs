@@ -98,7 +98,7 @@ test-mcdc: ## MC/DC dashboard for src/btree.rs + src/btree/ (VERBOSE=1 for per-o
 	# under `make test`/`make test-lib`; this target is an additional
 	# coverage *view*, not a separate test run.
 	cargo-mvl-mcdc harvest --obligations=target/mcdc/btree-obligations.json --run-dir=. 2>/dev/null \
-		| python3 tools/mcdc_report.py $(if $(VERBOSE),--verbose,)
+		| python3 tools/mcdc_report.py $(if $(filter 1,$(VERBOSE)),--verbose,)
 
 verification: test ## Verification level of the assurance case (alias for `make test`)
 
