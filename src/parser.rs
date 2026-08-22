@@ -14,3 +14,4 @@ pub use error::{
     parse_drop_index, parse_drop_table, parse_explain, parse_insert, parse_rollback, parse_select,
     parse_update, ParseOutcome,
 };
+pub use tokenizer::split_statements;
