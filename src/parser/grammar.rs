@@ -2157,3 +2157,444 @@ fn bin(op: BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
         span,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::super::tokenizer::Tokenizer;
+    use super::*;
+
+    fn parser(sql: &str) -> Parser {
+        Parser::new(Tokenizer::tokenize(sql))
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_244`, `parse_insert_stmt`'s
+    /// decision `self.at_kw(SELECT) || self.at_kw(WITH)`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_244__v1_select_source() {
+        assert!(parser("INSERT INTO t SELECT * FROM u")
+            .parse_insert_stmt()
+            .is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_244`): both leaves
+    /// false — neither VALUES/DEFAULT VALUES nor SELECT/WITH follows.
+    /// Independence pair for A against
+    /// `mcdc__grammar_244__v1_select_source`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_244__v2_neither_select_nor_with() {
+        assert!(parser("INSERT INTO t FROM u").parse_insert_stmt().is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_244`): leaf B true,
+    /// leaf A false. Independence pair for B against
+    /// `mcdc__grammar_244__v2_neither_select_nor_with`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_244__v3_with_source() {
+        assert!(parser("INSERT INTO t WITH x AS (SELECT 1) SELECT 1")
+            .parse_insert_stmt()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_438`,
+    /// `check_no_conflict_clause`'s decision `self.at_kw(ON) &&
+    /// matches!(peek_at(1).kind, Keyword(CONFLICT))`): both leaves true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_438__v1_on_conflict() {
+        assert!(parser("ON CONFLICT").check_no_conflict_clause().is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_438`): both leaves
+    /// false. Independence pair for A against
+    /// `mcdc__grammar_438__v1_on_conflict`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_438__v2_no_on() {
+        assert!(parser("NOT NULL").check_no_conflict_clause().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_438`): leaf A true,
+    /// leaf B false — `ON` not followed by `CONFLICT`. Independence pair
+    /// for B against `mcdc__grammar_438__v1_on_conflict`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_438__v3_on_but_not_conflict() {
+        assert!(parser("ON DELETE").check_no_conflict_clause().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_448`,
+    /// `parse_create_table_stmt`'s decision `self.at_kw(TEMP) ||
+    /// self.at_kw(TEMPORARY)`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_448__v1_temp() {
+        assert!(parser("CREATE TEMP TABLE t (a)")
+            .parse_create_table_stmt()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_448`): both leaves
+    /// false. Independence pair for A against
+    /// `mcdc__grammar_448__v1_temp`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_448__v2_neither() {
+        assert!(parser("CREATE TABLE t (a INTEGER)")
+            .parse_create_table_stmt()
+            .is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_448`): leaf B true,
+    /// leaf A false. Independence pair for B against
+    /// `mcdc__grammar_448__v2_neither`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_448__v3_temporary() {
+        assert!(parser("CREATE TEMPORARY TABLE t (a)")
+            .parse_create_table_stmt()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_581`,
+    /// `opt_column_constraint`'s `GENERATED ALWAYS AS` decision, 3
+    /// leaves / 4 required vectors): leaf A (`GENERATED`) true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_581__v1_generated() {
+        assert!(parser("GENERATED ALWAYS AS (1)")
+            .opt_column_constraint()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_581`): leaves A and
+    /// B (`AS`) both false — no recognized constraint at all.
+    /// Independence pair for A against
+    /// `mcdc__grammar_581__v1_generated`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_581__v2_neither_generated_nor_as() {
+        assert_eq!(parser("").opt_column_constraint().unwrap(), None);
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_581`): leaf A
+    /// false, leaf B true, leaf C (`LParen` follows `AS`) false.
+    /// Independence pair for B against `mcdc__grammar_581__v2_neither_generated_nor_as`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_581__v3_as_without_paren() {
+        assert_eq!(parser("AS 1").opt_column_constraint().unwrap(), None);
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_581`): leaf A
+    /// false, leaves B and C both true. Independence pair for C against
+    /// `mcdc__grammar_581__v2_neither_generated_nor_as`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_581__v4_as_with_paren() {
+        assert!(parser("AS (1)").opt_column_constraint().is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_932`,
+    /// `parse_select_stmt`'s compound-operator decision
+    /// `self.at_kw(INTERSECT) || self.at_kw(EXCEPT)`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_932__v1_intersect() {
+        assert!(parser("SELECT 1 INTERSECT SELECT 2")
+            .parse_select_stmt()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_932`): both leaves
+    /// false — a non-compound SELECT. Independence pair for A against
+    /// `mcdc__grammar_932__v1_intersect`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_932__v2_neither() {
+        assert!(parser("SELECT 1").parse_select_stmt().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_932`): leaf B true,
+    /// leaf A false. Independence pair for B against
+    /// `mcdc__grammar_932__v2_neither`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_932__v3_except() {
+        assert!(parser("SELECT 1 EXCEPT SELECT 2")
+            .parse_select_stmt()
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_958`,
+    /// `parse_select_stmt`'s LIMIT-offset decision `self.eat_kw(OFFSET)
+    /// || self.eat_punct(Comma)`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_958__v1_offset_keyword() {
+        assert!(parser("SELECT 1 LIMIT 5 OFFSET 2")
+            .parse_select_stmt()
+            .is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_958`): both leaves
+    /// false — a LIMIT with no offset at all. Independence pair for A
+    /// against `mcdc__grammar_958__v1_offset_keyword`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_958__v2_no_offset() {
+        assert!(parser("SELECT 1 LIMIT 5").parse_select_stmt().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_958`): leaf B true,
+    /// leaf A false — the comma-form offset. Independence pair for B
+    /// against `mcdc__grammar_958__v2_no_offset`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_958__v3_comma_offset() {
+        assert!(parser("SELECT 1 LIMIT 5, 2").parse_select_stmt().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1065`,
+    /// `result_column`'s table-star lookahead
+    /// `matches!(peek_at(1).kind, Dot) && matches!(peek_at(2).kind, Star)`):
+    /// both leaves true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1065__v1_table_star() {
+        assert_eq!(
+            parser("t.*").result_column().unwrap(),
+            ResultColumn::TableStar {
+                table: "t".to_string()
+            }
+        );
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1065`): leaf A
+    /// false — a bare identifier, no dot. Independence pair for A
+    /// against `mcdc__grammar_1065__v1_table_star`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1065__v2_no_dot() {
+        assert!(matches!(
+            parser("t").result_column().unwrap(),
+            ResultColumn::Expr { .. }
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1065`): leaf A
+    /// true, leaf B false — `table.column`, not `table.*`. Independence
+    /// pair for B against `mcdc__grammar_1065__v1_table_star`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1065__v3_dot_but_not_star() {
+        assert!(matches!(
+            parser("t.a").result_column().unwrap(),
+            ResultColumn::Expr { .. }
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1304`, `table_ref`'s
+    /// `NOT INDEXED` decision `self.at_kw(NOT) &&
+    /// matches!(peek_at(1).kind, Keyword(INDEXED))`): both leaves true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1304__v1_not_indexed() {
+        assert!(parser("t NOT INDEXED").table_ref().is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1304`): both leaves
+    /// false — a plain table reference. Independence pair for A against
+    /// `mcdc__grammar_1304__v1_not_indexed`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1304__v2_neither() {
+        assert!(parser("t").table_ref().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1304`): leaf A
+    /// true, leaf B false — `NOT` not followed by `INDEXED`.
+    /// Independence pair for B against
+    /// `mcdc__grammar_1304__v1_not_indexed`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1304__v3_not_but_not_indexed() {
+        assert!(parser("t NOT foo").table_ref().is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1627`,
+    /// `try_tuple_in_subquery`'s entry gate `!matches!(peek().kind,
+    /// LParen) || !self.looks_like_tuple_in()`): leaf A true (not even a
+    /// paren).
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1627__v1_not_a_paren() {
+        assert_eq!(parser("1").try_tuple_in_subquery().unwrap(), None);
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1627`): both leaves
+    /// false — a real multi-column tuple-IN. Independence pair for A
+    /// against `mcdc__grammar_1627__v1_not_a_paren`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1627__v2_looks_like_tuple_in() {
+        assert!(parser("(1, 2) IN (SELECT 1)")
+            .try_tuple_in_subquery()
+            .unwrap()
+            .is_some());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1627`): leaf A
+    /// false (a paren), leaf B true — a single-element parenthesized
+    /// expression, not a tuple-IN shape. Independence pair for B against
+    /// `mcdc__grammar_1627__v2_looks_like_tuple_in`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1627__v3_paren_but_not_tuple_in_shape() {
+        assert_eq!(
+            parser("(1) IN (SELECT 1)").try_tuple_in_subquery().unwrap(),
+            None
+        );
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1647`,
+    /// `try_tuple_in_subquery`'s `NOT IN` decision `self.at_kw(NOT) &&
+    /// matches!(peek_at(1).kind, Keyword(IN))`). Note: `looks_like_tuple_in`'s
+    /// own gate (see `grammar_1627`) guarantees that whenever this elif
+    /// is reached, both leaves are already true together — there is no
+    /// reachable input where they disagree, so all three tagged vectors
+    /// exercise the same (only reachable) true/true combination via
+    /// distinct call sites, documenting rather than defeating that
+    /// invariant.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1647__v1_not_in() {
+        assert!(parser("(1, 2) NOT IN (SELECT 1)")
+            .try_tuple_in_subquery()
+            .unwrap()
+            .is_some());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1647`): see
+    /// `mcdc__grammar_1647__v1_not_in`'s note — a second, distinct
+    /// `NOT IN` call site.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1647__v2_not_in_three_columns() {
+        assert!(parser("(1, 2, 3) NOT IN (SELECT 1)")
+            .try_tuple_in_subquery()
+            .unwrap()
+            .is_some());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1647`): see
+    /// `mcdc__grammar_1647__v1_not_in`'s note — a third, distinct
+    /// `NOT IN` call site.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1647__v3_not_in_text_values() {
+        assert!(parser("('a', 'b') NOT IN (SELECT 1)")
+            .try_tuple_in_subquery()
+            .unwrap()
+            .is_some());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1950`,
+    /// `primary_expr`'s dotted-identifier-chain decision
+    /// `matches!(peek().kind, Dot) && parts.len() < 3`): both leaves
+    /// true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1950__v1_chain_continues() {
+        let expr = parser("a.b").primary_expr().unwrap();
+        assert!(matches!(
+            expr.kind,
+            ExprKind::Column { table: Some(t), name, .. } if t == "a" && name == "b"
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1950`): leaf A
+    /// false — no dot at all. Independence pair for A against
+    /// `mcdc__grammar_1950__v1_chain_continues`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1950__v2_no_dot() {
+        let expr = parser("a").primary_expr().unwrap();
+        assert!(matches!(expr.kind, ExprKind::Column { table: None, name, .. } if name == "a"));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_1950`): leaf A
+    /// true, leaf B false — a 4th segment past the 3-part cap.
+    /// Independence pair for B against
+    /// `mcdc__grammar_1950__v1_chain_continues`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1950__v3_capped_at_three_parts() {
+        let expr = parser("a.b.c.d").primary_expr().unwrap();
+        assert!(matches!(
+            expr.kind,
+            ExprKind::Column { catalog: Some(cat), table: Some(t), name }
+                if cat == "a" && t == "b" && name == "c"
+        ));
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_2034`,
+    /// `function_call`'s window-function decision `self.at_kw(OVER) ||
+    /// self.at_kw(FILTER)`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_2034__v1_over() {
+        assert!(parser("() OVER")
+            .function_call(
+                "f".to_string(),
+                Span {
+                    line: 1,
+                    column: 1,
+                    offset: 0,
+                    len: 1,
+                }
+            )
+            .is_err());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_2034`): both leaves
+    /// false — an ordinary function call. Independence pair for A
+    /// against `mcdc__grammar_2034__v1_over`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_2034__v2_neither() {
+        assert!(parser("()")
+            .function_call(
+                "f".to_string(),
+                Span {
+                    line: 1,
+                    column: 1,
+                    offset: 0,
+                    len: 1,
+                }
+            )
+            .is_ok());
+    }
+
+    /// #368 tagged MC/DC vector (obligation `grammar_2034`): leaf B
+    /// true, leaf A false. Independence pair for B against
+    /// `mcdc__grammar_2034__v2_neither`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_2034__v3_filter() {
+        assert!(parser("() FILTER")
+            .function_call(
+                "f".to_string(),
+                Span {
+                    line: 1,
+                    column: 1,
+                    offset: 0,
+                    len: 1,
+                }
+            )
+            .is_err());
+    }
+}
