@@ -6,6 +6,7 @@ use super::join_access::{
 use super::joins::{emit_join_final_row, resolve_join_constraint};
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard};
 use super::*;
+use crate::codegen::index_maintenance::valid_table_root_page;
 /// #250: `A FULL JOIN B ON cond` (or `USING (...)`/`NATURAL`),
 /// restricted to the two-table case — `compile_select_joined` only
 /// calls this when `FULL` is the sole join in the `FROM` clause; any
@@ -62,12 +63,8 @@ pub(super) fn compile_full_join_two_table(
     let mut bindings = Vec::with_capacity(2);
     for (i, (table_ref, schema)) in table_refs.iter().zip(schemas.iter()).enumerate() {
         let cursor = i32::try_from(i).unwrap_or(0);
-        em.emit(Instruction::new(
-            Opcode::OpenRead,
-            cursor,
-            i32::try_from(schema.root_page).unwrap_or(0),
-            0,
-        ));
+        let root_page = valid_table_root_page(schema)?;
+        em.emit(Instruction::new(Opcode::OpenRead, cursor, root_page, 0));
         bindings.push(TableBinding {
             alias: table_ref.alias.clone(),
             name: table_binding_name(table_ref),

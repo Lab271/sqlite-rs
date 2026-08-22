@@ -23,18 +23,45 @@
 use crate::codegen::expr::{column_index, emit_column_read};
 use crate::codegen::select::CodegenError;
 use crate::codegen::{Emitter, RegAlloc};
-use crate::schema::TableSchema;
+use crate::schema::{IndexSchema, TableSchema};
 use crate::vdbe::{Instruction, Opcode, P4};
+
+/// Validates a table's `sqlite_master.rootpage` before it's used as an
+/// `OpenRead`/`OpenWrite` operand.
+///
+/// `rootpage` is untrusted on-disk data — a corrupt or adversarial file
+/// could carry a zero, negative, or out-of-`i32`-range value for it.
+/// Rather than defaulting a bad value to page 0 (the reserved header
+/// page) and silently pointing the cursor at it, this rejects the
+/// schema outright.
+pub(crate) fn valid_table_root_page(schema: &TableSchema) -> Result<i32, CodegenError> {
+    i32::try_from(schema.root_page)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| CodegenError::Unsupported {
+            reason: format!(
+                "table {} has an invalid root page ({})",
+                schema.name, schema.root_page
+            ),
+        })
+}
+
+/// Same validation as [`valid_table_root_page`], for an index's root page.
+pub(crate) fn valid_index_root_page(index: &IndexSchema) -> Result<i32, CodegenError> {
+    i32::try_from(index.root_page)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| CodegenError::Unsupported {
+            reason: format!(
+                "index {} has an invalid root page ({})",
+                index.name, index.root_page
+            ),
+        })
+}
 
 /// `OpenWrite`s one write cursor per index on `schema`, starting at
 /// `first_cursor`, with `P5 = 1` selecting `CursorSlot::IndexWrite`
 /// (#194's `OpenWrite` doc).
-///
-/// `sqlite_master.rootpage` is untrusted on-disk data — a corrupt or
-/// adversarial file could carry a zero, negative, or out-of-`i32`-range
-/// value for it. Rather than defaulting a bad value to page 0 (the
-/// reserved header page) and silently pointing the write cursor at it,
-/// this rejects the schema outright.
 pub(crate) fn open_index_cursors(
     em: &mut Emitter,
     schema: &TableSchema,
@@ -42,15 +69,7 @@ pub(crate) fn open_index_cursors(
 ) -> Result<(), CodegenError> {
     for (i, index) in schema.indexes.iter().enumerate() {
         let cursor = first_cursor.saturating_add(i32::try_from(i).unwrap_or(0));
-        let root_page = i32::try_from(index.root_page)
-            .ok()
-            .filter(|p| *p > 0)
-            .ok_or_else(|| CodegenError::Unsupported {
-                reason: format!(
-                    "index {} has an invalid root page ({})",
-                    index.name, index.root_page
-                ),
-            })?;
+        let root_page = valid_index_root_page(index)?;
         let mut instr = Instruction::new(Opcode::OpenWrite, cursor, root_page, 0);
         instr.p5 = 1;
         em.emit(instr);

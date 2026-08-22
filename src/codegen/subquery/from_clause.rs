@@ -1,6 +1,7 @@
 //! `FROM`-subquery schema resolution and materialization — see
 //! `super`'s module doc.
 
+use crate::codegen::index_maintenance::valid_table_root_page;
 use crate::codegen::select::{
     compile_select_joined_scan, compile_select_scan, CodegenError, ScanCursors,
 };
@@ -260,10 +261,11 @@ pub(crate) fn materialize_from_subquery(
             pseudo: reg.alloc_cursor(),
             distinct: reg.alloc_cursor(),
         };
+        let root_page = valid_table_root_page(schema)?;
         em.emit(Instruction::new(
             Opcode::OpenRead,
             cursors.table,
-            i32::try_from(schema.root_page).unwrap_or(0),
+            root_page,
             0,
         ));
         compile_select_scan(

@@ -7,6 +7,7 @@ use super::join_full::compile_full_join_two_table;
 use super::limit_scan::compile_limit_setup;
 use super::order_by::SYNTHETIC_SPAN;
 use super::*;
+use crate::codegen::index_maintenance::valid_table_root_page;
 
 pub(super) use level::{
     compile_join_level, compile_join_level_traverse, emit_join_final_row, resolve_join_constraint,
@@ -334,10 +335,12 @@ where
                 )?;
             }
             _ => {
-                let root_page = bindings
-                    .get(orig)
-                    .map(|b| i32::try_from(b.schema.root_page).unwrap_or(0))
-                    .unwrap_or(0);
+                let Some(binding) = bindings.get(orig) else {
+                    return Err(CodegenError::Unsupported {
+                        reason: "join table binding out of range".to_string(),
+                    });
+                };
+                let root_page = valid_table_root_page(&binding.schema)?;
                 em.emit(Instruction::new(Opcode::OpenRead, cursor, root_page, 0));
             }
         }

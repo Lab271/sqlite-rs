@@ -19,7 +19,9 @@
 //! anything else.
 
 use crate::codegen::expr::{compile_cond, compile_value};
-use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
+use crate::codegen::index_maintenance::{
+    emit_index_key_ops, open_index_cursors, valid_table_root_page,
+};
 use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::{CondTargets, Emitter, RegAlloc, Scope, Target};
 use crate::parser::ast::{Delete, ExprKind, Literal, ParamKind};
@@ -59,10 +61,11 @@ pub fn compile_delete_with_catalog(
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
 
+    let root_page = valid_table_root_page(schema)?;
     em.emit(Instruction::new(
         Opcode::OpenWrite,
         TABLE_CURSOR,
-        i32::try_from(schema.root_page).unwrap_or(0),
+        root_page,
         0,
     ));
     open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;

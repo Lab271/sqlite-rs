@@ -64,7 +64,9 @@
 //!   an ordinary `NOT NULL` violation.
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
-use crate::codegen::index_maintenance::{emit_index_key_ops, open_index_cursors};
+use crate::codegen::index_maintenance::{
+    emit_index_key_ops, open_index_cursors, valid_table_root_page,
+};
 use crate::codegen::select::{
     compile_select_joined_scan, compile_select_scan, select_result_column_count,
     select_result_column_count_joined, CodegenError, ScanCursors,
@@ -319,10 +321,11 @@ pub fn compile_insert(
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
 
+    let root_page = valid_table_root_page(schema)?;
     em.emit(Instruction::new(
         Opcode::OpenWrite,
         TABLE_CURSOR,
-        i32::try_from(schema.root_page).unwrap_or(0),
+        root_page,
         0,
     ));
     open_index_cursors(&mut em, schema, FIRST_INDEX_CURSOR)?;
@@ -436,10 +439,11 @@ pub fn compile_insert(
                     pseudo: select_table_cursor.saturating_add(2),
                     distinct: select_table_cursor.saturating_add(3),
                 };
+                let select_root_page = valid_table_root_page(select_schema)?;
                 em.emit(Instruction::new(
                     Opcode::OpenRead,
                     select_cursors.table,
-                    i32::try_from(select_schema.root_page).unwrap_or(0),
+                    select_root_page,
                     0,
                 ));
                 compile_select_scan(
