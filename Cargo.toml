@@ -23,6 +23,15 @@ mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "a64eb33e7c9ef9ad031
 name = "lock_probe"
 path = "tests/helpers/lock_probe.rs"
 
+# Test-only helper: a genuine second OS process for #361's crash-torture
+# test (`tests/corpus/crash_torture_test.rs`) to `kill -9` mid-write-loop
+# — a same-process thread can't be killed independently of the test
+# process itself. Not a `[[test]]` itself — spawned via
+# `Command`/`CARGO_BIN_EXE_write_loop_probe`.
+[[bin]]
+name = "write_loop_probe"
+path = "tests/helpers/write_loop_probe.rs"
+
 [[test]]
 name = "unit_layer_isolation"
 path = "tests/unit/layer_isolation.rs"
