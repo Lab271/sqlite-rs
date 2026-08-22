@@ -2,6 +2,7 @@ use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard
 use super::order_by::{OrderByPlan, OrderByTarget};
 use super::projection::emit_row_via_sink;
 use super::*;
+use crate::codegen::index_maintenance::valid_index_root_page;
 
 /// Finds a single index on `schema` whose declared column order is a
 /// prefix match (case-insensitively, column-for-column) for `plans` — the
@@ -120,7 +121,7 @@ where
     // reuse the sort cursor number, since `compile_sorted_scan`'s
     // `SorterOpen`/`SorterInsert` never run on this branch.
     let index_cursor = cursors.sort;
-    let root_page = i32::try_from(index.root_page).unwrap_or(0);
+    let root_page = valid_index_root_page(index)?;
     let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
     open_instr.p5 = 1;
     em.emit(open_instr);

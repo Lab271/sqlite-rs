@@ -2,6 +2,7 @@ use super::super::join_access::{choose_join_access, emit_join_row, JoinAccess};
 use super::super::limit_scan::{emit_limit_guard, emit_offset_guard, LimitState};
 use super::super::*;
 use super::{join_scope, synthesize_equality_constraint};
+use crate::codegen::index_maintenance::valid_index_root_page;
 use crate::parser::ast::Join;
 
 /// Resolves one `Join`'s constraint into an `ON`-equivalent `Expr` (or
@@ -249,7 +250,7 @@ where
                     let value_reg = compile_value(em, reg, &scope, &operand)?;
                     let index_cursor = i32::try_from(exec_bindings.len().saturating_add(level))
                         .unwrap_or(i32::MAX);
-                    let root_page = i32::try_from(index.root_page).unwrap_or(0);
+                    let root_page = valid_index_root_page(&index)?;
                     let mut open_instr =
                         Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
                     open_instr.p5 = 1;

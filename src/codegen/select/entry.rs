@@ -6,6 +6,7 @@ use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
 use super::order_by::resolve_order_by;
 use super::projection::{compile_row_values, result_columns};
 use super::*;
+use crate::codegen::index_maintenance::valid_table_root_page;
 /// Compiles `select` against `schema` (the resolved `FROM` table) into
 /// a `Program`. Single-table only — a `select.from` with a non-empty
 /// `joins` list (#237) has more than one table to resolve schemas for,
@@ -57,10 +58,11 @@ pub fn compile_select_with_catalog(
     let cursors = ScanCursors::for_standalone_select();
     match &from.first.kind {
         TableRefKind::Name(_) => {
+            let root_page = valid_table_root_page(schema)?;
             em.emit(Instruction::new(
                 Opcode::OpenRead,
                 cursors.table,
-                i32::try_from(schema.root_page).unwrap_or(0),
+                root_page,
                 0,
             ));
         }
@@ -413,10 +415,11 @@ pub fn compile_select_compound(
                            schema: &TableSchema|
      -> Result<(), CodegenError> {
         let cursors = ScanCursors::for_arm(arm_index);
+        let root_page = valid_table_root_page(schema)?;
         em.emit(Instruction::new(
             Opcode::OpenRead,
             cursors.table,
-            i32::try_from(schema.root_page).unwrap_or(0),
+            root_page,
             0,
         ));
         let arm_end = em.new_label();

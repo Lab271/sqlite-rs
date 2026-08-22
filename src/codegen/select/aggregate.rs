@@ -5,6 +5,7 @@ use super::limit_scan::compile_limit_setup;
 use super::order_by::{order_by_target_for_expr, OrderByPlan, OrderByTarget};
 use super::projection::{compile_row_values, ResultColumnPlan};
 use super::*;
+use crate::codegen::index_maintenance::valid_index_root_page;
 
 pub(crate) use accum::select_has_aggregate;
 use accum::FLUSH_CURSOR;
@@ -465,7 +466,7 @@ where
     // reuse the sort cursor number, since `SorterOpen`/`SorterInsert`
     // never run on this branch (matching #296's own convention).
     let index_cursor = cursors.sort;
-    let root_page = i32::try_from(index.root_page).unwrap_or(0);
+    let root_page = valid_index_root_page(index)?;
     let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
     open_instr.p5 = 1;
     em.emit(open_instr);

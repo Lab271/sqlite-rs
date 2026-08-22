@@ -4,6 +4,7 @@
 use super::from_clause::resolve_subquery_schema;
 use super::{select_id, HoistedSubquery};
 use crate::codegen::expr::{compile_cond, compile_value};
+use crate::codegen::index_maintenance::valid_table_root_page;
 use crate::codegen::select::{
     compile_grouped_scan, select_has_aggregate, CodegenError, ScanCursors,
 };
@@ -112,12 +113,8 @@ pub(crate) fn compile_scalar_subquery(
 
     let sub_cursor = reg.alloc_cursor();
 
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        sub_cursor,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
+    let root_page = valid_table_root_page(&schema)?;
+    em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));
 
     if select_has_aggregate(subselect) {
         // #304: the subquery's projected expression contains an
@@ -223,12 +220,8 @@ pub(crate) fn compile_exists(
     };
     let (t_label, t_is_new) = crate::codegen::expr::ensure_label(em, exists_true);
 
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        sub_cursor,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
+    let root_page = valid_table_root_page(&schema)?;
+    em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));
     let not_found = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
     em.patch_p2(rewind_addr, not_found);
@@ -366,12 +359,8 @@ pub(super) fn materialize_in_subquery_index(
     let eph_cursor = reg.alloc_cursor();
     em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
 
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        sub_cursor,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
+    let root_page = valid_table_root_page(&schema)?;
+    em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));
     let scan_end = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
     em.patch_p2(rewind_addr, scan_end);
@@ -456,12 +445,8 @@ pub(crate) fn compile_in_subquery_multi(
     let eph_cursor = reg.alloc_cursor();
     em.emit(Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0));
 
-    em.emit(Instruction::new(
-        Opcode::OpenRead,
-        sub_cursor,
-        i32::try_from(schema.root_page).unwrap_or(0),
-        0,
-    ));
+    let root_page = valid_table_root_page(&schema)?;
+    em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));
     let scan_end = em.new_label();
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
     em.patch_p2(rewind_addr, scan_end);
