@@ -152,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo install --git https://github.com/mvl-lang/mvl-rust \
-            --rev "$MVL_RUST_REV" rust-limit --bin cargo-mvl-limit --locked
+            --rev "$MVL_RUST_REV" rust-limit --bin cargo-mvl-limit --locked --force
       - run: make mvl-limit
       - run: make test
       - run: make lint
