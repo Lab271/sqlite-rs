@@ -1,6 +1,6 @@
 -- Extracted by tools/extract_sql_corpus.py from the vendored
 -- sqllogictest subset under tests/corpus/sql/vendor/sqllogictest/.
--- Do not edit by hand; run `make sql-corpus` to regenerate (#70).
+-- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70).
 CREATE TABLE t1(x INTEGER)
 CREATE TABLE t2(y INTEGER PRIMARY KEY)
 CREATE TABLE t3(z INTEGER UNIQUE)

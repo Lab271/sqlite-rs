@@ -1,4 +1,4 @@
-//! sqllogictest slice runner entry point. Run via `make sqllogictest`
+//! sqllogictest slice runner entry point. Run via `make test-sqllogictest`
 //! (`cargo test --test sqllogictest`) — kept separate from `make test`
 //! (same rationale as `corpus`/`parity`, see Cargo.toml): it shells out
 //! to the pinned oracle to build each vendored `.test` file's fixture

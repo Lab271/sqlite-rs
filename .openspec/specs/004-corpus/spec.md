@@ -119,7 +119,7 @@ The harness MUST, for each fixture, compare sqlite-rs output against pinned-orac
 #### Scenario: sqllogictest-format slice runs under the same policy
 
 - GIVEN the vendored sqllogictest corpus (`tests/corpus/sql/vendor/sqllogictest/test/`, #70)
-- WHEN `make sqllogictest` runs the slice
+- WHEN `make test-sqllogictest` runs the slice
 - THEN `query` records our engine parses, compiles, and executes are scored against the file's own expected block (literal values or the `N values hashing to <md5>` form), records outside the supported grammar/opcode slice are SKIPPED not failed, and the run exits 0 with per-file and total pass/skip/fail counts committed to `tools/sqllogictest-status.json`
 
 **Tests:** `tests/sqllogictest/runner_test.rs::sqllogictest_slice`

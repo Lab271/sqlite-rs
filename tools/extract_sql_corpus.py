@@ -475,7 +475,7 @@ def run(args):
         note = (
             "-- Extracted by tools/extract_sql_corpus.py from the vendored\n"
             "-- sqllogictest subset under tests/corpus/sql/vendor/sqllogictest/.\n"
-            "-- Do not edit by hand; run `make sql-corpus` to regenerate (#70)."
+            "-- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70)."
         )
         summary["sqllogictest"] = (files, collector, write_corpus("sqllogictest", collector, note))
 
@@ -497,7 +497,7 @@ def run(args):
         note = (
             "-- Extracted by tools/extract_sql_corpus.py from the vendored SQLite\n"
             f"-- TCL suite subset (version {SQLITE_VERSION}) under tests/corpus/sql/vendor/tcl/.\n"
-            "-- Do not edit by hand; run `make sql-corpus` to regenerate (#70)."
+            "-- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70)."
         )
         summary["tcl"] = (files, collector, write_corpus("tcl", collector, note))
 

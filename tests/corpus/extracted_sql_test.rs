@@ -22,6 +22,16 @@
 //!
 //! Unlike the #2 harness this needs no oracle, so it runs in the default
 //! `make test` loop rather than behind `make test-corpus`.
+//!
+//! The corpus-presence and tokenizer-totality invariants are checked once
+//! per source corpus (`tcl`/`sqllogictest` — the two subdirectory-less `.sql`
+//! filenames `tools/extract_sql_corpus.py` writes per category) rather than
+//! once over both combined, so `make test-tcl`/`make test-sqllogictest` can
+//! select just one via cargo's test-name substring filter (`_tcl`/
+//! `_sqllogictest`) without a second test binary. The SELECT-invalid ratchet
+//! ([`SELECT_INVALID_BASELINE`]) stays combined — its baseline count was
+//! derived and is documented against the combined corpus, and splitting it
+//! would require re-deriving two baselines for no invariant-strength gain.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -50,20 +60,30 @@ fn statements_in(path: &Path) -> Vec<String> {
 
 /// Every extracted `.sql` file for a category, across both source corpora.
 fn files_for(category: &str) -> Vec<PathBuf> {
+    files_for_source(category, None)
+}
+
+/// Extracted `.sql` file(s) for a category, optionally restricted to one
+/// source corpus (`"tcl"` or `"sqllogictest"` — matches the filename stem).
+fn files_for_source(category: &str, source: Option<&str>) -> Vec<PathBuf> {
     let dir = sql_dir().join(category);
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("sql"))
+        .filter(|p| match source {
+            None => true,
+            Some(s) => p.file_stem().and_then(|s| s.to_str()) == Some(s),
+        })
         .collect();
     files.sort();
     files
 }
 
-fn all_statements() -> Vec<(PathBuf, String)> {
+fn all_statements_for(source: Option<&str>) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     for category in CATEGORIES {
-        for path in files_for(category) {
+        for path in files_for_source(category, source) {
             for statement in statements_in(&path) {
                 out.push((path.clone(), statement));
             }
@@ -72,30 +92,41 @@ fn all_statements() -> Vec<(PathBuf, String)> {
     out
 }
 
-/// The corpus must actually be present and non-trivial — a silently empty
-/// extraction would make every other test here vacuously pass.
-#[test]
-fn extracted_corpus_is_present() {
-    let statements = all_statements();
+/// The corpus must actually be present and non-trivial for each source — a
+/// silently empty extraction would make every other test here vacuously
+/// pass. Named per-source (`_tcl`/`_sqllogictest`) so `make test-tcl`/
+/// `make test-sqllogictest` (cargo's test-name substring filter) can select
+/// just one.
+fn assert_corpus_present(source: &str, min_statements: usize) {
+    let statements = all_statements_for(Some(source));
     assert!(
-        statements.len() > 3000,
-        "expected a substantial extracted corpus, found {} statements — \
-         run `make sql-corpus` to regenerate",
+        statements.len() > min_statements,
+        "expected a substantial extracted {source} corpus, found {} statements — \
+         run `make extract-sql-corpus` to regenerate",
         statements.len()
     );
     for category in CATEGORIES {
         assert!(
-            !files_for(category).is_empty(),
-            "no extracted .sql files for category {category}"
+            !files_for_source(category, Some(source)).is_empty(),
+            "no extracted {source} .sql file for category {category}"
         );
     }
 }
 
-/// Invariant 1: the tokenizer is total over real SQLite-accepted SQL.
 #[test]
-fn every_extracted_statement_tokenizes_without_error() {
+fn extracted_corpus_is_present_tcl() {
+    assert_corpus_present("tcl", 2000);
+}
+
+#[test]
+fn extracted_corpus_is_present_sqllogictest() {
+    assert_corpus_present("sqllogictest", 1000);
+}
+
+/// Invariant 1: the tokenizer is total over real SQLite-accepted SQL.
+fn assert_tokenizes_without_error(source: &str) {
     let mut failures = Vec::new();
-    for (path, statement) in all_statements() {
+    for (path, statement) in all_statements_for(Some(source)) {
         for token in Tokenizer::tokenize(&statement) {
             if let TokenKind::Error(reason) = &token.kind {
                 failures.push(format!(
@@ -108,10 +139,20 @@ fn every_extracted_statement_tokenizes_without_error() {
     }
     assert!(
         failures.is_empty(),
-        "tokenizer errored on {} statement(s) real SQLite accepts:\n{}",
+        "tokenizer errored on {} {source} statement(s) real SQLite accepts:\n{}",
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn every_extracted_tcl_statement_tokenizes_without_error() {
+    assert_tokenizes_without_error("tcl");
+}
+
+#[test]
+fn every_extracted_sqllogictest_statement_tokenizes_without_error() {
+    assert_tokenizes_without_error("sqllogictest");
 }
 
 /// The parser must bound its own recursion rather than exhaust the stack: a

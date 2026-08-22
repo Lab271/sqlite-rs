@@ -7,13 +7,13 @@ regenerable offline with traceable provenance. Nothing here is hand-edited.
 Regenerate the extraction from these files:
 
 ```sh
-make sql-corpus
+make extract-sql-corpus
 ```
 
 Refresh these files from upstream (requires network):
 
 ```sh
-make sql-corpus FETCH=1
+make extract-sql-corpus FETCH=1
 ```
 
 ## `sqllogictest/` — 14 files
