@@ -337,6 +337,96 @@ mod tests {
         u32::from_be_bytes(page1[36..40].try_into().unwrap())
     }
 
+    /// #52 tagged MC/DC vector (obligation `delete_62`, decision
+    /// `cells.len() > 1 || ancestors.is_empty()`): leaf A
+    /// (`cells.len() > 1`) true, leaf B (`ancestors.is_empty()`) false —
+    /// a multi-page tree where the leaf being deleted from still has
+    /// other rows left, so it splices in place rather than collapsing.
+    /// Independence pair for A against
+    /// `mcdc__delete_62__v2_last_cell_in_leaf_with_ancestors_collapses`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__delete_62__v1_leaf_survives_with_ancestors() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let n = 60i64;
+        for i in 1..=n {
+            insert_row(
+                &mut pager,
+                &header,
+                1,
+                i,
+                format!("{filler}-{i:04}").as_bytes(),
+            )
+            .unwrap();
+        }
+        // Root has split into an interior page (ancestors non-empty for
+        // every leaf); the last-inserted rowid's leaf still holds other
+        // rows after this single delete.
+        delete_row(&mut pager, &header, 1, n).unwrap();
+        assert!(delete_row(&mut pager, &header, 1, n - 1).is_ok());
+    }
+
+    /// #52 tagged MC/DC vector (obligation `delete_62`): both leaves
+    /// false — a multi-page tree where the leaf being deleted from holds
+    /// exactly one cell, so it must be deallocated and its removal
+    /// cascaded into ancestors rather than spliced in place. Independence
+    /// pair for A against `mcdc__delete_62__v1_leaf_survives_with_ancestors`
+    /// and for B against
+    /// `mcdc__delete_62__v3_only_row_in_root_leaf_has_no_ancestors`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__delete_62__v2_last_cell_in_leaf_with_ancestors_collapses() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let filler = "x".repeat(190);
+        let n = 60i64;
+        for i in 1..=n {
+            insert_row(
+                &mut pager,
+                &header,
+                1,
+                i,
+                format!("{filler}-{i:04}").as_bytes(),
+            )
+            .unwrap();
+        }
+        // Draining every row but the last from this multi-page tree
+        // leaves exactly one leaf with exactly one cell and non-empty
+        // ancestors; deleting it must collapse the leaf.
+        let before = freelist_page_count(&mut pager);
+        for i in 1..n {
+            delete_row(&mut pager, &header, 1, i).unwrap();
+        }
+        delete_row(&mut pager, &header, 1, n).unwrap();
+        let after = freelist_page_count(&mut pager);
+        assert!(
+            after > before,
+            "emptying the last leaf in a multi-page tree must free at least one page"
+        );
+    }
+
+    /// #52 tagged MC/DC vector (obligation `delete_62`): leaf A false,
+    /// leaf B (`ancestors.is_empty()`) true independently flips the
+    /// outcome to true — the single-page root-leaf case, where the
+    /// (empty) root can never be collapsed away. Independence pair for B
+    /// against `mcdc__delete_62__v2_last_cell_in_leaf_with_ancestors_collapses`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__delete_62__v3_only_row_in_root_leaf_has_no_ancestors() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        insert_row(&mut pager, &header, 1, 1, b"hello").unwrap();
+        assert!(delete_row(&mut pager, &header, 1, 1).is_ok());
+    }
+
     /// Kills mutants that turn `cell_overflow_page`/`free_overflow_chain`
     /// into no-ops (`Ok(0)` / `Ok(())`): a deleted row whose payload
     /// actually spilled to overflow pages must return those pages to the
