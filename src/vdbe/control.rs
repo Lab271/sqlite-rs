@@ -68,9 +68,34 @@ pub fn halt(instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-/// `Transaction`: a no-op in this VM — transaction/schema-cookie
-/// machinery lives outside the bytecode interpreter (V1's pager).
-pub fn transaction() -> Result<Step, ExecError> {
+/// `Transaction`: opens an explicit transaction (#360) — clears
+/// `Vm::autocommit` so `Halt` no longer commits on its own, deferring to
+/// an explicit `AutoCommit` (SQL `COMMIT`/`ROLLBACK`) instead. Schema-
+/// cookie/lock-mode machinery (`P1`/`P2` beyond that) still lives
+/// outside the bytecode interpreter (V1's pager), so both operands are
+/// otherwise unused here.
+pub fn transaction(vm: &mut Vm) -> Result<Step, ExecError> {
+    vm.autocommit = false;
+    Ok(Step::Next)
+}
+
+/// `AutoCommit`: closes the transaction `Transaction` opened (#360).
+/// `P2` follows stock SQLite's convention: 1 commits every pending
+/// write via [`crate::pager::Pager::flush`], 0 discards them via
+/// [`crate::pager::Pager::rollback`]. Either way `Vm::autocommit` is
+/// restored to `true` so a subsequent `Halt` (or another
+/// `Transaction`/`AutoCommit` pair later in the same program) behaves
+/// exactly as if this were a fresh connection.
+pub fn auto_commit(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let db = vm.db()?;
+    if let Some(writer) = db.writer.clone() {
+        if instr.p2 == 1 {
+            writer.borrow_mut().flush()?;
+        } else {
+            writer.borrow_mut().rollback();
+        }
+    }
+    vm.autocommit = true;
     Ok(Step::Next)
 }
 
@@ -336,8 +361,53 @@ mod tests {
     }
 
     #[test]
-    fn transaction_is_a_no_op() {
-        assert_eq!(transaction().unwrap(), Step::Next);
+    fn transaction_clears_autocommit() {
+        let mut vm = VmType::new();
+        assert!(vm.autocommit);
+        assert_eq!(transaction(&mut vm).unwrap(), Step::Next);
+        assert!(!vm.autocommit);
+    }
+
+    /// A one-page database, just enough for [`Pager::open`] to succeed —
+    /// `AutoCommit`'s tests below only care about `Vm::autocommit` and
+    /// `Pager::flush`/`rollback` running without error, not any real
+    /// b-tree content.
+    fn writable_vm() -> VmType {
+        let page_size = 512u32;
+        let mut page1 = vec![0u8; page_size as usize];
+        page1[0..16].copy_from_slice(b"SQLite format 3\0");
+        page1[16..18].copy_from_slice(&u16::try_from(page_size).unwrap().to_be_bytes());
+        page1[18] = 1;
+        page1[19] = 1;
+        page1[28..32].copy_from_slice(&1u32.to_be_bytes());
+        page1[56..60].copy_from_slice(&1u32.to_be_bytes());
+        let mut header_bytes = [0u8; 100];
+        header_bytes.copy_from_slice(&page1[..100]);
+        let header = crate::header::DatabaseHeader::parse(&header_bytes).unwrap();
+
+        let mut vfs = crate::vfs::MemoryVfs::new();
+        vfs.insert("/test.db", page1);
+        let pager =
+            crate::pager::Pager::open(&vfs, std::path::Path::new("/test.db"), page_size).unwrap();
+        VmType::with_writable_db(pager, header)
+    }
+
+    #[test]
+    fn auto_commit_flushes_and_restores_autocommit() {
+        let mut vm = writable_vm();
+        vm.autocommit = false;
+        let instr = Instruction::new(Opcode::AutoCommit, 0, 1, 0);
+        assert_eq!(auto_commit(&mut vm, &instr).unwrap(), Step::Next);
+        assert!(vm.autocommit);
+    }
+
+    #[test]
+    fn auto_commit_rolls_back_dirty_pages() {
+        let mut vm = writable_vm();
+        vm.autocommit = false;
+        let instr = Instruction::new(Opcode::AutoCommit, 0, 0, 0);
+        assert_eq!(auto_commit(&mut vm, &instr).unwrap(), Step::Next);
+        assert!(vm.autocommit);
     }
 
     #[test]

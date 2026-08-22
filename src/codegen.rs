@@ -11,6 +11,7 @@ pub(crate) mod index_maintenance;
 pub mod select;
 pub mod stmt;
 pub(crate) mod subquery;
+pub mod transaction;
 
 pub use ddl::{compile_create_index, compile_create_table, compile_drop_index, compile_drop_table};
 pub use dispatch::{compile_statement, leading_keywords, DispatchError};
@@ -23,6 +24,7 @@ pub use stmt::insert::compile_insert;
 pub use stmt::update::{compile_update, compile_update_with_catalog};
 pub use stmt::{delete, insert, update};
 pub use subquery::resolve_from_table_schema;
+pub use transaction::{compile_begin, compile_commit, compile_rollback};
 
 use std::collections::HashMap;
 

@@ -338,6 +338,17 @@ impl Pager {
         Ok(())
     }
 
+    /// Discards every dirty page (#360's SQL-level `ROLLBACK`, as
+    /// opposed to [`recover_hot_journal`]'s crash-recovery rollback):
+    /// since writes only reach disk in [`Pager::flush`], undoing an
+    /// in-progress transaction is just forgetting what
+    /// [`Pager::get_page_mut`] buffered — nothing to journal, sync, or
+    /// evict from `page_cache` (which never holds a dirty page's
+    /// content in the first place, per its own doc comment).
+    pub fn rollback(&mut self) {
+        self.dirty.clear();
+    }
+
     /// Allocates a page: pops one off the freelist if it's non-empty,
     /// otherwise extends the database by one page. Returns the allocated
     /// page's (1-based) number. Updates the freelist trunk/count fields

@@ -9,16 +9,16 @@ use thiserror::Error;
 use crate::parser::ast::InsertSource;
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
-    parse_create_index, parse_create_table, parse_delete, parse_drop_index, parse_drop_table,
-    parse_insert, parse_update,
+    parse_begin, parse_commit, parse_create_index, parse_create_table, parse_delete,
+    parse_drop_index, parse_drop_table, parse_insert, parse_rollback, parse_update,
 };
 use crate::schema::TableSchema;
 use crate::vdbe::Program;
 
 use super::{
-    compile_create_index, compile_create_table, compile_delete_with_catalog, compile_drop_index,
-    compile_drop_table, compile_insert, compile_update_with_catalog, resolve_from_table_schema,
-    CodegenError,
+    compile_begin, compile_commit, compile_create_index, compile_create_table,
+    compile_delete_with_catalog, compile_drop_index, compile_drop_table, compile_insert,
+    compile_rollback, compile_update_with_catalog, resolve_from_table_schema, CodegenError,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -87,6 +87,18 @@ pub fn compile_statement(sql: &str, schemas: &[TableSchema]) -> Result<Program, 
     let kw = |i: usize| keywords.get(i).map(String::as_str).unwrap_or("");
 
     match kw(0) {
+        "BEGIN" => match parse_begin(sql) {
+            ParseOutcome::Accepted(begin) => Ok(compile_begin(&begin)),
+            other => Err(parse_error(other)),
+        },
+        "COMMIT" | "END" => match parse_commit(sql) {
+            ParseOutcome::Accepted(commit) => Ok(compile_commit(&commit)),
+            other => Err(parse_error(other)),
+        },
+        "ROLLBACK" => match parse_rollback(sql) {
+            ParseOutcome::Accepted(rollback) => Ok(compile_rollback(&rollback)),
+            other => Err(parse_error(other)),
+        },
         "INSERT" => match parse_insert(sql) {
             ParseOutcome::Accepted(insert) => {
                 let schema = find_schema(&insert.table)?;

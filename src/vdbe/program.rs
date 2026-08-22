@@ -21,6 +21,12 @@ pub enum Opcode {
     Return,
     Halt,
     Transaction,
+    // #360: explicit COMMIT/ROLLBACK — postdates the V2 oracle harvest
+    // (V2 had no write path, so no BEGIN/COMMIT/ROLLBACK codegen
+    // existed then), so excluded from `ALL` like the other V3 write
+    // opcodes below, but fully dispatched and exhaustiveness-checked.
+    // `P2` is stock SQLite's convention: 1 = commit, 0 = rollback.
+    AutoCommit,
     IfNot,
     IfNotZero,
     IfPos,
@@ -242,6 +248,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Return
         | Opcode::Halt
         | Opcode::Transaction
+        | Opcode::AutoCommit
         | Opcode::IfNot
         | Opcode::IfNotZero
         | Opcode::IfPos
