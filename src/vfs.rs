@@ -236,19 +236,26 @@ impl FileLock {
         self.0.check_reserved()
     }
 
-    /// Escalates this held SHARED lock straight to EXCLUSIVE, deliberately
-    /// skipping RESERVED — SQLite never takes RESERVED on the hot-journal
-    /// path (`os_unix.c`'s `sqlite3PagerSharedLock`): a live RESERVED lock
+    /// Escalates this held SHARED lock to EXCLUSIVE, stepping through
+    /// RESERVED and PENDING on the way (see
+    /// [`crate::vfs::lock::FileLockState::set_level`]) so a concurrent
+    /// holder of any level in the ladder makes this call fail fast instead
+    /// of silently interleaving. Two callers: `Pager::open`'s hot-journal
+    /// recovery (`os_unix.c`'s `sqlite3PagerSharedLock` also takes
+    /// EXCLUSIVE there, never lingering at RESERVED — a live RESERVED lock
     /// is how a second opener recognizes "someone already validated this
-    /// journal and is rolling it back", so acquiring it here would let a
-    /// racing opener wrongly conclude the database is safe to read while
-    /// recovery is still in flight.
+    /// journal and is rolling it back", so pausing here would let a racing
+    /// opener wrongly conclude the database is safe to read while recovery
+    /// is still in flight); and `Pager::flush`, which needs real mutual
+    /// exclusion against another connection's own `flush`/recovery for the
+    /// duration of its journal-write/page-write/journal-delete sequence.
     pub(crate) fn escalate_to_exclusive(&mut self) -> Result<()> {
         self.0.escalate_to_exclusive()
     }
 
-    /// Reverses [`FileLock::escalate_to_exclusive`] once recovery finishes,
-    /// returning to the plain reader lock.
+    /// Reverses [`FileLock::escalate_to_exclusive`] once recovery or
+    /// [`crate::pager::Pager::flush`] finishes, returning to the plain
+    /// reader lock.
     pub(crate) fn de_escalate_to_shared(&mut self) -> Result<()> {
         self.0.de_escalate_to_shared()
     }

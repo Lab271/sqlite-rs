@@ -130,13 +130,15 @@ impl PageCache {
 /// an adjacent `-wal` file (Req-4's "Read a database with uncheckpointed
 /// WAL" scenario).
 pub struct Pager {
-    /// Held only for its `Drop`, which releases the SHARED lock acquired
-    /// in `open`. Declared before `source`: struct fields drop in
-    /// declaration order, and the lock must be released while `source`'s
-    /// file handle is still open — POSIX `close()` silently drops all
-    /// `fcntl` locks on that fd, so unlocking a fd number the kernel may
-    /// already have reused for something else would be a real bug.
-    #[allow(dead_code, reason = "held only for its Drop side effect")]
+    /// Escalated to `Exclusive` for the duration of each [`Pager::flush`]
+    /// and released back to `Shared` immediately after (see `flush`'s doc
+    /// comment); otherwise just held for its `Drop`, which releases the
+    /// SHARED lock acquired in `open`. Declared before `source`: struct
+    /// fields drop in declaration order, and the lock must be released
+    /// while `source`'s file handle is still open — POSIX `close()`
+    /// silently drops all `fcntl` locks on that fd, so unlocking a fd
+    /// number the kernel may already have reused for something else would
+    /// be a real bug.
     lock: FileLock,
     /// Held only for its `Drop`, which releases the WAL `-shm`
     /// reader-mark lock claimed in `open` (#45) — `None` when there is no
@@ -324,6 +326,26 @@ impl Pager {
         if self.dirty.is_empty() {
             return Ok(());
         }
+        // Escalate the SHARED lock every `Pager` already holds up to
+        // EXCLUSIVE before touching the journal or the main file — without
+        // this, two `Pager`s (or a `Pager` racing a live stock `sqlite3`
+        // writer) could both pass `open`'s SHARED check and interleave
+        // journal/page writes with no real mutual exclusion, corrupting
+        // both. Mirrors `sqlite3PagerCommitPhaseOne`. A contended escalation
+        // (some other connection is already RESERVED-or-higher) surfaces as
+        // `VfsError::Locked` here, before any byte of this transaction is
+        // journaled or written — `self.dirty` is left intact so the caller
+        // can retry or roll back.
+        self.lock.escalate_to_exclusive()?;
+        let result = self.flush_locked();
+        // Always attempt to release back to SHARED, even on failure, so a
+        // mid-flush error doesn't leave this connection wedged at EXCLUSIVE
+        // for the rest of its lifetime.
+        self.lock.de_escalate_to_shared()?;
+        result
+    }
+
+    fn flush_locked(&mut self) -> Result<(), PagerError> {
         let mut page_nums: Vec<u32> = self.dirty.keys().copied().collect();
         page_nums.sort_unstable();
 
@@ -766,6 +788,49 @@ mod tests {
             std::fs::read(&path).unwrap(),
             db,
             "the main file must not be touched when recovery is refused"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Regression for the flush-time locking gap the V5 review found:
+    /// before this fix, `flush` never escalated past the plain SHARED
+    /// lock `open` takes, so a concurrent connection already RESERVED (or
+    /// higher) — e.g. mid-commit itself — could not block a racing
+    /// `flush`, and the two could interleave journal/page writes. Now
+    /// `flush` must fail fast with `Locked` instead.
+    #[test]
+    fn flush_fails_when_another_connection_holds_reserved() {
+        use crate::vfs::test_lock_probe::lock_held_by_subprocess;
+        use crate::vfs::UnixVfs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sqlite-rs-pager-flush-race-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let page_size = 512u32;
+        std::fs::write(&path, vec![7u8; page_size as usize]).unwrap();
+
+        let mut pager = Pager::open(&UnixVfs, &path, page_size).unwrap();
+        *pager.get_page_mut(1).unwrap() = vec![9u8; page_size as usize];
+
+        let (start, len) = crate::vfs::lock::reserved_byte_range();
+        let result = lock_held_by_subprocess(&path, "wrlock", start, len, || pager.flush());
+
+        match result {
+            Err(PagerError::Vfs(crate::vfs::VfsError::Locked { .. })) => {}
+            Err(other) => panic!("expected Locked, got {other:?}"),
+            Ok(_) => panic!("expected Locked, got Ok"),
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            vec![7u8; page_size as usize],
+            "a blocked flush must not have written any page to the main file"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
