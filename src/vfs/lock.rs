@@ -198,7 +198,7 @@ fn check_reserved_lock(file: &File) -> io::Result<bool> {
         l_pid: 0,
     };
     fcntl(file, FcntlArg::F_GETLK(&mut fl)).map_err(io::Error::from)?;
-    Ok(fl.l_type as i32 != libc::F_UNLCK as i32)
+    Ok(fl.l_type != libc::F_UNLCK as _)
 }
 
 /// Generic byte-range `fcntl(F_SETLK)` primitive — used both for the
