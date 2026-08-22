@@ -25,7 +25,7 @@ env:
   # cargo-mvl-limit is not published to crates.io, so the qualified-subset
   # gate builds it from source at this pinned rev (verified against
   # rust-limit v0.3.0). Bumping it is a reviewed change, like an oracle bump.
-  MVL_RUST_REV: "a64eb33e7c9ef9ad031d22a70405e59aa1ad3cb0"
+  MVL_RUST_REV: "1d3b8ef4668a47ce6f76bb01fd68381e34341388"
 
 jobs:
   gate:

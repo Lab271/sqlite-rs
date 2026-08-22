@@ -89,7 +89,7 @@ support (Finding 1) is ever fixed and this becomes the next blocker.
   Finding 1 — confirmed the `unit_header` test suite (5 tests) still
   passes with both functions' assertions live at every call.
 
-## Go/no-go
+## Go/no-go (first attempt)
 
 **No-go for broader adoption on `sqlite-rs`, as of this checkout
 (`mvl-rust` commit `c765404`, workspace version 0.4.0).** The one thing
@@ -102,5 +102,65 @@ does work on `impl` methods and could be adopted independently for
 regression-catching, but that's `rust-total`/plain `debug_assert!`
 territory, not what this ticket was evaluating.
 
-Re-evaluate once `visit_impl_item_fn` lands upstream; Finding 2 would
-then be the next thing to check.
+Not filed as a formal upstream issue — this finding, posted as a comment
+on sqlite-rs#371, was picked up directly and fixed via
+[mvl-lang/mvl-rust#90]. `rust-total`/`rust-effect` share the identical
+root cause (`Item::Fn`-only scanning) and are tracked separately by
+[mvl-lang/mvl-rust#89], not fixed by #90.
+
+## Retry, against mvl-rust v0.4.2 (mvl-lang/mvl-rust#90)
+
+Upstream fixed Finding 1 within the day: `1d3b8ef` (PR #90, `fix(refine):
+check impl methods, not just free functions`, released as v0.4.2) adds
+`visit_impl_item_fn` (`impl_methods()`, `FnFacts::of_method()`,
+`find_method_declarations()`) to the scanner, citing this spike's #371
+finding directly in its PR description. Bumped `sqlite-rs`'s
+pin — `Cargo.toml`'s `mvl` dependency and `.github/workflows/ci.yml`'s
+`MVL_RUST_REV`, both from `a64eb33e` to `1d3b8ef4668a4...` — reinstalled
+`cargo-mvl` at the new rev, and reran against the same `header.rs`.
+
+**Finding 1 confirmed fixed.** `cargo mvl prove src/header.rs` now
+returns 11 obligations covering both `DatabaseHeader::parse` (one
+declaration-site + one per return point, including every early
+`return Err(...)`) and `usable_page_size` (`requires`, `ensures`,
+return-site) — no longer silently empty. `impl` methods are visible to
+the scanner.
+
+**Finding 2 still reproduces, unchanged.** Re-tried the field-level
+postcondition the issue actually wanted —
+`result.as_ref().unwrap().page_size.is_power_of_two() && ...` — on
+`parse`'s `ensures`. Identical `E0282 "type annotations needed"` at the
+first early `return Err(...)` site, byte-for-byte the same diagnostic as
+the pre-fix attempt. This is unrelated to scanning (it's a `mvl-macros`
+codegen/type-inference issue in `inject_ensures`'s return-site
+rewriting), so fixing Finding 1 didn't touch it. `parse`'s `ensures`
+stays a tautology (`result.is_ok() || result.is_err()`) in the committed
+code for the same reason as before.
+
+All obligations that do compile land at `layer: "runtime"` — none prove
+statically (`is_power_of_two`, struct construction, and
+`page_size - reserved_space` aren't in the linear-arithmetic fragment
+`L1`–`L4` reason over) — so this spike hasn't yet exercised a genuine
+compile-time proof on real header-parsing code, only confirmed the
+obligations are now generated and enforced at runtime.
+
+`unit_header`'s 5 tests still pass with both functions' runtime
+assertions live.
+
+## Go/no-go (current)
+
+**Upgraded to conditional-go, blocked on Finding 2.** The blocking gap
+from the first pass is resolved upstream and adopted here. What's left
+untestable is exactly the postcondition the issue was written for — a
+struct-field check on a `Result`-returning parser — because of the
+separate `ensures`-at-early-return type-inference bug. Recommend:
+surface Finding 2 to `mvl-lang/mvl-rust` next (same channel that
+produced #90 — posting it as a sqlite-rs issue comment was enough to get
+Finding 1 fixed same-day), and re-run this spike's field-level `ensures`
+once it lands. Until then, `rust-refine` on this
+codebase is limited to `requires`/simple-return-value `ensures` that
+don't need to inspect a `Result`'s `Ok` payload at an early-return site,
+which excludes most of what `header.rs`'s invariants actually are.
+
+[mvl-lang/mvl-rust#90]: https://github.com/mvl-lang/mvl-rust/pull/90
+[mvl-lang/mvl-rust#89]: https://github.com/mvl-lang/mvl-rust/issues/89
