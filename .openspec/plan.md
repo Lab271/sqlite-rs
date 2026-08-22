@@ -50,9 +50,9 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 | **V1** | 0.1–0.5 | Read existing SQLite files | "Open any .sqlite file, extract the data" |
 | **V2** | 0.6–0.9 | Single-table queries | "Query it with real SQL" |
 | **V3** | 0.10–0.12 | Full CRUD | "It's a database now" |
-| **V4** | 0.13–0.14 | Multi-table SQL | "Joins, subqueries, aggregates" |
-| **V5 Slim** | 0.15 | Core transactions | "ACID with a journal" |
-| **V6 Slim** | 0.16 / **1.0** | WAL & basic CTEs | "Readers don't block writers" |
+| **V4** | 0.13 | Multi-table SQL | "Joins, subqueries, aggregates" |
+| **V5 Slim** | 0.14 | Core transactions | "ACID with a journal" |
+| **V6 Slim** | 0.15 / **1.0** | WAL & basic CTEs | "Readers don't block writers" |
 | **V7** | 1.1+ | Polish & compatibility | "Everything else" |
 | **V8** | — | Integrity & triggers | "The schema enforces itself" |
 | **V9** | — | Modern SQL | "UPSERT, RETURNING, window functions" |
@@ -165,7 +165,7 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ---
 
-## V5 Slim — Core Transactions (0.15.0)
+## V5 Slim — Core Transactions (0.14.0)
 
 **Value:** ACID in the classic journal mode. BEGIN/COMMIT/ROLLBACK, hot-journal crash recovery. After this block a power cut cannot corrupt a database.
 
@@ -195,7 +195,7 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 
 ---
 
-## V6 Slim — WAL & Basic CTEs (0.16.0 / 1.0 candidate)
+## V6 Slim — WAL & Basic CTEs (0.15.0 / 1.0 candidate)
 
 **Value:** Modern SQLite's default deployment mode. Readers don't block writers; writers don't block readers. Interoperates with stock SQLite processes on the same database file. Plus basic relational completeness.
 
