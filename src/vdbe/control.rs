@@ -70,20 +70,41 @@ pub fn halt(instr: &Instruction) -> Result<Step, ExecError> {
 
 /// `Transaction`: opens an explicit transaction (#360) — clears
 /// `Vm::autocommit` so `Halt` no longer commits on its own, deferring to
-/// an explicit `AutoCommit` (SQL `COMMIT`/`ROLLBACK`) instead. Schema-
-/// cookie/lock-mode machinery (`P1`/`P2` beyond that) still lives
-/// outside the bytecode interpreter (V1's pager), so both operands are
-/// otherwise unused here. Errors rather than silently re-entering if a
-/// transaction is already open (`vm.autocommit` already `false`) —
-/// stock SQLite's "cannot start a transaction within a transaction"
-/// (#396).
-pub fn transaction(vm: &mut Vm) -> Result<Step, ExecError> {
+/// an explicit `AutoCommit` (SQL `COMMIT`/`ROLLBACK`) instead. `P1`
+/// carries the `TransactionMode` `compile_begin` compiled (#395):
+/// `TRANSACTION_MODE_IMMEDIATE`/`TRANSACTION_MODE_EXCLUSIVE` escalate the
+/// lock right away via [`crate::pager::Pager::begin_immediate`]/
+/// [`crate::pager::Pager::begin_exclusive`] — stock SQLite acquires
+/// RESERVED/EXCLUSIVE as soon as `BEGIN` runs rather than waiting for the
+/// first write, so a concurrent writer is blocked immediately.
+/// `TRANSACTION_MODE_DEFERRED` (bare `BEGIN`) keeps the lazy-on-first-
+/// write behavior — no escalation here. Errors rather than silently
+/// re-entering if a transaction is already open (`vm.autocommit` already
+/// `false`) — stock SQLite's "cannot start a transaction within a
+/// transaction" (#396).
+pub fn transaction(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     if !vm.autocommit {
         return Err(ExecError::TransactionAlreadyActive);
+    }
+    if let Some(writer) = vm.db().ok().and_then(|db| db.writer.clone()) {
+        match instr.p1 {
+            TRANSACTION_MODE_IMMEDIATE => writer.borrow_mut().begin_immediate()?,
+            TRANSACTION_MODE_EXCLUSIVE => writer.borrow_mut().begin_exclusive()?,
+            _ => {}
+        }
     }
     vm.autocommit = false;
     Ok(Step::Next)
 }
+
+/// `Instruction::p1` values `compile_begin`/`transaction` (#395) use to
+/// carry `TransactionMode` through the `Transaction` opcode — bare
+/// `BEGIN`/`BEGIN DEFERRED` needs no lock escalation at `BEGIN` time.
+pub const TRANSACTION_MODE_DEFERRED: i32 = 0;
+/// See [`TRANSACTION_MODE_DEFERRED`].
+pub const TRANSACTION_MODE_IMMEDIATE: i32 = 1;
+/// See [`TRANSACTION_MODE_DEFERRED`].
+pub const TRANSACTION_MODE_EXCLUSIVE: i32 = 2;
 
 /// `AutoCommit`: closes the transaction `Transaction` opened (#360).
 /// `P2` follows stock SQLite's convention: 1 commits every pending
@@ -108,7 +129,7 @@ pub fn auto_commit(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         if instr.p2 == 1 {
             writer.borrow_mut().flush()?;
         } else {
-            writer.borrow_mut().rollback();
+            writer.borrow_mut().rollback()?;
         }
     }
     vm.autocommit = true;
@@ -380,7 +401,8 @@ mod tests {
     fn transaction_clears_autocommit() {
         let mut vm = VmType::new();
         assert!(vm.autocommit);
-        assert_eq!(transaction(&mut vm).unwrap(), Step::Next);
+        let instr = Instruction::new(Opcode::Transaction, TRANSACTION_MODE_DEFERRED, 0, 0);
+        assert_eq!(transaction(&mut vm, &instr).unwrap(), Step::Next);
         assert!(!vm.autocommit);
     }
 
@@ -432,12 +454,55 @@ mod tests {
     #[test]
     fn transaction_errors_when_already_active() {
         let mut vm = VmType::new();
-        assert_eq!(transaction(&mut vm).unwrap(), Step::Next);
+        let instr = Instruction::new(Opcode::Transaction, TRANSACTION_MODE_DEFERRED, 0, 0);
+        assert_eq!(transaction(&mut vm, &instr).unwrap(), Step::Next);
         assert!(matches!(
-            transaction(&mut vm),
+            transaction(&mut vm, &instr),
             Err(ExecError::TransactionAlreadyActive)
         ));
         assert!(!vm.autocommit, "the failed re-entry must not disturb state");
+    }
+
+    /// `BEGIN IMMEDIATE` escalates the pager's lock to RESERVED right away
+    /// (#395), not just at the first write.
+    #[test]
+    fn transaction_immediate_escalates_to_reserved() {
+        let mut vm = writable_vm();
+        let instr = Instruction::new(Opcode::Transaction, TRANSACTION_MODE_IMMEDIATE, 0, 0);
+        assert_eq!(transaction(&mut vm, &instr).unwrap(), Step::Next);
+        let writer = vm.db().unwrap().writer.clone().unwrap();
+        assert_eq!(
+            writer.borrow().tx_lock_level(),
+            crate::vfs::LockLevel::Reserved
+        );
+    }
+
+    /// `BEGIN EXCLUSIVE` escalates all the way to EXCLUSIVE at `BEGIN`
+    /// time (#395).
+    #[test]
+    fn transaction_exclusive_escalates_to_exclusive() {
+        let mut vm = writable_vm();
+        let instr = Instruction::new(Opcode::Transaction, TRANSACTION_MODE_EXCLUSIVE, 0, 0);
+        assert_eq!(transaction(&mut vm, &instr).unwrap(), Step::Next);
+        let writer = vm.db().unwrap().writer.clone().unwrap();
+        assert_eq!(
+            writer.borrow().tx_lock_level(),
+            crate::vfs::LockLevel::Exclusive
+        );
+    }
+
+    /// Bare `BEGIN` (DEFERRED) keeps today's lazy-on-first-write behavior
+    /// — no escalation at `BEGIN` time (#395).
+    #[test]
+    fn transaction_deferred_does_not_escalate() {
+        let mut vm = writable_vm();
+        let instr = Instruction::new(Opcode::Transaction, TRANSACTION_MODE_DEFERRED, 0, 0);
+        assert_eq!(transaction(&mut vm, &instr).unwrap(), Step::Next);
+        let writer = vm.db().unwrap().writer.clone().unwrap();
+        assert_eq!(
+            writer.borrow().tx_lock_level(),
+            crate::vfs::LockLevel::Shared
+        );
     }
 
     /// Bare `COMMIT`/`ROLLBACK` with no open transaction errors rather than

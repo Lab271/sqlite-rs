@@ -6,6 +6,32 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` parsed `TransactionMode` but
+`compile_begin` discarded it, so a concurrent writer was only blocked at
+`COMMIT` time (via `Pager::flush`'s EXCLUSIVE escalation), not at `BEGIN`
+as stock SQLite does. `Transaction`'s `P1` now carries the mode;
+`control::transaction` calls the new `Pager::begin_immediate`/
+`begin_exclusive` to escalate to RESERVED/EXCLUSIVE right away.
+`Pager::flush`/`rollback` release that lock back to `Shared` when the
+transaction ends (commit or rollback), including the no-write case (a
+`BEGIN IMMEDIATE` immediately followed by `COMMIT`/`ROLLBACK`). New
+subprocess interop test (`tests/corpus/begin_immediate_lock_interop_test.rs`)
+proves a compiled `BEGIN IMMEDIATE`/`EXCLUSIVE` visibly blocks a live
+stock `sqlite3` writer/reader, mirroring `lock_state_interop_test.rs`'s
+proof for the raw lock primitive. Closes #395. No version bump (V5 phase
+in progress). Spend: matched the small estimate.
+
+fix(pager): `Pager::flush` never used the 5-state lock ladder built for
+hot-journal recovery — it only ever held the plain SHARED lock every
+`open()` takes, so two writers (or `sqlite-rs` racing a live stock
+`sqlite3` process) could both pass the SHARED check and interleave
+journal writes/deletes and page writes with no OS-level mutual exclusion.
+`flush()` now escalates to EXCLUSIVE (stepping through RESERVED/PENDING)
+before touching the journal or main file, and de-escalates back to
+SHARED afterward, mirroring `sqlite3PagerCommitPhaseOne`/`Two`. Closes
+#398 (Refs #353). No version bump (V5 phase in progress). Spend: matched
+estimate.
+
 bench: `tests/performance/engine.rs` gains four transaction-batching
 benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
 `insert_batch_tx_1000`, `update_batch_tx`), each running a

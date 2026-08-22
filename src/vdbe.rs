@@ -28,6 +28,9 @@ pub use coerce::{
 };
 pub use collation::{compare_text, Collation};
 pub use compare::compare;
+pub use control::{
+    TRANSACTION_MODE_DEFERRED, TRANSACTION_MODE_EXCLUSIVE, TRANSACTION_MODE_IMMEDIATE,
+};
 pub use exec::{
     execute, execute_transaction_step, execute_with_db, execute_with_db_and_params,
     execute_with_params, execute_with_writable_db, ExecError, Step, Vm,

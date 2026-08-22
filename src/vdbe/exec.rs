@@ -482,7 +482,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         BeginSubrtn => control::begin_subrtn(),
         Return => control::r#return(vm, instr),
         Halt => control::halt(instr),
-        Transaction => control::transaction(vm),
+        Transaction => control::transaction(vm, instr),
         AutoCommit => control::auto_commit(vm, instr),
         IfNot => control::if_not(vm, instr),
         IfNotZero => control::if_not_zero(vm, instr),

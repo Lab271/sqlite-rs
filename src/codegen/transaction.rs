@@ -2,23 +2,32 @@
 //! compiles to a single control opcode, exactly like the DDL statements
 //! in the sibling `ddl` module: `Transaction` for `BEGIN`, `AutoCommit`
 //! for `COMMIT`/`ROLLBACK` (`P2` = 1/0 respectively, stock SQLite's
-//! convention). `TransactionMode` (DEFERRED/IMMEDIATE/EXCLUSIVE) governs
-//! lock acquisition, not the pager's rollback-journal write path, so it
-//! carries no weight here yet — V5 Slim's lock-state work (#357) is
-//! where it will matter.
+//! convention). `TransactionMode` (DEFERRED/IMMEDIATE/EXCLUSIVE) is
+//! carried through `Transaction`'s `P1` (#395) so
+//! `crate::vdbe::control::transaction` can escalate the lock at `BEGIN`
+//! time for IMMEDIATE/EXCLUSIVE rather than waiting for the first write.
 
 use crate::codegen::Emitter;
-use crate::parser::ast::{Begin, Commit, Rollback};
-use crate::vdbe::{Instruction, Opcode, Program};
+use crate::parser::ast::{Begin, Commit, Rollback, TransactionMode};
+use crate::vdbe::{
+    Instruction, Opcode, Program, TRANSACTION_MODE_DEFERRED, TRANSACTION_MODE_EXCLUSIVE,
+    TRANSACTION_MODE_IMMEDIATE,
+};
 
-pub fn compile_begin(_begin: &Begin) -> Program {
+pub fn compile_begin(begin: &Begin) -> Program {
+    let mode = match begin.mode {
+        None | Some(TransactionMode::Deferred) => TRANSACTION_MODE_DEFERRED,
+        Some(TransactionMode::Immediate) => TRANSACTION_MODE_IMMEDIATE,
+        Some(TransactionMode::Exclusive) => TRANSACTION_MODE_EXCLUSIVE,
+    };
+
     let mut em = Emitter::new();
     let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
     let body_start = em.new_label();
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
 
-    em.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
+    em.emit(Instruction::new(Opcode::Transaction, mode, 0, 0));
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     em.finish()
 }
@@ -64,6 +73,37 @@ mod tests {
             opcodes(&program),
             vec![Opcode::Init, Opcode::Transaction, Opcode::Halt]
         );
+        assert_eq!(program.instructions[1].p1, TRANSACTION_MODE_DEFERRED);
+    }
+
+    #[test]
+    fn begin_immediate_compiles_transaction_p1_to_immediate() {
+        let begin = match parse_begin("BEGIN IMMEDIATE") {
+            ParseOutcome::Accepted(b) => b,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_begin(&begin);
+        assert_eq!(program.instructions[1].p1, TRANSACTION_MODE_IMMEDIATE);
+    }
+
+    #[test]
+    fn begin_exclusive_compiles_transaction_p1_to_exclusive() {
+        let begin = match parse_begin("BEGIN EXCLUSIVE") {
+            ParseOutcome::Accepted(b) => b,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_begin(&begin);
+        assert_eq!(program.instructions[1].p1, TRANSACTION_MODE_EXCLUSIVE);
+    }
+
+    #[test]
+    fn begin_deferred_compiles_transaction_p1_to_deferred() {
+        let begin = match parse_begin("BEGIN DEFERRED") {
+            ParseOutcome::Accepted(b) => b,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_begin(&begin);
+        assert_eq!(program.instructions[1].p1, TRANSACTION_MODE_DEFERRED);
     }
 
     #[test]
