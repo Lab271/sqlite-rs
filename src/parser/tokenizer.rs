@@ -915,6 +915,19 @@ impl Tokenizer {
 /// tokenizer rather than a naive `str::split(';')` (#358's CLI session
 /// wiring: `sqlite-rs exec <db> "BEGIN; UPDATE ...; ROLLBACK;"` needs
 /// each statement compiled and run separately, sharing one `Pager`).
+/// Whether `sql` ends (ignoring trailing whitespace/comments) with a
+/// top-level `;` — the REPL's (#365) "has the user finished typing a
+/// statement, or do we need another line" test, going through the real
+/// tokenizer so a `;` inside a string/blob literal spanning multiple
+/// input lines never counts. Empty input is never complete.
+pub fn ends_with_semicolon(sql: &str) -> bool {
+    let tokens = Tokenizer::tokenize(sql);
+    // `tokenize` always appends a trailing `Eof`; the token before it
+    // (if any) is the last real token.
+    let last_real = tokens.len().checked_sub(2).and_then(|i| tokens.get(i));
+    matches!(last_real, Some(tok) if tok.kind == TokenKind::Semicolon)
+}
+
 /// Empty statements (a bare `;`, leading/trailing whitespace-only) are
 /// dropped, matching `sqlite3`'s own script handling.
 pub fn split_statements(sql: &str) -> Vec<String> {
@@ -985,6 +998,25 @@ mod tests {
     fn split_statements_drops_empty_and_whitespace_only_statements() {
         let stmts = split_statements("  ; BEGIN ;  ; ROLLBACK ; ");
         assert_eq!(stmts, vec!["BEGIN", "ROLLBACK"]);
+    }
+
+    #[test]
+    fn ends_with_semicolon_true_for_a_trailing_top_level_semicolon() {
+        assert!(ends_with_semicolon("SELECT * FROM t;"));
+        assert!(ends_with_semicolon("SELECT * FROM t ; -- trailing comment"));
+    }
+
+    #[test]
+    fn ends_with_semicolon_false_when_no_trailing_semicolon() {
+        assert!(!ends_with_semicolon("SELECT * FROM t"));
+        assert!(!ends_with_semicolon(""));
+        assert!(!ends_with_semicolon("   "));
+    }
+
+    #[test]
+    fn ends_with_semicolon_ignores_a_semicolon_inside_a_string_literal() {
+        assert!(!ends_with_semicolon("SELECT 'a;b'"));
+        assert!(ends_with_semicolon("SELECT 'a;b';"));
     }
 
     fn kinds(src: &str) -> Vec<TokenKind> {

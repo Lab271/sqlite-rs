@@ -14,16 +14,96 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    explain_query_plan, resolve_from_table_schema, CodegenError,
+    explain_query_plan, resolve_from_table_schema, CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
+use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
-use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::{execute_with_db, explain};
+use sqlite_rs::schema::{read_schema, TableSchema};
+use sqlite_rs::vdbe::{execute_with_db, explain, Program};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 use crate::common::{fatal, CSV_ROW_TERMINATOR};
+
+/// What [`compile_select_program`] produced: either `EXPLAIN QUERY
+/// PLAN`'s rows (nothing further to compile — there's no bytecode to
+/// run or `-explain`) or an ordinary compiled `Program`.
+pub(crate) enum SelectOutcome {
+    Eqp(Vec<EqpRow>),
+    Program(Program),
+}
+
+/// Parses (already done by the caller — `select`/`eqp_mode` come from
+/// `parse_select`/`parse_explain`), resolves every table `select`
+/// touches against `schemas`, and compiles it: FROM-less (#260),
+/// single-table, joined (#237), or `UNION ALL` compound (#240),
+/// whichever `select`'s shape calls for. Shared by `run_query` (a
+/// fresh read-only `Pager` per invocation) and the REPL (#365, one
+/// shared read/write `Pager` per session) — both need exactly this
+/// parse-resolve-compile pipeline, just against a different
+/// `PageSource`.
+pub(crate) fn compile_select_program(
+    select: &Select,
+    eqp_mode: bool,
+    schemas: &[TableSchema],
+) -> Result<SelectOutcome, String> {
+    let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
+        resolve_from_table_schema(table_ref, schemas)
+    };
+
+    let Some(from) = &select.from else {
+        if eqp_mode {
+            return Err("EXPLAIN QUERY PLAN requires a FROM clause".to_string());
+        }
+        let no_table = TableSchema {
+            name: String::new(),
+            root_page: 0,
+            columns: vec![],
+            column_types: vec![],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: String::new(),
+            indexes: vec![],
+        };
+        let program =
+            compile_select_with_catalog(select, &no_table, &[]).map_err(|e| e.to_string())?;
+        return Ok(SelectOutcome::Program(program));
+    };
+
+    let schema = resolve_table(&from.first).map_err(|e| e.to_string())?;
+
+    if eqp_mode {
+        let mut joined_schemas = vec![schema];
+        for join in &from.joins {
+            joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
+        }
+        let rows = explain_query_plan(select, &joined_schemas).map_err(|e| e.to_string())?;
+        return Ok(SelectOutcome::Eqp(rows));
+    }
+
+    let program = if !select.compound.is_empty() {
+        let mut arm_schemas = Vec::with_capacity(select.compound.len());
+        for arm in &select.compound {
+            let Some(arm_from) = &arm.from else {
+                return Err(CodegenError::NoFromClause.to_string());
+            };
+            arm_schemas.push(resolve_table(&arm_from.first).map_err(|e| e.to_string())?);
+        }
+        compile_select_compound(select, &schema, &arm_schemas, schemas)
+            .map_err(|e| e.to_string())?
+    } else if from.joins.is_empty() {
+        compile_select_with_catalog(select, &schema, schemas).map_err(|e| e.to_string())?
+    } else {
+        let mut joined_schemas = vec![schema];
+        for join in &from.joins {
+            joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
+        }
+        compile_select_joined(select, &joined_schemas, schemas).map_err(|e| e.to_string())?
+    };
+    Ok(SelectOutcome::Program(program))
+}
 
 pub fn run_query(raw_args: Vec<String>) -> ExitCode {
     let mut csv = false;
@@ -106,100 +186,19 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
         Ok(s) => s,
         Err(e) => return fatal(path, &e),
     };
-    let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
-        resolve_from_table_schema(table_ref, &schemas)
-    };
-    // A FROM-less SELECT (#260, e.g. `SELECT sqlite_version();`) has no
-    // table to resolve at all — `compile_select_with_catalog` handles
-    // this itself once `select.from` is `None`, so this path skips
-    // straight to codegen with a throwaway schema/catalog neither one
-    // is read.
-    let Some(from) = &select.from else {
-        if eqp_mode {
-            return fatal(
-                path,
-                &"EXPLAIN QUERY PLAN requires a FROM clause".to_string(),
-            );
-        }
-        let no_table = sqlite_rs::schema::TableSchema {
-            name: String::new(),
-            root_page: 0,
-            columns: vec![],
-            column_types: vec![],
-            without_rowid: false,
-            strict: false,
-            is_virtual: false,
-            sql: String::new(),
-            indexes: vec![],
-        };
-        let program = match compile_select_with_catalog(&select, &no_table, &[]) {
-            Ok(p) => p,
-            Err(e) => return fatal(path, &e),
-        };
-        return finish_query(path, &program, source, header, explain_flag, csv);
-    };
 
-    let schema = match resolve_table(&from.first) {
-        Ok(s) => s,
-        Err(e) => return fatal(path, &e),
-    };
-
-    if eqp_mode {
-        let mut joined_schemas = vec![schema];
-        for join in &from.joins {
-            let s = match resolve_table(&join.table) {
-                Ok(s) => s,
-                Err(e) => return fatal(path, &e),
-            };
-            joined_schemas.push(s);
+    match compile_select_program(&select, eqp_mode, &schemas) {
+        Ok(SelectOutcome::Eqp(rows)) => {
+            for row in rows {
+                println!("{}|{}|{}|{}", row.id, row.parent, row.notused, row.detail);
+            }
+            ExitCode::SUCCESS
         }
-        let rows = match explain_query_plan(&select, &joined_schemas) {
-            Ok(rows) => rows,
-            Err(e) => return fatal(path, &e),
-        };
-        for row in rows {
-            println!("{}|{}|{}|{}", row.id, row.parent, row.notused, row.detail);
+        Ok(SelectOutcome::Program(program)) => {
+            finish_query(path, &program, source, header, explain_flag, csv)
         }
-        return ExitCode::SUCCESS;
+        Err(e) => fatal(path, &e),
     }
-
-    let program = if !select.compound.is_empty() {
-        let mut arm_schemas = Vec::with_capacity(select.compound.len());
-        for arm in &select.compound {
-            let Some(arm_from) = &arm.from else {
-                return fatal(path, &CodegenError::NoFromClause);
-            };
-            let s = match resolve_table(&arm_from.first) {
-                Ok(s) => s,
-                Err(e) => return fatal(path, &e),
-            };
-            arm_schemas.push(s);
-        }
-        match compile_select_compound(&select, &schema, &arm_schemas, &schemas) {
-            Ok(p) => p,
-            Err(e) => return fatal(path, &e),
-        }
-    } else if from.joins.is_empty() {
-        match compile_select_with_catalog(&select, &schema, &schemas) {
-            Ok(p) => p,
-            Err(e) => return fatal(path, &e),
-        }
-    } else {
-        let mut joined_schemas = vec![schema];
-        for join in &from.joins {
-            let s = match resolve_table(&join.table) {
-                Ok(s) => s,
-                Err(e) => return fatal(path, &e),
-            };
-            joined_schemas.push(s);
-        }
-        match compile_select_joined(&select, &joined_schemas, &schemas) {
-            Ok(p) => p,
-            Err(e) => return fatal(path, &e),
-        }
-    };
-
-    finish_query(path, &program, source, header, explain_flag, csv)
 }
 
 /// `EXPLAIN`-render-or-execute-and-print tail shared by every `run_query`
@@ -249,7 +248,7 @@ fn finish_query(
     ExitCode::SUCCESS
 }
 
-fn write_list_row(out: &mut impl Write, values: &[Vec<u8>]) -> io::Result<()> {
+pub(crate) fn write_list_row(out: &mut impl Write, values: &[Vec<u8>]) -> io::Result<()> {
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
             out.write_all(b"|")?;

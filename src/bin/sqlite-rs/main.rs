@@ -1,16 +1,22 @@
 //! `sqlite-rs` CLI: `dump`, `export`, and `query` subcommands (issues
 //! #37, #95 — the V1 and V2 acceptance gates). Data goes to stdout
 //! (`dump`, `query`) or disk (`export`); anything gracefully skipped
-//! goes to stderr as a warning. Dot-commands, a REPL, and `.import` are
-//! explicit non-goals (CLI level 3, a later value block) — see the
-//! issue bodies. `query`'s own flags (`-csv`, `-explain`) deliberately
-//! use `sqlite3`'s single-dash option style rather than GNU `--long`
-//! flags, matching the interface it stays parity with.
+//! goes to stderr as a warning. `query`'s own flags (`-csv`,
+//! `-explain`) deliberately use `sqlite3`'s single-dash option style
+//! rather than GNU `--long` flags, matching the interface it stays
+//! parity with.
+//!
+//! `repl` (#365) is a deliberately minimal read-eval-print loop, added
+//! once V5's transaction control (#356/#360) needed a session to be
+//! observable in at all — `.import` and full dot-command parity with
+//! the stock `sqlite3` shell remain non-goals (see `repl.rs`'s module
+//! doc for exactly what's in/out of scope).
 
 mod common;
 mod dump;
 mod exec;
 mod query;
+mod repl;
 mod tables;
 
 use std::path::Path;
@@ -44,6 +50,10 @@ fn main() -> ExitCode {
             };
             exec::run_exec(Path::new(&path), &sql)
         }
-        _ => usage_error("[--version] <dump|export|query|tables|exec> <file>"),
+        Some("repl") => match args.next() {
+            Some(path) => repl::run_repl(Path::new(&path)),
+            None => usage_error("repl <file>"),
+        },
+        _ => usage_error("[--version] <dump|export|query|tables|exec|repl> <file>"),
     }
 }
