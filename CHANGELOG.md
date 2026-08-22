@@ -6,6 +6,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+test: `src/vdbe/cursor.rs` was the largest coverage gap in the repo
+(82.37% lines / 68.39% functions). Adds hand-assembled `Program` tests
+for opcodes no current codegen path emits (`Last`, `NullRow`, `IdxLE`)
+and for the `CursorTypeMismatch`/`MalformedInstruction` error arms that
+accounted for most of the file's missed lines — 84.33% line coverage
+after, repo TOTAL 90.91%. No production code changes. Part of epic #234
+(V4). Closes #351. No version bump (test-only chore).
+
 ## [0.13.3] - 2026-08-22
 
 fix: 16 codegen call sites (INSERT/UPDATE/DELETE/SELECT/subquery)
