@@ -30,7 +30,7 @@ fn scratch_dir(label: &str) -> PathBuf {
         "sqlite-rs-cli-e2e-{label}-{}-{n}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

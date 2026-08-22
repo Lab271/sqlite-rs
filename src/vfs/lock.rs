@@ -42,7 +42,7 @@ impl Drop for UnixSharedLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        let _ = fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE);
+        fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE).ok();
     }
 }
 

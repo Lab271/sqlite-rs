@@ -72,7 +72,7 @@ fn main() {
             println!("locked");
             std::io::stdout().flush().expect("flush stdout");
             let mut line = String::new();
-            let _ = std::io::stdin().lock().read_line(&mut line);
+            std::io::stdin().lock().read_line(&mut line).ok();
         }
         other => panic!("unknown mode: {other}"),
     }

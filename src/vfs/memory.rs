@@ -162,11 +162,12 @@ mod tests {
     /// and panicking while the guard is held.
     fn poison(vfs: &MemoryVfs) {
         let files = vfs.files.clone();
-        let _ = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let _guard = files.lock().unwrap();
             panic!("intentionally poisoning the lock for a test");
         })
-        .join();
+        .join()
+        .ok();
     }
 
     #[test]

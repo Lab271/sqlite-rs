@@ -290,7 +290,7 @@ fn bench_write(
             |(tmp, header, pager)| {
                 let rows = execute_with_writable_db(&program, pager, header)
                     .unwrap_or_else(|e| fail(format!("execute {sql:?}: {e}")));
-                let _ = std::fs::remove_file(&tmp);
+                std::fs::remove_file(&tmp).ok();
                 black_box(rows)
             },
             BatchSize::SmallInput,
@@ -310,7 +310,7 @@ fn bench_write(
                 let changes = conn
                     .execute(sql, [])
                     .unwrap_or_else(|e| fail(format!("rusqlite execute {sql:?}: {e}")));
-                let _ = std::fs::remove_file(&tmp);
+                std::fs::remove_file(&tmp).ok();
                 black_box(changes)
             },
             BatchSize::SmallInput,

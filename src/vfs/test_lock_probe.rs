@@ -97,7 +97,7 @@ impl HeldLock {
 
     #[allow(clippy::expect_used, reason = "test-only helper")]
     fn release(mut self) {
-        let _ = self.stdin.write_all(b"\n");
+        self.stdin.write_all(b"\n").ok();
         self.child.wait().expect("wait for lock_probe to exit");
     }
 }

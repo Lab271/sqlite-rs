@@ -36,7 +36,7 @@ fn one_row_fixture() -> (std::path::PathBuf, TableSchema) {
         "sqlite_rs_codegen_expr_test_{}_{n}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(a INTEGER, b INTEGER, name TEXT); INSERT INTO t VALUES (1, 10, 'aa');")
@@ -158,7 +158,7 @@ fn affinity_fixture() -> (std::path::PathBuf, TableSchema) {
         "sqlite_rs_codegen_affinity_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg(

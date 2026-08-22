@@ -22,7 +22,7 @@ use sqlite_rs::parser::tokenizer::Tokenizer;
 #[test]
 fn t1_tokenizer_roundtrip_never_panics() {
     for input in ["SELECT * FROM t WHERE a = 1", "", "'unterminated", "\0\0\0"] {
-        let _ = Tokenizer::tokenize(input);
+        drop(Tokenizer::tokenize(input));
     }
 }
 
@@ -143,7 +143,7 @@ fn t1_single_table_where_matches_oracle() {
         "sqlite_rs_tier1_where_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(a INTEGER, b INTEGER); INSERT INTO t VALUES (1, 10), (2, 5), (3, 20);")
@@ -214,7 +214,7 @@ fn t1_cli_query_matches_oracle() {
         "sqlite_rs_tier1_cli_query_test_{}.db",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let status = Command::new("sqlite3")
         .arg(&path)
         .arg("CREATE TABLE t(a INTEGER, b INTEGER); INSERT INTO t VALUES (1, 10), (2, 5), (3, 20);")

@@ -232,7 +232,7 @@ fn aggregate_calls_without_group_by_compile_via_the_implicit_whole_table_group()
         "SELECT max(id) FROM t",
         "SELECT min(id) FROM t",
     ] {
-        let _ = compile(sql, &s);
+        drop(compile(sql, &s));
     }
 }
 

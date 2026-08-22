@@ -308,7 +308,7 @@ pub fn run_file(oracle: &Path, script_path: &Path) -> FileTally {
 
     let db_path: PathBuf =
         std::env::temp_dir().join(format!("sqlite-rs-sqllogictest-{file_name}.db"));
-    let _ = std::fs::remove_file(&db_path);
+    std::fs::remove_file(&db_path).ok();
 
     let mut tally = FileTally {
         file: file_name,
@@ -363,6 +363,6 @@ pub fn run_file(oracle: &Path, script_path: &Path) -> FileTally {
         }
     }
 
-    let _ = std::fs::remove_file(&db_path);
+    std::fs::remove_file(&db_path).ok();
     tally
 }
