@@ -55,6 +55,16 @@ def main() -> int:
     print(f"  overall discharged:       {total_discharged}/{len(records)} "
           f"({100 * total_discharged / len(records):.1f}%)")
 
+    if multi_leaf:
+        print()
+        print("  multi-leaf obligations (leafs = conditions, vectors = leafs + 1 required cases):")
+        for r in multi_leaf:
+            leafs = r["vectors_required"] - 1
+            mark = "OK" if r["discharged"] else "--"
+            print(f"    [{mark}] {r['id']:<14} {leafs} leafs, "
+                  f"{r['vectors_discharged']}/{r['vectors_required']} vectors fulfilled  "
+                  f"({r['file']}:{r['line']})")
+
     if not args.verbose:
         print()
         print("Run with VERBOSE=1 for the per-obligation action list (multi-leaf only).")
@@ -66,19 +76,21 @@ def main() -> int:
     # ticket's tagged-test convention actually targets.
     print()
     for r in multi_leaf:
+        leafs = r["vectors_required"] - 1
         passing_vectors = {t["vector"] for t in r["tagged_tests"] if t["passed"]}
         failing_tests = [t for t in r["tagged_tests"] if not t["passed"]]
+        tag = f"{r['id']} [{leafs} leafs, {r['vectors_discharged']}/{r['vectors_required']} vectors]"
 
         if r["discharged"]:
-            print(f"DISCHARGED  {r['id']} ({r['file']}:{r['line']})")
+            print(f"DISCHARGED  {tag} ({r['file']}:{r['line']})")
             continue
 
         missing_vectors = sorted(set(range(1, r["vectors_required"] + 1)) - passing_vectors)
         for v in missing_vectors:
-            print(f"ADD TEST    {r['id']} ({r['file']}:{r['line']}) -- "
+            print(f"ADD TEST    {tag} ({r['file']}:{r['line']}) -- "
                   f"tag a test mcdc__{r['id']}__v{v}_<description>")
         for t in failing_tests:
-            print(f"FIX TEST    {r['id']} ({r['file']}:{r['line']}) -- {t['name']} is failing")
+            print(f"FIX TEST    {tag} ({r['file']}:{r['line']}) -- {t['name']} is failing")
 
     return 0
 
