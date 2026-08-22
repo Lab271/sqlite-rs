@@ -6,6 +6,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: `Pager::open` recovered a hot rollback journal from its header magic
+alone, with no check for a live second connection — a race against the
+oracle's own `hasHotJournal`/`sqlite3PagerSharedLock` (`os_unix.c`/
+`pager.c`) behavior. Now non-blocking-probes RESERVED before recovering
+(`FileLockState::check_reserved`, `fcntl(F_GETLK)`) and fails with
+`VfsError::Locked` if held; on a clear probe, escalates SHARED straight
+to EXCLUSIVE, deliberately skipping RESERVED, matching stock SQLite.
+Along the way, fixed a related bug the wiring surfaced: hot-journal
+recovery opened a second, independent fd to the main db path — exactly
+the "`close()` drops all `fcntl` locks on the inode" trap #45 had
+flagged and deferred — now consolidated to the one fd `Pager::open`
+already holds the lock on. `FileLockState` (#357's 5-state ladder,
+previously wired into nothing outside its own unit tests) now backs
+`UnixVfsFile`'s lock directly. See ADR-0024. Closes #359 (rescoped from
+a duplicate of #172/ADR-0016). No version bump (V5 phase in progress).
+Spend: ~1 session, matched the rescoped 1-day estimate.
+
 feat: `src/vfs/lock.rs` gains `LockLevel`/`FileLockState`, a full 5-state
 journal-mode lock ladder (UNLOCKED → SHARED → RESERVED → PENDING →
 EXCLUSIVE) built on byte-identical `fcntl` byte-range locks, matching

@@ -27,3 +27,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0021](0021-correlated-subquery-rematerialization-cost.md) | Defer a coroutine rewrite for correlated subqueries; scope an incremental hoist instead | 2026-08-21 |
 | [0022](0022-pager-has-no-page-cache.md) | `Pager` has no page cache — repeated-seek workloads pay full I/O every row | 2026-08-21 |
 | [0023](0023-leaf-cell-splice.md) | In-place leaf/index cell splice with real freeblock bookkeeping | 2026-08-22 |
+| [0024](0024-hot-journal-recovery-reserved-probe-single-fd.md) | Hot-journal recovery probes RESERVED and shares one fd with `Pager` | 2026-08-22 |

@@ -17,8 +17,6 @@ use std::io;
 use nix::fcntl::{fcntl, FcntlArg};
 use nix::libc::{self, off_t};
 
-use super::SharedLockGuard;
-
 /// SQLite's `PENDING_BYTE` (`os_unix.c`): base of the reserved lock-byte
 /// page.
 const PENDING_BYTE: off_t = 0x40000000;
@@ -77,6 +75,26 @@ impl FileLockState {
     /// The lock level currently held.
     pub fn lock_state(&self) -> LockLevel {
         self.level
+    }
+
+    /// Non-blocking probe: whether some *other* process currently holds a
+    /// write lock on `RESERVED_BYTE` — SQLite's `sqlite3OsCheckReservedLock`
+    /// (`os_unix.c`). RESERVED is held for the whole `Reserved`/`Pending`/
+    /// `Exclusive` span of the ladder (see this enum's doc comments), so
+    /// this single byte-range probe catches all three. Uses `F_GETLK`
+    /// (test-only, never blocks and never acquires anything) rather than
+    /// `F_SETLK`, so it never disturbs a level this process already holds.
+    pub fn check_reserved(&self) -> io::Result<bool> {
+        check_reserved_lock(&self.file)
+    }
+
+    /// The underlying file, for callers that need to read/write the same
+    /// fd this lock ladder tracks — never a second, independently-opened
+    /// fd to the same path (POSIX `fcntl` locks are scoped to `(process,
+    /// inode)`, not the open file description: closing *any* fd this
+    /// process holds to the file drops the lock for all of them).
+    pub(crate) fn file(&self) -> &File {
+        &self.file
     }
 
     /// Whether the held level reserves the right to write (`Reserved`,
@@ -160,41 +178,27 @@ impl FileLockState {
 
 impl Drop for FileLockState {
     fn drop(&mut self) {
-        // Best-effort, matching `UnixSharedLock`'s `Drop` above: a `drop`
-        // can't propagate failure, and there's nothing more to do about
-        // one anyway.
+        // Best-effort: a `drop` can't propagate failure, and there's
+        // nothing more to do about one anyway.
         self.set_level(LockLevel::Unlocked).ok();
     }
 }
 
-/// A held SHARED lock on a database file's journal-mode lock bytes,
-/// released on drop. Holds its own duplicated `File` (via `try_clone`)
-/// rather than a bare fd so releasing the lock never needs to reconstruct
-/// an fd's validity out of thin air.
-pub struct UnixSharedLock {
-    file: File,
-}
-
-impl SharedLockGuard for UnixSharedLock {}
-
-impl Drop for UnixSharedLock {
-    fn drop(&mut self) {
-        // Best-effort: `drop` can't propagate a failure, and there is
-        // nothing more this crate can do about one anyway.
-        fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE).ok();
-    }
-}
-
-/// Acquires a non-blocking SHARED lock on `file`'s journal-mode lock-byte
-/// range. `Err` on any failure, including lock contention (`EAGAIN`/
-/// `EACCES` surface here as a plain `io::Error`; `src/vfs/unix.rs`'s
-/// `to_lock_error` is what turns those into a distinguishable "database is
-/// locked" error one layer up).
-pub fn lock_shared(file: &File) -> io::Result<UnixSharedLock> {
-    fcntl_lock(file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
-    Ok(UnixSharedLock {
-        file: file.try_clone()?,
-    })
+/// Whether some other process holds a write lock overlapping
+/// `RESERVED_BYTE`, via `fcntl(F_GETLK)` — a query, never an acquisition.
+/// If this process itself already holds the byte, `F_GETLK` reports
+/// `F_UNLCK` (a process never conflicts with its own lock), which is
+/// exactly the "am I clear to escalate" answer callers need.
+fn check_reserved_lock(file: &File) -> io::Result<bool> {
+    let mut fl = libc::flock {
+        l_type: libc::F_WRLCK as _,
+        l_whence: libc::SEEK_SET as _,
+        l_start: RESERVED_BYTE,
+        l_len: 1,
+        l_pid: 0,
+    };
+    fcntl(file, FcntlArg::F_GETLK(&mut fl)).map_err(io::Error::from)?;
+    Ok(fl.l_type != libc::F_UNLCK as _)
 }
 
 /// Generic byte-range `fcntl(F_SETLK)` primitive — used both for the
@@ -234,6 +238,14 @@ pub(crate) fn exclusive_lock_available(path: &std::path::Path) -> bool {
     super::test_lock_probe::lock_available(path, "wrlock", SHARED_FIRST, SHARED_SIZE)
 }
 
+/// Test-only: `(start, len)` of the RESERVED byte, for cross-module tests
+/// that simulate another process holding it via a real subprocess
+/// (`src/pager.rs`'s hot-journal-vs-live-writer test, #359).
+#[cfg(test)]
+pub(crate) fn reserved_byte_range() -> (off_t, off_t) {
+    (RESERVED_BYTE, 1)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -262,30 +274,32 @@ mod tests {
     #[test]
     fn lock_shared_succeeds_on_a_fresh_file() {
         let (file, _path) = temp_file();
-        assert!(lock_shared(&file).is_ok());
+        let mut lock = FileLockState::new(file);
+        assert!(lock.set_level(LockLevel::Shared).is_ok());
     }
 
     #[test]
     fn shared_lock_blocks_concurrent_exclusive_lock_until_dropped() {
         let (file, path) = temp_file();
-        let guard = lock_shared(&file).unwrap();
+        let mut lock = FileLockState::new(file);
+        lock.set_level(LockLevel::Shared).unwrap();
 
         assert!(
             !exclusive_lock_available(&path),
             "a held SHARED lock must block a concurrent EXCLUSIVE lock"
         );
 
-        drop(guard);
+        drop(lock);
 
         assert!(
             exclusive_lock_available(&path),
-            "dropping the guard must release the SHARED lock"
+            "dropping the lock must release the SHARED lock"
         );
 
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// `lock_shared` contending with a real EXCLUSIVE lock held by another
+    /// A SHARED lock contending with a real EXCLUSIVE lock held by another
     /// OS process (not just this process re-locking, which `fcntl` never
     /// sees as contention) must surface as lock contention (`EAGAIN`/
     /// `EACCES`), which `src/vfs/unix.rs`'s `to_lock_error` turns into

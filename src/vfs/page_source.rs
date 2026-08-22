@@ -9,7 +9,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use super::{FileLock, Vfs, VfsError, VfsFile};
+use super::{AnyVfsFile, FileLock, Vfs, VfsError, VfsFile};
 
 #[derive(Debug, Error)]
 pub enum PageError {
@@ -109,6 +109,20 @@ impl WritablePageSource {
     pub fn open(vfs: &dyn Vfs, path: &Path, page_size: u32) -> Result<Self, VfsError> {
         let file = vfs.open_write(path)?;
         Ok(WritablePageSource { file, page_size })
+    }
+
+    /// Wraps an already-opened file handle rather than opening a fresh one
+    /// — for `Pager::open`'s hot-journal recovery (#359), which must probe
+    /// and escalate the lock on, then read/write/truncate, the *same* fd
+    /// used for every page access afterward. A second independently-opened
+    /// fd to the same path would reintroduce the "`close()` drops all
+    /// `fcntl` locks on the inode" trap this struct's own doc comment
+    /// above already commits to avoiding.
+    pub fn from_file(file: AnyVfsFile, page_size: u32) -> Self {
+        WritablePageSource {
+            file: file.into_inner(),
+            page_size,
+        }
     }
 
     /// Acquires a SHARED lock on the underlying file — see

@@ -38,7 +38,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::vfs::{
-    companion_path, AnyVfs, FileLock, PageError, PageSource, Vfs, WritablePageSource,
+    companion_path, AnyVfs, AnyVfsFile, FileLock, PageError, PageSource, Vfs, VfsError,
+    WritablePageSource,
 };
 use journal::{JournalError, JournalWriter};
 
@@ -224,19 +225,49 @@ impl Pager {
     /// which recovery can't safely act on). Returns [`PagerError::Wal`]
     /// if an adjacent non-empty `-wal` file's header is malformed or
     /// declares a page size that doesn't match `page_size`.
+    ///
+    /// Recovery itself (#359) matches stock SQLite's `hasHotJournal`/
+    /// `sqlite3PagerSharedLock` (`os_unix.c`/`pager.c`) rather than acting
+    /// on the journal's magic alone: after taking the SHARED lock every
+    /// open needs anyway, a non-blocking probe checks whether some other
+    /// connection already holds RESERVED (or higher) on the main file —
+    /// if so, that connection is either mid-transaction or already
+    /// rolling this same journal back itself, so replaying it here too
+    /// would race it, and `open` fails with [`VfsError::Locked`] instead.
+    /// Otherwise the lock jumps straight from SHARED to EXCLUSIVE,
+    /// deliberately skipping RESERVED (see
+    /// [`FileLock::escalate_to_exclusive`]'s doc comment), and every read/
+    /// write/truncate of both the probe and the replay itself goes
+    /// through the one fd opened below — never a second, independently
+    /// opened handle to the same path (the "`close()` drops all `fcntl`
+    /// locks on the inode" trap `WritablePageSource::from_file` documents).
     pub fn open<V: Vfs + Clone + 'static>(
         vfs: &V,
         path: &Path,
         page_size: u32,
     ) -> Result<Self, PagerError> {
         let journal_path = companion_path(path, "-journal");
+        let mut journal_is_hot = false;
         if vfs.exists(&journal_path)? {
             let journal = vfs.open_read(&journal_path)?;
             let mut magic = [0u8; JOURNAL_MAGIC.len()];
             let n = journal.read_at(&mut magic, 0)?;
-            if n == JOURNAL_MAGIC.len() && magic == JOURNAL_MAGIC {
-                recover_hot_journal(vfs, &journal_path, path)?;
+            journal_is_hot = n == JOURNAL_MAGIC.len() && magic == JOURNAL_MAGIC;
+        }
+
+        let db_file: AnyVfsFile = vfs.open_write(path)?.into();
+        let mut lock = db_file.lock_shared()?;
+
+        if journal_is_hot {
+            if lock.check_reserved()? {
+                return Err(VfsError::Locked {
+                    path: path.display().to_string(),
+                }
+                .into());
             }
+            lock.escalate_to_exclusive()?;
+            recover_hot_journal(vfs, &db_file, &journal_path)?;
+            lock.de_escalate_to_shared()?;
         }
 
         // Claimed before reading WAL frames below, so a live checkpointer
@@ -246,8 +277,7 @@ impl Pager {
         let wal_lock = vfs.claim_wal_read_lock(path)?;
         let wal_pages = read_wal_pages(vfs, path, page_size)?;
 
-        let source = WritablePageSource::open(vfs, path, page_size)?;
-        let lock = source.lock_shared()?;
+        let source = WritablePageSource::from_file(db_file, page_size);
         Ok(Pager {
             lock,
             wal_lock,
@@ -460,16 +490,18 @@ fn random_nonce() -> u32 {
     nanos ^ std::process::id()
 }
 
-/// Replays a hot journal's pages into `path`'s main file and deletes the
-/// journal (#172). Called from [`Pager::open`] once the journal's header
-/// magic is confirmed valid; a journal whose header/records don't parse
-/// surfaces as [`PagerError::Journal`] rather than being silently
-/// ignored, since that's a corrupt-journal condition distinct from "no
-/// hot journal at all".
+/// Replays a hot journal's pages into `db_file` and deletes the journal
+/// (#172). Called from [`Pager::open`] once the journal's header magic is
+/// confirmed valid and the EXCLUSIVE lock secured; a journal whose header/
+/// records don't parse surfaces as [`PagerError::Journal`] rather than
+/// being silently ignored, since that's a corrupt-journal condition
+/// distinct from "no hot journal at all". `db_file` is the one fd
+/// [`Pager::open`] already holds the lock on — recovery must never open a
+/// second, independent handle to the same path (#359).
 fn recover_hot_journal<V: Vfs>(
     vfs: &V,
+    db_file: &AnyVfsFile,
     journal_path: &Path,
-    db_path: &Path,
 ) -> Result<(), PagerError> {
     let journal_file = vfs.open_read(journal_path)?;
     let size = journal_file.size()?;
@@ -477,8 +509,7 @@ fn recover_hot_journal<V: Vfs>(
     let n = journal_file.read_at(&mut journal_bytes, 0)?;
     journal_bytes.truncate(n);
 
-    let db_file: crate::vfs::AnyVfsFile = vfs.open_write(db_path)?.into();
-    let recovered = journal::recover(&journal_bytes, &db_file).map_err(journal_to_pager_error)?;
+    let recovered = journal::recover(&journal_bytes, db_file).map_err(journal_to_pager_error)?;
     db_file.truncate(
         (recovered.initial_page_count as u64).saturating_mul(recovered.page_size as u64),
     )?;
@@ -670,6 +701,74 @@ mod tests {
         let pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
         assert_eq!(pager.read_page(2).unwrap(), original_page_2);
         assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
+    }
+
+    /// A second connection already holding RESERVED on the main file is
+    /// either mid-transaction or already rolling this same journal back
+    /// itself — replaying it here too would race it (oracle:
+    /// `sqlite3OsCheckReservedLock` in `pager.c`'s `hasHotJournal`, #359).
+    /// `open` must refuse rather than recover, leaving the journal and the
+    /// (still-corrupted) main file untouched.
+    #[test]
+    fn hot_journal_open_fails_when_another_connection_holds_reserved() {
+        use crate::vfs::test_lock_probe::lock_held_by_subprocess;
+        use crate::vfs::UnixVfs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sqlite-rs-pager-reserved-race-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+
+        let page_size = 512u32;
+        let mut db = vec![7u8; page_size as usize];
+        db.extend(vec![0xFFu8; page_size as usize]); // corrupted page 2
+        std::fs::write(&path, &db).unwrap();
+
+        let original_page_2 = vec![0xAAu8; page_size as usize];
+        let nonce = 42;
+        let header = journal::JournalHeader {
+            n_rec: 1,
+            nonce,
+            initial_page_count: 2,
+            sector_size: page_size,
+            page_size,
+        }
+        .serialize(JOURNAL_MAGIC);
+        let mut journal_bytes = vec![0u8; page_size as usize];
+        journal_bytes[..journal::JOURNAL_HEADER_LEN].copy_from_slice(&header);
+        journal_bytes.extend_from_slice(&2u32.to_be_bytes());
+        journal_bytes.extend_from_slice(&original_page_2);
+        journal_bytes
+            .extend_from_slice(&journal::page_checksum(nonce, &original_page_2).to_be_bytes());
+        let journal_path = dir.join("test.db-journal");
+        std::fs::write(&journal_path, &journal_bytes).unwrap();
+
+        let (start, len) = crate::vfs::lock::reserved_byte_range();
+        let result = lock_held_by_subprocess(&path, "wrlock", start, len, || {
+            Pager::open(&UnixVfs, &path, page_size)
+        });
+
+        match result {
+            Err(PagerError::Vfs(crate::vfs::VfsError::Locked { .. })) => {}
+            Err(other) => panic!("expected Locked, got {other:?}"),
+            Ok(_) => panic!("expected Locked, got Ok"),
+        }
+        assert!(
+            journal_path.exists(),
+            "a journal another connection may still be rolling back must not be deleted"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            db,
+            "the main file must not be touched when recovery is refused"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
