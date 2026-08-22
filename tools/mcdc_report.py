@@ -57,36 +57,28 @@ def main() -> int:
 
     if not args.verbose:
         print()
-        print("Run with VERBOSE=1 for the per-obligation breakdown and what's been tested.")
+        print("Run with VERBOSE=1 for the per-obligation action list (multi-leaf only).")
         return 0
 
+    # Single-leaf branches and compiler-void obligations are out of scope by
+    # convention (see dashboard counts above) — verbose mode only breaks
+    # down the multi-leaf obligations, since those are the only ones this
+    # ticket's tagged-test convention actually targets.
     print()
-    undischarged_multi = [r for r in multi_leaf if not r["discharged"]]
-    if undischarged_multi:
-        print("ACTION NEEDED — multi-leaf obligations still undischarged:")
-        for r in undischarged_multi:
-            print(f"  {r['id']} ({r['file']}:{r['line']}) -- "
-                  f"{r['vectors_discharged']}/{r['vectors_required']} vectors tagged & passing")
-            print(f"    -> write tests tagged mcdc__{r['id']}__v<N> for each required vector, "
-                  f"then re-run `make test-mcdc`")
-        print()
+    for r in multi_leaf:
+        passing_vectors = {t["vector"] for t in r["tagged_tests"] if t["passed"]}
+        failing_tests = [t for t in r["tagged_tests"] if not t["passed"]]
 
-    discharged_multi = [r for r in multi_leaf if r["discharged"]]
-    if discharged_multi:
-        print("TESTED — multi-leaf obligations discharged, and by which tests:")
-        for r in discharged_multi:
-            print(f"  {r['id']} ({r['file']}:{r['line']})")
-            for t in sorted(r["tagged_tests"], key=lambda t: t["vector"]):
-                status = "ok" if t["passed"] else "FAILED"
-                print(f"    v{t['vector']}: {t['name']} [{status}]")
-        print()
+        if r["discharged"]:
+            print(f"DISCHARGED  {r['id']} ({r['file']}:{r['line']})")
+            continue
 
-    undischarged_single = [r for r in single_leaf if not r["discharged"]]
-    if undischarged_single:
-        print(f"Out-of-scope single-leaf branches with no coverage yet ({len(undischarged_single)}), "
-              f"informational only:")
-        for r in undischarged_single:
-            print(f"  {r['id']} ({r['file']}:{r['line']})")
+        missing_vectors = sorted(set(range(1, r["vectors_required"] + 1)) - passing_vectors)
+        for v in missing_vectors:
+            print(f"ADD TEST    {r['id']} ({r['file']}:{r['line']}) -- "
+                  f"tag a test mcdc__{r['id']}__v{v}_<description>")
+        for t in failing_tests:
+            print(f"FIX TEST    {r['id']} ({r['file']}:{r['line']}) -- {t['name']} is failing")
 
     return 0
 
