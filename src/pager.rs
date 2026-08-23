@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use crate::header::JournalMode;
 use crate::vfs::{
-    companion_path, AnyVfs, AnyVfsFile, FileLock, PageError, PageSource, Vfs, VfsError,
+    companion_path, AnyVfs, AnyVfsFile, AnyWalShm, FileLock, PageError, PageSource, Vfs, VfsError,
     WritablePageSource,
 };
 use journal::{JournalError, JournalWriter};
@@ -159,6 +159,15 @@ pub struct Pager {
     /// ordering.
     #[allow(dead_code, reason = "held only for its Drop side effect")]
     wal_lock: Option<FileLock>,
+    /// A cached persistent handle to the `-shm` companion file (#437),
+    /// reused by every [`Pager::flush_wal_locked`] call across this
+    /// connection's lifetime instead of reopening `-shm` on each commit —
+    /// see [`crate::vfs::Vfs::open_wal_shm`]'s doc comment. Lazily opened
+    /// on the first WAL commit (`None` for a connection that never writes
+    /// in WAL mode); reset to `None` on any WAL/journal-mode switch, since
+    /// the underlying `-shm` file is deleted (`switch_wal_to_journal`) or
+    /// freshly recreated (`switch_journal_to_wal`) there.
+    wal_shm: Option<AnyWalShm>,
     source: WritablePageSource,
     wal_pages: HashMap<u32, Vec<u8>>,
     /// Pages fetched via [`Pager::get_page_mut`] since the last
@@ -309,6 +318,7 @@ impl Pager {
             lock,
             tx_lock_level: crate::vfs::LockLevel::Shared,
             wal_lock,
+            wal_shm: None,
             source,
             wal_pages,
             dirty: HashMap::new(),
@@ -521,37 +531,70 @@ impl Pager {
             source,
         };
 
-        let _write_guard = self.vfs.claim_wal_write_lock(&self.db_path)?;
-
-        // The post-transaction page count: layered through `self.dirty`
-        // (this transaction's own edit to page 1, if any) then
-        // `self.wal_pages` (a prior WAL commit's value) then `self.source`
-        // (the true pre-WAL original) — i.e. exactly `PageSource::read_page`'s
-        // own precedence, since the main file's own page-1 bytes go stale
-        // the moment the first WAL frame is ever written and stay stale
-        // until a checkpoint backfills them.
-        let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
-
-        let mut writer = wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
-            .map_err(to_pager_error)?;
-
-        let last_index = page_nums.len().saturating_sub(1);
-        for (index, &page_num) in page_nums.iter().enumerate() {
-            if let Some(bytes) = self.dirty.get(&page_num) {
-                let commit_db_size = if index == last_index {
-                    post_page_count
-                } else {
-                    0
-                };
-                writer
-                    .append_frame(page_num, bytes, commit_db_size)
-                    .map_err(to_pager_error)?;
-            }
+        // Lazily cache a persistent `-shm` handle (#437) so every commit
+        // after the first reuses the same already-open fd for the write
+        // lock and the `mxFrame` publish, instead of reopening `-shm`
+        // twice per commit (spike 011's dominant cost). Falls back to the
+        // old per-call `Vfs::claim_wal_write_lock` for backends with no
+        // real `-shm` file to cache a handle to (e.g. `MemoryVfs`).
+        if self.wal_shm.is_none() {
+            self.wal_shm = self.vfs.open_wal_shm(&self.db_path)?;
         }
-        writer.sync().map_err(to_pager_error)?;
+        let fallback_guard = if self.wal_shm.is_none() {
+            self.vfs.claim_wal_write_lock(&self.db_path)?
+        } else {
+            None
+        };
+        if let Some(shm) = &self.wal_shm {
+            shm.claim_write_lock()?;
+        }
 
-        let new_mx_frame = writer.frame_count();
-        self.vfs.publish_wal_mx_frame(&self.db_path, new_mx_frame)?;
+        let outcome = (|| -> Result<(), PagerError> {
+            // The post-transaction page count: layered through
+            // `self.dirty` (this transaction's own edit to page 1, if
+            // any) then `self.wal_pages` (a prior WAL commit's value)
+            // then `self.source` (the true pre-WAL original) — i.e.
+            // exactly `PageSource::read_page`'s own precedence, since the
+            // main file's own page-1 bytes go stale the moment the first
+            // WAL frame is ever written and stay stale until a
+            // checkpoint backfills them.
+            let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
+
+            let mut writer = wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
+                .map_err(to_pager_error)?;
+
+            let last_index = page_nums.len().saturating_sub(1);
+            for (index, &page_num) in page_nums.iter().enumerate() {
+                if let Some(bytes) = self.dirty.get(&page_num) {
+                    let commit_db_size = if index == last_index {
+                        post_page_count
+                    } else {
+                        0
+                    };
+                    writer
+                        .append_frame(page_num, bytes, commit_db_size)
+                        .map_err(to_pager_error)?;
+                }
+            }
+            writer.sync().map_err(to_pager_error)?;
+
+            let new_mx_frame = writer.frame_count();
+            match &self.wal_shm {
+                Some(shm) => shm.publish_mx_frame(new_mx_frame)?,
+                None => self.vfs.publish_wal_mx_frame(&self.db_path, new_mx_frame)?,
+            }
+            Ok(())
+        })();
+
+        // Always release the write lock, success or failure, before
+        // propagating — mirrors the fallback path's own `Drop`-on-scope-
+        // exit release, just explicit since the cached handle's lock
+        // isn't tied to a value's lifetime.
+        if let Some(shm) = &self.wal_shm {
+            shm.release_write_lock().ok();
+        }
+        drop(fallback_guard);
+        outcome?;
 
         for page_num in page_nums {
             if let Some(bytes) = self.dirty.remove(&page_num) {
@@ -652,6 +695,11 @@ impl Pager {
         let shm_file = self.vfs.create_or_open_write(&shm_path)?;
         shm_file.write_at(&crate::vfs::shm::fresh_shm_bytes(), 0)?;
         shm_file.sync()?;
+
+        // Drop any handle cached (#437) against a now-stale `-shm`
+        // generation — `flush_wal_locked` reopens fresh against the file
+        // just created above on its next call.
+        self.wal_shm = None;
         Ok(())
     }
 
@@ -699,6 +747,12 @@ impl Pager {
         self.vfs.delete(&wal_path)?;
         self.vfs.delete(&shm_path)?;
         self.wal_pages.clear();
+
+        // The cached handle (#437), if any, points at the `-shm` file
+        // just deleted above — drop it so a future switch back to WAL
+        // reopens fresh rather than reusing a stale fd to a since-
+        // deleted (or reused-inode) file.
+        self.wal_shm = None;
         Ok(())
     }
 
