@@ -165,6 +165,10 @@ pub struct Vm {
     /// `Halt` handling for the "BEGIN with no matching COMMIT/ROLLBACK"
     /// safety fallback.
     pub(crate) autocommit: bool,
+    /// Reused byte buffer for `MakeRecord` (#454): amortizes the record
+    /// payload's allocation across every row a statement emits, instead
+    /// of a fresh `Vec<u8>` per `MakeRecord` execution.
+    record_scratch: Vec<u8>,
 }
 
 impl Default for Vm {
@@ -178,6 +182,7 @@ impl Default for Vm {
             once_fired: HashSet::new(),
             params: Vec::new(),
             autocommit: true,
+            record_scratch: Vec::new(),
         }
     }
 }
@@ -193,6 +198,12 @@ pub(crate) const MAX_REGISTERS: usize = 1 << 20;
 impl Vm {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reused scratch buffer for `MakeRecord` (#454) — see
+    /// [`Vm::record_scratch`]'s field doc.
+    pub(crate) fn record_scratch(&mut self) -> &mut Vec<u8> {
+        &mut self.record_scratch
     }
 
     /// Builds a `Vm` that can service `OpenRead` against `source` (page
