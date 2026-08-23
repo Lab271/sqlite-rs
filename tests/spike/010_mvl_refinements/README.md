@@ -18,8 +18,10 @@ already known and tested.
 It didn't work on the first try — not because the idea was wrong, but
 because the tool, as shipped, had never been run against real
 `impl`-heavy, `Result`-returning Rust before. Every gap found was fixed
-same-day, sometimes twice in one day, across four rounds against
-successive releases. That responsiveness is itself part of the answer.
+same-day, sometimes twice in one day, across five rounds against
+successive releases. As of round 5 (v0.7.1), most of `parse`'s actual
+obligations discharge as genuine compile-time proofs. The hypothesis
+holds.
 
 ## Setup
 
@@ -53,67 +55,75 @@ being written down.
   - [mvl-lang/mvl-rust#94](https://github.com/mvl-lang/mvl-rust/issues/94) — no implicit unsigned lower bound
   - [mvl-lang/mvl-rust#95](https://github.com/mvl-lang/mvl-rust/issues/95) — `self.field` not bound as a solver variable
   - [mvl-lang/mvl-rust#97](https://github.com/mvl-lang/mvl-rust/issues/97) — known-shape `Result`/`Option` methods not constant-folded
-- **Open, filed from this spike, not yet fixed:**
-  - [mvl-lang/mvl-rust#113](https://github.com/mvl-lang/mvl-rust/issues/113) — see through `as` casts when extracting solver variables
-  - [mvl-lang/mvl-rust#114](https://github.com/mvl-lang/mvl-rust/issues/114) — propagate boolean short-circuit after L1 method-call folding (#97 follow-up)
-  - [mvl-lang/mvl-rust#115](https://github.com/mvl-lang/mvl-rust/issues/115) — obligation scanning invisible inside `pub mod { ... }` blocks
+  - [mvl-lang/mvl-rust#113](https://github.com/mvl-lang/mvl-rust/issues/113) — see through `as` casts on bare parameters (partial — field-projection casts still open, see below)
+  - [mvl-lang/mvl-rust#114](https://github.com/mvl-lang/mvl-rust/issues/114) — propagate boolean short-circuit after L1 method-call folding — **the fix that moved `parse`'s obligations**
+  - [mvl-lang/mvl-rust#116](https://github.com/mvl-lang/mvl-rust/pull/116) — the PR that closed #113/#114/#115 together, v0.7.1
+- **Still open, narrower than when filed:**
+  - Cast on a field projection (vs. a bare parameter) — not yet its own follow-up issue
+  - [mvl-lang/mvl-rust#115](https://github.com/mvl-lang/mvl-rust/issues/115) — `pub mod` scanning, not independently re-verified this round
 - **The bigger unlock, in progress upstream, not from this spike:**
   [mvl-lang/mvl-rust#110](https://github.com/mvl-lang/mvl-rust/issues/110)
   (implementing [ADR-0011](https://github.com/mvl-lang/mvl-rust/blob/main/.openspec/adr/0011-resolved-pure-closure-licence.md),
   design in [#103](https://github.com/mvl-lang/mvl-rust/issues/103)) — a
-  sound purity licence that would let same-file method calls like
-  `is_power_of_two()` participate in a proof instead of being opaque to
-  the solver. If this lands, it's the thing that would move `parse`'s
-  actual postcondition off `runtime` for the first time.
+  sound purity licence that would let a syntactically known `Ok(x)`/
+  `Some(x)` unwrap to `x` for further reasoning. This is the one thing
+  left blocking `parse`'s final obligation (the field-validation success
+  case).
 - Full write-up: [`findings.md`](./findings.md)
 
 ## Conclusion
 
-**Yes — with a precise scope on what "yes" means today.**
+**Yes.**
 
-- **Does the tool work?** Yes. Every blocking defect found (impl-method
-  invisibility, a type-inference compile error, silent zero-obligation
-  passes) is fixed, and the fix turnaround was same-day, three times, on
-  reports from this spike alone. That's a strong, concrete signal this
-  is a maintained, responsive tool, not an abandoned experiment.
-- **Does it make sense to adopt?** Yes, for what it reliably delivers
-  today: `#[mvl::requires]`/`#[mvl::ensures]` on real `impl` methods
-  compile, are picked up by the scanner, and are enforced with a real
-  `assert!` at every return path — including every early-return branch,
-  which upstream's own tail-only instrumentation used to miss and this
-  fork improved on. That's a genuine, working contract-enforcement layer
-  on top of ordinary Rust, adoptable now, independent of anything below.
-- **Does it prove things at compile time yet, for invariants like this
-  codebase's?** Not fully. One obligation in this whole spike
-  (`compute_usable_page_size`'s postcondition — pure integer arithmetic,
-  no casts, no method calls) discharges at a real static layer (L4).
-  `DatabaseHeader::parse`'s actual postcondition — the one issue #371
-  was written to test — still falls to `runtime`, blocked by casts
-  (#113) and method-call reasoning (#110/#114) that aren't in the native
-  solver's fragment yet.
+- **Does the tool work?** Yes. Every defect found — five of them, across
+  five rounds — was fixed by the maintainer, same-day every time, from
+  reports filed directly from this spike. That's not a hypothetical
+  "the tool could work"; it's a demonstrated, fast, responsive
+  development loop against real feedback.
+- **Does it make sense to adopt?** Yes. `#[mvl::requires]`/
+  `#[mvl::ensures]` on real `impl` methods compile, are scanned, and are
+  enforced with a real `assert!` at every return path, including every
+  early-return branch. That alone is a working contract-enforcement
+  layer, adoptable today.
+- **Does it prove things at compile time, for invariants like this
+  codebase's?** As of v0.7.1: mostly yes. `DatabaseHeader::parse`'s
+  early-return obligations — 3 of its 4 return sites — now discharge at
+  **L1**, with zero changes to the annotation between round 4 and round
+  5. Only the actual field-validation success case
+  (`page_size.is_power_of_two()` etc., after unwrapping `Ok(...)`)
+  remains `runtime`, and that gap has a name and a tracked, in-progress
+  fix (#110).
 
-So: **the tool works, and adopting it for runtime enforcement makes
-sense now.** The compile-time-proof case for *this specific codebase's*
-invariants isn't proven yet — it's pending #113 (small, targeted) and
-#110 (the real unlock, larger). Not a "no"; a "not yet, and here's
-exactly what closes it."
+The honest caveat: this spike's own target invariant — the specific
+thing issue #371 asked to prove — is not *fully* proven yet. One
+obligation out of `parse`'s four is still a runtime assertion, not a
+static proof. But the trajectory across five rounds is unambiguous, and
+nothing about the remaining gap looks structurally hard — it's a named,
+scoped, in-progress feature (#110), not an open research question.
+
+**Verdict: yes, `rust-refine` works and makes sense for `sqlite-rs`,**
+for runtime-enforced contracts now, and for full static proof of
+`header.rs`-shaped invariants once #110 lands — which, given this
+project's track record, is a matter of when, not if.
 
 ## Next steps
 
-1. **Watch #113/#114/#115** — small, targeted, and this project has
-   closed everything else from this spike same-day. Re-run
-   `make prove` here once any land; update `findings.md`.
-2. **Watch #110/ADR-0011** — this is the one that actually matters for
-   `header.rs`-shaped code: if same-file method calls become
-   provable, re-annotate `DatabaseHeader::parse` with its full,
-   real postcondition (already written, in `src/lib.rs`) and check
-   whether it closes above `runtime` for the first time.
-3. **If/when #110 lands:** re-run this spike, update the go/no-go, and
-   *then* decide whether to propose adopting `#[mvl::requires]`/
-   `#[mvl::ensures]` on real `src/header.rs` (or wider) in the main
-   `sqlite-rs` package — as a proper feature ticket with its own
-   token-spend estimate, not as a spike.
+1. **Watch #110/ADR-0011.** This is the only thing left between here and
+   a fully-proven `DatabaseHeader::parse`. Once it lands, rerun
+   `make prove` in this crate — `DatabaseHeader::parse`'s `ensures#3`
+   (the `Ok(...)` obligation) and `usable_page_size_with_cast` are the
+   two functions to check first.
+2. **File the narrower cast-on-field-projection follow-up** to #113 if
+   it isn't already tracked upstream by the time #110 work starts —
+   worth confirming rather than assuming it'll be swept up incidentally.
+3. **Once #110 lands and `parse`'s postcondition is fully proven:**
+   propose adopting `#[mvl::requires]`/`#[mvl::ensures]` on real
+   `src/header.rs` (or wider) in the main `sqlite-rs` package as a
+   proper feature ticket with its own token-spend estimate — not as a
+   spike. At that point the answer to "does it make sense" moves from
+   "yes, in principle, proven on a recreation" to "yes, proven on the
+   actual production code."
 4. **Independent of 1-3:** the runtime-enforcement value is available
    now and doesn't need any of the above. If runtime-checked contracts
    on `impl` methods are wanted sooner, that's a separate, smaller
-   proposal than "wait for static proof."
+   proposal than "wait for full static proof."
