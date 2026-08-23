@@ -22,7 +22,4 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# #371/#374's rust-refine spike: `mvl` isn't published to crates.io,
-# pinned instead to the same revision CI's mvl-limit gate already
-# builds from GitHub (MVL_RUST_REV in .github/workflows/ci.yml).
-allow-git = ["https://github.com/mvl-lang/mvl-rust"]
+allow-git = []

@@ -113,54 +113,6 @@ impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
     /// [`HEADER_LEN`] bytes. Never panics: malformed input returns `Err`.
-    // Spike #371, second retry, against mvl-rust v0.5.1
-    // (mvl-lang/mvl-rust#90/#89/#93), which fixed both prior blockers:
-    // `impl` methods are scanned (#90/#89), and `ensures` referencing an
-    // `Ok`-field at an early `return Err(...)` site no longer hits E0282
-    // (#93/#92 — `inject_ensures` now annotates every instrumented
-    // `result` binding with the function's declared return type instead
-    // of leaving it to inference). The issue's target annotations used
-    // `#[mvl::refine] impl { ... }` with `ret.field` and `==>` — none of
-    // that is real rust-refine syntax. The actual API attaches
-    // `#[mvl::requires]`/`#[mvl::ensures]` per function, the return value
-    // is always named `result`, and implication has to be spelled as
-    // `!p || q` since `==>` isn't a Rust operator the predicate's
-    // `syn::Expr` parser can accept.
-    //
-    // No `requires(buf.len() >= HEADER_LEN)` here, unlike the issue's
-    // target: `parse` is documented and tested to handle a too-short
-    // `buf` gracefully (`Err(TooShort)`), not to assume it away. A
-    // `requires` on this would turn `empty_file_is_too_short_not_a_panic`
-    // into an actual panic — the opposite of what that test exists to
-    // pin. This is on the issue itself, not rust-refine.
-    //
-    // `result.as_ref().unwrap()` below is unreachable on the `Err` path:
-    // the leading `result.is_err() ||` short-circuits before any
-    // `unwrap()` runs. clippy can't see that from the predicate alone —
-    // this codebase denies `unwrap_used` project-wide.
-    //
-    // Retested against mvl-rust v0.7.0's mvl-lang/mvl-rust#97 (constant-
-    // folds `Err(x).is_err()`/`Ok(x).is_ok()` etc. to a literal `bool` at
-    // L1): doesn't help here. In isolation, `(Err(...)).is_err()` alone
-    // does fold (confirmed in a standalone repro). But every early
-    // `return Err(...)` obligation here is `result.is_err() || <rest>`,
-    // and the fold doesn't propagate through `||` to short-circuit the
-    // whole expression to `true` — the `<rest>` clause (still containing
-    // `.unwrap()`/`.is_power_of_two()`, out of #97's stated scope) keeps
-    // the combined obligation at `runtime`. So this `ensures` is
-    // unaffected by v0.7.0 and stays exactly as annotated below.
-    #[allow(
-        clippy::unwrap_used,
-        reason = "guarded by the leading `result.is_err() ||` short-circuit"
-    )]
-    #[mvl::ensures(
-        result.is_err()
-            || (result.as_ref().unwrap().page_size.is_power_of_two()
-                && result.as_ref().unwrap().page_size >= 512
-                && result.as_ref().unwrap().page_size <= 65536
-                && (result.as_ref().unwrap().reserved_space as u32)
-                    < result.as_ref().unwrap().page_size)
-    )]
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
         if buf.len() < HEADER_LEN {
             return Err(HeaderError::TooShort { len: buf.len() });
@@ -248,38 +200,13 @@ impl DatabaseHeader {
     }
 
     /// Usable bytes per page: `page_size - reserved_space`.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "parse() rejects reserved_space >= page_size, so this never underflows"
+    )]
     pub fn usable_page_size(&self) -> u32 {
-        compute_usable_page_size(self.page_size, self.reserved_space as u32)
+        self.page_size - self.reserved_space as u32
     }
-}
-
-// Spike #371, retested against mvl-rust v0.7.0: extracted from
-// `usable_page_size` as a free function over bare `u32` params so the
-// `requires`/`ensures` below can actually close at L1-L4 instead of
-// falling to `layer: "runtime"`. Two things confirmed by testing, not
-// assumed:
-// - No explicit `>= 0` bounds needed any more (mvl-lang/mvl-rust#94,
-//   shipped in v0.7.0) — the solver now injects a `u32` parameter's
-//   implicit non-negativity into Γ on its own; restating it by hand,
-//   needed against v0.5.1, would still work but is redundant now.
-// - This still has to be a free function, not `&self.field` directly,
-//   even after mvl-lang/mvl-rust#95 (also in v0.7.0) taught the solver
-//   to bind a bare field projection like `self.page_size` as its own
-//   variable: `self.reserved_space as u32` — the cast this codebase
-//   actually needs, since the field is `u8` — blocks it again. A cast
-//   expression isn't recognized as a variable by the solver regardless
-//   of whether the operand is a bare parameter or a field projection
-//   (confirmed both ways), so pushing the cast to the call site, before
-//   the annotated function ever sees it, is still the only way to reach
-//   a plain, bindable `u32` identifier.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "parse() rejects reserved_space >= page_size, so this never underflows"
-)]
-#[mvl::requires(reserved_space <= page_size)]
-#[mvl::ensures(result <= page_size)]
-fn compute_usable_page_size(page_size: u32, reserved_space: u32) -> u32 {
-    page_size - reserved_space
 }
 
 #[cfg(test)]
