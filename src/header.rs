@@ -237,15 +237,39 @@ impl DatabaseHeader {
     }
 
     /// Usable bytes per page: `page_size - reserved_space`.
-    #[allow(
-        clippy::arithmetic_side_effects,
-        reason = "parse() rejects reserved_space >= page_size, so this never underflows"
-    )]
-    #[mvl::requires(self.reserved_space as u32 <= self.page_size)]
-    #[mvl::ensures(result <= self.page_size)]
     pub fn usable_page_size(&self) -> u32 {
-        self.page_size - self.reserved_space as u32
+        compute_usable_page_size(self.page_size, self.reserved_space as u32)
     }
+}
+
+// Spike #371: extracted from `usable_page_size` as a free function over
+// bare `u32` params so the `requires`/`ensures` below can actually close
+// at L1-L4 instead of falling to `layer: "runtime"`. Confirmed the
+// difference matters: the identical logic annotated on `&self` (`self.
+// page_size - self.reserved_space`) stays at `runtime` even with these
+// same bounds restated as `self.field` predicates — `rust-refine`'s
+// native solver only binds plain identifiers in its hypothesis context,
+// not field projections. `reserved_space >= 0 && page_size >= 0` looks
+// redundant given both are already `u32`, but it isn't: the solver
+// reasons over unbounded integers and never gets a `u32` parameter's
+// implicit non-negativity for free, so leaving those two clauses out
+// also pins this to `runtime`, confirmed by removing them locally
+// before adding this comment.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "parse() rejects reserved_space >= page_size, so this never underflows"
+)]
+#[allow(
+    unused_comparisons,
+    clippy::absurd_extreme_comparisons,
+    reason = "the >= 0 clauses are redundant to rustc (u32 can't be negative) but rust-refine's \
+              solver reasons over unbounded integers and doesn't get that bound for free -- \
+              restating it here is what lets the ensures below close at L4 instead of runtime"
+)]
+#[mvl::requires(reserved_space <= page_size && reserved_space >= 0 && page_size >= 0)]
+#[mvl::ensures(result <= page_size)]
+fn compute_usable_page_size(page_size: u32, reserved_space: u32) -> u32 {
+    page_size - reserved_space
 }
 
 #[cfg(test)]
