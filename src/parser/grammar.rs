@@ -760,6 +760,57 @@ impl Parser {
         })
     }
 
+    /// `create_view_stmt` (#379, grammar V6): `CREATE VIEW view_name
+    /// ['(' column_list ')'] AS select_stmt`.
+    pub(super) fn parse_create_view_stmt(&mut self) -> PResult<CreateView> {
+        let start = self.expect_kw(Keyword::CREATE)?;
+        if self.at_kw(Keyword::TEMP) || self.at_kw(Keyword::TEMPORARY) {
+            return self.unsupported("CREATE TEMP/TEMPORARY VIEW not yet supported");
+        }
+        self.expect_kw(Keyword::VIEW)?;
+        let if_not_exists = self.opt_if_not_exists()?;
+        let (name, _) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+
+        let columns = if self.eat_punct(&TokenKind::LParen) {
+            let mut cols = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                cols.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')'")?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        self.expect_kw(Keyword::AS)?;
+        let query = self.parse_select_stmt()?;
+        let end = query.span;
+
+        Ok(CreateView {
+            if_not_exists,
+            name,
+            columns,
+            query: Box::new(query),
+            span: join_span(start, end),
+        })
+    }
+
+    /// `drop_view_stmt` (#379, grammar V6): `DROP VIEW [IF EXISTS]
+    /// view_name`.
+    pub(super) fn parse_drop_view_stmt(&mut self) -> PResult<DropView> {
+        let start = self.expect_kw(Keyword::DROP)?;
+        self.expect_kw(Keyword::VIEW)?;
+        let if_exists = self.opt_if_exists()?;
+        let (name, end) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        Ok(DropView {
+            if_exists,
+            name,
+            span: join_span(start, end),
+        })
+    }
+
     pub(super) fn parse_drop_table_stmt(&mut self) -> PResult<DropTable> {
         let start = self.expect_kw(Keyword::DROP)?;
         self.expect_kw(Keyword::TABLE)?;

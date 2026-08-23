@@ -615,6 +615,37 @@ impl fmt::Display for CreateIndex {
     }
 }
 
+impl fmt::Display for CreateView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CREATE VIEW ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{}", self.name)?;
+        if let Some(columns) = &self.columns {
+            write!(f, " (")?;
+            for (i, col) in columns.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{col}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " AS {}", self.query)
+    }
+}
+
+impl fmt::Display for DropView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DROP VIEW ")?;
+        if self.if_exists {
+            write!(f, "IF EXISTS ")?;
+        }
+        write!(f, "{}", self.name)
+    }
+}
+
 impl fmt::Display for DropTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DROP TABLE ")?;

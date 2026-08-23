@@ -40,6 +40,8 @@ sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
                   | create-table-stmt  (* V3 *)
                   | create-index-stmt  (* V3 *)
                   | drop-stmt          (* V3 *)
+                  | create-view-stmt   (* V6 *)
+                  | drop-view-stmt     (* V6 *)
                   | explain-stmt       (* V4 *)
                   | begin-stmt         (* V5 *)
                   | commit-stmt        (* V5 *)
@@ -319,6 +321,24 @@ create-index-stmt ::= "CREATE" [ "UNIQUE" ] "INDEX" [ "IF" "NOT" "EXISTS" ] iden
 
 drop-stmt       ::= "DROP" ( "TABLE" | "INDEX" ) [ "IF" "EXISTS" ] identifier ;  (* V3 [parse.y cmd ::= DROP TABLE ifexists fullname] *)
 
+create-view-stmt ::= "CREATE" "VIEW" [ "IF" "NOT" "EXISTS" ] view-name
+                      [ "(" identifier { "," identifier } ")" ]
+                      "AS" select-stmt ;
+                                                                          (* V6 [parse.y:509-512 cmd] -- #379: the
+                                                                              `AS select-stmt` body is the same
+                                                                              select-stmt production as a top-level
+                                                                              SELECT (no extra wrapping parens,
+                                                                              matching real SQLite's grammar, unlike
+                                                                              common-table-expr's `AS ( select-stmt )`
+                                                                              form above); #380 is where the parsed
+                                                                              view becomes queryable (sqlite_master
+                                                                              storage + FROM-clause expansion) *)
+
+drop-view-stmt  ::= "DROP" "VIEW" [ "IF" "EXISTS" ] view-name ;
+                                                                          (* V6 [parse.y:513-515 cmd] -- #379 *)
+
+view-name       ::= identifier ;                                         (* V6 *)
+
 (* ===================== Transaction control (V5 slice) =====================
  * [parse.y:181 cmd ::= BEGIN transtype trans_opt, :186 transtype,
  *  :190 cmd ::= COMMIT|END trans_opt, :191 cmd ::= ROLLBACK trans_opt]
@@ -357,8 +377,9 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      compound-select tail, #377/#378 landed plain `UNION` -- see
  *      select-stmt/compound-op above; `INTERSECT`/`EXCEPT` moved to V7,
  *      see compound-op above),
- *      CREATE VIEW
- *      (GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
+ *      (CREATE VIEW landed -- #379, see create-view-stmt/drop-view-stmt
+ *      above under V6;
+ *      GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
  *      above; WITH/CTEs moved to V6 -- see with-clause/common-table-expr
  *      above)
  * V5:  SAVEPOINT/RELEASE, ROLLBACK ... TO SAVEPOINT
@@ -367,7 +388,9 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  * V6:  WITH RECURSIVE (non-recursive WITH/CTEs landed -- #375, see
  *      with-clause/common-table-expr above; codegen materialization of a
  *      CTE as a queryable table is a separate ticket, #376; plain
- *      `UNION` landed -- #377/#378, see compound-op above)
+ *      `UNION` landed -- #377/#378, see compound-op above; CREATE VIEW /
+ *      DROP VIEW landed -- #379, see create-view-stmt/drop-view-stmt
+ *      above; view storage + FROM-clause expansion is #380)
  * V7:  PRAGMA, ANALYZE (EXPLAIN [QUERY PLAN] pulled forward to V4 -- #243),
  *      `INTERSECT`/`EXCEPT` compound-select ops (see compound-op above)
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),

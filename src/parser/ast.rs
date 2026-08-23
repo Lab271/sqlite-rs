@@ -484,6 +484,28 @@ pub struct DropTable {
     pub span: Span,
 }
 
+/// `CREATE VIEW view_name ['(' column_list ')'] AS select_stmt` (#379,
+/// grammar V6 block). `query` is boxed for the same reason
+/// [`CommonTableExpr::query`] is: it recurses through the full `Select`
+/// AST, so an unboxed field would make [`super::ast`]'s types
+/// infinitely-sized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateView {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+    pub query: Box<Select>,
+    pub span: Span,
+}
+
+/// `DROP VIEW [IF EXISTS] view_name` (#379).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropView {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropIndex {
     pub if_exists: bool,

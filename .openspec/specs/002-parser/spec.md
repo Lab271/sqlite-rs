@@ -516,6 +516,20 @@ The AST MUST represent all SQLite SQL constructs without loss of information.
 
 **Tests:** `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_table`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_table_without_rowid`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_index`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_drop_table`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_drop_index`
 
+#### Scenario: Accept CREATE VIEW / DROP VIEW
+
+- GIVEN `CREATE VIEW v AS SELECT ...`, `CREATE VIEW v (a, b) AS SELECT ...`,
+  or `DROP VIEW [IF EXISTS] v`
+- WHEN parsed
+- THEN the result MUST be `ParseOutcome::Accepted` with a `CreateView`
+  (name, optional explicit column list, boxed `Select` query) or
+  `DropView` AST node, and printing it via `Display` and reparsing MUST
+  reproduce an equal AST
+
+**Implementation:** `src/parser/ast.rs::CreateView`, `src/parser/ast.rs::DropView`, `src/parser/grammar.rs::Parser::parse_create_view_stmt`, `src/parser/grammar.rs::Parser::parse_drop_view_stmt`
+
+**Tests:** `tests/unit/ddl_parser.rs::test_accept_create_view_simple`, `tests/unit/ddl_parser.rs::test_accept_create_view_with_column_list`, `tests/unit/ddl_parser.rs::test_accept_create_view_if_not_exists`, `tests/unit/ddl_parser.rs::test_printer_roundtrip_create_view`, `tests/unit/ddl_parser.rs::test_accept_drop_view`, `tests/unit/ddl_parser.rs::test_accept_drop_view_if_exists`
+
 ### Requirement 4: Error Messages [SHOULD]
 
 Parse errors SHOULD include source location and helpful context.
