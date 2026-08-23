@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-23
+
+fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row
+were ever empty, even though that path was already unreachable
+(`expr_list` always seeds one element before any `Ok`, with `?`
+short-circuiting earlier failures). Replaced with the same safe fallback
+idiom already used for subsequent rows. The other two `expect()` sites
+#409 flagged (`pager.rs`, `btree/master.rs`) turned out to be test-only
+code, already correctly lint-allowed — no change needed there. Closes
+#409.
+
 ## [0.16.0] - 2026-08-23 — V6.2 WAL Core
 
 Phase V6.2 of epic #354 (V6 Slim): the write half of the WAL format, the
