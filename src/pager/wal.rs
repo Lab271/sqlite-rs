@@ -39,7 +39,7 @@ use thiserror::Error;
 use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
 pub const HEADER_LEN: usize = 32;
-const FRAME_HEADER_LEN: usize = 24;
+pub(crate) const FRAME_HEADER_LEN: usize = 24;
 
 /// SQLite's WAL file-format version (`pager.c`'s `WAL_MAX_VERSION`),
 /// unchanged since the format's introduction — written by
