@@ -20,10 +20,8 @@ const CLI: &str = env!("CARGO_BIN_EXE_sqlite-rs");
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "sqlite-rs-view-{label}-{}-{n}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("sqlite-rs-view-{label}-{}-{n}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("scratch.db")
@@ -132,7 +130,11 @@ fn view_fixture_db(label: &str) -> PathBuf {
 fn create_view_simple_matches_oracle() {
     let db = view_fixture_db("simple");
     run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t WHERE x > 15");
-    assert_matches_oracle(&db, "SELECT * FROM v ORDER BY id", "create_view_simple_matches_oracle");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v ORDER BY id",
+        "create_view_simple_matches_oracle",
+    );
 }
 
 /// Scenario (b): a view with an explicit `(col, ...)` list renames its
@@ -154,7 +156,11 @@ fn create_view_of_view_matches_oracle() {
     let db = view_fixture_db("nested");
     run_exec_ok(&db, "CREATE VIEW v1 AS SELECT id, x FROM t WHERE x > 10");
     run_exec_ok(&db, "CREATE VIEW v2 AS SELECT id, x FROM v1 WHERE x < 30");
-    assert_matches_oracle(&db, "SELECT * FROM v2 ORDER BY id", "create_view_of_view_matches_oracle");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v2 ORDER BY id",
+        "create_view_of_view_matches_oracle",
+    );
 }
 
 /// Scenario (d): a view referenced in a `JOIN`, filtered further by the
@@ -185,7 +191,11 @@ fn create_view_persists_across_reload() {
     run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t WHERE x > 15");
     // Fresh `query` invocation: a new process, new `Pager`, schema
     // re-read from `sqlite_master` from scratch.
-    assert_matches_oracle(&db, "SELECT * FROM v ORDER BY id", "create_view_persists_across_reload");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v ORDER BY id",
+        "create_view_persists_across_reload",
+    );
     if let Some(oracle) = pinned_oracle() {
         let rootpage = oracle_select(
             &oracle,

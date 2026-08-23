@@ -14,8 +14,8 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog, expand_views,
-    expand_with_clause, explain_query_plan, resolve_from_table_schema, resolve_views,
-    CodegenError, EqpRow,
+    expand_with_clause, explain_query_plan, resolve_from_table_schema, resolve_views, CodegenError,
+    EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};

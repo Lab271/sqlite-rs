@@ -1046,9 +1046,8 @@ fn test_bare_tuple_without_in_is_invalid() {
 /// `IN (...)` subquery too.
 #[test]
 fn test_multi_column_in_rejects_compound_subquery() {
-    let msg = unsupported(
-        "SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u INTERSECT SELECT 1, 2)",
-    );
+    let msg =
+        unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u INTERSECT SELECT 1, 2)");
     assert!(msg.contains("compound"), "message: {msg}");
 }
 

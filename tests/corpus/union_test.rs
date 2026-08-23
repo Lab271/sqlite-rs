@@ -330,7 +330,10 @@ fn union_does_not_coerce_between_mismatched_arm_types() {
 #[test]
 fn union_with_trailing_order_by_is_rejected_cleanly() {
     let db = union_fixture_db("order_by");
-    let output = run_query(&db, "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC");
+    let output = run_query(
+        &db,
+        "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC",
+    );
     assert!(
         !output.status.success(),
         "expected ORDER BY on a UNION compound to be rejected, got success: {}",

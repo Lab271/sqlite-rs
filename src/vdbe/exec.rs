@@ -467,14 +467,13 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
     use Opcode::{
         Add, AggFinal, AggStep, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
         Concat, Copy, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete, Divide,
-        DropIndex, DropTable,
-        Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext,
-        IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos, Init, Insert, Int64, Integer,
-        IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict, Not,
-        NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite,
-        Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekIndexEq, SeekRowid,
-        Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen,
-        SorterSort, String8, Subtract, Transaction, Variable,
+        DropIndex, DropTable, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE,
+        IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos, Init, Insert,
+        Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next,
+        NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
+        OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid,
+        SeekIndexEq, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
+        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),

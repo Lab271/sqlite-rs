@@ -406,10 +406,7 @@ pub fn compile_select_compound(
         arm_selects.push(arm_select);
     }
 
-    let has_union = first
-        .compound
-        .iter()
-        .any(|arm| arm.op == CompoundOp::Union);
+    let has_union = first.compound.iter().any(|arm| arm.op == CompoundOp::Union);
     // One cursor block per arm (`ScanCursors::for_arm`, 4 cursors
     // each) — the shared dedup cursor sits right past the last arm's
     // block so it never collides with any arm's own table/sort/pseudo/

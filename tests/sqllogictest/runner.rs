@@ -246,11 +246,15 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
             | CodegenError::Unsupported { .. }
             | CodegenError::AmbiguousColumn { .. }
             | CodegenError::CompoundColumnMismatch { .. }
-            // `compile_select` never actually returns this — it's an
-            // INSERT-only variant (#195) — but `CodegenError` is a
-            // shared enum, so this match must stay exhaustive as new
-            // variants are added for other statement kinds.
-            | CodegenError::RowShapeMismatch { .. },
+            // `compile_select` never actually returns these — one's an
+            // INSERT-only variant (#195), the other's a view-expansion-
+            // only variant (#403 follow-up) that only ever surfaces from
+            // `expand_views`, run by the CLI before `compile_select` is
+            // even called — but `CodegenError` is a shared enum, so this
+            // match must stay exhaustive as new variants are added for
+            // other statement kinds.
+            | CodegenError::RowShapeMismatch { .. }
+            | CodegenError::CircularView { .. },
         ) => return Outcome::Skip,
     };
 
