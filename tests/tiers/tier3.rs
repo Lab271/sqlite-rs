@@ -14,7 +14,7 @@
 #[allow(dead_code)]
 mod oracle;
 
-use oracle::pinned_oracle;
+use oracle::{pinned_oracle, skip_no_oracle};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,13 +128,63 @@ fn t3_multi_table_joins_and_aggregates() {
     assert_eq!(run_query(&db, "SELECT * FROM dst").lines().count(), 3);
 }
 
+/// #390 — the V6 demo's headline claim, condensed: a real, live
+/// `sqlite3` process and sqlite-rs (driven through its own CLI, same as
+/// every other tier-3 stub in this file) interoperate on the same
+/// WAL-mode database file in both directions. The full scenario matrix
+/// (both alternating, checkpoint-by-one-read-by-other, a still-open
+/// oracle connection noticing frames sqlite-rs appended out-of-process)
+/// lives in `tests/corpus/wal_concurrent_interop_test.rs` — this stub
+/// just needs to prove the drop-order entry itself holds, not
+/// re-litigate every scenario.
 #[test]
-#[ignore = "drop-order 2 (V6) — WAL writing landed at #389 (see \
-            tests/corpus/wal_write_interop_test.rs's concurrent_writer_is_refused_the_wal_write_lock \
-            and src/pager.rs's reader_keeps_its_snapshot_across_a_concurrent_wal_commit); \
-            live interop with a real stock sqlite3 process remains for #390 (WAL reading is Tier 0)"]
 fn t3_wal_writing_and_live_interop() {
-    unimplemented!()
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("t3_wal_writing_and_live_interop");
+        return;
+    };
+
+    let db = scratch_db("wal-live-interop");
+    let status = Command::new(&oracle)
+        .arg(&db)
+        .arg("CREATE TABLE t(a INTEGER, b TEXT)")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // sqlite-rs switches the file to WAL and writes a row; a real,
+    // live sqlite3 process must see it with no PRAGMA of its own —
+    // WAL mode is auto-detected from the header.
+    assert!(run_exec(
+        &db,
+        "PRAGMA journal_mode = WAL; INSERT INTO t VALUES (1, 'from-sqlite-rs')"
+    )
+    .status
+    .success());
+    let output = Command::new(&oracle)
+        .arg("-readonly")
+        .arg(&db)
+        .arg("SELECT * FROM t;")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1|from-sqlite-rs"
+    );
+
+    // Reverse direction: the oracle appends onto the WAL sqlite-rs
+    // started, and sqlite-rs reads the result back correctly.
+    let status = Command::new(&oracle)
+        .arg(&db)
+        .arg("INSERT INTO t VALUES (2, 'from-sqlite3')")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        run_query(&db, "SELECT * FROM t ORDER BY a"),
+        "1|from-sqlite-rs\n2|from-sqlite3\n"
+    );
 }
 
 #[test]

@@ -12,6 +12,11 @@
 //! there's no sqlite-rs-side WAL *mode* to compare against a journal-mode
 //! run of the same workload. Tracked for #388/#389 instead of stubbed
 //! speculatively here.
+//!
+//! `scratch_db`/`declared_page_size` are `pub(crate)` so
+//! `wal_concurrent_interop_test.rs` (#390 — SQL-level live interop with a
+//! real `sqlite3` process, one level up from this file's byte-level WAL
+//! frame tests) can reuse them instead of duplicating.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -64,7 +69,7 @@ impl HeldLock {
     }
 }
 
-fn scratch_db(label: &str) -> PathBuf {
+pub(crate) fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -75,7 +80,7 @@ fn scratch_db(label: &str) -> PathBuf {
     dir.join("test.db")
 }
 
-fn declared_page_size(vfs: &UnixVfs, db: &std::path::Path) -> u32 {
+pub(crate) fn declared_page_size(vfs: &UnixVfs, db: &std::path::Path) -> u32 {
     let source = WritablePageSource::open(vfs, db, 4096).unwrap();
     let header = source.read_page(1).unwrap();
     let declared = u16::from_be_bytes([header[16], header[17]]) as u32;

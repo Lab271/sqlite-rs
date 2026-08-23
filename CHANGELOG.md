@@ -33,6 +33,24 @@ trade-off. Un-ignoring `tests/tiers/tier3.rs`'s
 `t3_wal_writing_and_live_interop` stays for #390 (live interop with a
 real stock `sqlite3` process).
 
+test: sqlite-rs + stock sqlite3 concurrent WAL interop (#390) — the "V6
+demo" gate for epic #354: `tests/corpus/wal_concurrent_interop_test.rs`
+drives sqlite-rs through the same SQL-level entry point
+(`execute_transaction_step`/`compile_statement`, the machinery
+`sqlite-rs exec` already wraps) a real caller would, proving all four
+scenarios against a live, pinned `sqlite3` process — sqlite-rs writes/
+oracle reads, oracle writes/sqlite-rs reads, both alternate commits
+(round-tripping WAL frames through each other's checksum chains), and a
+checkpoint by either side is read correctly by the other. Un-ignores
+`tests/tiers/tier3.rs`'s `t3_wal_writing_and_live_interop`. Also fixes a
+real gap this surfaced: `dump::open` (the CLI's `dump`/`query`/`exec`
+bootstrap) parsed the database header from the main file's raw bytes
+only, which fails for a WAL-mode database whose very first
+schema-creating transaction hasn't been checkpointed yet (that page 1's
+real content lives only in the `-wal` file) — it now falls back to a
+lenient `page_size`-only bootstrap and re-derives the header from the
+`Pager`'s WAL-aware read of page 1.
+
 ## [0.16.1] - 2026-08-23
 
 fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row
