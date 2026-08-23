@@ -374,7 +374,10 @@ const CHECKPOINT_TARGET_BYTES: usize = 10 * 1024 * 1024;
 
 fn build_10mb_wal() -> (AnyVfs, PathBuf, PathBuf) {
     let frame_size = WAL_FRAME_HEADER_LEN.saturating_add(CHECKPOINT_PAGE_SIZE as usize);
-    let frame_count = (CHECKPOINT_TARGET_BYTES / frame_size) as u32;
+    let frame_count = CHECKPOINT_TARGET_BYTES
+        .checked_div(frame_size)
+        .unwrap_or_else(|| fail("frame_size is zero"));
+    let frame_count = frame_count as u32;
 
     let dir = scratch_dir("checkpoint");
     let db_path = dir.join("checkpoint.db");
