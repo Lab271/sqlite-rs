@@ -466,7 +466,8 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
         Add, AggFinal, AggStep, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
-        Concat, Copy, CreateIndex, CreateTable, DecrJumpZero, Delete, Divide, DropIndex, DropTable,
+        Concat, Copy, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete, Divide,
+        DropIndex, DropTable,
         Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext,
         IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos, Init, Insert, Int64, Integer,
         IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict, Not,
@@ -552,6 +553,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Insert => cursor::insert(vm, instr),
         NewRowid => cursor::new_rowid(vm, instr),
         CreateTable => cursor::create_table(vm, instr),
+        CreateView => cursor::create_view(vm, instr),
         DropTable => cursor::drop_table(vm, instr),
         CreateIndex => cursor::create_index(vm, instr),
         DropIndex => cursor::drop_index(vm, instr),

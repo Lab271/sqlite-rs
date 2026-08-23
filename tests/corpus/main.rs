@@ -43,4 +43,5 @@ mod sql_corpus_test;
 mod subquery_test;
 mod transaction_oracle_test;
 mod union_test;
+mod view_test;
 mod unique_constraint_test;

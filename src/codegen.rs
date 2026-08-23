@@ -13,7 +13,10 @@ pub mod stmt;
 pub(crate) mod subquery;
 pub mod transaction;
 
-pub use ddl::{compile_create_index, compile_create_table, compile_drop_index, compile_drop_table};
+pub use ddl::{
+    compile_create_index, compile_create_table, compile_create_view, compile_drop_index,
+    compile_drop_table,
+};
 pub use dispatch::{compile_statement, leading_keywords, DispatchError};
 pub use select::{
     compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
@@ -23,7 +26,9 @@ pub use stmt::delete::{compile_delete, compile_delete_with_catalog};
 pub use stmt::insert::compile_insert;
 pub use stmt::update::{compile_update, compile_update_with_catalog};
 pub use stmt::{delete, insert, update};
-pub use subquery::{expand_with_clause, resolve_from_table_schema};
+pub use subquery::{
+    expand_views, expand_with_clause, resolve_from_table_schema, resolve_views, ResolvedView,
+};
 pub use transaction::{compile_begin, compile_commit, compile_rollback};
 
 use std::collections::HashMap;

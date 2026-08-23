@@ -999,6 +999,88 @@ at the parser level, #377) remain out of scope.
 
 **Tests:** `tests/corpus/union_test.rs::column_count_mismatch_is_rejected`, `tests/corpus/union_test.rs::union_column_count_mismatch_is_rejected`
 
+### Requirement 15: View Storage and Query Expansion [MUST]
+
+`CREATE VIEW` (#379's parser support) MUST register a `sqlite_master`
+row exactly like `CREATE TABLE`/`CREATE INDEX` (Requirement 9's DDL
+opcodes) do — `type = 'view'`, `name`/`tbl_name` the view's name,
+`rootpage = 0` (a view owns no b-tree of its own, matching stock
+SQLite's own storage convention), `sql` the verbatim `CREATE VIEW ...`
+source text — via a single `Opcode::CreateView` instruction
+(`P4::CreateTable`'s `{ name, sql }` payload, reused rather than
+duplicated since the two opcodes' payloads are identical). Unlike a CTE
+(Requirement 13, a pure in-query AST rewrite with no persistent state),
+a view's definition MUST survive being reloaded from `sqlite_master` by
+a fresh connection: `schema::read_views` decodes every `type = 'view'`
+row into a `ViewSchema { name, sql }`, and `codegen::resolve_views` then
+parses each one's `sql` back into a `CreateView` AST via #379's parser.
+`codegen::expand_views` mirrors `expand_with_clause`'s exact rewrite
+shape — every `FROM`/`JOIN` table reference naming a catalog view
+becomes a `TableRefKind::Subquery` wrapping that view's stored query,
+reusing Requirement 4's `OpenEphemeral`-backed `FROM`-subquery
+materialization unchanged — except it resolves against the always-fully-
+known view catalog rather than an in-declaration-order CTE list, and
+therefore recurses into any nested `TableRefKind::Subquery` (bounded by
+`views::MAX_DEPTH`) so a view-of-view resolves to arbitrary depth. An
+explicit `CREATE VIEW v(a, b) AS ...` column list renames the view's
+exposed output columns via the same `apply_column_aliases` helper
+Requirement 13's CTE column-list rename already uses. `expand_views`
+runs after `expand_with_clause` in `compile_select_program` so it also
+reaches into any `TableRefKind::Subquery` the CTE rewrite just produced
+(a CTE body that itself references a view), and so that a CTE shadows a
+same-named view for the scope of its declaring `SELECT`, matching how a
+CTE already shadows a same-named real table. `DROP VIEW` is parsed
+(#379) but not yet compiled — out of scope here.
+
+**Implementation:** `src/codegen/ddl/create_view.rs::compile_create_view`,
+`src/vdbe/cursor.rs::create_view`, `src/schema/ddl_reader.rs::read_views`,
+`src/codegen/subquery/views.rs::{expand_views, resolve_views}`
+
+#### Scenario: CREATE VIEW registers a sqlite_master row with rootpage 0
+
+- GIVEN `CREATE VIEW v AS SELECT id, x FROM t WHERE x > 15`
+- WHEN executed
+- THEN `sqlite_master` gains a row with `type = 'view'`, `rootpage = 0`,
+  and `sql` equal to the verbatim statement text
+
+**Tests:** `tests/corpus/view_test.rs::create_view_persists_across_reload`
+
+#### Scenario: A view referenced in FROM expands and scans like any table
+
+- GIVEN the view above and `SELECT * FROM v`
+- THEN `v`'s stored query is materialized into an ephemeral table and
+  the main query scans it, yielding the same rows a real table with
+  those contents would
+
+**Tests:** `tests/corpus/view_test.rs::create_view_simple_matches_oracle`
+
+#### Scenario: An explicit view column list renames its output columns
+
+- GIVEN `CREATE VIEW v (a, b) AS SELECT id, x FROM t` and `SELECT a, b
+  FROM v`
+- THEN `a`/`b` resolve to `v`'s query's first/second projected column
+  respectively
+
+**Tests:** `tests/corpus/view_test.rs::create_view_explicit_column_list_matches_oracle`
+
+#### Scenario: A view of a view (nested views) resolves to arbitrary depth
+
+- GIVEN `CREATE VIEW v1 AS SELECT id, x FROM t WHERE x > 10`, `CREATE
+  VIEW v2 AS SELECT id, x FROM v1 WHERE x < 30`, and `SELECT * FROM v2`
+- THEN `v2`'s expansion recurses into `v1`'s own `FROM` reference,
+  yielding the same rows as evaluating both filters against `t` directly
+
+**Tests:** `tests/corpus/view_test.rs::create_view_of_view_matches_oracle`
+
+#### Scenario: A view joined against another table, further filtered by WHERE
+
+- GIVEN a view `v` and `SELECT ... FROM v JOIN other ON ... WHERE v.x <
+  25`
+- THEN the join and the `WHERE` filter both resolve against the
+  materialized `v` cursor exactly as they would against a real table
+
+**Tests:** `tests/corpus/view_test.rs::create_view_joined_and_filtered_matches_oracle`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made

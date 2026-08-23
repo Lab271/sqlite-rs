@@ -92,6 +92,11 @@ pub enum Opcode {
     DropTable,
     CreateIndex,
     DropIndex,
+    /// `CreateView` (#380): registers a `sqlite_master` row with
+    /// `type = 'view'` and `rootpage = 0` (a view has no b-tree of its
+    /// own) — otherwise identical to `CreateTable`'s single-instruction
+    /// shape, reusing `P4::CreateTable`'s `{ name, sql }` payload.
+    CreateView,
     // compare
     Eq,
     Ge,
@@ -284,6 +289,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::IdxNext
         | Opcode::IdxPrev
         | Opcode::CreateTable
+        | Opcode::CreateView
         | Opcode::DropTable
         | Opcode::CreateIndex
         | Opcode::DropIndex

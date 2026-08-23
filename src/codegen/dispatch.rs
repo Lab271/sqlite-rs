@@ -9,16 +9,17 @@ use thiserror::Error;
 use crate::parser::ast::InsertSource;
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
-    parse_begin, parse_commit, parse_create_index, parse_create_table, parse_delete,
-    parse_drop_index, parse_drop_table, parse_insert, parse_rollback, parse_update,
+    parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
+    parse_delete, parse_drop_index, parse_drop_table, parse_insert, parse_rollback, parse_update,
 };
 use crate::schema::TableSchema;
 use crate::vdbe::Program;
 
 use super::{
     compile_begin, compile_commit, compile_create_index, compile_create_table,
-    compile_delete_with_catalog, compile_drop_index, compile_drop_table, compile_insert,
-    compile_rollback, compile_update_with_catalog, resolve_from_table_schema, CodegenError,
+    compile_create_view, compile_delete_with_catalog, compile_drop_index, compile_drop_table,
+    compile_insert, compile_rollback, compile_update_with_catalog, resolve_from_table_schema,
+    CodegenError,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -136,6 +137,10 @@ pub fn compile_statement(sql: &str, schemas: &[TableSchema]) -> Result<Program, 
         },
         "CREATE" if kw(1) == "TABLE" => match parse_create_table(sql) {
             ParseOutcome::Accepted(create) => Ok(compile_create_table(&create, sql)?),
+            other => Err(parse_error(other)),
+        },
+        "CREATE" if kw(1) == "VIEW" => match parse_create_view(sql) {
+            ParseOutcome::Accepted(create) => Ok(compile_create_view(&create, sql)?),
             other => Err(parse_error(other)),
         },
         "CREATE" if kw(1) == "INDEX" || kw(1) == "UNIQUE" => match parse_create_index(sql) {

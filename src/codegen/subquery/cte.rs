@@ -101,7 +101,7 @@ fn substitute_table_ref(table_ref: &mut TableRef, ctes: &[CommonTableExpr]) {
 /// `table.*`) result-column list can be renamed positionally; anything
 /// else is left alone (the CTE still compiles, just exposed under its
 /// query's own natural column names instead of the declared list).
-fn apply_column_aliases(query: &mut Select, columns: &[String]) {
+pub(super) fn apply_column_aliases(query: &mut Select, columns: &[String]) {
     if query.columns.len() != columns.len() {
         return;
     }

@@ -149,6 +149,46 @@ pub fn read_table_and_view_names<P: PageSource>(
     Ok(names)
 }
 
+/// A minimally-decoded `sqlite_master` view entry (#380): just the
+/// name and verbatim `CREATE VIEW ...` source text.
+/// `codegen::expand_views` re-parses `sql` into a `CreateView` AST
+/// (query + optional explicit column list) when it needs to substitute
+/// a `FROM`-clause reference to this view — kept as a plain string here
+/// rather than an eagerly-parsed AST so this module (per the module doc)
+/// stays independent of the full SQL parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewSchema {
+    pub name: String,
+    pub sql: String,
+}
+
+/// Walks `sqlite_master` via `cursor` (root_page = 1) and returns every
+/// `type = 'view'` entry as a [`ViewSchema`] — the catalog counterpart
+/// to [`read_schema`]'s tables, used by `codegen::expand_views` to
+/// resolve a `FROM`-clause name against the view catalog before
+/// falling back to a real table.
+pub fn read_views<P: PageSource>(
+    cursor: &mut TableCursor<P>,
+    encoding: TextEncoding,
+) -> Result<Vec<ViewSchema>, DdlError> {
+    let mut views = Vec::new();
+    let mut row = cursor.first()?;
+    while let Some(r) = row {
+        let values = decode_record(&r.payload, encoding)?;
+        if values.len() != 5 {
+            return Err(DdlError::MalformedRow(values.len()));
+        }
+        if text(values.first()) == "view" {
+            views.push(ViewSchema {
+                name: text(values.get(1)).to_string(),
+                sql: text(values.get(4)).to_string(),
+            });
+        }
+        row = cursor.next()?;
+    }
+    Ok(views)
+}
+
 fn table_schema(values: &[Value]) -> TableSchema {
     let name = text(values.get(1)).to_string();
     let root_page = match values.get(3) {
