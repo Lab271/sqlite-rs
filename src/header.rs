@@ -138,6 +138,17 @@ impl DatabaseHeader {
     // the leading `result.is_err() ||` short-circuits before any
     // `unwrap()` runs. clippy can't see that from the predicate alone —
     // this codebase denies `unwrap_used` project-wide.
+    //
+    // Retested against mvl-rust v0.7.0's mvl-lang/mvl-rust#97 (constant-
+    // folds `Err(x).is_err()`/`Ok(x).is_ok()` etc. to a literal `bool` at
+    // L1): doesn't help here. In isolation, `(Err(...)).is_err()` alone
+    // does fold (confirmed in a standalone repro). But every early
+    // `return Err(...)` obligation here is `result.is_err() || <rest>`,
+    // and the fold doesn't propagate through `||` to short-circuit the
+    // whole expression to `true` — the `<rest>` clause (still containing
+    // `.unwrap()`/`.is_power_of_two()`, out of #97's stated scope) keeps
+    // the combined obligation at `runtime`. So this `ensures` is
+    // unaffected by v0.7.0 and stays exactly as annotated below.
     #[allow(
         clippy::unwrap_used,
         reason = "guarded by the leading `result.is_err() ||` short-circuit"
@@ -242,31 +253,30 @@ impl DatabaseHeader {
     }
 }
 
-// Spike #371: extracted from `usable_page_size` as a free function over
-// bare `u32` params so the `requires`/`ensures` below can actually close
-// at L1-L4 instead of falling to `layer: "runtime"`. Confirmed the
-// difference matters: the identical logic annotated on `&self` (`self.
-// page_size - self.reserved_space`) stays at `runtime` even with these
-// same bounds restated as `self.field` predicates — `rust-refine`'s
-// native solver only binds plain identifiers in its hypothesis context,
-// not field projections. `reserved_space >= 0 && page_size >= 0` looks
-// redundant given both are already `u32`, but it isn't: the solver
-// reasons over unbounded integers and never gets a `u32` parameter's
-// implicit non-negativity for free, so leaving those two clauses out
-// also pins this to `runtime`, confirmed by removing them locally
-// before adding this comment.
+// Spike #371, retested against mvl-rust v0.7.0: extracted from
+// `usable_page_size` as a free function over bare `u32` params so the
+// `requires`/`ensures` below can actually close at L1-L4 instead of
+// falling to `layer: "runtime"`. Two things confirmed by testing, not
+// assumed:
+// - No explicit `>= 0` bounds needed any more (mvl-lang/mvl-rust#94,
+//   shipped in v0.7.0) — the solver now injects a `u32` parameter's
+//   implicit non-negativity into Γ on its own; restating it by hand,
+//   needed against v0.5.1, would still work but is redundant now.
+// - This still has to be a free function, not `&self.field` directly,
+//   even after mvl-lang/mvl-rust#95 (also in v0.7.0) taught the solver
+//   to bind a bare field projection like `self.page_size` as its own
+//   variable: `self.reserved_space as u32` — the cast this codebase
+//   actually needs, since the field is `u8` — blocks it again. A cast
+//   expression isn't recognized as a variable by the solver regardless
+//   of whether the operand is a bare parameter or a field projection
+//   (confirmed both ways), so pushing the cast to the call site, before
+//   the annotated function ever sees it, is still the only way to reach
+//   a plain, bindable `u32` identifier.
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "parse() rejects reserved_space >= page_size, so this never underflows"
 )]
-#[allow(
-    unused_comparisons,
-    clippy::absurd_extreme_comparisons,
-    reason = "the >= 0 clauses are redundant to rustc (u32 can't be negative) but rust-refine's \
-              solver reasons over unbounded integers and doesn't get that bound for free -- \
-              restating it here is what lets the ensures below close at L4 instead of runtime"
-)]
-#[mvl::requires(reserved_space <= page_size && reserved_space >= 0 && page_size >= 0)]
+#[mvl::requires(reserved_space <= page_size)]
 #[mvl::ensures(result <= page_size)]
 fn compute_usable_page_size(page_size: u32, reserved_space: u32) -> u32 {
     page_size - reserved_space
