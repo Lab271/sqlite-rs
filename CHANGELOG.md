@@ -6,6 +6,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-23 — V6.3 Concurrency
+
+Phase V6.3 of epic #354 (V6 Slim), finalizing V6 and unlocking 1.0: real
+WAL-mode writes with multi-reader/single-writer concurrency, and the
+sqlite3-interop demo that was the epic's stated goal. Closes #388, #389,
+#390, #391.
+
 feat: minimal `PRAGMA journal_mode=WAL|DELETE` switching (#388) — a
 narrow V6 grammar carve-out (`.openspec/grammar/sqlite.ebnf`, general
 PRAGMA support stays deferred to V7) parses only this one pragma
@@ -72,12 +79,22 @@ this batch size); `concurrent_read_write` ~338ms/20 cycles; `checkpoint_10mb`
 win, because `expand_with_clause` rewrites every CTE reference into its
 own independent materialization (confirmed by reading
 `src/codegen/subquery/cte.rs`), identical cost to inline repetition —
-there is no shared-materialization optimization yet. Also surfaced, not
-fixed here (out of scope for a benchmark ticket): a 10-way `UNION ALL`
-of `SELECT count(*) FROM cte` fails compilation past the first arm
-("table cte has an invalid root page (0)") — a compound-arm/CTE codegen
-gap, worth a follow-up ticket alongside the no-shared-materialization
-finding above. spend: roughly matched the issue's 1-day estimate.
+there is no shared-materialization optimization yet (filed as #425).
+Also surfaced, not fixed here (out of scope for a benchmark ticket): a
+10-way `UNION ALL` of `SELECT count(*) FROM cte` fails compilation past
+the first arm ("table cte has an invalid root page (0)") — a
+compound-arm/CTE codegen gap, filed as #424. spend: roughly matched the
+issue's 1-day estimate.
+
+Also filed from this phase's work: #422 (`Pager` should recover, not
+error, when another connection's auto-checkpoint deletes `-wal`/`-shm`
+out from under it — found while building #390's interop tests).
+
+spend: V6.3 as a whole ran noticeably over its ~5-day estimate — #388
+also had to add a minimal PRAGMA parser (none existed), and #389 had to
+make `Pager::flush` genuinely WAL-aware (the write path was entirely
+rollback-journal-only beforehand) — both prerequisites the original
+per-ticket estimates didn't account for.
 
 ## [0.16.1] - 2026-08-23
 
