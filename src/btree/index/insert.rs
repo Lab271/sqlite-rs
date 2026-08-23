@@ -24,7 +24,8 @@ use crate::btree::index::{
     IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
 };
 use crate::btree::{
-    local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell, BtreeError,
+    cell_bytes, local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell,
+    BtreeError,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -177,12 +178,7 @@ fn insert_into_index_leaf(
         // other cells) when there's enough contiguous free space; falls
         // back to a full rebuild otherwise (see #337).
         if !splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)? {
-            write_index_leaf_page(
-                buf,
-                header_start,
-                leaf_page,
-                &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-            )?;
+            write_index_leaf_page(buf, header_start, leaf_page, &cell_bytes(cells))?;
         }
         return Ok(());
     }
@@ -202,21 +198,11 @@ fn insert_into_index_leaf(
 
     {
         let buf = pager.get_page_mut(leaf_page)?;
-        write_index_leaf_page(
-            buf,
-            header_start,
-            leaf_page,
-            &left.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-        )?;
+        write_index_leaf_page(buf, header_start, leaf_page, &cell_bytes(left))?;
     }
     {
         let buf = pager.get_page_mut(right_page)?;
-        write_index_leaf_page(
-            buf,
-            0,
-            right_page,
-            &right.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-        )?;
+        write_index_leaf_page(buf, 0, right_page, &cell_bytes(right))?;
     }
 
     insert_into_index_parent(
@@ -387,12 +373,7 @@ fn root_split(
                 encoding,
             )?;
             let dest = pager.get_page_mut(relocated)?;
-            write_index_leaf_page(
-                dest,
-                0,
-                relocated,
-                &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-            )?;
+            write_index_leaf_page(dest, 0, relocated, &cell_bytes(cells))?;
         }
         INTERIOR_INDEX => {
             let (entries, rightmost) = collect_index_interior_entries(
