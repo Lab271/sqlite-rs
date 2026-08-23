@@ -46,9 +46,11 @@ pub struct Assignment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Select {
     /// `WITH cte { , cte }` prefix (#375, non-recursive only —
-    /// `WITH RECURSIVE` is out of scope here, see #376 for
-    /// materialization). Parsed but not yet consumed by codegen: a CTE
-    /// name is not resolvable in `from-clause`/`table-ref` yet.
+    /// `WITH RECURSIVE` is out of scope here). #376's
+    /// `codegen::expand_with_clause` rewrites this away before codegen
+    /// proper runs: each CTE reference in `FROM`/`JOIN` becomes a
+    /// `TableRefKind::Subquery`, materialized into an ephemeral table
+    /// the same way #257's `FROM`-subqueries already are.
     pub with_clause: Option<WithClause>,
     pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,

@@ -890,6 +890,62 @@ cursor machinery is introduced by this requirement.
 **Tests:** `src/vdbe/exec.rs::tests::agg_step_min_honours_a_nocase_collation`,
 `tests/codegen/select_test.rs::min_max_aggregate_honours_collate_nocase`
 
+### Requirement 13: Non-Recursive CTE Materialization [MUST]
+
+A non-recursive `WITH` clause (#375's parser support) MUST be rewritten
+away before the rest of codegen runs, rather than given its own
+materialization path: `codegen::expand_with_clause` replaces every
+`FROM`/`JOIN` table reference that names a CTE with a
+`TableRefKind::Subquery` wrapping that CTE's own query, reusing
+Requirement 4's existing `OpenEphemeral`-backed `FROM`-subquery
+materialization unchanged. A CTE name shadows a same-named real table
+for the scope of the one `SELECT` that declared it — the rewrite is a
+local AST transformation, never a catalog mutation, so it cannot leak
+into a sibling statement. Later CTEs in the same `WITH` list may
+reference an earlier one by name (non-recursively); an explicit
+`WITH cte(a, b) AS (...)` column list renames that CTE's exposed output
+columns positionally. `WITH RECURSIVE` stays out of scope (rejected by
+the parser, #375).
+
+**Implementation:** `src/codegen/subquery/cte.rs::expand_with_clause`,
+`src/codegen/subquery/from_clause.rs::materialize_from_subquery`
+
+#### Scenario: A CTE referenced in FROM materializes and scans like any table
+
+- GIVEN `WITH cte AS (SELECT id, x FROM t WHERE x > 15) SELECT * FROM cte`
+- THEN `cte`'s query is materialized into an ephemeral table and the
+  main query scans it, yielding the same rows a real table with those
+  contents would
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_single_cte_matches_oracle`
+
+#### Scenario: An explicit CTE column list renames its output columns
+
+- GIVEN `WITH cte(a, b) AS (SELECT id, x FROM t) SELECT a, b FROM cte`
+- THEN `a`/`b` resolve to `cte`'s query's first/second projected column
+  respectively
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_explicit_column_list_matches_oracle`
+
+#### Scenario: A CTE joined against another table, further filtered by WHERE
+
+- GIVEN `WITH cte AS (SELECT id, x FROM t) SELECT ... FROM cte JOIN other
+  ON ... WHERE cte.x < 25`
+- THEN the join and the `WHERE` filter both resolve against the
+  materialized `cte` cursor exactly as they would against a real table
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_cte_joined_and_filtered_matches_oracle`
+
+#### Scenario: A later CTE in the same WITH list references an earlier one
+
+- GIVEN `WITH a AS (SELECT id, x FROM t WHERE x > 10), b AS (SELECT *
+  FROM a WHERE x < 30) SELECT * FROM b`
+- THEN `b`'s own materialization scans `a`'s already-rewritten query
+  (nested `FROM`-subquery materialization), not a catalog table named
+  `a`
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_second_cte_references_first_matches_oracle`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made

@@ -14,7 +14,7 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    explain_query_plan, resolve_from_table_schema, CodegenError, EqpRow,
+    expand_with_clause, explain_query_plan, resolve_from_table_schema, CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
@@ -48,6 +48,14 @@ pub(crate) fn compile_select_program(
     eqp_mode: bool,
     schemas: &[TableSchema],
 ) -> Result<SelectOutcome, String> {
+    // #376: a `WITH` clause is rewritten away before any table
+    // resolution happens — every CTE reference in `FROM`/`JOIN` becomes
+    // a `TableRefKind::Subquery` wrapping that CTE's own query, so the
+    // rest of this pipeline (and #257's subquery-in-FROM codegen) needs
+    // no CTE-specific handling at all.
+    let expanded = expand_with_clause(select);
+    let select = &expanded;
+
     let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
         resolve_from_table_schema(table_ref, schemas)
     };

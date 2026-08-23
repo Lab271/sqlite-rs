@@ -40,12 +40,14 @@
 //! scalar subqueries).
 
 mod correlation;
+mod cte;
 mod from_clause;
 mod memoize;
 mod scalar;
 
 use crate::parser::ast::Select;
 
+pub use cte::expand_with_clause;
 pub use from_clause::resolve_from_table_schema;
 
 pub(crate) use correlation::hoist_uncorrelated_where_subqueries;

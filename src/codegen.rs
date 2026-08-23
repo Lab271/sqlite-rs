@@ -23,7 +23,7 @@ pub use stmt::delete::{compile_delete, compile_delete_with_catalog};
 pub use stmt::insert::compile_insert;
 pub use stmt::update::{compile_update, compile_update_with_catalog};
 pub use stmt::{delete, insert, update};
-pub use subquery::resolve_from_table_schema;
+pub use subquery::{expand_with_clause, resolve_from_table_schema};
 pub use transaction::{compile_begin, compile_commit, compile_rollback};
 
 use std::collections::HashMap;
