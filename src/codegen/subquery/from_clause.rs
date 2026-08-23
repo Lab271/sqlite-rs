@@ -196,6 +196,24 @@ pub(crate) fn materialize_from_subquery(
     catalog: &[TableSchema],
     dest_cursor: i32,
 ) -> Result<TableSchema, CodegenError> {
+    // #382: a compound (`UNION`/`UNION ALL`) body isn't handled by this
+    // materialization path yet — only `subquery`'s own `first` arm would
+    // be scanned into `dest_cursor`, silently dropping every other
+    // arm's rows (discovered via a CTE-body-is-UNION corpus regression).
+    // Reject cleanly here rather than let that data loss reach a
+    // caller, matching the "not yet supported" pattern used just below
+    // for a joined subquery-in-FROM. Fast-follow: teach this function
+    // (and its view-expansion counterpart, `expand_views`, which shares
+    // the same underlying materialization) to loop over every compound
+    // arm like `compile_select_compound` does at the top level.
+    if !subquery.compound.is_empty() {
+        return Err(CodegenError::Unsupported {
+            reason: "a compound (UNION) SELECT as a CTE/view/derived-table body is not yet \
+                     supported"
+                .to_string(),
+        });
+    }
+
     let table_refs = subquery_own_table_refs(subquery)?;
     let schemas = resolve_subquery_schemas(&table_refs, catalog)?;
     let Some(from) = &subquery.from else {

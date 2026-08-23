@@ -163,3 +163,66 @@ fn with_clause_second_cte_references_first_matches_oracle() {
         "with_clause_second_cte_references_first_matches_oracle",
     );
 }
+
+// #382: additional corpus coverage beyond #375/#376's original scenario
+// set — a CTE self-joined twice in one query, a CTE with its own
+// ORDER BY/LIMIT, and a CTE whose body is itself a compound (UNION)
+// SELECT.
+
+/// The same CTE named twice in one `FROM`/`JOIN` (a self-join) — each
+/// reference must materialize/scan independently, like two real-table
+/// references would.
+#[test]
+fn with_clause_cte_referenced_twice_self_join_matches_oracle() {
+    let db = cte_fixture_db("self_join");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t) \
+         SELECT c1.id, c2.id FROM cte c1 JOIN cte c2 ON c2.x = c1.x + 10 \
+         ORDER BY c1.id",
+        "with_clause_cte_referenced_twice_self_join_matches_oracle",
+    );
+}
+
+/// An `ORDER BY`/`LIMIT` inside the CTE's own query body — the CTE
+/// materializes only its own limited/ordered result, not the whole
+/// underlying table.
+#[test]
+fn with_clause_cte_with_internal_order_by_limit_matches_oracle() {
+    let db = cte_fixture_db("order_limit");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t ORDER BY x DESC LIMIT 2) \
+         SELECT * FROM cte ORDER BY id",
+        "with_clause_cte_with_internal_order_by_limit_matches_oracle",
+    );
+}
+
+/// A CTE whose body is itself a compound `UNION` `SELECT` — CTE
+/// materialization (#375/#376) does not yet compose with compound-
+/// `SELECT` codegen (#377/#378): `materialize_from_subquery` only
+/// scans a subquery body's `first` arm, silently dropping every other
+/// arm's rows (a real data-loss bug found while writing this test —
+/// see `src/codegen/subquery/from_clause.rs::materialize_from_subquery`,
+/// fixed here to reject cleanly instead of returning wrong results;
+/// full support for a compound CTE/view body is a fast-follow). This
+/// pins the current clean-rejection behavior.
+#[test]
+fn with_clause_cte_body_is_union_is_rejected_cleanly() {
+    let db = cte_fixture_db("union_body");
+    let output = run_query(
+        &db,
+        "WITH cte AS (SELECT x FROM t WHERE x > 15 UNION SELECT x FROM t WHERE x < 25) \
+         SELECT * FROM cte ORDER BY x",
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compound CTE body to be rejected (not yet supported), got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected a clean 'not yet supported' rejection, got: {stderr}"
+    );
+}

@@ -917,7 +917,7 @@ the parser, #375).
   main query scans it, yielding the same rows a real table with those
   contents would
 
-**Tests:** `tests/corpus/cte_test.rs::with_clause_single_cte_matches_oracle`
+**Tests:** `tests/corpus/cte_test.rs::with_clause_single_cte_matches_oracle`, `tests/corpus/cte_test.rs::with_clause_cte_referenced_twice_self_join_matches_oracle`, `tests/corpus/cte_test.rs::with_clause_cte_with_internal_order_by_limit_matches_oracle`
 
 #### Scenario: An explicit CTE column list renames its output columns
 
@@ -945,6 +945,17 @@ the parser, #375).
   `a`
 
 **Tests:** `tests/corpus/cte_test.rs::with_clause_second_cte_references_first_matches_oracle`
+
+#### Scenario: A CTE whose body is a compound (UNION) SELECT is rejected cleanly
+
+- GIVEN `WITH cte AS (SELECT x FROM t WHERE x > 15 UNION SELECT x FROM t
+  WHERE x < 25) SELECT * FROM cte`
+- THEN compilation MUST fail with `CodegenError::Unsupported`, not
+  silently scan only the CTE body's `first` arm (a real data-loss bug
+  found and fixed by #382 — `materialize_from_subquery` previously
+  ignored every `compound` arm past `first`)
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_cte_body_is_union_is_rejected_cleanly`
 
 ### Requirement 14: Compound SELECT (UNION / UNION ALL) [MUST]
 
@@ -979,7 +990,7 @@ at the parser level, #377) remain out of scope.
 - GIVEN `SELECT a FROM t1 UNION ALL SELECT a FROM t1` over a two-row `t1`
 - THEN every row from both arms is emitted, duplicates included
 
-**Tests:** `tests/corpus/union_test.rs::union_all_concatenates_without_deduplication`, `tests/corpus/union_test.rs::union_all_keeps_duplicate_rows`, `tests/corpus/union_test.rs::multiple_union_all_arms_chain`, `tests/corpus/union_test.rs::where_clause_filters_only_its_own_arm`, `tests/corpus/union_test.rs::union_all_does_not_coerce_between_mismatched_arm_types`
+**Tests:** `tests/corpus/union_test.rs::union_all_concatenates_without_deduplication`, `tests/corpus/union_test.rs::union_all_keeps_duplicate_rows`, `tests/corpus/union_test.rs::multiple_union_all_arms_chain`, `tests/corpus/union_test.rs::where_clause_filters_only_its_own_arm`, `tests/corpus/union_test.rs::union_all_does_not_coerce_between_mismatched_arm_types`, `tests/corpus/union_test.rs::union_vs_union_all_row_counts_differ_on_same_overlapping_inputs`
 
 #### Scenario: UNION deduplicates rows across arms
 
@@ -988,7 +999,7 @@ at the parser level, #377) remain out of scope.
 - THEN each distinct row is emitted exactly once, even though it
   appears in both arms
 
-**Tests:** `tests/corpus/union_test.rs::union_dedups_duplicate_rows`, `tests/corpus/union_test.rs::union_basic_no_duplicates`
+**Tests:** `tests/corpus/union_test.rs::union_dedups_duplicate_rows`, `tests/corpus/union_test.rs::union_basic_no_duplicates`, `tests/corpus/union_test.rs::union_does_not_coerce_between_mismatched_arm_types`, `tests/corpus/union_test.rs::three_way_union_chain_dedups_across_all_arms`
 
 #### Scenario: A compound arm's column-count mismatch is rejected
 
@@ -998,6 +1009,15 @@ at the parser level, #377) remain out of scope.
   padded/truncated row
 
 **Tests:** `tests/corpus/union_test.rs::column_count_mismatch_is_rejected`, `tests/corpus/union_test.rs::union_column_count_mismatch_is_rejected`
+
+#### Scenario: ORDER BY/LIMIT on the whole compound statement is rejected
+
+- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC`
+- THEN compilation fails cleanly with the documented "not yet supported"
+  `CodegenError::Unsupported`, per this requirement's explicit
+  out-of-scope note, rather than silently sorting only the last arm
+
+**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_is_rejected_cleanly`
 
 ### Requirement 15: View Storage and Query Expansion [MUST]
 
@@ -1052,7 +1072,7 @@ CTE already shadows a same-named real table. `DROP VIEW` is parsed
   the main query scans it, yielding the same rows a real table with
   those contents would
 
-**Tests:** `tests/corpus/view_test.rs::create_view_simple_matches_oracle`
+**Tests:** `tests/corpus/view_test.rs::create_view_simple_matches_oracle`, `tests/corpus/view_test.rs::with_clause_cte_selects_from_view_matches_oracle`
 
 #### Scenario: An explicit view column list renames its output columns
 
@@ -1080,6 +1100,23 @@ CTE already shadows a same-named real table. `DROP VIEW` is parsed
   materialized `v` cursor exactly as they would against a real table
 
 **Tests:** `tests/corpus/view_test.rs::create_view_joined_and_filtered_matches_oracle`
+
+#### Scenario: DROP VIEW fails cleanly rather than being silently ignored
+
+- GIVEN `DROP VIEW v` run against a real connection, with `DROP VIEW`
+  parsed (#379) but not dispatched to any codegen path (this
+  requirement's own out-of-scope note above)
+- THEN the statement MUST be rejected with a clean error (`statement
+  dispatch` reports it as unrecognized) rather than panicking or
+  silently no-opping, and `v` remains queryable afterward — #382
+  verified this end-to-end and found the existing behavior already
+  clean (no codegen path is reached at all: `compile_statement`'s
+  keyword dispatch has no `"DROP" if kw(1) == "VIEW"` arm, so it falls
+  through to `DispatchError::Unrecognized` before ever touching a
+  parser or opcode). Wiring an actual `Opcode::DropView` remains a
+  fast-follow, tracked separately from this scenario.
+
+**Tests:** `tests/corpus/view_test.rs::drop_view_fails_cleanly_not_wired_into_codegen`
 
 ## Traceability Note
 

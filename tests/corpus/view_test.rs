@@ -197,3 +197,56 @@ fn create_view_persists_across_reload() {
         skip_no_oracle("create_view_persists_across_reload (rootpage check)");
     }
 }
+
+// #382: additional corpus coverage beyond #380's original scenario set
+// — a `WITH`-clause CTE whose body reads from a view (per Requirement
+// 15, `expand_views` runs after `expand_with_clause` so it also
+// reaches into a CTE's rewritten body), and `DROP VIEW`'s current
+// end-to-end behavior.
+
+/// A CTE's body selects from a view — `expand_with_clause` runs first
+/// (rewriting the CTE reference into a `TableRefKind::Subquery`
+/// wrapping the CTE body verbatim, view reference and all), then
+/// `expand_views` recurses into that subquery and expands the view
+/// reference it finds there.
+#[test]
+fn with_clause_cte_selects_from_view_matches_oracle() {
+    let db = view_fixture_db("cte_from_view");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t WHERE x > 10");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM v WHERE x < 30) SELECT * FROM cte ORDER BY id",
+        "with_clause_cte_selects_from_view_matches_oracle",
+    );
+}
+
+/// `DROP VIEW` (#379's parser support) is not yet wired into codegen
+/// (Requirement 15 explicitly scopes it out) — running it end-to-end
+/// against a real connection MUST fail cleanly (a rejected/unsupported
+/// statement error) rather than panicking or silently no-opping. This
+/// pins that current behavior so a future #380 follow-on that wires
+/// `Opcode::DropView` has a test to flip instead of a silent gap.
+#[test]
+fn drop_view_fails_cleanly_not_wired_into_codegen() {
+    let db = view_fixture_db("drop_view");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t");
+    let output = run_exec(&db, "DROP VIEW v");
+    assert!(
+        !output.status.success(),
+        "expected DROP VIEW to be rejected (not yet wired into codegen), \
+         got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.is_empty(),
+        "expected a clean rejection message on stderr, got none"
+    );
+    // The view must be unaffected — still queryable after the rejected
+    // DROP VIEW attempt.
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v ORDER BY id",
+        "drop_view_fails_cleanly_not_wired_into_codegen (view still queryable)",
+    );
+}

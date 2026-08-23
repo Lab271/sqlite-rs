@@ -278,3 +278,112 @@ fn intersect_is_rejected_as_unsupported() {
     let output = run_query(&db, "SELECT a FROM t1 INTERSECT SELECT a FROM t1");
     assert!(!output.status.success());
 }
+
+// #382: additional corpus coverage beyond #377/#378's original scenario
+// set — plain `UNION`'s type-coercion behavior across mismatched arm
+// types, `ORDER BY` on the whole compound result, a three-way `UNION`
+// chain, and a paired `UNION`-vs-`UNION ALL` row-count regression test.
+
+/// Same no-coercion behavior as `union_all_does_not_coerce_between_mismatched_arm_types`,
+/// but for plain `UNION`: dedup compares each arm's own storage
+/// class/affinity as stored, it does not coerce one arm's type into the
+/// other's before comparing/deduplicating.
+#[test]
+fn union_does_not_coerce_between_mismatched_arm_types() {
+    let db = scratch_db("union_type_mismatch");
+    let ddls = ["CREATE TABLE ti(a INTEGER)", "CREATE TABLE ts(a TEXT)"];
+    let rows = [
+        "INSERT INTO ti VALUES (1), (2)",
+        "INSERT INTO ts VALUES ('1'), ('y')",
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().chain(rows.iter()) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    // `1` (integer) and `'1'` (text) are distinct storage classes, so a
+    // type-blind `UNION` keeps both rather than deduping them together.
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM ti UNION SELECT a FROM ts",
+        "union_does_not_coerce_between_mismatched_arm_types",
+    );
+}
+
+/// `ORDER BY`/`LIMIT` trailing the whole compound statement is
+/// explicitly out of scope for Requirement 14 (`compile_select_compound`
+/// rejects it outright) — pins that it fails cleanly rather than
+/// silently sorting only the last arm or being ignored.
+#[test]
+fn union_with_trailing_order_by_is_rejected_cleanly() {
+    let db = union_fixture_db("order_by");
+    let output = run_query(&db, "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC");
+    assert!(
+        !output.status.success(),
+        "expected ORDER BY on a UNION compound to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ORDER BY/LIMIT on a UNION compound SELECT is not yet supported"),
+        "expected the documented ORDER BY/LIMIT rejection, got: {stderr}"
+    );
+}
+
+/// A three-way `UNION` chain (`A UNION B UNION C`) dedups across all
+/// three arms, not just pairwise.
+#[test]
+fn three_way_union_chain_dedups_across_all_arms() {
+    let db = union_fixture_db("three_way");
+    let output = run_query_ok(
+        &db,
+        "SELECT a FROM t1 UNION SELECT a FROM t1 UNION SELECT b FROM t2",
+    );
+    assert_eq!(output, "1\n2\n3\n4\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION SELECT a FROM t1 UNION SELECT b FROM t2",
+        "three_way_union_chain_dedups_across_all_arms",
+    );
+}
+
+/// Paired regression: the exact same two arms with overlapping rows
+/// produce different row counts under `UNION` (deduplicated) vs `UNION
+/// ALL` (not) — pins the dedup/no-dedup distinction against
+/// regressing back to matching row counts.
+#[test]
+fn union_vs_union_all_row_counts_differ_on_same_overlapping_inputs() {
+    let db = union_fixture_db("paired_counts");
+    let union_all = run_query_ok(&db, "SELECT a FROM t1 UNION ALL SELECT a FROM t1");
+    let union = run_query_ok(&db, "SELECT a FROM t1 UNION SELECT a FROM t1");
+    assert_eq!(union_all, "1\n2\n1\n2\n");
+    assert_eq!(union, "1\n2\n");
+    assert_ne!(
+        union_all.lines().count(),
+        union.lines().count(),
+        "UNION ALL and UNION should differ in row count on overlapping arms"
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION ALL SELECT a FROM t1",
+        "union_vs_union_all_row_counts_differ_on_same_overlapping_inputs (UNION ALL)",
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION SELECT a FROM t1",
+        "union_vs_union_all_row_counts_differ_on_same_overlapping_inputs (UNION)",
+    );
+}
