@@ -207,18 +207,81 @@ construction, neither in the linear-arithmetic fragment `L1`–`L4` reason
 over, so every obligation here is discharged at `layer: "runtime"`
 (equivalent to a hand-written `assert!`, not stronger).
 
-Recommended next step for a real L1–L4 win: extract the pure-arithmetic
-core of `usable_page_size` (`page_size - reserved_space`) into a free
-function over bare `u32` params rather than `&self` field access — the
-interval solver reasons over plain identifiers, not struct-field
-projections, so `self.reserved_space`/`self.page_size` are opaque to it
-even though the same subtraction the `mask_low_nibble` demo function
-proves at L1/L2 for a masking case would very likely close here too. If
-that lands, it's worth sweeping the codebase's existing
-`#[allow(clippy::arithmetic_side_effects, reason = "...")]` sites —
-each is already a hand-written, unenforced precondition claim, and a
-free-function `requires`/`ensures` pair could upgrade some of them from
-"comment asserting an invariant" to "compiler-checked precondition."
+## Third pass: extracting `usable_page_size` for a real L1–L4 proof
+
+Tried the recommended next step. First hypothesis — that `&self` field
+access alone was the blocker — turned out to be incomplete: extracting
+`usable_page_size`'s body verbatim into a free function over bare `u32`
+params (`compute_usable_page_size(page_size: u32, reserved_space: u32)`)
+with `#[mvl::requires(reserved_space <= page_size)]` still fell to
+`runtime`, disproving the "just needs bare identifiers" theory on its
+own. Isolating it further (standalone crate against v0.5.1, not part of
+this commit) found **two independent causes**, both confirmed by
+toggling one variable at a time and rerunning `cargo mvl prove`:
+
+1. **No implicit unsigned lower bound.** The solver reasons over
+   unbounded integers and never infers a `u32` parameter's `>= 0` for
+   free. `reserved_space <= page_size` alone doesn't give it enough to
+   derive `page_size - reserved_space <= page_size` via Fourier-Motzkin.
+   Restating the type-implied bound explicitly —
+   `reserved_space <= page_size && reserved_space >= 0 && page_size >= 0`
+   — is what lets the return-site `ensures` close, and it closes at
+   **L4**, not L1/L2 as first guessed (L2's per-variable interval model
+   isn't enough for a two-variable relation; this needs
+   Fourier-Motzkin's cross-variable reasoning, same layer as the demo's
+   `cross_variable_bound`).
+2. **`self.field` still doesn't reach the solver as a variable**,
+   confirmed separately: the identical logic and identical (now
+   sufficient) bounds, restated as `self.reserved_space`/`self.page_size`
+   on the original `&self` method, still falls to `runtime`. So the
+   field-projection gap from the second go/no-go note is real, but it's
+   a *second*, independent cause — not the only one, and not even the
+   first one hit once the free function is tried in isolation.
+
+Applied to `header.rs`: `usable_page_size` now delegates to a new
+private free function `compute_usable_page_size(page_size: u32,
+reserved_space: u32) -> u32`, carrying the `#[mvl::requires]`/
+`#[mvl::ensures]` (with the explicit `>= 0` clauses) and the
+`#[allow(clippy::arithmetic_side_effects, ...)]` that used to sit on the
+method. Needed two more allows on top of that one, both scoped and
+justified inline: `unused_comparisons` (rustc itself flags `x >= 0` on a
+`u32` as always-true — correct, and exactly the redundancy the fix
+exploits) and `clippy::absurd_extreme_comparisons` (same observation,
+clippy's version).
+
+**Result: `compute_usable_page_size::returns::ensures#0` now reports
+`"layer": "L4"`, `"warrant": {"warrant": "proof"}`** — the first
+obligation in this entire spike discharged by the actual solver rather
+than an injected `assert!`. `unit_header`'s 5 tests, `cargo fmt`, and
+`cargo clippy --all-targets` all stay green. Every other obligation in
+the file (the two `parse` predicates and `compute_usable_page_size`'s
+own declaration-site/call-site checks) is unaffected and still `runtime`
+— expected, since neither cause here touches `Result`/enum inspection
+or declaration-site coherence semantics.
+
+## Go/no-go (final)
+
+**Go, with one proven data point.** All three findings this spike
+surfaced were fixed or worked around: `impl`-method scanning (#90/#89),
+the `ensures` early-return type-inference bug (#93/#92), and — via a
+one-function extraction, not an upstream fix — the missing-bound and
+field-projection gaps that kept even pure arithmetic pinned to
+`runtime`. `sqlite-rs` now has one concrete example of `rust-refine`
+proving a real invariant at compile time instead of merely asserting it.
+Scaling this up would mean sweeping the codebase's existing
+`#[allow(clippy::arithmetic_side_effects, reason = "...")]` sites (each
+is already a hand-written, unenforced precondition claim) and applying
+the same free-function-plus-explicit-bounds pattern; each one is a
+candidate to upgrade from "comment asserting an invariant" to
+"compiler-checked precondition," conditional on the arithmetic being
+linear enough for L1–L4 and not itself blocked by a `self.field`
+projection needing the same extraction treatment.
+
+The field-projection gap (self.field never binds as a Γ variable) and
+the missing-unsigned-bound gap remain real, filed as informal findings
+(not yet upstream issues) — a natural next step if this pattern gets
+adopted more broadly, since fixing either would remove the need for the
+extraction workaround.
 
 [mvl-lang/mvl-rust#90]: https://github.com/mvl-lang/mvl-rust/pull/90
 [mvl-lang/mvl-rust#89]: https://github.com/mvl-lang/mvl-rust/issues/89
