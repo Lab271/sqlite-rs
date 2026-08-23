@@ -198,7 +198,38 @@ pub(super) fn emit_distinct_guard(
         return Ok(());
     }
     let cols = result_columns(select, schema);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
+    emit_dedup_guard(
+        em,
+        reg,
+        &cols,
+        schema,
+        cursor,
+        pseudo,
+        distinct_cursor,
+        skip_label,
+        catalog,
+    )
+}
+
+/// The `Found`/`IdxInsert` dedup check `emit_distinct_guard` uses for
+/// `SELECT DISTINCT` (against `select.distinct`), factored out so
+/// plain `UNION`'s compound-select dedup (#378) can drive the same
+/// ephemeral-index check across every arm's own result columns/schema,
+/// sharing one `distinct_cursor` opened once for the whole compound
+/// statement rather than once per arm.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_dedup_guard(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    cols: &[ResultColumnPlan],
+    schema: &TableSchema,
+    cursor: i32,
+    pseudo: bool,
+    distinct_cursor: i32,
+    skip_label: Label,
+    catalog: &[TableSchema],
+) -> Result<(), CodegenError> {
+    let (first, count) = compile_row_values(em, reg, schema, cols, cursor, pseudo, catalog)?;
     let count = i32::try_from(count).unwrap_or(0);
     let addr = em.emit(Instruction::with_p4(
         Opcode::Found,

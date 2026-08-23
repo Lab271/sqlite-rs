@@ -946,6 +946,59 @@ the parser, #375).
 
 **Tests:** `tests/corpus/cte_test.rs::with_clause_second_cte_references_first_matches_oracle`
 
+### Requirement 14: Compound SELECT (UNION / UNION ALL) [MUST]
+
+A compound `SELECT`'s `first` arm and every `select.compound` arm each
+get their own `OpenRead`/scan/`ResultRow` block, with cursor numbers
+offset by `ScanCursors::for_arm` (4 cursors per arm) so no arm's own
+sort/pseudo/DISTINCT cursor collides with another arm's. `UNION ALL`
+(#240) concatenates every arm's rows with no deduplication. Plain
+`UNION` (#377/#378) additionally routes every row from every arm
+through one ephemeral index (`OpenEphemeral`) opened once for the whole
+statement, past the last arm's own cursor block — a `Found`/`IdxInsert`
+check before each `ResultRow`, reusing the exact dedup mechanism
+Requirement 8's `SELECT DISTINCT` already performs
+(`projection::emit_dedup_guard`, factored out of
+`projection::emit_distinct_guard`) — drops a row already seen from an
+earlier arm instead of re-emitting it. Mixing `UNION` and `UNION ALL`
+arms in one statement is simplified to "any `UNION` arm dedups the
+whole result" rather than SQLite's pairwise left-to-right operator
+semantics — a documented narrowing, not the general case. Every arm
+must project the same number of result columns as `first` — checked at
+compile time via `select_result_column_count` and reported as
+`CodegenError::CompoundColumnMismatch`, never silently
+padded/truncated. `ORDER BY`/`LIMIT` on the whole compound statement,
+joins/subqueries within an arm, and `INTERSECT`/`EXCEPT` (unsupported
+at the parser level, #377) remain out of scope.
+
+**Implementation:** `src/codegen/select/entry.rs::compile_select_compound`,
+`src/codegen/select/projection.rs::emit_dedup_guard`
+
+#### Scenario: UNION ALL concatenates without deduplication
+
+- GIVEN `SELECT a FROM t1 UNION ALL SELECT a FROM t1` over a two-row `t1`
+- THEN every row from both arms is emitted, duplicates included
+
+**Tests:** `tests/corpus/union_test.rs::union_all_concatenates_without_deduplication`, `tests/corpus/union_test.rs::union_all_keeps_duplicate_rows`, `tests/corpus/union_test.rs::multiple_union_all_arms_chain`, `tests/corpus/union_test.rs::where_clause_filters_only_its_own_arm`, `tests/corpus/union_test.rs::union_all_does_not_coerce_between_mismatched_arm_types`
+
+#### Scenario: UNION deduplicates rows across arms
+
+- GIVEN `SELECT a FROM t1 UNION SELECT a FROM t1` over a two-row `t1`
+  with no duplicate rows within either arm alone
+- THEN each distinct row is emitted exactly once, even though it
+  appears in both arms
+
+**Tests:** `tests/corpus/union_test.rs::union_dedups_duplicate_rows`, `tests/corpus/union_test.rs::union_basic_no_duplicates`
+
+#### Scenario: A compound arm's column-count mismatch is rejected
+
+- GIVEN `SELECT a FROM t1 UNION [ALL] SELECT a, b FROM t2` (arm projects
+  two columns against `first`'s one)
+- THEN compilation fails with `CompoundColumnMismatch`, not a
+  padded/truncated row
+
+**Tests:** `tests/corpus/union_test.rs::column_count_mismatch_is_rejected`, `tests/corpus/union_test.rs::union_column_count_mismatch_is_rejected`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made

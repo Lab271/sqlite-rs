@@ -42,7 +42,7 @@ pub fn compile_select_with_catalog(
     }
     if !select.compound.is_empty() {
         return Err(CodegenError::Unsupported {
-            reason: "this SELECT is a UNION ALL compound — call compile_select_compound instead"
+            reason: "this SELECT is a UNION compound — call compile_select_compound instead"
                 .to_string(),
         });
     }
@@ -337,18 +337,29 @@ pub(super) fn arm_as_select(arm: &CompoundSelect) -> Select {
     }
 }
 
-/// Compiles a `UNION ALL` compound `SELECT` (#240): `first` against
-/// `first_schema`, then each of `select.compound`'s arms against its
-/// paired schema in `arm_schemas` (same order, one per arm) —
-/// concatenating every arm's rows with no deduplication and no shared
-/// sort/merge step. Each arm gets its own `OpenRead`/scan/`ResultRow`
-/// block with cursor numbers offset by `ScanCursors::for_arm`, so
-/// arms never collide even when an arm itself uses a sort or DISTINCT
-/// cursor. `first`'s `order_by`/`limit` apply to the whole compound
-/// statement, but are not yet implemented here — sorting/limiting a
-/// concatenation of independent scans needs a shared sorter across
-/// arms, which is out of this ticket's scope; callers must reject a
-/// non-empty `order_by`/`limit` before calling this.
+/// Compiles a `UNION [ALL]` compound `SELECT` (#240 for `UNION ALL`,
+/// #377/#378 for plain `UNION`): `first` against `first_schema`, then
+/// each of `select.compound`'s arms against its paired schema in
+/// `arm_schemas` (same order, one per arm). Each arm gets its own
+/// `OpenRead`/scan/`ResultRow` block with cursor numbers offset by
+/// `ScanCursors::for_arm`, so arms never collide even when an arm
+/// itself uses a sort or DISTINCT cursor. `first`'s `order_by`/`limit`
+/// apply to the whole compound statement, but are not yet implemented
+/// here — sorting/limiting a concatenation of independent scans needs
+/// a shared sorter across arms, which is out of this ticket's scope;
+/// callers must reject a non-empty `order_by`/`limit` before calling
+/// this.
+///
+/// If any arm's `op` is `CompoundOp::Union`, every row from every arm
+/// (not just that arm's own) is routed through one ephemeral index
+/// opened once for the whole statement, reusing the exact
+/// `Found`/`IdxInsert` dedup check `SELECT DISTINCT` already performs
+/// (`projection::emit_dedup_guard`) — a row already seen from an
+/// earlier arm is silently dropped instead of re-emitted. Mixing
+/// `UNION` and `UNION ALL` arms in one statement (rare in practice) is
+/// simplified to "any `UNION` arm dedups the whole result", rather
+/// than SQLite's pairwise left-to-right operator semantics — a known,
+/// documented narrowing rather than the general case.
 ///
 /// Joins/subqueries within any arm are out of scope for this ticket —
 /// every arm's `from` must be a single table with no joins.
@@ -364,7 +375,7 @@ pub fn compile_select_compound(
         .is_some_and(|from| !from.joins.is_empty())
     {
         return Err(CodegenError::Unsupported {
-            reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
+            reason: "UNION with a JOIN in one of its arms is not yet supported".to_string(),
         });
     }
     if first.compound.len() != arm_schemas.len() {
@@ -375,8 +386,7 @@ pub fn compile_select_compound(
     }
     if !first.order_by.is_empty() || first.limit.is_some() {
         return Err(CodegenError::Unsupported {
-            reason: "ORDER BY/LIMIT on a UNION ALL compound SELECT is not yet supported"
-                .to_string(),
+            reason: "ORDER BY/LIMIT on a UNION compound SELECT is not yet supported".to_string(),
         });
     }
 
@@ -385,7 +395,7 @@ pub fn compile_select_compound(
     for (arm, arm_schema) in first.compound.iter().zip(arm_schemas) {
         if arm.from.as_ref().is_some_and(|from| !from.joins.is_empty()) {
             return Err(CodegenError::Unsupported {
-                reason: "UNION ALL with a JOIN in one of its arms is not yet supported".to_string(),
+                reason: "UNION with a JOIN in one of its arms is not yet supported".to_string(),
             });
         }
         let arm_select = arm_as_select(arm);
@@ -396,6 +406,18 @@ pub fn compile_select_compound(
         arm_selects.push(arm_select);
     }
 
+    let has_union = first
+        .compound
+        .iter()
+        .any(|arm| arm.op == CompoundOp::Union);
+    // One cursor block per arm (`ScanCursors::for_arm`, 4 cursors
+    // each) — the shared dedup cursor sits right past the last arm's
+    // block so it never collides with any arm's own table/sort/pseudo/
+    // distinct cursors.
+    let dedup_cursor = i32::try_from(arm_schemas.len().saturating_add(1))
+        .unwrap_or(i32::MAX)
+        .saturating_mul(4);
+
     let mut em = Emitter::new();
     let mut reg = RegAlloc::new();
 
@@ -404,8 +426,33 @@ pub fn compile_select_compound(
     em.place(body_start);
     em.patch_p2(init_addr, body_start);
 
+    if has_union {
+        em.emit(Instruction::new(Opcode::OpenEphemeral, dedup_cursor, 0, 0));
+    }
+
     let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, reg_first: i32, count: i32| {
-        em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+        if has_union {
+            let found_addr = em.emit(Instruction::with_p4(
+                Opcode::Found,
+                dedup_cursor,
+                0,
+                reg_first,
+                P4::Int(i64::from(count)),
+            ));
+            let skip = em.new_label();
+            em.patch_p2(found_addr, skip);
+            em.emit(Instruction::with_p4(
+                Opcode::IdxInsert,
+                dedup_cursor,
+                reg_first,
+                0,
+                P4::Int(i64::from(count)),
+            ));
+            em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+            em.place(skip);
+        } else {
+            em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+        }
         Ok(())
     };
 

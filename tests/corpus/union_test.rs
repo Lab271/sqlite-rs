@@ -1,6 +1,7 @@
-//! End-to-end oracle-diff tests for `UNION ALL` compound `SELECT`
-//! (#240), via the `sqlite-rs` CLI's `exec`/`query` subcommands —
-//! mirroring `join_test.rs`'s scratch-db-per-test shape.
+//! End-to-end oracle-diff tests for compound `SELECT` — `UNION ALL`
+//! (#240) and plain `UNION` (#377/#378) — via the `sqlite-rs` CLI's
+//! `exec`/`query` subcommands, mirroring `join_test.rs`'s
+//! scratch-db-per-test shape.
 
 use crate::oracle::{assert_integrity_check_ok, pinned_oracle, skip_no_oracle};
 use std::path::{Path, PathBuf};
@@ -221,11 +222,59 @@ fn where_clause_filters_only_its_own_arm() {
     );
 }
 
-/// Plain `UNION` (with dedup) is deferred to Phase 2 — must be
-/// rejected as unsupported, not silently treated as `UNION ALL`.
+/// Plain `UNION` (#377/#378) deduplicates — a row that appears in both
+/// arms is emitted only once, unlike `UNION ALL`.
 #[test]
-fn plain_union_is_rejected_as_unsupported() {
-    let db = union_fixture_db("plain_union");
-    let output = run_query(&db, "SELECT a FROM t1 UNION SELECT b FROM t2");
+fn union_dedups_duplicate_rows() {
+    let db = union_fixture_db("union_dupes");
+    let output = run_query_ok(&db, "SELECT a FROM t1 UNION SELECT a FROM t1");
+    assert_eq!(output, "1\n2\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION SELECT a FROM t1",
+        "union_dedups_duplicate_rows",
+    );
+    if let Some(oracle) = pinned_oracle() {
+        assert_integrity_check_ok(&oracle, &db);
+    }
+}
+
+/// Basic `UNION` with no overlapping rows between arms — every row
+/// from both arms survives, same as `UNION ALL` would here.
+#[test]
+fn union_basic_no_duplicates() {
+    let db = union_fixture_db("union_basic");
+    let output = run_query_ok(&db, "SELECT a FROM t1 UNION SELECT b FROM t2");
+    assert_eq!(output, "1\n2\n3\n4\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION SELECT b FROM t2",
+        "union_basic_no_duplicates",
+    );
+}
+
+/// A mismatched arm column count is rejected at compile time for plain
+/// `UNION` too, same as `UNION ALL`.
+#[test]
+fn union_column_count_mismatch_is_rejected() {
+    let db = union_fixture_db("union_mismatch");
+    let output = run_query(&db, "SELECT a FROM t1 UNION SELECT a, b FROM t2");
+    assert!(
+        !output.status.success(),
+        "expected column-count mismatch to fail, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("same number of result columns"),
+        "expected a column-count-mismatch error, got: {stderr}"
+    );
+}
+
+/// `INTERSECT`/`EXCEPT` remain unsupported (deferred to V7).
+#[test]
+fn intersect_is_rejected_as_unsupported() {
+    let db = union_fixture_db("intersect_unsupported");
+    let output = run_query(&db, "SELECT a FROM t1 INTERSECT SELECT a FROM t1");
     assert!(!output.status.success());
 }

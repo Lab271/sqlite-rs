@@ -23,7 +23,7 @@ use crate::codegen::{
     p4_coll_seq, CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target,
 };
 use crate::parser::ast::{
-    BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
+    BinaryOp, CompoundOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
     JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef, TableRefKind,
 };
 use crate::parser::tokenizer::Span;
