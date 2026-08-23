@@ -1,8 +1,11 @@
 # Spike 010: does `rust-refine` work, and does it make sense for sqlite-rs?
 
-Issue [#371](https://github.com/iheitlager/sqlite-rs/issues/371). Full
+**Status: concluded — yes.** Issue
+[#371](https://github.com/iheitlager/sqlite-rs/issues/371). Full
 narrative, round-by-round evidence, and tracked upstream issues are in
 [`findings.md`](./findings.md) — this file is the short version.
+Production rollout is now its own ticket (see "Next steps"); this crate
+stays in place as the reference point, not deleted.
 
 ## Hypothesis
 
