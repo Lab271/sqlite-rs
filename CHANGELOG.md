@@ -6,6 +6,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-23 — V5 review fixes
+
+Follow-up fixes from the combined code-review/security-review pass over
+the eight merged V5 PRs (#353 comment thread). Patch release — no new
+features, no scope beyond closing gaps the review found in the V5 lock
+and transaction-control paths.
+
 fix: `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` parsed `TransactionMode` but
 `compile_begin` discarded it, so a concurrent writer was only blocked at
 `COMMIT` time (via `Pager::flush`'s EXCLUSIVE escalation), not at `BEGIN`
@@ -18,8 +25,7 @@ transaction ends (commit or rollback), including the no-write case (a
 subprocess interop test (`tests/corpus/begin_immediate_lock_interop_test.rs`)
 proves a compiled `BEGIN IMMEDIATE`/`EXCLUSIVE` visibly blocks a live
 stock `sqlite3` writer/reader, mirroring `lock_state_interop_test.rs`'s
-proof for the raw lock primitive. Closes #395. No version bump (V5 phase
-in progress). Spend: matched the small estimate.
+proof for the raw lock primitive. Closes #395.
 
 fix(pager): `Pager::flush` never used the 5-state lock ladder built for
 hot-journal recovery — it only ever held the plain SHARED lock every
@@ -29,8 +35,48 @@ journal writes/deletes and page writes with no OS-level mutual exclusion.
 `flush()` now escalates to EXCLUSIVE (stepping through RESERVED/PENDING)
 before touching the journal or main file, and de-escalates back to
 SHARED afterward, mirroring `sqlite3PagerCommitPhaseOne`/`Two`. Closes
-#398 (Refs #353). No version bump (V5 phase in progress). Spend: matched
-estimate.
+#398 (Refs #353).
+
+fix: nested `BEGIN; BEGIN;` and a bare `COMMIT`/`ROLLBACK` with no open
+transaction silently succeeded instead of erroring like stock SQLite —
+a divergence the V5 review flagged as untested. Both now return the
+matching stock-`sqlite3` error. Closes #396.
+
+fix(ci): `cargo-mvl-limit` install lacked `--force`, so `Swatinem/rust-cache`
+restoring a stale cached binary made the mvl-limit gate flaky in CI.
+Closes #394 (chore, CI-only).
+
+Spend: matched the review-fix estimate (see #353 review comment for the
+combined analysis this closed out).
+
+## [0.14.0] - 2026-08-22 — V5 Slim: Core Transactions
+
+Epic #353. "ACID with a rollback journal": `BEGIN`/`COMMIT`/`ROLLBACK`
+(including `DEFERRED`/`IMMEDIATE`/`EXCLUSIVE`), the 5-state file lock
+ladder, rollback-journal write path, hot-journal crash recovery, and the
+VDBE transaction opcodes that make it all executable. Spend: matched the
+epic's 2-3 week estimate.
+
+feat: parser support for `BEGIN`/`COMMIT`/`ROLLBACK` (`DEFERRED`/
+`IMMEDIATE`/`EXCLUSIVE` transaction modes) as first-class statements.
+Closes #356.
+
+feat: `src/vdbe/control.rs` gains the transaction opcodes
+(`Transaction`/`AutoCommit`) that make compiled `BEGIN`/`COMMIT`/
+`ROLLBACK` actually run against the pager instead of just parsing.
+Closes #360.
+
+feat: `exec` CLI subcommand runs multi-statement scripts through a single
+session, so a script's `BEGIN ... COMMIT` spans multiple statements
+against one connection instead of one-shot-per-statement. Closes #358.
+
+feat: minimal `repl` subcommand for interactive multi-statement
+`BEGIN`/`COMMIT`/`ROLLBACK` sessions. Closes #365.
+
+test: crash torture test — a kill -9 loop mid-write against the rollback
+journal, verifying the database always recovers to a consistent state on
+restart. Discharges the epic's "power-cut torture test" acceptance gate.
+Closes #361.
 
 bench: `tests/performance/engine.rs` gains four transaction-batching
 benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
@@ -45,8 +91,8 @@ criterion directly. Current numbers (`bench_1mb.db`, `--quick`):
 `insert_single_tx` 16ms vs oracle 3ms (~5×), `insert_batch_tx_1000` 61ms
 vs oracle 4ms (~17×) — batching cuts our per-row cost far faster than
 linear, but the ratio to oracle isn't at 5× yet outside the single-row
-case; left as a follow-up rather than in scope here. Closes #373. No
-version bump (V5 phase in progress). Spend: matched the small estimate.
+case; left as a follow-up rather than in scope here. Closes #373. Spend:
+matched the small estimate.
 
 fix: `Pager::open` recovered a hot rollback journal from its header magic
 alone, with no check for a live second connection — a race against the
@@ -62,8 +108,8 @@ flagged and deferred — now consolidated to the one fd `Pager::open`
 already holds the lock on. `FileLockState` (#357's 5-state ladder,
 previously wired into nothing outside its own unit tests) now backs
 `UnixVfsFile`'s lock directly. See ADR-0024. Closes #359 (rescoped from
-a duplicate of #172/ADR-0016). No version bump (V5 phase in progress).
-Spend: ~1 session, matched the rescoped 1-day estimate.
+a duplicate of #172/ADR-0016). Spend: ~1 session, matched the rescoped
+1-day estimate.
 
 feat: `src/vfs/lock.rs` gains `LockLevel`/`FileLockState`, a full 5-state
 journal-mode lock ladder (UNLOCKED → SHARED → RESERVED → PENDING →
@@ -72,8 +118,7 @@ EXCLUSIVE) built on byte-identical `fcntl` byte-range locks, matching
 probe semantics. Exposed from `sqlite_rs::vfs` for the follow-up `Pager`
 write-path wiring (#45); `Pager`/`VfsFile::lock_shared` are unchanged.
 Verified against a live stock `sqlite3` process in both directions
-(`tests/corpus/lock_state_interop_test.rs`). Closes #357. No version
-bump (VFS primitive only, not yet wired into any write path). Spend:
+(`tests/corpus/lock_state_interop_test.rs`). Closes #357. Spend:
 matched estimate.
 
 test: `src/vdbe/cursor.rs` was the largest coverage gap in the repo
@@ -82,7 +127,7 @@ for opcodes no current codegen path emits (`Last`, `NullRow`, `IdxLE`)
 and for the `CursorTypeMismatch`/`MalformedInstruction` error arms that
 accounted for most of the file's missed lines — 84.33% line coverage
 after, repo TOTAL 90.91%. No production code changes. Part of epic #234
-(V4). Closes #351. No version bump (test-only chore).
+(V4). Closes #351.
 
 ## [0.13.3] - 2026-08-22
 
