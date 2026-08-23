@@ -86,6 +86,41 @@ jobs:
         with:
           shared-key: test
 
+      # `make test` includes tests whose oracle-fallback path (bootstrapping
+      # a scratch db via our own CLI instead of the pinned sqlite3) is
+      # exercised only when no oracle is present — build it here so this
+      # job's environment matches the old single-job gate exactly, rather
+      # than silently exercising an untested code path.
+      - name: Cache pinned sqlite3 oracle
+        id: cache-sqlite
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
+        with:
+          path: ~/.local/sqlite-oracle
+          key: sqlite-oracle-${{ env.SQLITE_ORACLE_VERSION }}-${{ runner.os }}
+      - name: Build pinned sqlite3 oracle
+        if: steps.cache-sqlite.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://sqlite.org/2026/${SQLITE_ORACLE_TARBALL}.tar.gz" -o sqlite.tar.gz
+          tar xzf sqlite.tar.gz
+          cd "${SQLITE_ORACLE_TARBALL}"
+          ./configure --prefix="$HOME/.local/sqlite-oracle"
+          make -j"$(nproc)"
+          make install
+      - name: Verify the oracle is the pinned, non-codec build
+        run: |
+          set -euo pipefail
+          ORACLE="$HOME/.local/sqlite-oracle/bin/sqlite3"
+          echo "ORACLE_SQLITE3=$ORACLE" >> "$GITHUB_ENV"
+          found="$("$ORACLE" -version | awk '{print $1}')"
+          if [ "$found" != "$SQLITE_ORACLE_VERSION" ]; then
+            echo "error: oracle is $found, expected $SQLITE_ORACLE_VERSION"; exit 1
+          fi
+          if "$ORACLE" :memory: "PRAGMA compile_options;" | grep -qi codec; then
+            echo "error: oracle is a codec build"; exit 1
+          fi
+          echo "oracle: $ORACLE ($found, non-codec)"
+
       # Cheap, dependency-free gates first so a policy violation fails the
       # job before the expensive steps run.
       - run: make version-pin
