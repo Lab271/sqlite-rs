@@ -127,9 +127,14 @@ fn order_by_program_emits_rows_in_sorted_order() {
 /// `SELECT DISTINCT note FROM products` shape (against an in-memory-only
 /// program, no real table needed): probes an ephemeral index before
 /// each emit, discarding rows already seen. Each 4-instruction candidate
-/// block (`String8`, `Found`, `ResultRow`, `IdxInsert`) is the same
+/// block (`String8`, `Found`, `IdxInsert`, `ResultRow`) is the same
 /// shape; `Found`'s jump target is simply the next block's start, so a
-/// duplicate skips straight past its own `ResultRow`/`IdxInsert`.
+/// duplicate skips straight past its own `IdxInsert`/`ResultRow`.
+/// `IdxInsert` reads the candidate register *before* `ResultRow` runs —
+/// matching real codegen's order (`projection.rs::emit_dedup_check`
+/// emits `IdxInsert` immediately after `Found`, with `ResultRow` emitted
+/// separately afterward), since #465 has `ResultRow` take each register
+/// (leaving `Null` behind) rather than clone it.
 #[test]
 fn distinct_program_discards_rows_already_seen() {
     let program = Program::new(vec![
@@ -140,26 +145,26 @@ fn distinct_program_discards_rows_already_seen() {
         Instruction::with_p4(Opcode::String8, 0, 0, 0, P4::Str("a".to_string())),
         /* 3 */
         Instruction::with_p4(Opcode::Found, 0, 6, 0, P4::Int(1)), // jump to pc 6 if present
-        /* 4 */ Instruction::new(Opcode::ResultRow, 0, 1, 0),
-        /* 5 */
+        /* 4 */
         Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        /* 5 */ Instruction::new(Opcode::ResultRow, 0, 1, 0),
         // Candidate "a" (second occurrence: present, skip emit/insert).
         /* 6 */
         Instruction::with_p4(Opcode::String8, 0, 0, 0, P4::Str("a".to_string())),
         /* 7 */
         Instruction::with_p4(Opcode::Found, 0, 10, 0, P4::Int(1)), // jump to pc 10 if present
         /* 8 */
-        Instruction::new(Opcode::ResultRow, 0, 1, 0), // unreachable (found=true)
-        /* 9 */
         Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)), // unreachable
+        /* 9 */
+        Instruction::new(Opcode::ResultRow, 0, 1, 0), // unreachable (found=true)
         // Candidate "b" (absent, insert, emit).
         /* 10 */
         Instruction::with_p4(Opcode::String8, 0, 0, 0, P4::Str("b".to_string())),
         /* 11 */
         Instruction::with_p4(Opcode::Found, 0, 14, 0, P4::Int(1)), // jump to pc 14 (Halt) if present
-        /* 12 */ Instruction::new(Opcode::ResultRow, 0, 1, 0),
-        /* 13 */
+        /* 12 */
         Instruction::with_p4(Opcode::IdxInsert, 0, 0, 0, P4::Int(1)),
+        /* 13 */ Instruction::new(Opcode::ResultRow, 0, 1, 0),
         /* 14 */ Instruction::new(Opcode::Halt, 0, 0, 0),
     ]);
     let rows = execute(&program).unwrap();

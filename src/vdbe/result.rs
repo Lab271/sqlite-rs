@@ -165,9 +165,17 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 
 /// `ResultRow`: yields the contiguous register range `[P1, P1+P2)` as
 /// one output row to the statement's caller.
+///
+/// Reuses `vm.row_scratch` (#465) across calls to amortize the output
+/// row's `Vec` allocation, and takes each register's value (leaving
+/// `Value::Null` behind) instead of cloning it — safe because every
+/// scan loop reloads its projected registers (via `Column`/`Rowid`/
+/// literal-load opcodes) before the next `ResultRow` reads them again.
 pub fn result_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = Vm::bounded_count("ResultRow", instr.p2)?;
-    let mut row = Vec::with_capacity(count);
+    let mut row = std::mem::take(vm.row_scratch());
+    row.clear();
+    row.reserve(count);
     for i in 0..count {
         let reg = instr
             .p1
@@ -176,7 +184,7 @@ pub fn result_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                 opcode: "ResultRow",
                 index: instr.p1,
             })?;
-        row.push(vm.register(reg)?.clone());
+        row.push(vm.take_register(reg)?);
     }
     vm.emit_row(row);
     Ok(Step::Next)
@@ -249,6 +257,47 @@ mod tests {
         vm.set_register(1, Value::Integer(2)).unwrap();
         result_row(&mut vm, &Instruction::new(Opcode::ResultRow, 0, 2, 0)).unwrap();
         assert_eq!(vm.rows(), &[vec![Value::Integer(1), Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn result_row_takes_registers_leaving_null_behind() {
+        // #465: ResultRow moves each register's value into the emitted
+        // row instead of cloning it, so the source register reads back
+        // as Null afterwards — safe because scan loops always reload
+        // their projected registers before the next ResultRow.
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Text("hello".to_string().into()))
+            .unwrap();
+        vm.set_register(1, Value::Integer(2)).unwrap();
+        result_row(&mut vm, &Instruction::new(Opcode::ResultRow, 0, 2, 0)).unwrap();
+        assert_eq!(
+            vm.rows(),
+            &[vec![
+                Value::Text("hello".to_string().into()),
+                Value::Integer(2)
+            ]]
+        );
+        assert_eq!(*vm.register(0).unwrap(), Value::Null);
+        assert_eq!(*vm.register(1).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn result_row_reuses_scratch_buffer_across_calls() {
+        // #465: the row_scratch buffer is handed out and returned across
+        // successive ResultRow calls without leaking or corrupting state.
+        let mut vm = Vm::new();
+        for round in 0..3i64 {
+            vm.set_register(0, Value::Integer(round)).unwrap();
+            result_row(&mut vm, &Instruction::new(Opcode::ResultRow, 0, 1, 0)).unwrap();
+        }
+        assert_eq!(
+            vm.rows(),
+            &[
+                vec![Value::Integer(0)],
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+            ]
+        );
     }
 
     #[test]
