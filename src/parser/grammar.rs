@@ -229,9 +229,7 @@ impl Parser {
             (InsertSource::DefaultValues, end)
         } else if self.eat_kw(Keyword::VALUES) {
             let first_row = self.value_row()?;
-            // `expr_list` always yields at least one element, so `last()` is safe.
-            #[allow(clippy::expect_used)]
-            let mut end = first_row.last().expect("value row is non-empty").span;
+            let mut end = first_row.last().map_or(start, |e| e.span);
             let mut rows = vec![first_row];
             while self.eat_punct(&TokenKind::Comma) {
                 let row = self.value_row()?;
@@ -2346,6 +2344,18 @@ mod tests {
         assert!(parser("INSERT INTO t WITH x AS (SELECT 1) SELECT 1")
             .parse_insert_stmt()
             .is_ok());
+    }
+
+    /// #409: the first VALUES row's end span used to come from
+    /// `first_row.last().expect(...)`, now from a safe `map_or` fallback.
+    /// Regression guard that the span computation is unchanged for the
+    /// common case.
+    #[test]
+    fn insert_values_single_row_span_ends_at_last_value_expr() {
+        let sql = "INSERT INTO t VALUES (1)";
+        let insert = parser(sql).parse_insert_stmt().unwrap();
+        // `end` comes from the last value expr's span, not the closing paren.
+        assert_eq!(insert.span.len, (sql.len() - 1) as u32);
     }
 
     /// #368 tagged MC/DC vector (obligation `grammar_438`,
