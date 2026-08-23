@@ -8,7 +8,7 @@ use super::*;
 /// The access strategy #243's join-level planner picked for a table
 /// binding, in place of an unconditional `Rewind`/`Next` full scan --
 /// see [`choose_join_access`].
-pub(super) enum JoinAccess {
+pub(in crate::codegen) enum JoinAccess {
     /// The `ON` equality's other side is a rowid reference (the
     /// `rowid`/`_rowid_`/`oid` keywords, or the table's `INTEGER PRIMARY
     /// KEY` alias column): a `SeekRowid` point lookup, generalizing
@@ -65,7 +65,7 @@ pub(super) fn expr_is_safe_join_probe(expr: &Expr, prior_bindings: &[TableBindin
 /// considered -- a non-unique index could match more than one row, which
 /// this seek-once codegen shape can't express (see the module doc's
 /// LEFT JOIN "matched" flag: it assumes at most one inner-side match).
-pub(super) fn choose_join_access(
+pub(in crate::codegen) fn choose_join_access(
     binding: &TableBinding,
     on_expr: &Expr,
     prior_bindings: &[TableBinding],
