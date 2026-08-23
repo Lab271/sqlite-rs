@@ -55,10 +55,25 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
 /// Walks a record payload's header once, returning each column's serial
 /// type paired with the byte offset (into `payload`) of that column's
 /// body — never decodes any column body. This is the header-walk logic
-/// [`decode_column`] and, in `src/vdbe/cursor.rs`, the row header cache
-/// (#458) both build on: parse the header once, then look up as many
-/// columns as needed by index without re-walking it.
+/// [`decode_column`] builds on; [`parse_header_into`] is the same walk
+/// for a caller (the row header cache, #458, in `src/vdbe/cursor.rs`)
+/// that wants to reuse an existing `Vec`'s allocation across rows rather
+/// than pay a fresh allocation per call.
 pub(crate) fn parse_header(payload: &[u8]) -> Result<Vec<(u64, usize)>, RecordError> {
+    let mut entries = Vec::new();
+    parse_header_into(payload, &mut entries)?;
+    Ok(entries)
+}
+
+/// Like [`parse_header`], but appends into a caller-supplied (cleared)
+/// `Vec` instead of allocating a new one — lets a per-cursor cache reuse
+/// its backing allocation across every row it's repositioned onto,
+/// rather than allocating and freeing a `Vec` per row.
+pub(crate) fn parse_header_into(
+    payload: &[u8],
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<(), RecordError> {
+    entries.clear();
     let (header_len, n) = decode_varint_at(payload, 0)?;
     let header_len = header_len as usize;
     if header_len < n {
@@ -70,7 +85,6 @@ pub(crate) fn parse_header(payload: &[u8]) -> Result<Vec<(u64, usize)>, RecordEr
 
     let mut pos = n;
     let mut body_pos = header_len;
-    let mut entries = Vec::new();
     while pos < header_len {
         let (serial_type, len) = decode_varint_at(payload, pos)?;
         if pos.saturating_add(len) > header_len {
@@ -83,7 +97,7 @@ pub(crate) fn parse_header(payload: &[u8]) -> Result<Vec<(u64, usize)>, RecordEr
         entries.push((serial_type, body_pos));
         body_pos = body_pos.saturating_add(serial_type_len(serial_type));
     }
-    Ok(entries)
+    Ok(())
 }
 
 /// Decodes only column `idx` of a record's payload — the header entries

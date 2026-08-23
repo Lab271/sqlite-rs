@@ -51,8 +51,8 @@ use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor, TableRow};
 use crate::record::{
-    decode_column, decode_record, decode_serial_value, encode_record, parse_header, TextEncoding,
-    Value,
+    decode_column, decode_record, decode_serial_value, encode_record, parse_header_into,
+    TextEncoding, Value,
 };
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
@@ -129,17 +129,24 @@ pub(crate) struct TableCursorState {
     root_page: u32,
     /// `current`'s parsed header (#458), computed lazily by the first
     /// `Column` read of a row and reused by every later `Column` read of
-    /// the *same* row — reset to `None` (never left stale) by
+    /// the *same* row — invalidated (never left stale) by
     /// [`Self::set_current`], the only way `current` is ever reassigned.
-    header_cache: Option<RowHeaderCache>,
+    /// Never itself replaced with a fresh `RowHeaderCache`, so its
+    /// backing `Vec` allocation is reused across every row this cursor
+    /// visits rather than allocated and freed per row (see its own doc —
+    /// that per-row alloc/free was a measured *regression* on the
+    /// `full_scan` bench versus no caching at all before this was
+    /// switched from `Option<RowHeaderCache>` to this always-present,
+    /// reuse-the-allocation shape).
+    header_cache: RowHeaderCache,
 }
 
 impl TableCursorState {
-    /// The sole setter for `current` — always paired with clearing
+    /// The sole setter for `current` — always paired with invalidating
     /// `header_cache`, so a cache can never survive its row.
     fn set_current(&mut self, row: Option<TableRow>) {
         self.current = row;
-        self.header_cache = None;
+        self.header_cache.invalidate();
     }
 }
 
@@ -157,16 +164,35 @@ impl std::fmt::Debug for TableCursorState {
 /// payload. Lets repeated `Column` opcodes against the same row look up
 /// an offset directly instead of re-walking the header from byte 0 every
 /// time.
-#[derive(Debug)]
+///
+/// `valid` (rather than an `Option<RowHeaderCache>` on the owning cursor
+/// state) is deliberate: a fresh `Vec` per row — the first, simpler
+/// implementation of this cache — measured *slower* than no cache at all
+/// on the `full_scan` bench (#458), because it traded a cheap per-column
+/// header re-walk for a per-row heap allocation. Keeping one `RowHeaderCache`
+/// (and its `Vec`'s capacity) alive for the cursor's whole lifetime and
+/// just marking it stale on `set_current` avoids that churn — `ensure`
+/// reuses the existing allocation via `Vec::clear` instead of
+/// reallocating.
+#[derive(Debug, Default)]
 struct RowHeaderCache {
     entries: Vec<(u64, usize)>,
+    valid: bool,
 }
 
 impl RowHeaderCache {
-    fn parse(payload: &[u8]) -> Result<Self, crate::record::RecordError> {
-        Ok(Self {
-            entries: parse_header(payload)?,
-        })
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    /// Parses `payload`'s header into `self.entries` if not already
+    /// valid for the current row; a no-op otherwise.
+    fn ensure(&mut self, payload: &[u8]) -> Result<(), crate::record::RecordError> {
+        if !self.valid {
+            parse_header_into(payload, &mut self.entries)?;
+            self.valid = true;
+        }
+        Ok(())
     }
 
     fn column(
@@ -175,6 +201,7 @@ impl RowHeaderCache {
         idx: usize,
         encoding: TextEncoding,
     ) -> Result<Value, crate::record::RecordError> {
+        debug_assert!(self.valid, "column() called before ensure()");
         match self.entries.get(idx) {
             Some(&(serial_type, offset)) => {
                 decode_serial_value(serial_type, payload, offset, encoding).map(|(v, _)| v)
@@ -199,8 +226,8 @@ pub(crate) struct IndexReadState {
     cursor: IndexCursor<Rc<dyn crate::vfs::PageSource>>,
     current: Option<crate::btree::IndexRow>,
     /// Same role as [`TableCursorState::header_cache`] (#458): `current`'s
-    /// parsed header, cleared whenever `current` is reassigned.
-    header_cache: Option<RowHeaderCache>,
+    /// parsed header, invalidated whenever `current` is reassigned.
+    header_cache: RowHeaderCache,
 }
 
 impl IndexReadState {
@@ -208,7 +235,7 @@ impl IndexReadState {
     /// [`TableCursorState::set_current`]'s doc.
     fn set_current(&mut self, row: Option<crate::btree::IndexRow>) {
         self.current = row;
-        self.header_cache = None;
+        self.header_cache.invalidate();
     }
 }
 
@@ -391,7 +418,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                 root_page,
                 cursor,
                 current: None,
-                header_cache: None,
+                header_cache: RowHeaderCache::default(),
             }),
         )?;
         return Ok(Step::Next);
@@ -404,7 +431,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             current: None,
             forced_null: false,
             root_page,
-            header_cache: None,
+            header_cache: RowHeaderCache::default(),
         }),
     )?;
     Ok(Step::Next)
@@ -439,7 +466,7 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             current: None,
             forced_null: false,
             root_page,
-            header_cache: None,
+            header_cache: RowHeaderCache::default(),
         }),
     )?;
     Ok(Step::Next)
@@ -660,23 +687,20 @@ fn read_row_column(
                     reason: "cursor has no current row".to_string(),
                 })?
                 .payload;
-            let cache = if let Some(cache) = &state.header_cache {
-                cache
-            } else {
-                let parsed = RowHeaderCache::parse(payload).map_err(|e| {
-                    ExecError::MalformedInstruction {
-                        opcode,
-                        reason: e.to_string(),
-                    }
-                })?;
-                state.header_cache.insert(parsed)
-            };
-            cache.column(payload, idx, TextEncoding::Utf8).map_err(|e| {
-                ExecError::MalformedInstruction {
+            state
+                .header_cache
+                .ensure(payload)
+                .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
-                }
-            })
+                })?;
+            state
+                .header_cache
+                .column(payload, idx, TextEncoding::Utf8)
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode,
+                    reason: e.to_string(),
+                })
         }
         CursorSlot::IndexRead(state) => {
             let payload = &state
@@ -687,23 +711,20 @@ fn read_row_column(
                     reason: "cursor has no current row".to_string(),
                 })?
                 .payload;
-            let cache = if let Some(cache) = &state.header_cache {
-                cache
-            } else {
-                let parsed = RowHeaderCache::parse(payload).map_err(|e| {
-                    ExecError::MalformedInstruction {
-                        opcode,
-                        reason: e.to_string(),
-                    }
-                })?;
-                state.header_cache.insert(parsed)
-            };
-            cache.column(payload, idx, TextEncoding::Utf8).map_err(|e| {
-                ExecError::MalformedInstruction {
+            state
+                .header_cache
+                .ensure(payload)
+                .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
-                }
-            })
+                })?;
+            state
+                .header_cache
+                .column(payload, idx, TextEncoding::Utf8)
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode,
+                    reason: e.to_string(),
+                })
         }
         _ => unreachable!("filtered to Table/IndexRead above"),
     }
