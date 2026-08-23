@@ -90,8 +90,7 @@ where
             em.place(done_label);
         }
         Some(where_expr) => {
-            let Some((lhs, rhs)) =
-                super::limit_scan::top_level_equality_operands(where_expr)
+            let Some((lhs, rhs)) = super::limit_scan::top_level_equality_operands(where_expr)
             else {
                 return Ok(false);
             };

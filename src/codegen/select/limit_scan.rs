@@ -215,19 +215,31 @@ fn where_col(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// A [`find_covering_index`] match: which of `schema.indexes` was
+/// matched (by position, not reference — see that function's doc for
+/// why) plus a clone of the probe operand expression.
+pub(super) struct CoveringIndexMatch {
+    pub(super) index_position: usize,
+    pub(super) operand: Expr,
+}
+
 /// Finds a `UNIQUE` index of `schema` usable as a covering-index scan
 /// (#444) for `select`: `select.where_clause` must be a single
 /// top-level equality between the index's leading column and a
 /// literal/bind-parameter operand, and every `SELECT`-list column (bare
 /// columns only — see [`bare_result_column_names`]) must itself be
-/// carried by that index. Returns the matched index plus the probe
-/// operand expression. Shared by [`try_compile_covering_index_scan`]
+/// carried by that index. Returns the matched index's position in
+/// `schema.indexes` plus the probe operand expression (owned, not
+/// borrowed: a function taking two independent `&` parameters can't
+/// return a value borrowing from either one without a named lifetime
+/// tying them together, which the qualified subset forbids — see
+/// `tools/mvl-limit`). Shared by [`try_compile_covering_index_scan`]
 /// (which actually emits the scan) and `eqp.rs` (which only reports it),
 /// so the two can never drift apart.
-pub(super) fn find_covering_index<'a>(
-    schema: &'a TableSchema,
-    select: &'a Select,
-) -> Option<(&'a IndexSchema, &'a Expr)> {
+pub(super) fn find_covering_index(
+    schema: &TableSchema,
+    select: &Select,
+) -> Option<CoveringIndexMatch> {
     if matches!(select.distinct, Some(Distinctness::Distinct)) {
         return None;
     }
@@ -246,13 +258,14 @@ pub(super) fn find_covering_index<'a>(
     if !is_supported_operand {
         return None;
     }
-    let index = schema.indexes.iter().find(|idx| {
+    let index_position = schema.indexes.iter().position(|idx| {
         idx.unique
             && idx
                 .columns
                 .first()
                 .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
     })?;
+    let index = schema.indexes.get(index_position)?;
     let result_names = bare_result_column_names(select)?;
     let covers = |name: &str| {
         index
@@ -263,7 +276,10 @@ pub(super) fn find_covering_index<'a>(
     if !result_names.iter().all(|n| covers(n)) {
         return None;
     }
-    Some((index, operand))
+    Some(CoveringIndexMatch {
+        index_position,
+        operand: operand.clone(),
+    })
 }
 
 /// Emits an index-only ("covering index") scan (#444) in place of
@@ -289,9 +305,17 @@ pub(super) fn try_compile_covering_index_scan<F>(
 where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
-    let Some((index, operand)) = find_covering_index(schema, select) else {
+    let Some(CoveringIndexMatch {
+        index_position,
+        operand,
+    }) = find_covering_index(schema, select)
+    else {
         return Ok(false);
     };
+    let Some(index) = schema.indexes.get(index_position) else {
+        return Ok(false);
+    };
+    let operand = &operand;
     // Re-derived rather than threaded through `find_covering_index`'s
     // return value: `bare_result_column_names` is infallible once
     // `find_covering_index` has already returned `Some`.

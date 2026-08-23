@@ -581,10 +581,13 @@ fn read_row_column(
             .cloned()
             .unwrap_or(Value::Null)),
         CursorSlot::IndexRead(state) => {
-            let row = state.current.as_ref().ok_or(ExecError::MalformedInstruction {
-                opcode,
-                reason: "cursor has no current row".to_string(),
-            })?;
+            let row = state
+                .current
+                .as_ref()
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                })?;
             decode_column(&row.payload, idx, TextEncoding::Utf8).map_err(|e| {
                 ExecError::MalformedInstruction {
                     opcode,

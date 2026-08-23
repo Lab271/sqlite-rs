@@ -131,8 +131,13 @@ pub fn explain_query_plan(
         } else {
             None
         };
-        let detail = match (access, covering) {
-            (_, Some((index, _))) => format!(
+        let detail = match (
+            access,
+            covering
+                .as_ref()
+                .and_then(|m| binding.schema.indexes.get(m.index_position)),
+        ) {
+            (_, Some(index)) => format!(
                 "SEARCH {} USING COVERING INDEX {} ({}=?)",
                 eqp_display_name(table_ref),
                 index.name,
