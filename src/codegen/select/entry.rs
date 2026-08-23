@@ -4,7 +4,7 @@ use super::aggregate::{
 use super::index_scan::try_compile_index_ordered_scan;
 use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
 use super::order_by::resolve_order_by;
-use super::projection::{compile_row_values, result_columns};
+use super::projection::{compile_row_values, emit_dedup_check, result_columns};
 use super::*;
 use crate::codegen::index_maintenance::valid_table_root_page;
 /// Compiles `select` against `schema` (the resolved `FROM` table) into
@@ -354,7 +354,7 @@ pub(super) fn arm_as_select(arm: &CompoundSelect) -> Select {
 /// (not just that arm's own) is routed through one ephemeral index
 /// opened once for the whole statement, reusing the exact
 /// `Found`/`IdxInsert` dedup check `SELECT DISTINCT` already performs
-/// (`projection::emit_dedup_guard`) — a row already seen from an
+/// (`projection::emit_dedup_check`) — a row already seen from an
 /// earlier arm is silently dropped instead of re-emitted. Mixing
 /// `UNION` and `UNION ALL` arms in one statement (rare in practice) is
 /// simplified to "any `UNION` arm dedups the whole result", rather
@@ -427,22 +427,8 @@ pub fn compile_select_compound(
 
     let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, reg_first: i32, count: i32| {
         if has_union {
-            let found_addr = em.emit(Instruction::with_p4(
-                Opcode::Found,
-                dedup_cursor,
-                0,
-                reg_first,
-                P4::Int(i64::from(count)),
-            ));
             let skip = em.new_label();
-            em.patch_p2(found_addr, skip);
-            em.emit(Instruction::with_p4(
-                Opcode::IdxInsert,
-                dedup_cursor,
-                reg_first,
-                0,
-                P4::Int(i64::from(count)),
-            ));
+            emit_dedup_check(em, dedup_cursor, reg_first, count, skip);
             em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
             em.place(skip);
         } else {
