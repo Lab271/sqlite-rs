@@ -16,7 +16,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
-use sqlite_rs::record::{decode_record, decode_varint, TextEncoding, Value};
+use sqlite_rs::record::{decode_column, decode_record, decode_varint, TextEncoding, Value};
 
 /// Minimal-length varint encoder mirroring `decode_varint`'s bit layout
 /// (7 bits/byte, big-endian, high-bit continuation flag; the 9-byte
@@ -201,6 +201,41 @@ proptest! {
         prop_assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
             Ok(vec![Value::Text(s.clone().into())])
+        );
+    }
+
+    /// `decode_column` (#439) skips decoding bodies before the requested
+    /// index instead of decoding the whole record; this pins it against
+    /// `decode_record` — decoding column `idx` alone must equal the
+    /// value `decode_record` returns at that same index, for every
+    /// index, across a mix of serial types (fixed-width ints, a float,
+    /// a blob, and text) so no combination of "skip this column's
+    /// body/don't skip it" offset math silently drifts from the
+    /// full-record decoder.
+    #[test]
+    fn prop_decode_column_matches_decode_record(
+        i in i64::MIN..=i64::MAX,
+        r in any::<u64>(),
+        blob in prop::collection::vec(any::<u8>(), 0..50),
+        s in ".{0,50}",
+    ) {
+        let text_bytes = s.as_bytes();
+        let real = f64::from_bits(r);
+        let payload = record_bytes(&[
+            (6, &i.to_be_bytes()),
+            (7, &real.to_be_bytes()),
+            (0, &[]),
+            (12 + 2 * blob.len() as u64, &blob),
+            (13 + 2 * text_bytes.len() as u64, text_bytes),
+        ]);
+        let full = decode_record(&payload, TextEncoding::Utf8).unwrap();
+        for (idx, expected) in full.iter().enumerate() {
+            prop_assert_eq!(decode_column(&payload, idx, TextEncoding::Utf8), Ok(expected.clone()));
+        }
+        // One past the last column is out of range on both decoders.
+        prop_assert_eq!(
+            decode_column(&payload, full.len(), TextEncoding::Utf8),
+            Ok(Value::Null)
         );
     }
 }

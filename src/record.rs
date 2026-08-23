@@ -8,7 +8,7 @@ mod error;
 mod value;
 mod varint;
 
-pub use decode::decode_record;
+pub use decode::{decode_column, decode_record};
 pub use encode::encode_record;
 pub(crate) use encode::encode_varint;
 pub use error::RecordError;

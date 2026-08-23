@@ -50,6 +50,68 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
     Ok(values)
 }
 
+/// Decodes only column `idx` of a record's payload — the header entries
+/// (serial types) for columns before `idx` are still walked to compute
+/// their body sizes (needed to find `idx`'s offset), but their bodies are
+/// never decoded/allocated, unlike [`decode_record`]. Used by the VDBE's
+/// `Column` opcode (#439) so a WHERE clause that rejects a row never pays
+/// to decode the row's other columns. Returns `Value::Null` for an
+/// out-of-range `idx`, matching `decode_record(..)[idx]`'s
+/// `unwrap_or(Value::Null)` convention at call sites.
+pub fn decode_column(
+    payload: &[u8],
+    idx: usize,
+    encoding: TextEncoding,
+) -> Result<Value, RecordError> {
+    let (header_len, n) = decode_varint_at(payload, 0)?;
+    let header_len = header_len as usize;
+    if header_len < n {
+        return Err(RecordError::HeaderTooShort {
+            declared: header_len,
+            varint_len: n,
+        });
+    }
+
+    let mut pos = n;
+    let mut body_pos = header_len;
+    let mut col = 0;
+    while pos < header_len {
+        let (serial_type, len) = decode_varint_at(payload, pos)?;
+        if pos.saturating_add(len) > header_len {
+            return Err(RecordError::HeaderOverrun {
+                offset: pos,
+                header_len,
+            });
+        }
+        pos = pos.saturating_add(len);
+        if col == idx {
+            let (value, _) = decode_serial_value(serial_type, payload, body_pos, encoding)?;
+            return Ok(value);
+        }
+        body_pos = body_pos.saturating_add(serial_type_len(serial_type));
+        col = col.saturating_add(1);
+    }
+    Ok(Value::Null)
+}
+
+/// Number of body bytes a serial type occupies, without decoding the
+/// value it holds — lets [`decode_column`] skip past columns before the
+/// requested index using only the (cheap) header entries, never touching
+/// their bodies. Mirrors the lengths [`decode_serial_value`] returns.
+fn serial_type_len(serial_type: u64) -> usize {
+    match serial_type {
+        0 | 8 | 9 | 10 | 11 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => 6,
+        6 | 7 => 8,
+        n if n % 2 == 0 => (n.wrapping_sub(12) / 2) as usize,
+        n => (n.wrapping_sub(13) / 2) as usize,
+    }
+}
+
 /// `decode_varint`, but against `buf` starting at absolute offset `pos`,
 /// with errors reporting the absolute offset rather than one relative to
 /// a sub-slice.
@@ -475,6 +537,44 @@ mod tests {
         assert_eq!(
             decode_record(&payload, TextEncoding::Utf8),
             Err(RecordError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn decode_column_matches_decode_record_at_every_index() {
+        let payload = record_bytes(&[
+            (1, &[42]),
+            (0, &[]),
+            (13 + 2 * 5, b"hello"),
+            (7, &2.5f64.to_be_bytes()),
+        ]);
+        let full = decode_record(&payload, TextEncoding::Utf8).unwrap();
+        for (idx, expected) in full.iter().enumerate() {
+            assert_eq!(
+                decode_column(&payload, idx, TextEncoding::Utf8),
+                Ok(expected.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn decode_column_out_of_range_is_null() {
+        let payload = record_bytes(&[(1, &[42])]);
+        assert_eq!(
+            decode_column(&payload, 5, TextEncoding::Utf8),
+            Ok(Value::Null)
+        );
+    }
+
+    #[test]
+    fn decode_column_header_errors_still_surface() {
+        let payload = vec![0x80, 0x00]; // header_len = 0 via 2-byte varint
+        assert_eq!(
+            decode_column(&payload, 0, TextEncoding::Utf8),
+            Err(RecordError::HeaderTooShort {
+                declared: 0,
+                varint_len: 2
+            })
         );
     }
 
