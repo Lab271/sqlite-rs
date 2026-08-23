@@ -188,6 +188,9 @@ harness = false
 [package.metadata.oracle]
 version = "3.53.4"
 
+[profile.bench]
+debug = true
+
 [lints.clippy]
 let_underscore_must_use = "deny"
 unwrap_used = "deny"
