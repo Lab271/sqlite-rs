@@ -143,6 +143,23 @@ pub trait Vfs {
         let _ = (path, mx_frame);
         Ok(())
     }
+
+    /// Opens a persistent handle to `path`'s `-shm` companion file, meant
+    /// to be cached by the caller (`Pager`, #437) for its connection's
+    /// whole lifetime rather than reopened on every commit. Unlike
+    /// [`Vfs::claim_wal_write_lock`]/[`Vfs::publish_wal_mx_frame`], which
+    /// each do their own fresh `open()` and only exist for a single call,
+    /// this handle's own `claim_write_lock`/`release_write_lock`/
+    /// `publish_mx_frame` methods reuse the same already-open fd across
+    /// every subsequent commit — spike 011 (`tests/spike/011_wal_performance`)
+    /// found repeated per-commit `open()`+`fstat` on `-shm` to be the
+    /// dominant cost in the WAL write path. Default: `Ok(None)` — no real
+    /// `-shm` file to cache a handle to (e.g. [`MemoryVfs`]); callers fall
+    /// back to the per-call methods above in that case.
+    fn open_wal_shm(&self, path: &Path) -> Result<Option<AnyWalShm>> {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 /// Builds the path of a companion file (e.g. `-wal`, `-journal`) by
@@ -294,6 +311,10 @@ impl AnyVfs {
     pub fn publish_wal_mx_frame(&self, path: &Path, mx_frame: u32) -> Result<()> {
         self.0.publish_wal_mx_frame(path, mx_frame)
     }
+
+    pub fn open_wal_shm(&self, path: &Path) -> Result<Option<AnyWalShm>> {
+        self.0.open_wal_shm(path)
+    }
 }
 
 /// A held file lock, released when dropped. Opaque on purpose: it hides
@@ -382,6 +403,66 @@ trait SharedLockGuard {
     fn set_level(&mut self, _level: lock::LockLevel) -> Result<()> {
         Ok(())
     }
+}
+
+/// A persistent handle to a `-shm` companion file, returned by
+/// [`Vfs::open_wal_shm`] (#437) and cached by [`crate::pager::Pager`] for
+/// its whole connection lifetime — see that method's doc comment for why.
+/// Erases the concrete backend type behind a boxed trait object, same
+/// pattern as [`FileLock`]/[`AnyVfsFile`] just above: this module is the
+/// designated `dyn` boundary, so `Pager` never has to name `dyn` itself.
+pub struct AnyWalShm(Box<dyn WalShm>);
+
+impl std::fmt::Debug for AnyWalShm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AnyWalShm(..)")
+    }
+}
+
+impl From<Box<dyn WalShm>> for AnyWalShm {
+    fn from(handle: Box<dyn WalShm>) -> Self {
+        AnyWalShm(handle)
+    }
+}
+
+impl AnyWalShm {
+    /// Claims the `WAL_WRITE_LOCK` byte on this handle's already-open fd
+    /// (no fresh `open()`/`fstat`, unlike [`Vfs::claim_wal_write_lock`]).
+    /// Pairs with [`AnyWalShm::release_write_lock`], which the caller must
+    /// call even on an early `?` return — [`crate::pager::Pager`] does
+    /// this via a small `Drop`-based guard, the same shape
+    /// [`FileLock`]'s own callers already use elsewhere.
+    pub(crate) fn claim_write_lock(&self) -> Result<()> {
+        self.0.claim_write_lock()
+    }
+
+    /// Releases the `WAL_WRITE_LOCK` byte claimed by
+    /// [`AnyWalShm::claim_write_lock`]. Idempotent-in-practice (unlocking
+    /// an already-unlocked byte range succeeds as a no-op), but callers
+    /// should still pair each claim with exactly one release.
+    pub(crate) fn release_write_lock(&self) -> Result<()> {
+        self.0.release_write_lock()
+    }
+
+    /// Publishes `mx_frame` through this same held handle's fd, instead
+    /// of [`Vfs::publish_wal_mx_frame`] reopening `-shm` a second time.
+    pub(crate) fn publish_mx_frame(&self, mx_frame: u32) -> Result<()> {
+        self.0.publish_mx_frame(mx_frame)
+    }
+}
+
+/// Implemented next to each [`VfsFile`] backend's real `-shm` handle
+/// (e.g. the Unix backend's real `fcntl`-lockable fd) — see
+/// [`Vfs::open_wal_shm`].
+trait WalShm {
+    /// See [`AnyWalShm::claim_write_lock`].
+    fn claim_write_lock(&self) -> Result<()>;
+
+    /// See [`AnyWalShm::release_write_lock`].
+    fn release_write_lock(&self) -> Result<()>;
+
+    /// See [`AnyWalShm::publish_mx_frame`].
+    fn publish_mx_frame(&self, mx_frame: u32) -> Result<()>;
 }
 
 #[cfg(test)]

@@ -112,6 +112,16 @@ impl Vfs for UnixVfs {
         }
         shm::publish_mx_frame(&shm_path, mx_frame).map_err(|source| to_vfs_error(&shm_path, source))
     }
+
+    fn open_wal_shm(&self, path: &Path) -> Result<Option<crate::vfs::AnyWalShm>> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(None);
+        }
+        shm::open_wal_shm(&shm_path)
+            .map(|handle| Some(crate::vfs::AnyWalShm::from(Box::new(handle) as Box<dyn crate::vfs::WalShm>)))
+            .map_err(|source| to_vfs_error(&shm_path, source))
+    }
 }
 
 /// A single fd, shared (via `Rc`) between this file's I/O and any

@@ -41,7 +41,7 @@ use std::path::Path;
 use nix::libc::{self, off_t};
 
 use super::lock::fcntl_lock;
-use super::SharedLockGuard;
+use super::{SharedLockGuard, VfsError};
 
 const MX_FRAME_OFFSET: u64 = 16;
 const READ_MARK_BASE_OFFSET: u64 = 100;
@@ -114,6 +114,67 @@ pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> 
     validate_shm_len(&file)?;
     fcntl_lock(&file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
     Ok(WalWriteLock { file })
+}
+
+/// A persistent `-shm` fd for [`super::Vfs::open_wal_shm`] (#437): opened
+/// and validated once, then reused across every subsequent
+/// `claim_write_lock`/`release_write_lock`/`publish_mx_frame` call
+/// instead of [`claim_wal_write_lock`]/[`publish_mx_frame`] each doing
+/// their own fresh `open()` per call. Unlike [`WalWriteLock`], holding
+/// this does not itself mean the write lock is held — `claim_write_lock`/
+/// `release_write_lock` toggle the same `fcntl` byte on this one fd
+/// explicitly, once per commit, instead of the lock's lifetime being
+/// tied to a value's `Drop`.
+pub(crate) struct UnixWalShm {
+    file: File,
+    path: std::path::PathBuf,
+}
+
+fn to_shm_vfs_error(path: &Path, source: io::Error) -> VfsError {
+    VfsError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+/// Like [`to_shm_vfs_error`], but maps `fcntl(F_SETLK)`'s lock-contention
+/// errno values to [`VfsError::Locked`] — mirrors `unix.rs`'s private
+/// `to_lock_error` (duplicated here rather than shared across modules,
+/// since both are a handful of lines tied to their own module's error
+/// paths).
+fn to_shm_lock_error(path: &Path, source: io::Error) -> VfsError {
+    match source.raw_os_error() {
+        Some(libc::EAGAIN) | Some(libc::EACCES) => VfsError::Locked {
+            path: path.display().to_string(),
+        },
+        _ => to_shm_vfs_error(path, source),
+    }
+}
+
+impl super::WalShm for UnixWalShm {
+    fn claim_write_lock(&self) -> super::Result<()> {
+        fcntl_lock(&self.file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)
+            .map_err(|source| to_shm_lock_error(&self.path, source))
+    }
+
+    fn release_write_lock(&self) -> super::Result<()> {
+        fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1)
+            .map_err(|source| to_shm_vfs_error(&self.path, source))
+    }
+
+    fn publish_mx_frame(&self, mx_frame: u32) -> super::Result<()> {
+        write_u32_at(&self.file, MX_FRAME_OFFSET, mx_frame)
+            .map_err(|source| to_shm_vfs_error(&self.path, source))
+    }
+}
+
+pub(crate) fn open_wal_shm(shm_path: &Path) -> io::Result<UnixWalShm> {
+    let file = open_shm(shm_path, true)?;
+    validate_shm_len(&file)?;
+    Ok(UnixWalShm {
+        file,
+        path: shm_path.to_path_buf(),
+    })
 }
 
 /// Opens `-shm` at `shm_path` with `O_NOFOLLOW`, so a symlink planted at
