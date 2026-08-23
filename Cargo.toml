@@ -9,18 +9,6 @@ license = "Apache-2.0"
 nix = { version = "0.31.3", features = ["fs"] }
 thiserror = "1"
 
-# Spike #371, 3rd retry: rust-refine proof-of-concept on header.rs. Not
-# a published crate — pinned to the same mvl-rust revision CI's
-# mvl-limit gate already builds from GitHub (MVL_RUST_REV in
-# .github/workflows/ci.yml), not a local filesystem path (#374 merged
-# that by mistake — a path dependency only resolves on the machine that
-# happens to have that exact checkout). Bumped past v0.7.0, which ships
-# mvl-lang/mvl-rust#94 (inject a u32 param's implicit >= 0 into Γ), #95
-# (bind self.field/param.field as a solver variable), and #97
-# (constant-fold known-shape Result/Option methods at L1) — all three
-# native-solver gaps this spike found and reported.
-mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "c3ebad8e5d85a9302b572dbd9a2f34c1c7d66d06", version = "0.7.0" }
-
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a
 # `#[[test]]` itself — spawned via `Command`/`CARGO_BIN_EXE_lock_probe`.
