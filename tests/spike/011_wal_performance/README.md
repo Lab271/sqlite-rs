@@ -1,4 +1,4 @@
-# Spike 010: WAL Performance Regression
+# Spike 011: WAL Performance Regression
 
 **Issue:** #438 (investigation), #437 (bug)
 

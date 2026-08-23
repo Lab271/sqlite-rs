@@ -1,4 +1,4 @@
-# Spike 010: WAL Performance Investigation
+# Spike 011: WAL Performance Investigation
 # Usage: make bench | make profile-journal | make profile-wal | make compare
 
 BENCH_V6 = cargo bench --bench v6
