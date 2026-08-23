@@ -57,7 +57,7 @@ Follows the mvl convention: every requirement carries `**Implementation:**` and 
 
 - **Model** — three cross-checked sources: crate version (Cargo.toml) → V-block/phase/epic via the one-minor-per-phase policy; block names and count from [plan.md](plan.md)'s value-blocks table; grammar-model rule counts per V-block from `grammar/sqlite.ebnf` (a grammar tag missing from plan.md is drift).
 - **Traceability** — *Completeness (S→P):* does each requirement's implementation file exist? *Coverage (E→P):* scenario-weighted — a requirement with 5 scenarios and 1 test link scores 1/5, not 100%.
-- **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov). CI enforces a 75% line-coverage gate on every push/PR (`make coverage-gate`) and posts the per-file report as a sticky PR comment, so this evidence is refreshed and visible on every PR rather than only available locally (#20).
+- **Evidence** — corpus fixtures present; cached line coverage (`make coverage` via cargo-llvm-cov). CI enforces an 80% line-coverage gate on every push/PR (`make coverage-gate`) and posts the per-file report as a sticky PR comment, so this evidence is refreshed and visible on every PR rather than only available locally (#20).
 - **Verification** — `cargo test` / the oracle harness (not measured by the dashboard).
 
 Requirements marked `(planned)` after the Implementation link describe future tiers and are excluded from scoring; specs on the current epic's critical path are active. As V-blocks progress, planned requirements flip to active and the dashboard tracks completion.
@@ -65,9 +65,9 @@ Requirements marked `(planned)` after the Implementation link describe future ti
 ```bash
 make assurance              # dashboard
 make assurance VERBOSE=true # per-requirement detail
-make assurance-gate         # CI gate at 75%
+make assurance-gate         # CI gate at 80%
 make coverage               # line coverage report (cargo-llvm-cov)
-make coverage-gate          # CI gate: fail if line coverage < 75%
+make coverage-gate          # CI gate: fail if line coverage < 80%
 make traceability           # fast path, no I/O
 ```
 
