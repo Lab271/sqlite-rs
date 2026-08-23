@@ -277,13 +277,76 @@ candidate to upgrade from "comment asserting an invariant" to
 linear enough for L1–L4 and not itself blocked by a `self.field`
 projection needing the same extraction treatment.
 
-The field-projection gap (self.field never binds as a Γ variable) and
-the missing-unsigned-bound gap remain real, filed as informal findings
-(not yet upstream issues) — a natural next step if this pattern gets
-adopted more broadly, since fixing either would remove the need for the
-extraction workaround.
+The field-projection gap and the missing-unsigned-bound gap were filed
+upstream as [mvl-lang/mvl-rust#94] and [mvl-lang/mvl-rust#95]; a third,
+the method-call-on-known-shape-constructor gap from `parse`'s `ensures`,
+as [mvl-lang/mvl-rust#97]. All three closed same-day — see the fourth
+pass below.
+
+## Fourth pass: retest against mvl-rust v0.7.0 (#94/#95/#97)
+
+Bumped the pin again — `Cargo.toml`'s `mvl` and CI's `MVL_RUST_REV`,
+both to `c3ebad8e` (v0.7.0) — and re-ran everything, verifying each fix
+against a real change rather than assuming the closed-issue title meant
+it fully worked as hoped:
+
+- **#94 (implicit `u32` lower bound) confirmed fixed, and simplified the
+  code.** Removed the explicit `reserved_space >= 0 && page_size >= 0`
+  clauses from `compute_usable_page_size`'s `requires` — the return-site
+  `ensures` still closes at **L4**. The `unused_comparisons`/
+  `clippy::absurd_extreme_comparisons` allows those clauses needed are
+  gone too, since nothing states the now-redundant comparison anymore.
+- **#95 (bind `self.field` as a solver variable) confirmed fixed, but
+  narrower than hoped.** A minimal `self.page_size`/`self.reserved_space`
+  repro (both fields already `u32`, no cast) now closes at L4 — but only
+  with the `>= 0` bounds restated explicitly; #94's automatic injection
+  doesn't extend to field projections, only bare parameters, confirmed
+  by removing them and watching it fall back to `runtime`. More
+  importantly for `header.rs` specifically: **a cast blocks it again**.
+  `self.reserved_space as u32` (needed here since the field is `u8`) put
+  the obligation straight back at `runtime`, with or without #95 — and
+  the identical cast on a bare parameter (`reserved_space as u32` instead
+  of `self.reserved_space as u32`) reproduces the exact same block, so
+  this is a cast-expression gap, not specifically a field-projection
+  one. Net effect for this file: `usable_page_size` still can't be
+  annotated directly on `&self` and stays a thin wrapper around the free
+  `compute_usable_page_size`, which now needs no `>= 0` restatement
+  thanks to #94.
+- **#97 (constant-fold `Err(x).is_err()` etc. at L1) confirmed fixed in
+  isolation, but doesn't reach `parse`'s actual predicate.** A standalone
+  `#[mvl::ensures(result.is_err())]` on a function returning a literal
+  `Err(...)` now folds to L1/L2, as designed. But `parse`'s real
+  predicate is `result.is_err() || <rest>`, and confirmed directly: the
+  fold doesn't propagate through `||` to short-circuit the combined
+  expression to `true` when `<rest>` still contains unsupported
+  constructs (`.unwrap()`, `.is_power_of_two()`) — `#97`'s own scope
+  note says as much (pure syntactic pattern-match, not a boolean
+  simplifier). So every one of `parse`'s 8 return-site obligations is
+  unaffected and stays at `runtime`, unchanged from the third pass.
+
+`unit_header`'s 5 tests, `cargo fmt --check`, and
+`cargo clippy --all-targets` all stay green with the simplified
+annotations.
+
+## Go/no-go (current, after v0.7.0)
+
+Unchanged in substance from the third pass: **go, with one proven data
+point** (`compute_usable_page_size`, now with a simpler annotation
+thanks to #94). `parse`'s invariant — the one the original issue was
+actually about — still discharges only at `runtime`, and now for a
+third, independently-confirmed reason on top of the first two
+(struct-field/method-call reasoning, explicitly out of scope): `||`
+doesn't propagate a folded-true `is_err()` branch past an otherwise
+un-provable second clause. Two remaining, real gaps from this pass —
+casts blocking solver variable-binding (parameter or field, confirmed
+both), and #94's bound-injection not extending to field
+projections — are candidates for further upstream issues if this
+pattern is adopted more broadly; not filed yet.
 
 [mvl-lang/mvl-rust#90]: https://github.com/mvl-lang/mvl-rust/pull/90
 [mvl-lang/mvl-rust#89]: https://github.com/mvl-lang/mvl-rust/issues/89
 [mvl-lang/mvl-rust#92]: https://github.com/mvl-lang/mvl-rust/issues/92
 [mvl-lang/mvl-rust#93]: https://github.com/mvl-lang/mvl-rust/pull/93
+[mvl-lang/mvl-rust#94]: https://github.com/mvl-lang/mvl-rust/issues/94
+[mvl-lang/mvl-rust#95]: https://github.com/mvl-lang/mvl-rust/issues/95
+[mvl-lang/mvl-rust#97]: https://github.com/mvl-lang/mvl-rust/issues/97
