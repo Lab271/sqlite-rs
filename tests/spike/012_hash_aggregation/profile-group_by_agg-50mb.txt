@@ -1,0 +1,58 @@
+Analysis of sampling engine-015e719dc1825bb9 (pid 86432) every 1 millisecond
+Process:         engine-015e719dc1825bb9 [86432]
+Path:            /Users/USER/*/engine-015e719dc1825bb9
+Load Address:    0x1025f4000
+Identifier:      engine-015e719dc1825bb9
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  bash [86407]
+Target Type:     live task
+
+Date/Time:       2026-08-23 20:53:12.441 +0200
+Launch Time:     2026-08-23 20:53:09.379 +0200
+OS Version:      macOS 26.6.1 (25G76)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         394.8M
+Physical footprint (peak):  394.8M
+Idle exit:                  untracked
+----
+
+Call graph:
+    6643 Thread_15705514   DispatchQueue_1: com.apple.main-thread  (serial)
+      6347 start  (in dyld) + 6992  [0x1860344e4]
+      + 6347 main  (in engine-015e719dc1825bb9) + 52  [0x102612d60]
+      +   6347 _RNvNtCsaLOjE9VYtxK_3std2rt19lang_start_internal  (in engine-015e719dc1825bb9) + 952  [0x10288aacc]
+      +     6347 std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::hb19a214857887822  (in engine-015e719dc1825bb9) + 16  [0x10262dbf0]
+      +       6347 std::sys::backtrace::__rust_begin_short_backtrace::hf5d916979c504f74  (in engine-015e719dc1825bb9) + 12  [0x10262bb04]  backtrace.rs:166
+      +         6347 engine::main::h0c23ac44bddd5f8a  (in engine-015e719dc1825bb9) + 1420  [0x102611ad0]  macros.rs:120
+      +           6347 criterion::benchmark_group::BenchmarkGroup$LT$M$GT$::bench_function::h47652735ef99a1cf  (in engine-015e719dc1825bb9) + 1120  [0x10261c7b8]  benchmark_group.rs:253
+      +             6347 criterion::routine::Routine::profile::h1382241d5cf1f0e0  (in engine-015e719dc1825bb9) + 436  [0x1025f99a8]  routine.rs:74
+      +               6347 _$LT$criterion..routine..Function$LT$M$C$F$C$T$GT$$u20$as$u20$criterion..routine..Routine$LT$M$C$T$GT$$GT$::bench::hb99dfff12535f916  (in engine-015e719dc1825bb9) + 236  [0x1025f5190]  routine.rs:258
+      +                 6347 c_with_alloca  (in engine-015e719dc1825bb9) + 76  [0x1027cbb94]
+      +                   6347 alloca::trampoline::hda9c5088ce805736  (in engine-015e719dc1825bb9) + 72  [0x102618854]
+      +                     6347 criterion::bencher::Bencher$LT$M$GT$::iter::h06e5133f5ee8ed90  (in engine-015e719dc1825bb9) + 176  [0x102627978]  bencher.rs:91
+      +                       6347 sqlite_rs::vdbe::exec::execute_with_db::h7c58659a1f41c5c6  (in engine-015e719dc1825bb9) + 64  [0x10267a9cc]
+      +                         1987 sqlite_rs::vdbe::exec::run::h332a5c3bf58626c8  (in engine-015e719dc1825bb9) + 528  [0x10267b458]
+      +                         ! 1689 sqlite_rs::vdbe::result::make_record::h25342f5685007dac  (in engine-015e719dc1825bb9) + 596  [0x1026f857c]
+      +                         ! : 352 sqlite_rs::record::encode::encode_record::h4d2b02799a0c4ace  (in engine-015e719dc1825bb9) + 480  [0x1026af988]
+      +                         ! : | 326 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::h3bbc2fccab7b7891  (in engine-015e719dc1825bb9) + 108  [0x1028b3770]
+      +                         ! : | + 311 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::ha70b4f21ef61890e  (in engine-015e719dc1825bb9) + 92  [0x1028b36ac]
+      +                         ! : | + ! 228 _realloc  (in libsystem_malloc.dylib) + 452  [0x18622bf14]
+      +                         ! : | + ! : 199 _malloc_zone_realloc  (in libsystem_malloc.dylib) + 148  [0x18622b6f8]
+      +                         ! : | + ! : | 68 xzm_realloc  (in libsystem_malloc.dylib) + 1048,24,...  [0x18621bf9c,0x18621bb9c,...]
+      +                         ! : | + ! : | 51 xzm_realloc  (in libsystem_malloc.dylib) + 808  [0x18621beac]
+      +                         ! : | + ! : | + 32 <deduplicated_symbol>  (in libsystem_malloc.dylib) + 112,0,...  [0x18621b1cc,0x18621b15c,...]
+      +                         ! : | + ! : | + 17 _xzm_xzone_malloc  (in libsystem_malloc.dylib) + 8,32,...  [0x18621b958,0x18621b970,...]
+      +                         ! : | + ! : | + 2 _xzm_xzone_thread_cache_fill_and_malloc  (in libsystem_malloc.dylib) + 116  [0x186222634]
+      +                         ! : | + ! : | +   2 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 860  [0x1862232d8]
+      +                         ! : | + ! : | +     1 xzm_chunk_mark_used  (in libsystem_malloc.dylib) + 188  [0x186203efc]
+      +                         ! : | + ! : | +     : 1 _xzm_reclaim_mark_used  (in libsystem_malloc.dylib) + 124  [0x186203fac]
+      +                         ! : | + ! : | +     :   1 _xzm_reclaim_mark_used_locked  (in libsystem_malloc.dylib) + 60  [0x186206a9c]
+      +                         ! : | + ! : | +     :     1 mach_vm_reclaim_try_cancel  (in libsystem_kernel.dylib) + 228  [0x1863cf2d8]
+      +                         ! : | + ! : | +     1 xzm_chunk_mark_used  (in libsystem_malloc.dylib) + 0  [0x186203e40]
+      +                         ! : | + ! : | 46 xzm_realloc  (in libsystem_malloc.dylib) + 904  [0x18621bf0c]
+      +                         ! : | + ! : | + 32 _xzm_free  (in libsystem_malloc.dylib) + 28,164,...  [0x18621c134,0x18621c1bc,...]
+      +                         ! : | + ! : | + 14 _xzm_free  (in libsystem_malloc.dylib) + 352  [0x18621c278]
