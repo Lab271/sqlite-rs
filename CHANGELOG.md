@@ -17,6 +17,22 @@ every pending WAL frame, deletes `-wal`/`-shm`, and flips the header
 bytes back going to DELETE. Refuses mid-transaction, matching stock
 SQLite.
 
+feat: WAL-mode writes actually go through the WAL (#389) — `Pager::flush`
+now branches on the tracked journal mode: in `journal_mode=WAL`, every
+dirty page is appended as a WAL frame (`WalWriter::open_existing`,
+resuming across sessions rather than truncating), the last one marked as
+the commit frame, `mxFrame` published to `-shm`, and the writer's own
+subsequent reads served by folding the new pages into its in-memory
+`wal_pages` overlay — all without ever escalating the main file's SHARED
+lock to EXCLUSIVE, so readers are never blocked. A new `WAL_WRITE_LOCK`
+(`src/vfs/shm.rs`, `Vfs::claim_wal_write_lock`) serializes concurrent
+writers, surfacing contention as the existing `VfsError::Locked` path.
+`rollback` in WAL mode was already correct (frames are only ever appended
+at commit time). See ADR-0026 for the writer-reopens-and-rescans
+trade-off. Un-ignoring `tests/tiers/tier3.rs`'s
+`t3_wal_writing_and_live_interop` stays for #390 (live interop with a
+real stock `sqlite3` process).
+
 ## [0.16.1] - 2026-08-23
 
 fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row

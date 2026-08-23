@@ -77,14 +77,44 @@ pub(crate) fn wal_read_lock_byte(slot: usize) -> off_t {
         .saturating_add(slot as off_t)
 }
 
+/// SQLite's `WAL_WRITE_LOCK` (`wal.c`): guards `mxFrame`/the `-wal` file's
+/// own tail against a second concurrent writer (#389) — exactly one
+/// connection may hold this at a time, matching WAL's single-writer
+/// invariant. `wal.c`'s lock layout, order 0..7: write, ckpt, recover,
+/// read(0..4) — this is byte 0, i.e. `UNIX_SHM_BASE` itself.
+const WAL_WRITE_LOCK_BYTE: off_t = UNIX_SHM_BASE;
+
 /// SQLite's `WAL_CKPT_LOCK` (`wal.c`): guards a PASSIVE checkpoint (#386)
 /// while it reads `aReadMark`/writes `nBackfill`, so two concurrent
 /// checkpoint attempts don't race on the same backfill state. A single
 /// byte at a fixed offset from `UNIX_SHM_BASE`, same as the reader-mark
 /// bytes above (`wal.c`'s lock layout, order 0..7: write, ckpt, recover,
-/// read(0..4) — this module doesn't yet claim the write lock itself,
-/// tracked with the rest of the write-side wal-index wiring at #388/#389).
+/// read(0..4)).
 const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
+
+/// A held `WAL_WRITE_LOCK`, releasing on drop — taken by a writer (#389)
+/// before appending frames/advancing `mxFrame`, so a second concurrent
+/// writer is refused rather than interleaving frames or racing the
+/// `mxFrame` publish. Same shape as [`WalCheckpointLock`] just below.
+#[derive(Debug)]
+pub struct WalWriteLock {
+    file: File,
+}
+
+impl SharedLockGuard for WalWriteLock {}
+
+impl Drop for WalWriteLock {
+    fn drop(&mut self) {
+        fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1).ok();
+    }
+}
+
+pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> {
+    let file = open_shm(shm_path, true)?;
+    validate_shm_len(&file)?;
+    fcntl_lock(&file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
+    Ok(WalWriteLock { file })
+}
 
 /// Opens `-shm` at `shm_path` with `O_NOFOLLOW`, so a symlink planted at
 /// that path (e.g. in a shared or world-writable directory) can't redirect
@@ -196,6 +226,16 @@ pub(crate) fn read_backfill(shm_path: &Path) -> io::Result<u32> {
 pub(crate) fn publish_backfill(shm_path: &Path, n_backfill: u32) -> io::Result<()> {
     let file = open_shm(shm_path, true)?;
     write_u32_at(&file, N_BACKFILL_OFFSET, n_backfill)
+}
+
+/// Publishes a new `mxFrame` (the WAL's current end-of-valid-data, in
+/// frames) after a writer (#389) appends and commits one or more frames —
+/// so a reader that claims a fresh reader-mark slot afterward
+/// ([`claim_wal_read_lock`]'s `mx_frame(&file)` read) sees the up-to-date
+/// value rather than whatever the WAL generation started at.
+pub(crate) fn publish_mx_frame(shm_path: &Path, mx_frame: u32) -> io::Result<()> {
+    let file = open_shm(shm_path, true)?;
+    write_u32_at(&file, MX_FRAME_OFFSET, mx_frame)
 }
 
 fn read_mark_offset(slot: usize) -> u64 {
@@ -528,6 +568,33 @@ mod tests {
 
         release_all(held);
         std::fs::remove_file(&shm_path).unwrap();
+    }
+
+    #[test]
+    fn write_lock_is_exclusive_to_a_single_writer() {
+        let path = temp_shm(0);
+
+        let held = hold_multiple(&path, &[("wrlock", WAL_WRITE_LOCK_BYTE, 1)]);
+        let result = claim_wal_write_lock(&path);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+        release_all(held);
+
+        let guard = claim_wal_write_lock(&path).unwrap();
+        drop(guard);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn mx_frame_round_trips() {
+        let path = temp_shm(0);
+        publish_mx_frame(&path, 7).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(mx_frame(&file).unwrap(), 7);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

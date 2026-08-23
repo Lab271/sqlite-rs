@@ -29,3 +29,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0023](0023-leaf-cell-splice.md) | In-place leaf/index cell splice with real freeblock bookkeeping | 2026-08-22 |
 | [0024](0024-hot-journal-recovery-reserved-probe-single-fd.md) | Hot-journal recovery probes RESERVED and shares one fd with `Pager` | 2026-08-22 |
 | [0025](0025-passive-only-checkpoint-linear-frame-scan.md) | PASSIVE-only checkpoint, single non-blocking lock, linear frame scan | 2026-08-23 |
+| [0026](0026-wal-writer-reopens-and-rescans-per-flush.md) | WAL writer reopens and rescans the `-wal` file on every flush | 2026-08-23 |

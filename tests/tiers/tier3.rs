@@ -129,7 +129,10 @@ fn t3_multi_table_joins_and_aggregates() {
 }
 
 #[test]
-#[ignore = "drop-order 2 (V6) — WAL writing (WAL reading is Tier 0)"]
+#[ignore = "drop-order 2 (V6) — WAL writing landed at #389 (see \
+            tests/corpus/wal_write_interop_test.rs's concurrent_writer_is_refused_the_wal_write_lock \
+            and src/pager.rs's reader_keeps_its_snapshot_across_a_concurrent_wal_commit); \
+            live interop with a real stock sqlite3 process remains for #390 (WAL reading is Tier 0)"]
 fn t3_wal_writing_and_live_interop() {
     unimplemented!()
 }

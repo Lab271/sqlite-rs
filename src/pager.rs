@@ -196,6 +196,13 @@ pub struct Pager {
     db_path: PathBuf,
     /// The `-journal` companion path, precomputed once in `open`.
     journal_path: PathBuf,
+    /// The journal mode this database was opened with (page 1's
+    /// write/read-version bytes, read once in `open`), kept in sync by
+    /// [`Pager::set_journal_mode`] on every switch (#389) — [`Pager::flush`]
+    /// consults this on every call to route between the rollback-journal
+    /// and WAL write paths, so it's tracked here rather than re-read off
+    /// page 1 on every flush.
+    journal_mode: JournalMode,
 }
 
 /// Byte offsets of the three header fields ([`crate::header::DatabaseHeader`])
@@ -297,6 +304,7 @@ impl Pager {
         let wal_pages = read_wal_pages(vfs, path, page_size)?;
 
         let source = WritablePageSource::from_file(db_file, page_size);
+        let journal_mode = journal_mode_from_page1(&source.read_page(1)?);
         Ok(Pager {
             lock,
             tx_lock_level: crate::vfs::LockLevel::Shared,
@@ -309,6 +317,7 @@ impl Pager {
             vfs: AnyVfs::new(vfs.clone()),
             db_path: path.to_path_buf(),
             journal_path,
+            journal_mode,
         })
     }
 
@@ -351,6 +360,22 @@ impl Pager {
             self.release_tx_lock()?;
             return Ok(());
         }
+
+        // WAL mode (#389) never touches the rollback journal or the main
+        // file at commit time, and deliberately never escalates `self.lock`
+        // (the main file's SHARED lock) to EXCLUSIVE either — that
+        // escalation exists only to serialize the journal-path's direct
+        // writes into the main file, and would defeat the entire point of
+        // WAL ("writers don't block readers": a concurrent reader only
+        // needs its own SHARED lock plus its own read-mark slot, neither of
+        // which `flush_wal_locked`'s `WAL_WRITE_LOCK` touches). Mutual
+        // exclusion between writers is `WAL_WRITE_LOCK` instead.
+        if self.journal_mode == JournalMode::Wal {
+            let result = self.flush_wal_locked();
+            self.release_tx_lock()?;
+            return result;
+        }
+
         // Escalate the SHARED lock every `Pager` already holds up to
         // EXCLUSIVE before touching the journal or the main file — without
         // this, two `Pager`s (or a `Pager` racing a live stock `sqlite3`
@@ -462,6 +487,81 @@ impl Pager {
         Ok(())
     }
 
+    /// WAL-mode half of [`Pager::flush`] (#389): appends every dirty page
+    /// as a WAL frame (in ascending page-number order, matching
+    /// `flush_locked`'s own ordering), marks the last one as the commit
+    /// frame, publishes the new `mxFrame`, and folds the newly-written
+    /// pages into `self.wal_pages` so this same connection's own
+    /// subsequent reads see them immediately — without re-claiming a new
+    /// WAL reader-mark slot, since `self.wal_lock`'s slot is only this
+    /// connection's *own* snapshot bookkeeping, not something a writer
+    /// needs to touch to observe its own just-committed writes.
+    ///
+    /// Unlike the rollback-journal path, every dirty page is written here
+    /// — not just the ones that pre-existed the transaction — because the
+    /// main database file is never touched at commit time in WAL mode; a
+    /// freshly allocated page has nowhere else to live until a later
+    /// checkpoint backfills it.
+    ///
+    /// Claims [`crate::vfs::Vfs::claim_wal_write_lock`] for the duration,
+    /// so a second concurrent writer is refused (surfaces as
+    /// [`crate::vfs::VfsError::Locked`], converted to [`PagerError::Vfs`]
+    /// the same way every other lock-contention path already converts)
+    /// rather than interleaving frames or racing the `mxFrame` publish —
+    /// this is WAL's only writer-side mutual exclusion; `self.lock` (the
+    /// main file's SHARED lock) is deliberately left untouched, per
+    /// `flush`'s own doc comment.
+    fn flush_wal_locked(&mut self) -> Result<(), PagerError> {
+        let mut page_nums: Vec<u32> = self.dirty.keys().copied().collect();
+        page_nums.sort_unstable();
+
+        let wal_path = companion_path(&self.db_path, "-wal");
+        let to_pager_error = |source| PagerError::Wal {
+            path: wal_path.display().to_string(),
+            source,
+        };
+
+        let _write_guard = self.vfs.claim_wal_write_lock(&self.db_path)?;
+
+        // The post-transaction page count: layered through `self.dirty`
+        // (this transaction's own edit to page 1, if any) then
+        // `self.wal_pages` (a prior WAL commit's value) then `self.source`
+        // (the true pre-WAL original) — i.e. exactly `PageSource::read_page`'s
+        // own precedence, since the main file's own page-1 bytes go stale
+        // the moment the first WAL frame is ever written and stay stale
+        // until a checkpoint backfills them.
+        let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
+
+        let mut writer = wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
+            .map_err(to_pager_error)?;
+
+        let last_index = page_nums.len().saturating_sub(1);
+        for (index, &page_num) in page_nums.iter().enumerate() {
+            if let Some(bytes) = self.dirty.get(&page_num) {
+                let commit_db_size = if index == last_index {
+                    post_page_count
+                } else {
+                    0
+                };
+                writer
+                    .append_frame(page_num, bytes, commit_db_size)
+                    .map_err(to_pager_error)?;
+            }
+        }
+        writer.sync().map_err(to_pager_error)?;
+
+        let new_mx_frame = writer.frame_count();
+        self.vfs.publish_wal_mx_frame(&self.db_path, new_mx_frame)?;
+
+        for page_num in page_nums {
+            if let Some(bytes) = self.dirty.remove(&page_num) {
+                self.wal_pages.insert(page_num, bytes);
+            }
+        }
+        self.dirty.clear();
+        Ok(())
+    }
+
     /// Discards every dirty page (#360's SQL-level `ROLLBACK`, as
     /// opposed to [`recover_hot_journal`]'s crash-recovery rollback):
     /// since writes only reach disk in [`Pager::flush`], undoing an
@@ -493,7 +593,7 @@ impl Pager {
             return Err(PagerError::PendingTransaction);
         }
 
-        if self.current_journal_mode()? == mode {
+        if self.journal_mode == mode {
             return Ok(());
         }
 
@@ -501,6 +601,7 @@ impl Pager {
             JournalMode::Wal => self.switch_journal_to_wal()?,
             JournalMode::Legacy => self.switch_wal_to_journal()?,
         }
+        self.journal_mode = mode;
 
         // Re-read page 1 fresh rather than reusing any copy read before
         // the branch above: `switch_wal_to_journal`'s checkpoint may
@@ -520,20 +621,6 @@ impl Pager {
         self.source.sync()?;
         self.page_cache.borrow_mut().invalidate(1);
         Ok(())
-    }
-
-    /// The journal mode currently recorded on page 1's write/read-version
-    /// bytes (18/19) — [`crate::header::DatabaseHeader::journal_mode`]'s
-    /// same detection logic, read directly off `self.source` rather than
-    /// through a parsed `DatabaseHeader` (a full header round-trip isn't
-    /// needed just to read two bytes).
-    fn current_journal_mode(&self) -> Result<JournalMode, PagerError> {
-        let page1 = self.source.read_page(1)?;
-        Ok(if page1.get(18..20) == Some(&[2u8, 2u8][..]) {
-            JournalMode::Wal
-        } else {
-            JournalMode::Legacy
-        })
     }
 
     /// Journal -> WAL half of [`Pager::set_journal_mode`]: creates a
@@ -702,6 +789,21 @@ impl Pager {
             freelist_page_count.saturating_add(1),
         )?;
         Ok(())
+    }
+}
+
+/// The journal mode recorded on page 1's write/read-version bytes (18/19)
+/// — [`crate::header::DatabaseHeader::journal_mode`]'s same detection
+/// logic, read directly off a raw page-1 buffer rather than through a
+/// parsed `DatabaseHeader` (a full header round-trip isn't needed just to
+/// read two bytes). Used once by [`Pager::open`] to seed `journal_mode`;
+/// kept in sync afterward by [`Pager::set_journal_mode`] rather than
+/// re-derived from disk on every access.
+fn journal_mode_from_page1(page1: &[u8]) -> JournalMode {
+    if page1.get(18..20) == Some(&[2u8, 2u8][..]) {
+        JournalMode::Wal
+    } else {
+        JournalMode::Legacy
     }
 }
 
@@ -1377,6 +1479,117 @@ mod tests {
         let page1 = pager.read_page(1).unwrap();
         assert_eq!(page1.get(18..20), Some(&[1u8, 1u8][..]));
         assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+    }
+
+    /// #389: `flush` in WAL mode must append a WAL frame rather than
+    /// writing straight into the main file — the main file's own bytes
+    /// for the written page must stay exactly as they were before the
+    /// commit, with only the `-wal` file (verified here via
+    /// `wal::committed_pages`) reflecting the new content.
+    #[test]
+    fn flush_in_wal_mode_appends_a_frame_and_leaves_the_main_file_untouched() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        pager.flush().unwrap();
+
+        // The main file's page 2 must be untouched — only the WAL frame
+        // (and this same connection's in-memory `wal_pages` overlay) has
+        // the new content.
+        let db_file = vfs.open_read(Path::new("/test.db")).unwrap();
+        let mut raw_page2 = vec![0u8; 512];
+        db_file.read_at(&mut raw_page2, 512).unwrap();
+        assert_eq!(
+            raw_page2,
+            vec![2u8; 512],
+            "flush in WAL mode must never write the main db file directly"
+        );
+
+        let wal_file = vfs.open_read(Path::new("/test.db-wal")).unwrap();
+        let size = wal_file.size().unwrap();
+        let mut wal_bytes = vec![0u8; size as usize];
+        wal_file.read_at(&mut wal_bytes, 0).unwrap();
+        let header = wal::WalHeader::parse(&wal_bytes).unwrap();
+        let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
+        assert_eq!(db_size, 2);
+        assert_eq!(pages.get(&2), Some(&vec![9u8; 512]));
+
+        // The writer's own connection sees its just-committed write
+        // immediately, without re-claiming a reader slot.
+        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+    }
+
+    /// #389's "readers don't block writers, writers don't block readers,
+    /// reader sees a consistent snapshot" invariant: a `Pager` opened
+    /// before a commit keeps its pre-commit view even after a second
+    /// `Pager` commits a WAL frame, while a third, freshly-opened `Pager`
+    /// sees the new data.
+    #[test]
+    fn reader_keeps_its_snapshot_across_a_concurrent_wal_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut writer = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        writer.set_journal_mode(JournalMode::Wal).unwrap();
+
+        // Reader B opens before the commit below and must never see it.
+        let reader_before = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(reader_before.read_page(2).unwrap(), vec![2u8; 512]);
+
+        writer.get_page_mut(2).unwrap().fill(9u8);
+        writer.flush().unwrap();
+
+        assert_eq!(
+            reader_before.read_page(2).unwrap(),
+            vec![2u8; 512],
+            "a reader opened before the commit must keep its own snapshot"
+        );
+
+        // Reader C, opened fresh after the commit, must see the new data.
+        let reader_after = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(reader_after.read_page(2).unwrap(), vec![9u8; 512]);
+    }
+
+    /// #389: `rollback` in WAL mode must discard dirty pages without ever
+    /// touching the `-wal` file — frames are only ever appended at commit
+    /// time, never speculatively.
+    #[test]
+    fn rollback_in_wal_mode_never_touches_the_wal_file() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![0u8; 512]);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        let wal_size_before = vfs
+            .open_read(Path::new("/test.db-wal"))
+            .unwrap()
+            .size()
+            .unwrap();
+
+        pager.get_page_mut(1).unwrap().fill(0xAA);
+        pager.rollback().unwrap();
+
+        let wal_size_after = vfs
+            .open_read(Path::new("/test.db-wal"))
+            .unwrap()
+            .size()
+            .unwrap();
+        assert_eq!(
+            wal_size_before, wal_size_after,
+            "rollback must never append a frame"
+        );
+        assert_eq!(
+            pager.read_page(1).unwrap().get(18..20),
+            Some(&[2u8, 2u8][..])
+        );
     }
 
     /// A one-page database (empty freelist) allocates by extending the
