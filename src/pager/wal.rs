@@ -32,13 +32,21 @@
 //!   20..24 checksum-2
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use thiserror::Error;
 
-pub const HEADER_LEN: usize = 32;
-const FRAME_HEADER_LEN: usize = 24;
+use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
-#[derive(Debug, Error, PartialEq, Eq)]
+pub const HEADER_LEN: usize = 32;
+pub(crate) const FRAME_HEADER_LEN: usize = 24;
+
+/// SQLite's WAL file-format version (`pager.c`'s `WAL_MAX_VERSION`),
+/// unchanged since the format's introduction — written by
+/// [`WalHeader::new`], not currently validated on parse.
+const FORMAT_VERSION: u32 = 3_007_000;
+
+#[derive(Debug, Error)]
 pub enum WalError {
     #[error("WAL header is {len} bytes, need at least {HEADER_LEN}")]
     HeaderTooShort { len: usize },
@@ -56,9 +64,12 @@ pub enum WalError {
         stored: (u32, u32),
         computed: (u32, u32),
     },
+
+    #[error(transparent)]
+    Vfs(#[from] VfsError),
 }
 
-/// A parsed 32-byte WAL header.
+/// A parsed/serialized 32-byte WAL header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalHeader {
     /// `true` if frame/header checksums are the host's native byte order
@@ -68,6 +79,8 @@ pub struct WalHeader {
     pub page_size: u32,
     pub salt1: u32,
     pub salt2: u32,
+    format_version: u32,
+    checkpoint_seq: u32,
     header_checksum: (u32, u32),
 }
 
@@ -106,6 +119,8 @@ impl WalHeader {
             return Err(WalError::InvalidPageSize { page_size });
         }
 
+        let format_version = read_u32(bytes, 4)?;
+        let checkpoint_seq = read_u32(bytes, 12)?;
         let salt1 = read_u32(bytes, 16)?;
         let salt2 = read_u32(bytes, 20)?;
         let stored = (read_u32(bytes, 24)?, read_u32(bytes, 28)?);
@@ -122,8 +137,62 @@ impl WalHeader {
             page_size,
             salt1,
             salt2,
+            format_version,
+            checkpoint_seq,
             header_checksum: stored,
         })
+    }
+
+    /// Builds a fresh header for a brand-new WAL file — `checkpoint_seq`
+    /// is the generation counter a RESTART/TRUNCATE checkpoint bumps when
+    /// it rewrites the WAL header (deferred to V7, not this crate's
+    /// PASSIVE-only checkpoint_passive); a first-ever WAL for a database
+    /// starts at 1, matching stock SQLite.
+    pub fn new(
+        native_checksum: bool,
+        page_size: u32,
+        salt1: u32,
+        salt2: u32,
+        checkpoint_seq: u32,
+    ) -> Self {
+        let mut header = WalHeader {
+            native_checksum,
+            page_size,
+            salt1,
+            salt2,
+            format_version: FORMAT_VERSION,
+            checkpoint_seq,
+            header_checksum: (0, 0),
+        };
+        let bytes = header.serialize();
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "serialize() always returns exactly HEADER_LEN bytes"
+        )]
+        let checksummed = &bytes[0..24];
+        header.header_checksum = checksum(native_checksum, checksummed, (0, 0));
+        header
+    }
+
+    /// Serializes this header back to its 32-byte on-disk form. Round-trips
+    /// with [`WalHeader::parse`] once `header_checksum` is set (see
+    /// [`WalHeader::new`], which computes it before returning).
+    pub fn serialize(&self) -> [u8; HEADER_LEN] {
+        let magic: u32 = if self.native_checksum {
+            0x377f_0682
+        } else {
+            0x377f_0683
+        };
+        let mut out = [0u8; HEADER_LEN];
+        out[0..4].copy_from_slice(&magic.to_be_bytes());
+        out[4..8].copy_from_slice(&self.format_version.to_be_bytes());
+        out[8..12].copy_from_slice(&self.page_size.to_be_bytes());
+        out[12..16].copy_from_slice(&self.checkpoint_seq.to_be_bytes());
+        out[16..20].copy_from_slice(&self.salt1.to_be_bytes());
+        out[20..24].copy_from_slice(&self.salt2.to_be_bytes());
+        out[24..28].copy_from_slice(&self.header_checksum.0.to_be_bytes());
+        out[28..32].copy_from_slice(&self.header_checksum.1.to_be_bytes());
+        out
     }
 }
 
@@ -241,6 +310,76 @@ pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Ve
     (committed, committed_db_size)
 }
 
+/// Appends frames to a `-wal` file: writes the header once on
+/// [`WalWriter::create`], then each [`WalWriter::append_frame`] call
+/// carries the running checksum forward exactly as [`committed_pages`]
+/// verifies it on read — a page written then read back via this pair
+/// round-trips by construction. `commit_db_size` is `0` for a frame that
+/// does not end a transaction, matching the read path's convention.
+pub struct WalWriter {
+    file: AnyVfsFile,
+    header: WalHeader,
+    running: (u32, u32),
+    offset: u64,
+}
+
+impl WalWriter {
+    /// Creates (or reopens) the `-wal` file at `path` and writes `header`.
+    pub fn create(vfs: &AnyVfs, path: &Path, header: WalHeader) -> Result<Self, WalError> {
+        let file = vfs.create_or_open_write(path)?;
+        file.write_at(&header.serialize(), 0)?;
+        Ok(WalWriter {
+            file,
+            running: header.header_checksum,
+            offset: HEADER_LEN as u64,
+            header,
+        })
+    }
+
+    /// Appends one frame (24-byte header + `page_data`) at the writer's
+    /// current offset, continuing the running checksum chain.
+    pub fn append_frame(
+        &mut self,
+        page_num: u32,
+        page_data: &[u8],
+        commit_db_size: u32,
+    ) -> Result<(), WalError> {
+        let mut frame_header = [0u8; FRAME_HEADER_LEN];
+        frame_header[0..4].copy_from_slice(&page_num.to_be_bytes());
+        frame_header[4..8].copy_from_slice(&commit_db_size.to_be_bytes());
+        frame_header[8..12].copy_from_slice(&self.header.salt1.to_be_bytes());
+        frame_header[12..16].copy_from_slice(&self.header.salt2.to_be_bytes());
+
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "frame_header is a fixed 24-byte array"
+        )]
+        let after_header = checksum(
+            self.header.native_checksum,
+            &frame_header[0..8],
+            self.running,
+        );
+        let after_page = checksum(self.header.native_checksum, page_data, after_header);
+        frame_header[16..20].copy_from_slice(&after_page.0.to_be_bytes());
+        frame_header[20..24].copy_from_slice(&after_page.1.to_be_bytes());
+
+        let mut buf = Vec::with_capacity(FRAME_HEADER_LEN.saturating_add(page_data.len()));
+        buf.extend_from_slice(&frame_header);
+        buf.extend_from_slice(page_data);
+        self.file.write_at(&buf, self.offset)?;
+
+        self.running = after_page;
+        self.offset = self.offset.saturating_add(buf.len() as u64);
+        Ok(())
+    }
+
+    /// Flushes every frame written so far to durable storage.
+    pub fn sync(&self) -> Result<(), WalError> {
+        self.file.sync()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -276,10 +415,10 @@ mod tests {
 
     #[test]
     fn too_short_is_err_not_panic() {
-        assert_eq!(
+        assert!(matches!(
             WalHeader::parse(&[0u8; 10]),
             Err(WalError::HeaderTooShort { len: 10 })
-        );
+        ));
     }
 
     #[test]
@@ -340,11 +479,68 @@ mod tests {
             page_size: 4096,
             salt1: 0,
             salt2: 0,
+            format_version: FORMAT_VERSION,
+            checkpoint_seq: 0,
             header_checksum: (0, 0),
         };
         for len in 0..100 {
             let bytes = vec![0x55u8; len];
             let _ = committed_pages(&header, &bytes);
         }
+    }
+
+    #[test]
+    fn write_then_read_round_trips_committed_page() {
+        use crate::vfs::{AnyVfs, MemoryVfs};
+
+        let memory = MemoryVfs::new();
+        let vfs = AnyVfs::new(memory);
+        let path = Path::new("/test.db-wal");
+
+        let header = WalHeader::new(true, 512, 0xAAAA_1111, 0xBBBB_2222, 1);
+        let mut writer = WalWriter::create(&vfs, path, header).unwrap();
+
+        let page1 = vec![0x11u8; 512];
+        writer.append_frame(1, &page1, 0).unwrap();
+        let page2 = vec![0x22u8; 512];
+        writer.append_frame(2, &page2, 2).unwrap();
+        writer.sync().unwrap();
+
+        let file = vfs.open_read(path).unwrap();
+        let size = file.size().unwrap();
+        let mut bytes = vec![0u8; size as usize];
+        file.read_at(&mut bytes, 0).unwrap();
+
+        let parsed = WalHeader::parse(&bytes).unwrap();
+        assert_eq!(parsed, header);
+        let (pages, db_size) = committed_pages(&parsed, &bytes);
+        assert_eq!(db_size, 2);
+        assert_eq!(pages.get(&1), Some(&page1));
+        assert_eq!(pages.get(&2), Some(&page2));
+    }
+
+    #[test]
+    fn uncommitted_trailing_frame_is_not_published() {
+        use crate::vfs::{AnyVfs, MemoryVfs};
+
+        let memory = MemoryVfs::new();
+        let vfs = AnyVfs::new(memory);
+        let path = Path::new("/test.db-wal");
+
+        let header = WalHeader::new(true, 512, 1, 2, 1);
+        let mut writer = WalWriter::create(&vfs, path, header).unwrap();
+        let page1 = vec![0x33u8; 512];
+        writer.append_frame(1, &page1, 0).unwrap();
+        writer.sync().unwrap();
+
+        let file = vfs.open_read(path).unwrap();
+        let size = file.size().unwrap();
+        let mut bytes = vec![0u8; size as usize];
+        file.read_at(&mut bytes, 0).unwrap();
+
+        let parsed = WalHeader::parse(&bytes).unwrap();
+        let (pages, db_size) = committed_pages(&parsed, &bytes);
+        assert_eq!(db_size, 0);
+        assert!(pages.is_empty());
     }
 }

@@ -25,6 +25,7 @@
 //! deferred (#45) — nothing here yet opens two fds to the same path, so
 //! there is no bug for it to fix; see #45 for when that changes.
 
+pub mod checkpoint;
 mod error;
 pub mod freelist;
 pub mod journal;

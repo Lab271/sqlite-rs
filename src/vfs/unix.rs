@@ -59,6 +59,41 @@ impl Vfs for UnixVfs {
             .map(|opt| opt.map(|guard| FileLock(Box::new(guard))))
             .map_err(|source| to_lock_error(&shm_path, source))
     }
+
+    fn claim_wal_checkpoint_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(None);
+        }
+        shm::claim_wal_checkpoint_lock(&shm_path)
+            .map(|guard| Some(FileLock(Box::new(guard))))
+            .map_err(|source| to_lock_error(&shm_path, source))
+    }
+
+    fn active_wal_reader_marks(&self, path: &Path) -> Result<Vec<u32>> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(Vec::new());
+        }
+        shm::active_reader_marks(&shm_path).map_err(|source| to_vfs_error(&shm_path, source))
+    }
+
+    fn publish_wal_backfill(&self, path: &Path, n_backfill: u32) -> Result<()> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(());
+        }
+        shm::publish_backfill(&shm_path, n_backfill)
+            .map_err(|source| to_vfs_error(&shm_path, source))
+    }
+
+    fn read_wal_backfill(&self, path: &Path) -> Result<u32> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(0);
+        }
+        shm::read_backfill(&shm_path).map_err(|source| to_vfs_error(&shm_path, source))
+    }
 }
 
 /// A single fd, shared (via `Rc`) between this file's I/O and any

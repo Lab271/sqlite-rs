@@ -45,3 +45,4 @@ mod transaction_oracle_test;
 mod union_test;
 mod unique_constraint_test;
 mod view_test;
+mod wal_write_interop_test;

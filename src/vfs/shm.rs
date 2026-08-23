@@ -35,7 +35,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 
 use nix::libc::{self, off_t};
@@ -69,10 +69,103 @@ const UNIX_SHM_BASE: off_t = 120;
 /// `slot` ranges 1..=4 — slot 0 is reserved (always considered "in use" by
 /// SQLite's own protocol) and is never claimed by a reader here, matching
 /// spike 005 experiment 4.
-fn wal_read_lock_byte(slot: usize) -> off_t {
+pub(crate) fn wal_read_lock_byte(slot: usize) -> off_t {
     UNIX_SHM_BASE
         .saturating_add(3)
         .saturating_add(slot as off_t)
+}
+
+/// SQLite's `WAL_CKPT_LOCK` (`wal.c`): guards a PASSIVE checkpoint (#386)
+/// while it reads `aReadMark`/writes `nBackfill`, so two concurrent
+/// checkpoint attempts don't race on the same backfill state. A single
+/// byte at a fixed offset from `UNIX_SHM_BASE`, same as the reader-mark
+/// bytes above (`wal.c`'s lock layout, order 0..7: write, ckpt, recover,
+/// read(0..4) — this module doesn't yet claim the write lock itself,
+/// tracked with the rest of the write-side wal-index wiring at #388/#389).
+const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
+
+/// Opens `-shm` at `shm_path` with `O_NOFOLLOW`, so a symlink planted at
+/// that path (e.g. in a shared or world-writable directory) can't redirect
+/// a lock claim or a raw `nBackfill` write onto an arbitrary file this
+/// process happens to have write access to. Every `-shm` open in this
+/// module goes through here rather than a bare `OpenOptions::open`.
+fn open_shm(shm_path: &Path, write: bool) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).custom_flags(libc::O_NOFOLLOW);
+    if write {
+        opts.write(true);
+    }
+    opts.open(shm_path)
+}
+
+/// `WalCkptInfo.nBackfill` (`wal.c`): how many leading frames a checkpoint
+/// has already copied into the main database file.
+const N_BACKFILL_OFFSET: u64 = 96;
+
+/// A held `WAL_CKPT_LOCK`, releasing on drop — taken by a checkpointer
+/// (#386) before reading `aReadMark`/writing `nBackfill` so a concurrent
+/// checkpoint attempt is refused rather than racing on the same backfill
+/// state.
+#[derive(Debug)]
+pub struct WalCheckpointLock {
+    file: File,
+}
+
+impl SharedLockGuard for WalCheckpointLock {}
+
+impl Drop for WalCheckpointLock {
+    fn drop(&mut self) {
+        fcntl_lock(&self.file, libc::F_UNLCK, WAL_CKPT_LOCK_BYTE, 1).ok();
+    }
+}
+
+pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckpointLock> {
+    let file = open_shm(shm_path, true)?;
+    validate_shm_len(&file)?;
+    fcntl_lock(&file, libc::F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
+    Ok(WalCheckpointLock { file })
+}
+
+/// The frame marks of readers currently pinned to this WAL generation —
+/// probed by attempting a transient exclusive claim on each of the 4
+/// reader-mark lock bytes: a slot that's still `EAGAIN`/`EACCES` has a live
+/// reader, whose published `aReadMark` bounds how far a PASSIVE checkpoint
+/// (#386) may safely backfill. A slot whose lock is free is skipped (no
+/// reader; its stale mark, if any, is not a constraint) — mirrors
+/// `claim_wal_read_lock`'s "the lock decides occupancy, not the mark
+/// value" rule.
+pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
+    let file = open_shm(shm_path, true)?;
+    validate_shm_len(&file)?;
+
+    let mut marks = Vec::new();
+    for slot in 1..=4usize {
+        let byte = wal_read_lock_byte(slot);
+        match fcntl_lock(&file, libc::F_WRLCK, byte, 1) {
+            Ok(()) => {
+                fcntl_lock(&file, libc::F_UNLCK, byte, 1)?;
+            }
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)) => {
+                marks.push(read_mark(&file, slot)?);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(marks)
+}
+
+/// Reads `nBackfill`: how many leading frames the last checkpoint already
+/// copied to the main file.
+pub(crate) fn read_backfill(shm_path: &Path) -> io::Result<u32> {
+    let file = open_shm(shm_path, false)?;
+    read_u32_at(&file, N_BACKFILL_OFFSET)
+}
+
+/// Publishes a new `nBackfill` after a PASSIVE checkpoint (#386) copies
+/// frames `1..=nBackfill` into the main database file.
+pub(crate) fn publish_backfill(shm_path: &Path, n_backfill: u32) -> io::Result<()> {
+    let file = open_shm(shm_path, true)?;
+    write_u32_at(&file, N_BACKFILL_OFFSET, n_backfill)
 }
 
 fn read_mark_offset(slot: usize) -> u64 {
@@ -97,11 +190,12 @@ fn set_read_mark(file: &File, slot: usize, value: u32) -> io::Result<()> {
     write_u32_at(file, read_mark_offset(slot), value)
 }
 
-/// Test-only: reads back a published mark to verify `set_read_mark`.
-/// Production code never needs to read a mark it didn't just write — slot
-/// occupancy is determined by the lock, not the mark value (see
-/// `claim_wal_read_lock`'s doc comment).
-#[cfg(test)]
+/// Reads back a published mark — used by [`active_reader_marks`] once a
+/// slot's lock has confirmed it's actually held, and in tests to verify
+/// `set_read_mark`. Never used to determine slot occupancy on its own:
+/// that's the lock, not the mark value (see `claim_wal_read_lock`'s doc
+/// comment) — a stale mark left behind by a released slot is meaningless
+/// until the lock says the slot is live again.
 fn read_mark(file: &File, slot: usize) -> io::Result<u32> {
     read_u32_at(file, read_mark_offset(slot))
 }
@@ -168,7 +262,7 @@ impl Drop for WalReadLock {
 /// mark. `Err` on the first non-contention `fcntl` failure, or if every
 /// slot is genuinely contended (`EAGAIN`/`EACCES`).
 pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadLock>> {
-    let file = match OpenOptions::new().read(true).write(true).open(shm_path) {
+    let file = match open_shm(shm_path, true) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -404,5 +498,57 @@ mod tests {
 
         release_all(held);
         std::fs::remove_file(&shm_path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_lock_is_exclusive_to_a_single_checkpointer() {
+        let path = temp_shm(0);
+
+        let held = hold_multiple(&path, &[("wrlock", WAL_CKPT_LOCK_BYTE, 1)]);
+        let result = claim_wal_checkpoint_lock(&path);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+        release_all(held);
+
+        let guard = claim_wal_checkpoint_lock(&path).unwrap();
+        drop(guard);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn active_reader_marks_reports_only_locked_slots() {
+        let path = temp_shm(0);
+        // Slot 1 has a live reader at mark 5; slot 2's lock is free (its
+        // leftover mark of 9 must NOT be reported — occupancy is the lock,
+        // not the mark, per this module's central invariant).
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        set_read_mark(&file, 1, 5).unwrap();
+        set_read_mark(&file, 2, 9).unwrap();
+        let held = hold_multiple(&path, &[("rdlock", wal_read_lock_byte(1), 1)]);
+
+        let marks = active_reader_marks(&path).unwrap();
+        assert_eq!(marks, vec![5]);
+
+        release_all(held);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn active_reader_marks_is_empty_when_no_readers() {
+        let path = temp_shm(0);
+        assert!(active_reader_marks(&path).unwrap().is_empty());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn backfill_round_trips() {
+        let path = temp_shm(0);
+        assert_eq!(read_backfill(&path).unwrap(), 0);
+        publish_backfill(&path, 3).unwrap();
+        assert_eq!(read_backfill(&path).unwrap(), 3);
+        std::fs::remove_file(&path).unwrap();
     }
 }
