@@ -870,7 +870,10 @@ fn explain_query_plan_reports_aliased_table_name() {
 fn explain_query_plan_reports_rowid_search_with_reversed_equality_operands() {
     let db = join_fixture_db("eqp_reversed_rowid");
     let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM a WHERE 1 = id");
-    assert_eq!(output, "0|0|0|SEARCH a USING INTEGER PRIMARY KEY (rowid=?)\n");
+    assert_eq!(
+        output,
+        "0|0|0|SEARCH a USING INTEGER PRIMARY KEY (rowid=?)\n"
+    );
 }
 
 /// #243: a `JOIN ... USING (...)` reports a full `SCAN` for the inner

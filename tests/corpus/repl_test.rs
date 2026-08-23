@@ -237,10 +237,7 @@ fn unknown_dot_command_reports_error_and_session_continues() {
     let output = run_repl(&db, &[".tables", "SELECT 1;", ".quit"]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unknown command"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("unknown command"), "stderr: {stderr}");
     let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
     assert_eq!(stdout, "1\n");
 }
@@ -265,10 +262,7 @@ fn select_with_unsupported_syntax_reports_error_and_session_continues() {
     let output = run_repl(&db, &["SELECT * FROM t JOIN t;", "SELECT 1;", ".quit"]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("not yet supported"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("not yet supported"), "stderr: {stderr}");
     let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
     assert_eq!(stdout, "1\n");
 }
@@ -281,10 +275,7 @@ fn select_with_syntax_error_reports_error_and_session_continues() {
     let output = run_repl(&db, &["SELECT FROM;", "SELECT 1;", ".quit"]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("syntax error"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("syntax error"), "stderr: {stderr}");
     let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
     assert_eq!(stdout, "1\n");
 }

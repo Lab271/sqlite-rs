@@ -43,7 +43,10 @@ fn explain_query_plan_rejects_missing_from_clause() {
 fn explain_query_plan_rejects_schema_count_mismatch() {
     let select = accepted_select("SELECT * FROM a");
     let err = explain_query_plan(&select, &[]).expect_err("expected a schema-count mismatch");
-    assert!(matches!(err, CodegenError::Unsupported { .. }), "got {err:?}");
+    assert!(
+        matches!(err, CodegenError::Unsupported { .. }),
+        "got {err:?}"
+    );
 }
 
 fn pinned_oracle() -> Option<PathBuf> {
