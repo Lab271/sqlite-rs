@@ -7,7 +7,7 @@
 
 use super::ast::{
     Begin, Commit, CreateIndex, CreateTable, CreateView, Delete, DropIndex, DropTable, DropView,
-    Explain, Insert, Rollback, Select, Update,
+    Explain, Insert, Pragma, Rollback, Select, Update,
 };
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
@@ -319,6 +319,29 @@ pub fn parse_rollback(src: &str) -> ParseOutcome<Rollback> {
     let tokens = Tokenizer::tokenize(src);
     let mut parser = Parser::new(tokens);
     match parser.parse_rollback_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single PRAGMA statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V6 carve-out, #388) — only `PRAGMA
+/// journal_mode = WAL|DELETE` is `Accepted`; any other pragma name or
+/// value is `Unsupported`. Never panics — any input produces one of the
+/// three [`ParseOutcome`] variants.
+pub fn parse_pragma(src: &str) -> ParseOutcome<Pragma> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_pragma_stmt() {
         Ok(stmt) => match parser.expect_end() {
             Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
             Err(ParseFail::Unsupported { message, span }) => {

@@ -45,7 +45,9 @@ use super::SharedLockGuard;
 
 const MX_FRAME_OFFSET: u64 = 16;
 const READ_MARK_BASE_OFFSET: u64 = 100;
-#[cfg(test)]
+/// `aReadMark` slot value meaning "no reader has claimed this slot in
+/// the current WAL generation" — every slot starts here on a freshly
+/// created `-shm` file ([`fresh_shm_bytes`]).
 const READ_MARK_UNUSED: u32 = 0xFFFF_FFFF;
 
 /// Minimum `-shm` file length for a valid wal-index header: through the
@@ -96,6 +98,34 @@ fn open_shm(shm_path: &Path, write: bool) -> io::Result<File> {
         opts.write(true);
     }
     opts.open(shm_path)
+}
+
+/// The byte layout of a fresh, valid `-shm` file for a brand-new WAL
+/// generation (#388, `PRAGMA journal_mode=WAL`): one `SHM_REGION_SIZE`
+/// region — the same fixed size this module's own tests already use
+/// for a minimal valid `-shm` — with every `aReadMark` slot set to
+/// [`READ_MARK_UNUSED`] (no reader has claimed one in this WAL
+/// generation yet) and everything else (mxFrame, nBackfill, lock bytes)
+/// zeroed, matching a brand-new WAL with no frames written.
+///
+/// Returns bytes rather than writing a file directly, unlike this
+/// module's other functions: `claim_wal_read_lock`/
+/// `claim_wal_checkpoint_lock`/etc. are inherently real-file-only
+/// (`std::fs`/`fcntl` record locks have no `MemoryVfs` equivalent — a
+/// known, already-accepted limitation, see `checkpoint.rs`'s tests),
+/// but the `-shm` file's *content* has no such restriction and must be
+/// creatable uniformly on every backend. The caller
+/// (`crate::pager::Pager::set_journal_mode`) writes these bytes through
+/// the abstract `Vfs` trait instead.
+pub(crate) fn fresh_shm_bytes() -> Vec<u8> {
+    let mut bytes = vec![0u8; SHM_REGION_SIZE as usize];
+    for slot in 0..5usize {
+        let off = read_mark_offset(slot) as usize;
+        if let Some(dest) = bytes.get_mut(off..off.saturating_add(4)) {
+            dest.copy_from_slice(&READ_MARK_UNUSED.to_ne_bytes());
+        }
+    }
+    bytes
 }
 
 /// `WalCkptInfo.nBackfill` (`wal.c`): how many leading frames a checkpoint

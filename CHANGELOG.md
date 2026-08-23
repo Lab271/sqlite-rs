@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+feat: minimal `PRAGMA journal_mode=WAL|DELETE` switching (#388) — a
+narrow V6 grammar carve-out (`.openspec/grammar/sqlite.ebnf`, general
+PRAGMA support stays deferred to V7) parses only this one pragma
+name/value pair, with everything else falling through to a clean
+`Unsupported`. Codegen/VDBE wiring (`Opcode::SetJournalMode`) actually
+runs the switch: `Pager::set_journal_mode` creates a fresh `-wal`/`-shm`
+and flips the header's version bytes going into WAL, or checkpoints
+every pending WAL frame, deletes `-wal`/`-shm`, and flips the header
+bytes back going to DELETE. Refuses mid-transaction, matching stock
+SQLite.
+
 ## [0.16.1] - 2026-08-23
 
 fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row

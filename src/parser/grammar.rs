@@ -895,6 +895,55 @@ impl Parser {
         }
     }
 
+    /// `pragma-stmt` (#388, grammar V6 carve-out): `PRAGMA journal_mode
+    /// = (WAL|DELETE)` -- the minimal slice this ticket needs. `PRAGMA`
+    /// pragma names are identifiers in real SQLite (not a fixed keyword
+    /// list), so `journal_mode` is read via `identifier()` like any
+    /// other name; any other pragma name, or any other value for
+    /// `journal_mode`, parses far enough to report a clean
+    /// `Unsupported` rather than a hard parse error -- mirrors
+    /// `parse_with_clause`'s `WITH RECURSIVE` precedent. General PRAGMA
+    /// support stays deferred to V7 (grammar file's Future blocks).
+    pub(super) fn parse_pragma_stmt(&mut self) -> PResult<Pragma> {
+        let start = self.expect_kw(Keyword::PRAGMA)?;
+        let (name, _) = self.identifier()?;
+        if !name.eq_ignore_ascii_case("journal_mode") {
+            return self.unsupported(format!("pragma {name:?} not yet supported"));
+        }
+        // The bare `PRAGMA journal_mode` query form (no `=`) is real
+        // SQLite syntax (queries the current mode) but stays out of this
+        // narrow carve-out -- `Unsupported`, not `Invalid`, since it's
+        // syntactically valid SQL this parser just doesn't implement.
+        if !self.eat_punct(&TokenKind::Eq) {
+            return self.unsupported("PRAGMA journal_mode query form (no '=') not yet supported");
+        }
+        let (journal_mode, end) = self.pragma_journal_mode_value()?;
+        Ok(Pragma {
+            journal_mode,
+            span: join_span(start, end),
+        })
+    }
+
+    /// `WAL`/`DELETE` only (#388). `DELETE` is a reserved keyword
+    /// (`Keyword::DELETE`), not an identifier -- mirrors parse.y's own
+    /// `nmnum` production (parse.y:1723), which folds `DELETE` in as a
+    /// bare-keyword pragma value alongside a plain `nm` (identifier)
+    /// value like `WAL` -- so it needs its own match arm here rather
+    /// than falling out of a single `identifier()` call.
+    fn pragma_journal_mode_value(&mut self) -> PResult<(PragmaJournalMode, Span)> {
+        match self.peek().kind.clone() {
+            TokenKind::Identifier(text) if text.eq_ignore_ascii_case("wal") => {
+                let span = self.advance().span;
+                Ok((PragmaJournalMode::Wal, span))
+            }
+            TokenKind::Keyword(Keyword::DELETE) => {
+                let span = self.advance().span;
+                Ok((PragmaJournalMode::Delete, span))
+            }
+            _ => self.unsupported("unsupported journal_mode value (only WAL/DELETE are supported)"),
+        }
+    }
+
     /// `explain-stmt` (#243, grammar V4): `EXPLAIN [QUERY PLAN]
     /// select-stmt`. Only a `SELECT` body is supported — wrapping any
     /// other statement kind (or bare `EXPLAIN` with no `QUERY PLAN`, the

@@ -32,4 +32,10 @@ pub enum PagerError {
 
     #[error(transparent)]
     Freelist(#[from] FreelistError),
+
+    #[error("cannot change journal_mode with a pending transaction")]
+    PendingTransaction,
+
+    #[error("checkpoint did not fully back-fill the WAL while switching journal_mode out of WAL")]
+    CheckpointIncomplete,
 }

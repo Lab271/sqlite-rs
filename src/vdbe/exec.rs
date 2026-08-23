@@ -19,7 +19,7 @@ use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::program::{Instruction, Opcode, Program, P4};
-use crate::vdbe::{arithmetic, control, cursor, result, sorter};
+use crate::vdbe::{arithmetic, control, cursor, pragma, result, sorter};
 use crate::vfs::PageSource;
 
 #[derive(Debug, Error)]
@@ -85,6 +85,9 @@ pub enum ExecError {
 
     #[error("cannot rollback - no transaction is active")]
     NoActiveTransactionToRollback,
+
+    #[error("cannot change journal_mode within a transaction")]
+    JournalModeChangeDuringTransaction,
 }
 
 /// The outcome of executing one instruction: fall through to PC+1, jump
@@ -472,8 +475,8 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next,
         NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
         OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid,
-        SeekIndexEq, SeekRowid, Sequence, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
-        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft, ShiftRight, Sort, SorterData,
+        SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -484,6 +487,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Halt => control::halt(instr),
         Transaction => control::transaction(vm, instr),
         AutoCommit => control::auto_commit(vm, instr),
+        SetJournalMode => pragma::set_journal_mode(vm, instr),
         IfNot => control::if_not(vm, instr),
         IfNotZero => control::if_not_zero(vm, instr),
         IfPos => control::if_pos(vm, instr),

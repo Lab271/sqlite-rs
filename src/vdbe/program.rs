@@ -27,6 +27,12 @@ pub enum Opcode {
     // opcodes below, but fully dispatched and exhaustiveness-checked.
     // `P2` is stock SQLite's convention: 1 = commit, 0 = rollback.
     AutoCommit,
+    // #388: `PRAGMA journal_mode = WAL|DELETE` -- like `AutoCommit`
+    // above, postdates the V2 oracle harvest (no PRAGMA codegen existed
+    // then), so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked. `P1` carries the target mode
+    // (`crate::vdbe::pragma::JOURNAL_MODE_WAL`/`JOURNAL_MODE_DELETE`).
+    SetJournalMode,
     IfNot,
     IfNotZero,
     IfPos,
@@ -254,6 +260,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Halt
         | Opcode::Transaction
         | Opcode::AutoCommit
+        | Opcode::SetJournalMode
         | Opcode::IfNot
         | Opcode::IfNotZero
         | Opcode::IfPos

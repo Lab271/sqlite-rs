@@ -42,6 +42,7 @@ sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
                   | drop-stmt          (* V3 *)
                   | create-view-stmt   (* V6 *)
                   | drop-view-stmt     (* V6 *)
+                  | pragma-stmt        (* V6 *)
                   | explain-stmt       (* V4 *)
                   | begin-stmt         (* V5 *)
                   | commit-stmt        (* V5 *)
@@ -53,7 +54,9 @@ sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
                      #243 pulled EXPLAIN [QUERY PLAN] forward from its original
                      V7 slot -- see explain-stmt below -- because the planner's
                      index-selection work needs EQP output to be observable now;
-                     PRAGMA/ANALYZE remain V7 *)
+                     PRAGMA/ANALYZE remain V7, except the narrow
+                     journal_mode=WAL|DELETE carve-out -- see pragma-stmt below,
+                     #388 *)
 
 explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
                      (* V4 [parse.y:173 explain] *)
@@ -339,6 +342,22 @@ drop-view-stmt  ::= "DROP" "VIEW" [ "IF" "EXISTS" ] view-name ;
 
 view-name       ::= identifier ;                                         (* V6 *)
 
+(* ===================== PRAGMA journal_mode (V6 carve-out) =====================
+ * [parse.y:1715 cmd ::= PRAGMA nm dbnm EQ nmnum] -- `nmnum` (parse.y:1723)
+ * is where `DELETE` is folded in as a bare keyword value alongside a
+ * plain `nm` (identifier) value like `WAL`, which is why the value
+ * alternation below needs its own two literal cases rather than one
+ * `identifier` production. General PRAGMA support -- every other
+ * pragma name, and journal_mode's other stock-SQLite values
+ * (MEMORY/OFF/TRUNCATE/PERSIST) -- stays deferred to V7 (see Future
+ * blocks below); #388 carves out only this one case, needed to switch
+ * a database into/out of WAL mode, rather than waiting on the full
+ * PRAGMA grammar.
+ *)
+
+pragma-stmt     ::= "PRAGMA" "journal_mode" "=" ( "WAL" | "DELETE" ) ;
+                     (* V6 [parse.y:1715 cmd] -- #388 *)
+
 (* ===================== Transaction control (V5 slice) =====================
  * [parse.y:181 cmd ::= BEGIN transtype trans_opt, :186 transtype,
  *  :190 cmd ::= COMMIT|END trans_opt, :191 cmd ::= ROLLBACK trans_opt]
@@ -391,8 +410,11 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      `UNION` landed -- #377/#378, see compound-op above; CREATE VIEW /
  *      DROP VIEW landed -- #379, see create-view-stmt/drop-view-stmt
  *      above; view storage + FROM-clause expansion is #380)
- * V7:  PRAGMA, ANALYZE (EXPLAIN [QUERY PLAN] pulled forward to V4 -- #243),
- *      `INTERSECT`/`EXCEPT` compound-select ops (see compound-op above)
+ * V7:  PRAGMA (general form -- every pragma name/value other than the
+ *      narrow `journal_mode = WAL|DELETE` carve-out that landed under
+ *      V6 -- see pragma-stmt above, #388), ANALYZE (EXPLAIN [QUERY
+ *      PLAN] pulled forward to V4 -- #243), `INTERSECT`/`EXCEPT`
+ *      compound-select ops (see compound-op above)
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),
  *      ALTER TABLE (RENAME / ADD|DROP|RENAME COLUMN)
  * V9:  UPSERT (ON CONFLICT DO ...), RETURNING, window functions (OVER/PARTITION/frames),
