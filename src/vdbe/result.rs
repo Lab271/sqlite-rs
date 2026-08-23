@@ -3,7 +3,9 @@
 //! record serialization (`MakeRecord`, reusing spec 003's on-disk record
 //! encoding byte-for-byte), and row emission (`ResultRow`).
 
-use crate::record::{encode_record, TextEncoding, Value};
+use std::rc::Rc;
+
+use crate::record::{encode_record_into, TextEncoding, Value};
 use crate::vdbe::affinity::{apply_affinity, Affinity};
 use crate::vdbe::exec::{ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
@@ -153,8 +155,11 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         }
         values.push(value);
     }
-    let payload = encode_record(&values, TextEncoding::Utf8);
-    vm.set_register(instr.p3, Value::Blob(payload.into()))?;
+    let mut scratch = std::mem::take(vm.record_scratch());
+    encode_record_into(&values, TextEncoding::Utf8, &mut scratch);
+    let payload: Rc<[u8]> = Rc::from(scratch.as_slice());
+    *vm.record_scratch() = scratch;
+    vm.set_register(instr.p3, Value::Blob(payload))?;
     Ok(Step::Next)
 }
 

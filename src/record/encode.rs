@@ -133,6 +133,18 @@ fn serial_type_and_body(value: &Value, encoding: TextEncoding) -> (u64, Vec<u8>)
 /// functions reproduces the original values, and the byte layout matches
 /// spec 003 exactly (reused as-is for `MakeRecord`'s in-memory rows).
 pub fn encode_record(values: &[Value], encoding: TextEncoding) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_record_into(values, encoding, &mut out);
+    out
+}
+
+/// Like [`encode_record`], but writes into a caller-owned buffer instead of
+/// allocating a fresh `Vec<u8>`. `out` is cleared first; callers that reuse
+/// the same buffer across calls (e.g. once per row in a hot loop) amortize
+/// its capacity instead of paying a `realloc` per row.
+pub fn encode_record_into(values: &[Value], encoding: TextEncoding, out: &mut Vec<u8>) {
+    out.clear();
+
     let parts: Vec<(u64, Vec<u8>)> = values
         .iter()
         .map(|v| serial_type_and_body(v, encoding))
@@ -155,12 +167,17 @@ pub fn encode_record(values: &[Value], encoding: TextEncoding) -> Vec<u8> {
         header_len = header_len.saturating_add(1);
     };
 
-    let mut out = header_len_varint;
+    out.reserve(
+        header_len_varint
+            .len()
+            .saturating_add(serial_type_bytes.len())
+            .saturating_add(parts.iter().map(|(_, b)| b.len()).sum()),
+    );
+    out.extend(&header_len_varint);
     out.extend(&serial_type_bytes);
     for (_, body) in &parts {
         out.extend(body);
     }
-    out
 }
 
 #[cfg(test)]

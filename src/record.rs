@@ -9,8 +9,8 @@ mod value;
 mod varint;
 
 pub use decode::{decode_column, decode_record};
-pub use encode::encode_record;
 pub(crate) use encode::encode_varint;
+pub use encode::{encode_record, encode_record_into};
 pub use error::RecordError;
 pub use value::{TextEncoding, Value};
 pub use varint::decode_varint;
