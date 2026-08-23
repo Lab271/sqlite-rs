@@ -84,6 +84,16 @@ fn test_invalid_delete_limit_not_yet_supported() {
     invalid("DELETE FROM t LIMIT 1");
 }
 
+/// `parse_delete`'s own `Err(ParseFail::Unsupported)` arm (as opposed
+/// to `expect_end`'s, exercised by
+/// `test_unsupported_delete_trailing_compound` below) fires when
+/// `parse_delete_stmt` itself — via its WHERE-clause `expr()` call —
+/// hits an unimplemented construct.
+#[test]
+fn test_unsupported_delete_where_current_timestamp() {
+    unsupported("DELETE FROM t WHERE a = CURRENT_TIMESTAMP");
+}
+
 #[test]
 fn test_unsupported_delete_trailing_compound() {
     // Trailing UNION is only rejected once control returns to the

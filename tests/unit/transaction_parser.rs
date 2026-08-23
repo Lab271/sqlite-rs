@@ -49,6 +49,27 @@ fn invalid_rollback(src: &str) {
     }
 }
 
+fn unsupported_begin(src: &str) {
+    match parse_begin(src) {
+        ParseOutcome::Unsupported { .. } => {}
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_commit(src: &str) {
+    match parse_commit(src) {
+        ParseOutcome::Unsupported { .. } => {}
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_rollback(src: &str) {
+    match parse_rollback(src) {
+        ParseOutcome::Unsupported { .. } => {}
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
 // ---- BEGIN ------------------------------------------------------------
 
 #[test]
@@ -97,6 +118,16 @@ fn test_invalid_begin_bad_mode() {
     invalid_begin("BEGIN FOO TRANSACTION");
 }
 
+/// `expect_end`'s trailing-token check treats a leftover `UNION` (etc.)
+/// keyword as an unimplemented-but-recognized construct rather than a
+/// plain syntax error, regardless of which statement precedes it — the
+/// same shared classification `ddl_parser.rs`'s `DROP TABLE ... UNION
+/// SELECT 1` test relies on for `parse_drop_table`.
+#[test]
+fn test_unsupported_begin_trailing_union() {
+    unsupported_begin("BEGIN UNION SELECT 1");
+}
+
 // ---- COMMIT / END -------------------------------------------------------
 
 #[test]
@@ -124,6 +155,11 @@ fn test_invalid_commit_trailing_garbage() {
     invalid_commit("COMMIT EXTRA");
 }
 
+#[test]
+fn test_unsupported_commit_trailing_union() {
+    unsupported_commit("COMMIT UNION SELECT 1");
+}
+
 // ---- ROLLBACK -----------------------------------------------------------
 
 #[test]
@@ -139,6 +175,11 @@ fn test_accept_rollback_transaction() {
 #[test]
 fn test_invalid_rollback_trailing_garbage() {
     invalid_rollback("ROLLBACK EXTRA");
+}
+
+#[test]
+fn test_unsupported_rollback_trailing_union() {
+    unsupported_rollback("ROLLBACK UNION SELECT 1");
 }
 
 // ---- printer round-trip ---------------------------------------------------

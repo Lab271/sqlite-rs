@@ -12,13 +12,39 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
-use sqlite_rs::codegen::compile_select;
+use sqlite_rs::codegen::{compile_select, explain_query_plan, CodegenError};
 use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::record::Value;
 use sqlite_rs::schema::TableSchema;
 use sqlite_rs::vdbe::execute_with_db;
 use sqlite_rs::vfs::{UnixVfs, Vfs, VfsPageSource};
+
+fn accepted_select(src: &str) -> sqlite_rs::parser::ast::Select {
+    match parse_select(src) {
+        ParseOutcome::Accepted(select) => *select,
+        other => panic!("expected accept for {src:?}, got {other:?}"),
+    }
+}
+
+/// #243: `explain_query_plan` rejects a `FROM`-less `SELECT` outright
+/// — there's no table to report a scan/search plan for.
+#[test]
+fn explain_query_plan_rejects_missing_from_clause() {
+    let select = accepted_select("SELECT 1");
+    let err = explain_query_plan(&select, &[]).expect_err("expected NoFromClause");
+    assert!(matches!(err, CodegenError::NoFromClause));
+}
+
+/// #243: `explain_query_plan` requires exactly one schema per
+/// `FROM`-clause table — a caller passing the wrong number gets a
+/// clear `Unsupported` error rather than an out-of-bounds panic.
+#[test]
+fn explain_query_plan_rejects_schema_count_mismatch() {
+    let select = accepted_select("SELECT * FROM a");
+    let err = explain_query_plan(&select, &[]).expect_err("expected a schema-count mismatch");
+    assert!(matches!(err, CodegenError::Unsupported { .. }), "got {err:?}");
+}
 
 fn pinned_oracle() -> Option<PathBuf> {
     let path = PathBuf::from("sqlite3");

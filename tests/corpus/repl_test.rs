@@ -208,3 +208,95 @@ fn dot_exit_also_ends_the_session() {
     let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
     assert_eq!(stdout, "1\n");
 }
+
+/// Opening a nonexistent path reports an error and exits with failure,
+/// rather than panicking.
+#[test]
+fn opening_a_bad_path_reports_an_error_and_fails() {
+    let dir = std::env::temp_dir().join(format!(
+        "sqlite-rs-repl-bad-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    let missing = dir.join("does-not-exist.db");
+    let output = run_repl(&missing, &[".quit"]);
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).is_empty());
+}
+
+/// An unrecognized dot-command reports an error but the session
+/// continues (the REPL's own explicit scope-down: no dot-command
+/// beyond `.quit`/`.exit`).
+#[test]
+fn unknown_dot_command_reports_error_and_session_continues() {
+    let db = seed_db("unknown_dot_command");
+    let output = run_repl(&db, &[".tables", "SELECT 1;", ".quit"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown command"),
+        "stderr: {stderr}"
+    );
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
+/// Closing stdin without a `.quit`/`.exit` (e.g. a piped script that
+/// just ends) ends the session cleanly at EOF, same as an explicit
+/// `.quit`.
+#[test]
+fn stdin_eof_without_dot_quit_ends_the_session() {
+    let db = seed_db("eof_no_quit");
+    let output = run_repl(&db, &["SELECT 1;"]);
+    assert!(output.status.success());
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
+/// A `SELECT` using syntactically-recognized-but-unimplemented syntax
+/// reports a "not yet supported" error and the session continues.
+#[test]
+fn select_with_unsupported_syntax_reports_error_and_session_continues() {
+    let db = seed_db("unsupported_select");
+    let output = run_repl(&db, &["SELECT * FROM t JOIN t;", "SELECT 1;", ".quit"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported"),
+        "stderr: {stderr}"
+    );
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
+/// A `SELECT` with a genuine syntax error reports a "syntax error"
+/// diagnostic and the session continues.
+#[test]
+fn select_with_syntax_error_reports_error_and_session_continues() {
+    let db = seed_db("select_syntax_error");
+    let output = run_repl(&db, &["SELECT FROM;", "SELECT 1;", ".quit"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syntax error"),
+        "stderr: {stderr}"
+    );
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
+/// A `SELECT` that parses fine but fails to compile (e.g. a missing
+/// table) reports the compile error and the session continues.
+#[test]
+fn select_from_missing_table_reports_error_and_session_continues() {
+    let db = seed_db("select_missing_table");
+    let output = run_repl(&db, &["SELECT * FROM nope;", "SELECT 1;", ".quit"]);
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).is_empty());
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}

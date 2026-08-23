@@ -28,6 +28,34 @@ fn accept_drop_view(src: &str) -> DropView {
     }
 }
 
+fn unsupported_view(src: &str) -> String {
+    match parse_create_view(src) {
+        ParseOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_view(src: &str) -> String {
+    match parse_create_view(src) {
+        ParseOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
+fn unsupported_drop_view(src: &str) -> String {
+    match parse_drop_view(src) {
+        ParseOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_drop_view(src: &str) -> String {
+    match parse_drop_view(src) {
+        ParseOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
 fn accept_table(src: &str) -> CreateTable {
     match parse_create_table(src) {
         ParseOutcome::Accepted(stmt) => *stmt,
@@ -512,4 +540,33 @@ fn test_accept_drop_view() {
 fn test_accept_drop_view_if_exists() {
     let drop = accept_drop_view("DROP VIEW IF EXISTS v");
     assert!(drop.if_exists);
+}
+
+#[test]
+fn test_unsupported_create_temp_view() {
+    unsupported_view("CREATE TEMP VIEW v AS SELECT 1");
+}
+
+#[test]
+fn test_invalid_create_view_missing_as() {
+    invalid_view("CREATE VIEW v SELECT 1");
+}
+
+/// `expect_end`'s trailing-token check classifies a leftover `UNION`
+/// keyword as unimplemented-but-recognized regardless of which
+/// statement precedes it (same shared arm `ddl_parser.rs`'s other
+/// `... UNION SELECT 1` tests exercise for CREATE INDEX/DROP TABLE).
+#[test]
+fn test_unsupported_create_view_trailing_union() {
+    unsupported_view("CREATE VIEW v AS SELECT 1 UNION SELECT 2 INTERSECT SELECT 3");
+}
+
+#[test]
+fn test_invalid_drop_view_missing_name() {
+    invalid_drop_view("DROP VIEW");
+}
+
+#[test]
+fn test_unsupported_drop_view_trailing_union() {
+    unsupported_drop_view("DROP VIEW v UNION SELECT 1");
 }

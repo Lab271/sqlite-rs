@@ -10,7 +10,7 @@
 )]
 
 use sqlite_rs::parser::ast::*;
-use sqlite_rs::parser::{parse_select, parse_update, ParseOutcome};
+use sqlite_rs::parser::{parse_explain, parse_select, parse_update, ParseOutcome};
 
 fn accept(src: &str) -> Select {
     match parse_select(src) {
@@ -146,6 +146,69 @@ fn invalid(src: &str) -> String {
         ParseOutcome::Invalid { message, .. } => message,
         other => panic!("expected invalid for {src:?}, got {other:?}"),
     }
+}
+
+/// Once control returns to `parse_select`'s own top-level `expect_end`
+/// (rather than a nested compound-SELECT's), a mixed `UNION` then
+/// `INTERSECT` leaves the `INTERSECT` as an unconsumed trailing token —
+/// `expect_end` classifies that as unimplemented-but-recognized, not a
+/// plain syntax error, matching `test_reject_update_trailing_compound_unsupported`'s
+/// shape for UPDATE.
+#[test]
+fn test_reject_select_trailing_compound_unsupported() {
+    unsupported("SELECT 1 UNION SELECT 2 INTERSECT SELECT 3");
+}
+
+/// Trailing garbage after an otherwise-complete SELECT is rejected at
+/// `parse_select`'s own `expect_end`, not from within
+/// `parse_select_stmt` itself.
+#[test]
+fn test_reject_select_trailing_garbage_invalid() {
+    invalid("SELECT 1)");
+}
+
+fn unsupported_explain(src: &str) -> String {
+    match parse_explain(src) {
+        ParseOutcome::Unsupported { message, .. } => message,
+        other => panic!("expected unsupported for {src:?}, got {other:?}"),
+    }
+}
+
+fn invalid_explain(src: &str) -> String {
+    match parse_explain(src) {
+        ParseOutcome::Invalid { message, .. } => message,
+        other => panic!("expected invalid for {src:?}, got {other:?}"),
+    }
+}
+
+/// #243: bare `EXPLAIN` (no `QUERY PLAN`) is the CLI's `-explain`
+/// opcode-dump mode, not this parser's job — rejected as `Unsupported`.
+#[test]
+fn test_unsupported_bare_explain() {
+    let msg = unsupported_explain("EXPLAIN SELECT 1");
+    assert!(msg.contains("-explain"), "message: {msg}");
+}
+
+/// `EXPLAIN QUERY PLAN` followed by anything other than a `SELECT` is
+/// a syntax error at the nested `parse_select_stmt` call.
+#[test]
+fn test_invalid_explain_query_plan_missing_select() {
+    invalid_explain("EXPLAIN QUERY PLAN");
+}
+
+/// Trailing garbage after an otherwise-complete `EXPLAIN QUERY PLAN
+/// select-stmt` is rejected at `parse_explain`'s own `expect_end`.
+#[test]
+fn test_invalid_explain_trailing_garbage() {
+    invalid_explain("EXPLAIN QUERY PLAN SELECT 1)");
+}
+
+/// Same shared `expect_end` classification as
+/// `test_reject_select_trailing_compound_unsupported`, reached this
+/// time via `EXPLAIN QUERY PLAN`.
+#[test]
+fn test_unsupported_explain_trailing_compound() {
+    unsupported_explain("EXPLAIN QUERY PLAN SELECT 1 UNION SELECT 2 INTERSECT SELECT 3");
 }
 
 /// Requirement 2, "Accept valid SELECT" scenario.
