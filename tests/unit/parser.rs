@@ -1107,6 +1107,42 @@ fn test_with_recursive_is_unsupported() {
     assert!(msg.contains("RECURSIVE"), "message: {msg}");
 }
 
+/// `[NOT] MATERIALIZED` (SQLite 3.35+ CTE query-planner hint) is
+/// recognized syntax the parser doesn't act on yet — pinned as
+/// `Unsupported`, not `Invalid`, per the extracted-corpus regression
+/// this PR fixed (`tests/corpus/extracted_sql_test.rs`).
+#[test]
+fn test_with_materialized_hint_is_unsupported() {
+    let msg = unsupported("WITH cte AS MATERIALIZED (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("MATERIALIZED"), "message: {msg}");
+}
+
+#[test]
+fn test_with_not_materialized_hint_is_unsupported() {
+    let msg = unsupported("WITH cte AS NOT MATERIALIZED (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("MATERIALIZED"), "message: {msg}");
+}
+
+/// A `WITH` clause feeding `INSERT`/`UPDATE`/`DELETE` instead of
+/// `SELECT` (a CTE-backed data-modifying statement) is recognized SQL
+/// this grammar slice doesn't parse — pinned as `Unsupported`, not
+/// `Invalid`, per the same extracted-corpus regression.
+#[test]
+fn test_with_clause_feeding_insert_is_unsupported() {
+    let msg = unsupported("WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte");
+    assert!(msg.contains("INSERT"), "message: {msg}");
+}
+
+/// A single-quoted string literal used as a `SELECT`-list alias is a
+/// legacy SQLite compatibility quirk it accepts — recognized syntax,
+/// not malformed SQL, so `AS '...'` must be `Unsupported`, not
+/// `Invalid`.
+#[test]
+fn test_quoted_string_alias_is_unsupported() {
+    let msg = unsupported("SELECT 1 AS 'x'");
+    assert!(msg.contains("alias"), "message: {msg}");
+}
+
 /// Printer roundtrip: WITH-prefixed SELECT reparses to the same AST
 /// (spec 002-parser Requirement 3).
 #[test]

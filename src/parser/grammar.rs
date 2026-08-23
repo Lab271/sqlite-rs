@@ -931,6 +931,19 @@ impl Parser {
         if self.at_kw(Keyword::VALUES) {
             return self.unsupported("bare VALUES not yet supported");
         }
+        // A `WITH` clause can also introduce `INSERT`/`UPDATE`/`DELETE`
+        // (a CTE feeding a data-modifying statement) in real SQLite —
+        // recognized syntax this grammar slice doesn't parse, so it's
+        // surfaced as `Unsupported` rather than falling through to the
+        // generic `SELECT` expectation below, which would misreport it
+        // as malformed SQL.
+        if with_clause.is_some()
+            && (self.at_kw(Keyword::INSERT)
+                || self.at_kw(Keyword::UPDATE)
+                || self.at_kw(Keyword::DELETE))
+        {
+            return self.unsupported("WITH ... INSERT/UPDATE/DELETE not yet supported");
+        }
         let select_start = self.expect_kw(Keyword::SELECT)?;
         let start = with_clause.as_ref().map_or(select_start, |w| w.span);
 
@@ -1076,6 +1089,19 @@ impl Parser {
         };
 
         self.expect_kw(Keyword::AS)?;
+        // `[NOT] MATERIALIZED` (a query-planner hint, SQLite 3.35+) is
+        // recognized syntax we don't yet act on — surfacing it as
+        // `Unsupported` rather than falling through to the generic `'('`
+        // expectation below, which would misreport it as malformed SQL.
+        if self.at_kw(Keyword::MATERIALIZED)
+            || (self.at_kw(Keyword::NOT)
+                && matches!(
+                    self.peek_at(1).kind,
+                    TokenKind::Keyword(Keyword::MATERIALIZED)
+                ))
+        {
+            return self.unsupported("[NOT] MATERIALIZED CTE hint not yet supported");
+        }
         self.expect_punct(TokenKind::LParen, "'('")?;
         let query = self.parse_select_stmt()?;
         let end = self.expect_punct(TokenKind::RParen, "')'")?;
@@ -1187,6 +1213,18 @@ impl Parser {
     /// alias, never a keyword (keywords are never `TokenKind::Identifier`).
     fn opt_alias(&mut self) -> PResult<Option<String>> {
         if self.eat_kw(Keyword::AS) {
+            // Stock SQLite accepts a single-quoted string literal as an
+            // alias too (a legacy compatibility quirk — `'m'` is treated
+            // as if it were the identifier `m`), which our tokenizer
+            // sees as a `TokenKind::String` rather than `Identifier`.
+            // Recognized syntax we don't yet implement, not malformed
+            // SQL: a plain `identifier()` call here would misreport it
+            // as `Invalid` instead of `Unsupported`.
+            if matches!(self.peek().kind, TokenKind::String(_)) {
+                return self.unsupported(
+                    "a quoted string literal as an alias (e.g. AS 'name') is not yet supported",
+                );
+            }
             let (name, _) = self.identifier()?;
             return Ok(Some(name));
         }
