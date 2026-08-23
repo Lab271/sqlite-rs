@@ -50,7 +50,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor, TableRow};
-use crate::record::{decode_column, decode_record, encode_record, TextEncoding, Value};
+use crate::record::{
+    decode_column, decode_record, decode_serial_value, encode_record, parse_header, TextEncoding,
+    Value,
+};
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
 use crate::vdbe::{compare, Collation};
@@ -124,6 +127,20 @@ pub(crate) struct TableCursorState {
     /// `OpenWrite`; a read-only cursor never uses it (no write opcode
     /// runs against it), so it costs nothing on the read-only path.
     root_page: u32,
+    /// `current`'s parsed header (#458), computed lazily by the first
+    /// `Column` read of a row and reused by every later `Column` read of
+    /// the *same* row — reset to `None` (never left stale) by
+    /// [`Self::set_current`], the only way `current` is ever reassigned.
+    header_cache: Option<RowHeaderCache>,
+}
+
+impl TableCursorState {
+    /// The sole setter for `current` — always paired with clearing
+    /// `header_cache`, so a cache can never survive its row.
+    fn set_current(&mut self, row: Option<TableRow>) {
+        self.current = row;
+        self.header_cache = None;
+    }
 }
 
 impl std::fmt::Debug for TableCursorState {
@@ -132,6 +149,38 @@ impl std::fmt::Debug for TableCursorState {
             .field("current", &self.current)
             .field("forced_null", &self.forced_null)
             .finish_non_exhaustive()
+    }
+}
+
+/// A record payload's header, parsed once (#458): each column's serial
+/// type paired with the byte offset of its body within the row's
+/// payload. Lets repeated `Column` opcodes against the same row look up
+/// an offset directly instead of re-walking the header from byte 0 every
+/// time.
+#[derive(Debug)]
+struct RowHeaderCache {
+    entries: Vec<(u64, usize)>,
+}
+
+impl RowHeaderCache {
+    fn parse(payload: &[u8]) -> Result<Self, crate::record::RecordError> {
+        Ok(Self {
+            entries: parse_header(payload)?,
+        })
+    }
+
+    fn column(
+        &self,
+        payload: &[u8],
+        idx: usize,
+        encoding: TextEncoding,
+    ) -> Result<Value, crate::record::RecordError> {
+        match self.entries.get(idx) {
+            Some(&(serial_type, offset)) => {
+                decode_serial_value(serial_type, payload, offset, encoding).map(|(v, _)| v)
+            }
+            None => Ok(Value::Null),
+        }
     }
 }
 
@@ -149,6 +198,18 @@ pub(crate) struct IndexReadState {
     root_page: u32,
     cursor: IndexCursor<Rc<dyn crate::vfs::PageSource>>,
     current: Option<crate::btree::IndexRow>,
+    /// Same role as [`TableCursorState::header_cache`] (#458): `current`'s
+    /// parsed header, cleared whenever `current` is reassigned.
+    header_cache: Option<RowHeaderCache>,
+}
+
+impl IndexReadState {
+    /// The sole setter for `current` — see
+    /// [`TableCursorState::set_current`]'s doc.
+    fn set_current(&mut self, row: Option<crate::btree::IndexRow>) {
+        self.current = row;
+        self.header_cache = None;
+    }
 }
 
 impl std::fmt::Debug for IndexReadState {
@@ -330,6 +391,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                 root_page,
                 cursor,
                 current: None,
+                header_cache: None,
             }),
         )?;
         return Ok(Step::Next);
@@ -342,6 +404,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             current: None,
             forced_null: false,
             root_page,
+            header_cache: None,
         }),
     )?;
     Ok(Step::Next)
@@ -376,6 +439,7 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             current: None,
             forced_null: false,
             root_page,
+            header_cache: None,
         }),
     )?;
     Ok(Step::Next)
@@ -415,13 +479,14 @@ pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let found = match vm.cursor_mut(instr.p1)? {
         CursorSlot::Table(state) => {
             state.forced_null = false;
-            state.current = state
+            let row = state
                 .cursor
                 .first()
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode: "Rewind",
                     reason: e.to_string(),
                 })?;
+            state.set_current(row);
             state.current.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
@@ -452,13 +517,14 @@ pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let found = match vm.cursor_mut(instr.p1)? {
         CursorSlot::Table(state) => {
             state.forced_null = false;
-            state.current = state
+            let row = state
                 .cursor
                 .last()
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode: "Last",
                     reason: e.to_string(),
                 })?;
+            state.set_current(row);
             state.current.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
@@ -489,13 +555,14 @@ pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let found = match vm.cursor_mut(instr.p1)? {
         CursorSlot::Table(state) => {
-            state.current = state
+            let row = state
                 .cursor
                 .next()
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode: "Next",
                     reason: e.to_string(),
                 })?;
+            state.set_current(row);
             state.current.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
@@ -530,33 +597,20 @@ pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// row a `WHERE` filter rejects before reading later columns never has
 /// those columns decoded at all.
 fn read_row_column(
-    vm: &Vm,
+    vm: &mut Vm,
     slot: i32,
     idx: usize,
     opcode: &'static str,
 ) -> Result<Value, ExecError> {
+    // Pseudo and ephemeral-table cursors need no header cache (a pseudo
+    // cursor's record blob is already fully decoded per read; an
+    // ephemeral-table row is stored as already-decoded `Value`s) — handle
+    // them here against an immutable borrow, so the cache-bearing arms
+    // below can take a mutable one without the two ever overlapping.
     match vm.cursor(slot)? {
-        CursorSlot::Table(state) => {
-            if state.forced_null {
-                return Ok(Value::Null);
-            }
-            let row = state
-                .current
-                .as_ref()
-                .ok_or(ExecError::MalformedInstruction {
-                    opcode,
-                    reason: "cursor has no current row".to_string(),
-                })?;
-            decode_column(&row.payload, idx, TextEncoding::Utf8).map_err(|e| {
-                ExecError::MalformedInstruction {
-                    opcode,
-                    reason: e.to_string(),
-                }
-            })
-        }
         CursorSlot::Pseudo { register } => {
             let register = *register;
-            match vm.register(register)? {
+            return match vm.register(register)? {
                 Value::Blob(bytes) => decode_column(bytes, idx, TextEncoding::Utf8).map_err(|e| {
                     ExecError::MalformedInstruction {
                         opcode,
@@ -567,40 +621,91 @@ fn read_row_column(
                     opcode,
                     reason: format!("pseudo-cursor register holds {other:?}, not a record blob"),
                 }),
-            }
+            };
         }
-        CursorSlot::EphemeralTable(state) => Ok(state
-            .pos
-            .and_then(|p| state.rows.get(p))
-            .ok_or(ExecError::MalformedInstruction {
+        CursorSlot::EphemeralTable(state) => {
+            return Ok(state
+                .pos
+                .and_then(|p| state.rows.get(p))
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                })?
+                .1
+                .get(idx)
+                .cloned()
+                .unwrap_or(Value::Null));
+        }
+        CursorSlot::Table(_) | CursorSlot::IndexRead(_) => {}
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
                 opcode,
-                reason: "cursor has no current row".to_string(),
-            })?
-            .1
-            .get(idx)
-            .cloned()
-            .unwrap_or(Value::Null)),
-        CursorSlot::IndexRead(state) => {
-            let row = state
+                slot,
+                found: other.type_name(),
+                expected: "table, pseudo, ephemeral table, or index read cursor",
+            })
+        }
+    }
+
+    match vm.cursor_mut(slot)? {
+        CursorSlot::Table(state) => {
+            if state.forced_null {
+                return Ok(Value::Null);
+            }
+            let payload = &state
                 .current
                 .as_ref()
                 .ok_or(ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
+                })?
+                .payload;
+            let cache = if let Some(cache) = &state.header_cache {
+                cache
+            } else {
+                let parsed = RowHeaderCache::parse(payload).map_err(|e| {
+                    ExecError::MalformedInstruction {
+                        opcode,
+                        reason: e.to_string(),
+                    }
                 })?;
-            decode_column(&row.payload, idx, TextEncoding::Utf8).map_err(|e| {
+                state.header_cache.insert(parsed)
+            };
+            cache.column(payload, idx, TextEncoding::Utf8).map_err(|e| {
                 ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
                 }
             })
         }
-        other => Err(ExecError::CursorTypeMismatch {
-            opcode,
-            slot,
-            found: other.type_name(),
-            expected: "table, pseudo, ephemeral table, or index read cursor",
-        }),
+        CursorSlot::IndexRead(state) => {
+            let payload = &state
+                .current
+                .as_ref()
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                })?
+                .payload;
+            let cache = if let Some(cache) = &state.header_cache {
+                cache
+            } else {
+                let parsed = RowHeaderCache::parse(payload).map_err(|e| {
+                    ExecError::MalformedInstruction {
+                        opcode,
+                        reason: e.to_string(),
+                    }
+                })?;
+                state.header_cache.insert(parsed)
+            };
+            cache.column(payload, idx, TextEncoding::Utf8).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode,
+                    reason: e.to_string(),
+                }
+            })
+        }
+        _ => unreachable!("filtered to Table/IndexRead above"),
     }
 }
 
@@ -682,13 +787,14 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     };
     let state = vm.table_cursor_mut(instr.p1, "SeekRowid")?;
     state.forced_null = false;
-    state.current = state
+    let row = state
         .cursor
         .seek(target)
         .map_err(|e| ExecError::MalformedInstruction {
             opcode: "SeekRowid",
             reason: e.to_string(),
         })?;
+    state.set_current(row);
     Ok(if state.current.is_none() {
         Step::Jump(to_pc(instr.p2))
     } else {
@@ -750,7 +856,7 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     };
     let current = if matched { found } else { None };
     match vm.cursor_mut(instr.p1)? {
-        CursorSlot::IndexRead(state) => state.current = current.clone(),
+        CursorSlot::IndexRead(state) => state.set_current(current.clone()),
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode: "SeekIndexEq",
@@ -829,13 +935,14 @@ fn index_read_state_mut<'a>(
 /// matching index forward.
 pub fn idx_rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = index_read_state_mut(vm, instr.p1, "IdxRewind")?;
-    state.current = state
+    let row = state
         .cursor
         .first()
         .map_err(|e| ExecError::MalformedInstruction {
             opcode: "IdxRewind",
             reason: e.to_string(),
         })?;
+    state.set_current(row);
     Ok(if state.current.is_some() {
         Step::Next
     } else {
@@ -850,13 +957,14 @@ pub fn idx_rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// DESC` over an ascending index, or vice versa).
 pub fn idx_last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = index_read_state_mut(vm, instr.p1, "IdxLast")?;
-    state.current = state
+    let row = state
         .cursor
         .last()
         .map_err(|e| ExecError::MalformedInstruction {
             opcode: "IdxLast",
             reason: e.to_string(),
         })?;
+    state.set_current(row);
     Ok(if state.current.is_some() {
         Step::Next
     } else {
@@ -870,13 +978,14 @@ pub fn idx_last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// shape; pairs with `IdxRewind`.
 pub fn idx_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = index_read_state_mut(vm, instr.p1, "IdxNext")?;
-    state.current = state
+    let row = state
         .cursor
         .next()
         .map_err(|e| ExecError::MalformedInstruction {
             opcode: "IdxNext",
             reason: e.to_string(),
         })?;
+    state.set_current(row);
     Ok(if state.current.is_some() {
         Step::Jump(to_pc(instr.p2))
     } else {
@@ -889,13 +998,14 @@ pub fn idx_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// with `IdxLast`, the same way `IdxNext` pairs with `IdxRewind`.
 pub fn idx_prev(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = index_read_state_mut(vm, instr.p1, "IdxPrev")?;
-    state.current = state
+    let row = state
         .cursor
         .prev()
         .map_err(|e| ExecError::MalformedInstruction {
             opcode: "IdxPrev",
             reason: e.to_string(),
         })?;
+    state.set_current(row);
     Ok(if state.current.is_some() {
         Step::Jump(to_pc(instr.p2))
     } else {
@@ -924,7 +1034,7 @@ pub fn idx_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 pub fn null_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = vm.table_cursor_mut(instr.p1, "NullRow")?;
     state.forced_null = true;
-    state.current = None;
+    state.set_current(None);
     Ok(Step::Next)
 }
 
@@ -1221,7 +1331,7 @@ pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             // clear `current` so a stray follow-up `Rowid`/`Column`
             // reads as "no row" rather than stale data.
             if let CursorSlot::Table(state) = vm.cursor_mut(instr.p1)? {
-                state.current = None;
+                state.set_current(None);
             }
             Ok(Step::Next)
         }
@@ -2253,6 +2363,70 @@ mod tests {
         open_pseudo(&mut vm, &Instruction::new(Opcode::OpenPseudo, 0, 5, 0)).unwrap();
         let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn repeated_column_reads_on_the_same_row_reuse_the_header_cache() {
+        // Reads both columns of the same row twice each, in a scrambled
+        // order — the second read of a column must return the same value
+        // as the first (proving the cached header, populated on the very
+        // first `Column` call for this row, is being reused rather than
+        // silently ignored or corrupted across repeated lookups).
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 10)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 11)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 12)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 13)).unwrap();
+
+        assert_eq!(*vm.register(11).unwrap(), Value::Integer(1));
+        assert_eq!(*vm.register(13).unwrap(), Value::Integer(1));
+        assert_eq!(
+            *vm.register(10).unwrap(),
+            Value::Text("row number 1".to_string().into())
+        );
+        assert_eq!(vm.register(10).unwrap(), vm.register(12).unwrap());
+    }
+
+    #[test]
+    fn next_invalidates_the_header_cache_so_column_reads_the_new_row() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+
+        // Populate row 1's header cache, then advance — if `Next` failed
+        // to invalidate it, this read would wrongly reuse row 1's offsets
+        // against row 2's payload.
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
+        next(&mut vm, &Instruction::new(Opcode::Next, 0, 1, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 11)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 12)).unwrap();
+
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(1));
+        assert_eq!(*vm.register(11).unwrap(), Value::Integer(2));
+        assert_eq!(
+            *vm.register(12).unwrap(),
+            Value::Text("row number 2".to_string().into())
+        );
+    }
+
+    #[test]
+    fn seek_rowid_invalidates_the_header_cache() {
+        let mut vm = open_vm("table_multipage.db");
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 999, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 10)).unwrap();
+
+        vm.set_register(5, Value::Integer(1500)).unwrap();
+        seek_rowid(&mut vm, &Instruction::new(Opcode::SeekRowid, 0, 42, 5)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 11)).unwrap();
+
+        assert_eq!(
+            *vm.register(11).unwrap(),
+            Value::Text("row number 1500".to_string().into())
+        );
     }
 
     #[test]
