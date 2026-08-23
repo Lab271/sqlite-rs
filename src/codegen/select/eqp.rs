@@ -1,5 +1,5 @@
 use super::join_access::{choose_join_access, JoinAccess};
-use super::limit_scan::{is_rowid_reference, top_level_equality_operands};
+use super::limit_scan::{find_covering_index, is_rowid_reference, top_level_equality_operands};
 use super::*;
 /// One row of `EXPLAIN QUERY PLAN` output (#243) -- SQLite's own EQP
 /// shape (`id, parent, notused, detail`), distinct from plain
@@ -120,13 +120,33 @@ pub fn explain_query_plan(
         } else {
             on_expr.and_then(|e| choose_join_access(binding, e, prior_bindings))
         };
-        let detail = match access {
-            None => format!("SCAN {}", eqp_display_name(table_ref)),
-            Some(JoinAccess::Rowid(_)) => format!(
+        // #444: a covering-index scan only applies to the outermost
+        // table's own `WHERE` clause (like the rowid-seek check above),
+        // and only when `access` didn't already find a rowid seek --
+        // `find_covering_index` only fires for a non-rowid indexed
+        // column, so the two never actually overlap, but checking
+        // `access.is_none()` keeps this branch's precedence explicit.
+        let covering = if level == 0 && access.is_none() {
+            find_covering_index(&binding.schema, select)
+        } else {
+            None
+        };
+        let detail = match (access, covering) {
+            (_, Some((index, _))) => format!(
+                "SEARCH {} USING COVERING INDEX {} ({}=?)",
+                eqp_display_name(table_ref),
+                index.name,
+                index
+                    .columns
+                    .first()
+                    .map_or_else(String::new, |c| c.name.clone())
+            ),
+            (None, None) => format!("SCAN {}", eqp_display_name(table_ref)),
+            (Some(JoinAccess::Rowid(_)), None) => format!(
                 "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
                 eqp_display_name(table_ref)
             ),
-            Some(JoinAccess::UniqueIndex { index, .. }) => format!(
+            (Some(JoinAccess::UniqueIndex { index, .. }), None) => format!(
                 "SEARCH {} USING INDEX {} ({}=?)",
                 eqp_display_name(table_ref),
                 index.name,

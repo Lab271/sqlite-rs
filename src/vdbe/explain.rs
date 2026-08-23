@@ -126,6 +126,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::SeekRowid => "SeekRowid",
         Opcode::SeekIndexEq => "SeekIndexEq",
         Opcode::IdxRowid => "IdxRowid",
+        Opcode::IdxColumn => "IdxColumn",
         Opcode::IdxRewind => "IdxRewind",
         Opcode::IdxLast => "IdxLast",
         Opcode::IdxNext => "IdxNext",
@@ -232,6 +233,7 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
             format!("cursor {p1} seek index key at r[{p3}..], jump {p2} if miss")
         }
         Opcode::IdxRowid => format!("r[{p2}] = cursor {p1} indexed rowid"),
+        Opcode::IdxColumn => format!("r[{p3}] = cursor {p1} column {p2} (index)"),
         Opcode::IdxRewind => format!("cursor {p1} index rewind, jump {p2} if empty"),
         Opcode::IdxLast => format!("cursor {p1} to last index entry, jump {p2} if empty"),
         Opcode::IdxNext => format!("cursor {p1} index next, jump {p2} if entry found"),

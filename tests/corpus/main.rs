@@ -33,6 +33,7 @@ mod index_ordered_scan_test;
 mod join_test;
 mod journal_interop_test;
 mod lock_state_interop_test;
+mod no_stats_optimizations_test;
 mod oracle_test;
 mod pager_write_test;
 mod parser_oracle_test;

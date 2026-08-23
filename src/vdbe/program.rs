@@ -77,6 +77,13 @@ pub enum Opcode {
     // codegen can chain into a `SeekRowid` on the table cursor.
     SeekIndexEq,
     IdxRowid,
+    // #444: covering-index-scan / index-only `COUNT` column read — reads
+    // key column `P2` of index-read cursor `P1`'s current entry straight
+    // out of the index's own record, without ever seeking the table
+    // cursor. Like `SeekIndexEq`/`IdxRowid` above, postdates the V2
+    // oracle harvest, so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked.
+    IdxColumn,
     // #296: index-ordered scan — walks a matching index's b-tree
     // directly (forward or backward) in place of `Rewind`/`Next` +
     // sorter opcodes, so `ORDER BY <indexed col> [DESC] LIMIT n` never
@@ -291,6 +298,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::NoConflict
         | Opcode::SeekIndexEq
         | Opcode::IdxRowid
+        | Opcode::IdxColumn
         | Opcode::IdxRewind
         | Opcode::IdxLast
         | Opcode::IdxNext

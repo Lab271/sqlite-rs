@@ -900,6 +900,44 @@ pub fn idx_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// `IdxColumn` (#444): reads key column `P2` of index-read cursor `P1`'s
+/// current entry into register `P3`, decoding straight from the index's
+/// own record — the covering-index-scan / index-only-`COUNT` counterpart
+/// to `Column` on a table cursor, letting codegen skip `IdxRowid` +
+/// `SeekRowid` entirely when every needed column is already in the
+/// index key.
+pub fn idx_column(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let idx = usize::try_from(instr.p2).map_err(|_| ExecError::MalformedInstruction {
+        opcode: "IdxColumn",
+        reason: format!("negative column index {}", instr.p2),
+    })?;
+    let current = match vm.cursor(instr.p1)? {
+        CursorSlot::IndexRead(state) => &state.current,
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "IdxColumn",
+                slot: instr.p1,
+                found: other.type_name(),
+                expected: "index read cursor",
+            })
+        }
+    };
+    let row = current.as_ref().ok_or(ExecError::MalformedInstruction {
+        opcode: "IdxColumn",
+        reason: "cursor has no current row".to_string(),
+    })?;
+    let encoding = vm.db()?.header.text_encoding;
+    let key = decode_record(&row.payload, encoding).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "IdxColumn",
+            reason: e.to_string(),
+        }
+    })?;
+    let value = key.get(idx).cloned().unwrap_or(Value::Null);
+    vm.set_register(instr.p3, value)?;
+    Ok(Step::Next)
+}
+
 /// `NullRow`: forces cursor `P1` to read as an all-NULL row until its
 /// next real positioning (`Rewind`/`Last`/`Next`/`SeekRowid`).
 pub fn null_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
