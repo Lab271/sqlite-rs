@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor, TableRow};
-use crate::record::{decode_record, encode_record, TextEncoding, Value};
+use crate::record::{decode_column, decode_record, encode_record, TextEncoding, Value};
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
 use crate::vdbe::{compare, Collation};
@@ -523,11 +523,22 @@ pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<Value>, ExecError> {
+/// Reads column `idx` of cursor `slot`'s current row. For a table/pseudo
+/// cursor this decodes only column `idx` out of the row's record payload
+/// (#439) rather than the whole record, so a `WHERE`, `SET`, or
+/// `SELECT`-list read pays only for the columns it actually names — a
+/// row a `WHERE` filter rejects before reading later columns never has
+/// those columns decoded at all.
+fn read_row_column(
+    vm: &Vm,
+    slot: i32,
+    idx: usize,
+    opcode: &'static str,
+) -> Result<Value, ExecError> {
     match vm.cursor(slot)? {
         CursorSlot::Table(state) => {
             if state.forced_null {
-                return Ok(Vec::new());
+                return Ok(Value::Null);
             }
             let row = state
                 .current
@@ -536,7 +547,7 @@ fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<V
                     opcode,
                     reason: "cursor has no current row".to_string(),
                 })?;
-            decode_record(&row.payload, TextEncoding::Utf8).map_err(|e| {
+            decode_column(&row.payload, idx, TextEncoding::Utf8).map_err(|e| {
                 ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
@@ -546,7 +557,7 @@ fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<V
         CursorSlot::Pseudo { register } => {
             let register = *register;
             match vm.register(register)? {
-                Value::Blob(bytes) => decode_record(bytes, TextEncoding::Utf8).map_err(|e| {
+                Value::Blob(bytes) => decode_column(bytes, idx, TextEncoding::Utf8).map_err(|e| {
                     ExecError::MalformedInstruction {
                         opcode,
                         reason: e.to_string(),
@@ -566,7 +577,9 @@ fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<V
                 reason: "cursor has no current row".to_string(),
             })?
             .1
-            .clone()),
+            .get(idx)
+            .cloned()
+            .unwrap_or(Value::Null)),
         other => Err(ExecError::CursorTypeMismatch {
             opcode,
             slot,
@@ -587,12 +600,11 @@ fn current_row_columns(vm: &Vm, slot: i32, opcode: &'static str) -> Result<Vec<V
 /// knows which column, if any, is the alias and can emit `Rowid` instead
 /// of `Column` for it.
 pub fn column(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let values = current_row_columns(vm, instr.p1, "Column")?;
     let idx = usize::try_from(instr.p2).map_err(|_| ExecError::MalformedInstruction {
         opcode: "Column",
         reason: format!("negative column index {}", instr.p2),
     })?;
-    let value = values.get(idx).cloned().unwrap_or(Value::Null);
+    let value = read_row_column(vm, instr.p1, idx, "Column")?;
     vm.set_register(instr.p3, value)?;
     Ok(Step::Next)
 }

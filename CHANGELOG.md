@@ -6,6 +6,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+perf: lazy per-column record decoding for the VDBE `Column` opcode (#439)
+— `decode_column(payload, idx, encoding)` (`src/record/decode.rs`) walks
+the record header to find one column's offset and decodes only that
+column's body, instead of `decode_record`-ing the whole row on every
+column access. Because WHERE, SET, and SELECT-list column reads all
+compile to the same `Column` opcode, and a row a `WHERE` filter rejects
+skips its later opcodes via jump-if-false, this gives lazy column
+decoding to SELECT, UPDATE, and DELETE uniformly with no codegen
+changes. `filter_scan` benchmark (50MB fixture): down from a reported
+2.8x gap vs. the oracle to running faster than it (0.65x).
+
 fix: cache the WAL `-shm` fd across a connection's lifetime (#437) —
 `Vfs::open_wal_shm` returns a persistent handle `Pager` caches and reuses
 for every commit's write-lock claim/`mxFrame` publish, instead of
