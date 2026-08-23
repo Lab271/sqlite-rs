@@ -8,8 +8,42 @@
 use super::ast::*;
 use std::fmt;
 
+impl fmt::Display for WithClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WITH ")?;
+        for (i, cte) in self.ctes.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{cte}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for CommonTableExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(columns) = &self.columns {
+            write!(f, " (")?;
+            for (i, col) in columns.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{col}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " AS ({})", self.query)?;
+        Ok(())
+    }
+}
+
 impl fmt::Display for Select {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(with_clause) = &self.with_clause {
+            write!(f, "{with_clause} ")?;
+        }
         write!(f, "SELECT")?;
         match self.distinct {
             Some(Distinctness::Distinct) => write!(f, " DISTINCT")?,

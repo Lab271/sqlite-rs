@@ -443,6 +443,7 @@ where
         })
         .collect();
     let throwaway = Select {
+        with_clause: None,
         distinct: None,
         columns: rewritten_columns,
         from: None,

@@ -396,6 +396,8 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 - WHEN parsed
 - THEN parse succeeds with WithClause in SelectStmt
 
+**Tests:** `tests/unit/parser.rs::test_with_clause_single_cte`, `tests/unit/parser.rs::test_with_clause_multiple_ctes`, `tests/unit/parser.rs::test_with_clause_cte_with_column_list`, `tests/unit/parser.rs::test_with_clause_cte_referenced_in_from`, `tests/unit/parser.rs::test_with_recursive_is_unsupported`, `tests/unit/parser.rs::test_with_clause_printer_roundtrip`
+
 #### Scenario: Accept window function
 
 - GIVEN `SELECT row_number() OVER (ORDER BY x) FROM t`

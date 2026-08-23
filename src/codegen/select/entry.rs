@@ -323,6 +323,7 @@ pub(crate) fn select_result_column_count_joined(
 /// arm (see [`crate::parser::ast::Select::compound`]).
 pub(super) fn arm_as_select(arm: &CompoundSelect) -> Select {
     Select {
+        with_clause: None,
         distinct: arm.distinct,
         columns: arm.columns.clone(),
         from: arm.from.clone(),

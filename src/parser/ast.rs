@@ -1,7 +1,8 @@
 //! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
 //! 002-parser Requirements 2-4), plus the V4 join slice (#237), the V4
-//! subquery-expression slice (#238), and the V4 GROUP BY/HAVING slice
-//! (#239).
+//! subquery-expression slice (#238), the V4 GROUP BY/HAVING slice
+//! (#239), and the V6 non-recursive `WITH`/CTE slice (#375,
+//! `WithClause`/`CommonTableExpr`).
 //!
 //! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`/
 //! `(* V4 *)`-tagged rules: SELECT with an INNER/LEFT [OUTER]/CROSS join
@@ -44,6 +45,11 @@ pub struct Assignment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Select {
+    /// `WITH cte { , cte }` prefix (#375, non-recursive only —
+    /// `WITH RECURSIVE` is out of scope here, see #376 for
+    /// materialization). Parsed but not yet consumed by codegen: a CTE
+    /// name is not resolvable in `from-clause`/`table-ref` yet.
+    pub with_clause: Option<WithClause>,
     pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,
     pub from: Option<FromClause>,
@@ -59,6 +65,25 @@ pub struct Select {
     pub compound: Vec<CompoundSelect>,
     pub order_by: Vec<OrderingTerm>,
     pub limit: Option<Limit>,
+    pub span: Span,
+}
+
+/// Non-recursive `WITH` clause (#375): `WITH cte { , cte }`, prefixing a
+/// `select-stmt`. `WITH RECURSIVE` is not represented here — a bare
+/// `WITH` is parsed, `WITH RECURSIVE` remains `unsupported(..)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    pub ctes: Vec<CommonTableExpr>,
+    pub span: Span,
+}
+
+/// One `cte_name [(col, ...)] AS (select-stmt)` definition within a
+/// `WithClause`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommonTableExpr {
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+    pub query: Box<Select>,
     pub span: Span,
 }
 

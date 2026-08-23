@@ -692,11 +692,9 @@ fn test_scalar_subquery_parses() {
     assert!(matches!(expr.kind, ExprKind::Subquery(_)));
 }
 
-#[test]
-fn test_unsupported_cte() {
-    let msg = unsupported("WITH cte AS (SELECT 1) SELECT * FROM cte");
-    assert!(msg.contains("CTE"), "message: {msg}");
-}
+// Non-recursive `WITH` (CTEs) is now supported (#375) — see the
+// "#375: non-recursive WITH clause (CTEs)" test block below.
+// `WITH RECURSIVE` remains unsupported: `test_with_recursive_is_unsupported`.
 
 // ---- three-way outcome: invalid ----------------------------------------
 
@@ -1006,4 +1004,70 @@ fn test_multi_column_in_rejects_compound_subquery() {
     let msg =
         unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u UNION SELECT 1, 2)");
     assert!(msg.contains("compound"), "message: {msg}");
+}
+
+// ---- #375: non-recursive WITH clause (CTEs) --------------------------
+
+/// A single `WITH name AS (...)` prefix parses, and `with_clause` carries
+/// exactly one `CommonTableExpr` with no explicit column list.
+#[test]
+fn test_with_clause_single_cte() {
+    let select = accept("WITH cte AS (SELECT 1) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes.len(), 1);
+    assert_eq!(with_clause.ctes[0].name, "cte");
+    assert_eq!(with_clause.ctes[0].columns, None);
+}
+
+/// Multiple comma-separated CTEs in one WITH clause.
+#[test]
+fn test_with_clause_multiple_ctes() {
+    let select = accept("WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a, b");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes.len(), 2);
+    assert_eq!(with_clause.ctes[0].name, "a");
+    assert_eq!(with_clause.ctes[1].name, "b");
+}
+
+/// A CTE with an explicit column list: `cte(x, y) AS (...)`.
+#[test]
+fn test_with_clause_cte_with_column_list() {
+    let select = accept("WITH cte(x, y) AS (SELECT 1, 2) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(
+        with_clause.ctes[0].columns,
+        Some(vec!["x".to_string(), "y".to_string()])
+    );
+}
+
+/// The CTE's own body is a full `Select`, and the outer query can
+/// reference the CTE name in its FROM clause (parsing only — codegen
+/// resolution of the CTE name is #376's scope, not this ticket's).
+#[test]
+fn test_with_clause_cte_referenced_in_from() {
+    let select = accept("WITH cte AS (SELECT id FROM t WHERE id > 0) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes[0].query.columns.len(), 1);
+    assert!(with_clause.ctes[0].query.where_clause.is_some());
+    let from = select.from.as_ref().expect("expected a FROM clause");
+    assert!(matches!(&from.first.kind, TableRefKind::Name(name) if name == "cte"));
+}
+
+/// `WITH RECURSIVE` is grammatically distinct and out of scope here —
+/// only the non-recursive form is implemented.
+#[test]
+fn test_with_recursive_is_unsupported() {
+    let msg = unsupported("WITH RECURSIVE cte AS (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("RECURSIVE"), "message: {msg}");
+}
+
+/// Printer roundtrip: WITH-prefixed SELECT reparses to the same AST
+/// (spec 002-parser Requirement 3).
+#[test]
+fn test_with_clause_printer_roundtrip() {
+    let select1 = accept("WITH cte(x) AS (SELECT 1) SELECT * FROM cte");
+    let printed1 = select1.to_string();
+    let select2 = accept(&printed1);
+    let printed2 = select2.to_string();
+    assert_eq!(printed1, printed2);
 }

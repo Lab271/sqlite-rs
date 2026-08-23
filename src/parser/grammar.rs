@@ -872,13 +872,16 @@ impl Parser {
     }
 
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
-        if self.at_kw(Keyword::WITH) {
-            return self.unsupported("WITH / CTEs not yet supported");
-        }
+        let with_clause = if self.at_kw(Keyword::WITH) {
+            Some(self.parse_with_clause()?)
+        } else {
+            None
+        };
         if self.at_kw(Keyword::VALUES) {
             return self.unsupported("bare VALUES not yet supported");
         }
-        let start = self.expect_kw(Keyword::SELECT)?;
+        let select_start = self.expect_kw(Keyword::SELECT)?;
+        let start = with_clause.as_ref().map_or(select_start, |w| w.span);
 
         let distinct = if self.eat_kw(Keyword::DISTINCT) {
             Some(Distinctness::Distinct)
@@ -973,6 +976,7 @@ impl Parser {
             .get(self.pos.saturating_sub(1))
             .map_or(start, |t| t.span);
         Ok(Select {
+            with_clause,
             distinct,
             columns,
             from,
@@ -983,6 +987,53 @@ impl Parser {
             order_by,
             limit,
             span: join_span(start, end),
+        })
+    }
+
+    /// `with-clause` (#375, grammar V6): `WITH cte { , cte }`, where each
+    /// `cte` is `cte_name [(col, ...)] AS (select-stmt)`. `WITH
+    /// RECURSIVE` is not yet supported — only the non-recursive form.
+    fn parse_with_clause(&mut self) -> PResult<WithClause> {
+        let start = self.expect_kw(Keyword::WITH)?;
+        if self.at_kw(Keyword::RECURSIVE) {
+            return self.unsupported("WITH RECURSIVE not yet supported");
+        }
+        let mut ctes = vec![self.parse_common_table_expr()?];
+        while self.eat_punct(&TokenKind::Comma) {
+            ctes.push(self.parse_common_table_expr()?);
+        }
+        let end = ctes.last().map_or(start, |cte| cte.span);
+        Ok(WithClause {
+            ctes,
+            span: join_span(start, end),
+        })
+    }
+
+    /// `cte_name [(col, ...)] AS (select-stmt)`.
+    fn parse_common_table_expr(&mut self) -> PResult<CommonTableExpr> {
+        let (name, name_span) = self.identifier()?;
+
+        let columns = if self.eat_punct(&TokenKind::LParen) {
+            let mut cols = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                cols.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')'")?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        self.expect_kw(Keyword::AS)?;
+        self.expect_punct(TokenKind::LParen, "'('")?;
+        let query = self.parse_select_stmt()?;
+        let end = self.expect_punct(TokenKind::RParen, "')'")?;
+
+        Ok(CommonTableExpr {
+            name,
+            columns,
+            query: Box::new(query),
+            span: join_span(name_span, end),
         })
     }
 
@@ -2190,13 +2241,17 @@ mod tests {
 
     /// #368 tagged MC/DC vector (obligation `grammar_244`): leaf B true,
     /// leaf A false. Independence pair for B against
-    /// `mcdc__grammar_244__v2_neither_select_nor_with`.
+    /// `mcdc__grammar_244__v2_neither_select_nor_with`. #375 landed
+    /// non-recursive `WITH`, so this now parses successfully instead of
+    /// erroring out on the (then-)unimplemented WITH clause — the leaf
+    /// still exercises the WITH branch of `grammar_244`'s decision, just
+    /// via an `Ok` result now.
     #[test]
     #[allow(non_snake_case)]
     fn mcdc__grammar_244__v3_with_source() {
         assert!(parser("INSERT INTO t WITH x AS (SELECT 1) SELECT 1")
             .parse_insert_stmt()
-            .is_err());
+            .is_ok());
     }
 
     /// #368 tagged MC/DC vector (obligation `grammar_438`,
