@@ -186,7 +186,7 @@ fn run_one_statement(
         return;
     }
 
-    let program = match compile_statement(stmt, &schemas) {
+    let program = match compile_statement(stmt, &schemas, &views) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");

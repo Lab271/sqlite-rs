@@ -77,19 +77,26 @@ fn substitute_cte_refs(select: &mut Select, ctes: &[CommonTableExpr]) {
 }
 
 fn substitute_table_ref(table_ref: &mut TableRef, ctes: &[CommonTableExpr]) {
-    let TableRefKind::Name(name) = &table_ref.kind else {
-        return;
-    };
-    let Some(cte) = ctes.iter().find(|c| c.name.eq_ignore_ascii_case(name)) else {
-        return;
-    };
-    // A subquery-in-FROM's alias is mandatory to the rest of codegen
-    // (`resolve_from_table_schema`'s doc comment) — default it to the
-    // CTE's own name when the reference didn't supply one itself (the
-    // common `FROM cte_name` case, as opposed to `FROM cte_name AS c`).
-    let alias = table_ref.alias.clone().or_else(|| Some(cte.name.clone()));
-    table_ref.kind = TableRefKind::Subquery(cte.query.clone());
-    table_ref.alias = alias;
+    match &mut table_ref.kind {
+        TableRefKind::Name(name) => {
+            let Some(cte) = ctes.iter().find(|c| c.name.eq_ignore_ascii_case(name)) else {
+                return;
+            };
+            // A subquery-in-FROM's alias is mandatory to the rest of
+            // codegen (`resolve_from_table_schema`'s doc comment) —
+            // default it to the CTE's own name when the reference
+            // didn't supply one itself (the common `FROM cte_name`
+            // case, as opposed to `FROM cte_name AS c`).
+            let alias = table_ref.alias.clone().or_else(|| Some(cte.name.clone()));
+            table_ref.kind = TableRefKind::Subquery(cte.query.clone());
+            table_ref.alias = alias;
+        }
+        // An inline derived table (`FROM (SELECT ... FROM cte_name) sub`)
+        // can itself reference an earlier-declared CTE in its own FROM —
+        // recurse into it the same way view expansion does, so a CTE
+        // isn't only resolvable directly under a query's top-level FROM.
+        TableRefKind::Subquery(inner) => substitute_cte_refs(inner, ctes),
+    }
 }
 
 /// Renames a CTE's own result columns to its explicit `(col, ...)` list

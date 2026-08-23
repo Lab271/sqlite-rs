@@ -311,7 +311,7 @@ fn run_our_session(pager: &Rc<RefCell<Pager>>, header: DatabaseHeader, stmts: &[
     };
     let mut autocommit = true;
     for stmt in stmts {
-        let program = compile_statement(stmt, &schemas)
+        let program = compile_statement(stmt, &schemas, &[])
             .unwrap_or_else(|e| fail(format!("compile {stmt:?}: {e}")));
         let (rows, ac) = execute_transaction_step(&program, Rc::clone(pager), header, autocommit)
             .unwrap_or_else(|e| fail(format!("execute {stmt:?}: {e}")));

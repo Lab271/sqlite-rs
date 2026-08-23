@@ -387,3 +387,36 @@ fn union_vs_union_all_row_counts_differ_on_same_overlapping_inputs() {
         "union_vs_union_all_row_counts_differ_on_same_overlapping_inputs (UNION)",
     );
 }
+
+/// `INSERT INTO t SELECT ... UNION SELECT ...` — a compound-SELECT
+/// source for `INSERT ... SELECT` — must be rejected cleanly by
+/// `compile_insert`'s `select.compound` guard rather than silently
+/// dropping every arm but the first (the bug this PR's `insert.rs`
+/// change fixes). End-to-end pin, not just the parser-level check in
+/// `tests/unit/insert_parser.rs`.
+#[test]
+fn insert_select_compound_source_is_rejected_cleanly() {
+    let db = union_fixture_db("insert_compound");
+    run_exec(&db, "CREATE TABLE dst(a INTEGER, name TEXT)");
+    let output = run_exec(
+        &db,
+        "INSERT INTO dst SELECT a, name FROM t1 UNION SELECT b, tag FROM t2",
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compound INSERT...SELECT source to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported") || stderr.contains("Unsupported"),
+        "expected a clean rejection message, got: {stderr}"
+    );
+    // Nothing must have been inserted despite the rejection.
+    let count = run_query_ok(&db, "SELECT count(*) FROM dst");
+    assert_eq!(
+        count.trim(),
+        "0",
+        "rejected INSERT must not have written any rows"
+    );
+}

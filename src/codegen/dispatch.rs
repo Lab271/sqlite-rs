@@ -6,20 +6,20 @@
 
 use thiserror::Error;
 
-use crate::parser::ast::InsertSource;
+use crate::parser::ast::{InsertSource, TableRefKind};
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
     parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
     parse_delete, parse_drop_index, parse_drop_table, parse_insert, parse_rollback, parse_update,
 };
-use crate::schema::TableSchema;
+use crate::schema::{TableSchema, ViewSchema};
 use crate::vdbe::Program;
 
 use super::{
-    compile_begin, compile_commit, compile_create_index, compile_create_table,
-    compile_create_view, compile_delete_with_catalog, compile_drop_index, compile_drop_table,
-    compile_insert, compile_rollback, compile_update_with_catalog, resolve_from_table_schema,
-    CodegenError,
+    compile_begin, compile_commit, compile_create_index, compile_create_table, compile_create_view,
+    compile_delete_with_catalog, compile_drop_index, compile_drop_table, compile_insert,
+    compile_rollback, compile_update_with_catalog, expand_views, expand_with_clause,
+    resolve_from_table_schema, resolve_views, CodegenError,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -68,7 +68,11 @@ fn parse_error<T: std::fmt::Debug>(other: ParseOutcome<T>) -> DispatchError {
 /// future caller that needs to run a single INSERT/UPDATE/DELETE/CREATE
 /// TABLE/CREATE INDEX/DROP TABLE/DROP INDEX statement against a known
 /// catalog.
-pub fn compile_statement(sql: &str, schemas: &[TableSchema]) -> Result<Program, DispatchError> {
+pub fn compile_statement(
+    sql: &str,
+    schemas: &[TableSchema],
+    views: &[ViewSchema],
+) -> Result<Program, DispatchError> {
     let find_schema = |name: &str| -> Result<&TableSchema, DispatchError> {
         schemas
             .iter()
@@ -101,18 +105,51 @@ pub fn compile_statement(sql: &str, schemas: &[TableSchema]) -> Result<Program, 
             other => Err(parse_error(other)),
         },
         "INSERT" => match parse_insert(sql) {
-            ParseOutcome::Accepted(insert) => {
+            ParseOutcome::Accepted(mut insert) => {
                 let schema = find_schema(&insert.table)?;
                 let select_schemas: Option<Vec<TableSchema>> = match &insert.source {
                     InsertSource::Select(select) => {
-                        let Some(from) = &select.from else {
+                        // Same `WITH`/view expansion `compile_select_program`
+                        // runs for a plain SELECT (#375/#380), so a CTE/view
+                        // name in the source at least *resolves* against the
+                        // catalog instead of failing with an unexplained "no
+                        // such table". The INSERT codegen path below
+                        // (`compile_insert`'s single-/joined-table scan)
+                        // only knows how to scan a *real* table's root page,
+                        // though — it doesn't yet drive `#257`'s FROM-
+                        // subquery materialization the way a plain SELECT's
+                        // codegen does — so a CTE/view expanding into a
+                        // `TableRefKind::Subquery` here is rejected
+                        // explicitly rather than falling through to
+                        // `compile_insert` and failing with a confusing
+                        // "invalid root page (0)" (the subquery's synthetic,
+                        // rootpage-less schema).
+                        let resolved_views = resolve_views(views);
+                        let cte_expanded = expand_with_clause(select);
+                        let expanded = expand_views(&cte_expanded, &resolved_views)?;
+
+                        let Some(from) = &expanded.from else {
                             return Err(DispatchError::NoFromClause);
                         };
+                        let is_subquery = |r: &crate::parser::ast::TableRef| {
+                            matches!(r.kind, TableRefKind::Subquery(_))
+                        };
+                        if is_subquery(&from.first)
+                            || from.joins.iter().any(|j| is_subquery(&j.table))
+                        {
+                            return Err(CodegenError::Unsupported {
+                                reason: "INSERT ... SELECT with a CTE or view source is not yet \
+                                         supported"
+                                    .to_string(),
+                            }
+                            .into());
+                        }
                         let mut joined_schemas =
                             vec![resolve_from_table_schema(&from.first, schemas)?];
                         for join in &from.joins {
                             joined_schemas.push(resolve_from_table_schema(&join.table, schemas)?);
                         }
+                        insert.source = InsertSource::Select(Box::new(expanded));
                         Some(joined_schemas)
                     }
                     InsertSource::Values(_) | InsertSource::DefaultValues => None,

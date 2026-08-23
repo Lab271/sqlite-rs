@@ -67,7 +67,7 @@ pub(crate) fn compile_select_program(
     // CTE also shadows a same-named view for the scope of its declaring
     // `SELECT`, matching how it already shadows a same-named real table.
     let resolved_views = resolve_views(views);
-    let expanded = expand_views(&cte_expanded, &resolved_views);
+    let expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
     let select = &expanded;
 
     let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {

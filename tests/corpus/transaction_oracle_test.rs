@@ -105,7 +105,7 @@ fn run_our_session(vfs: &UnixVfs, db: &Path, page_size: u32, stmts: &[&str]) {
 
     let mut autocommit = true;
     for stmt in stmts {
-        let program = compile_statement(stmt, &schemas).unwrap();
+        let program = compile_statement(stmt, &schemas, &[]).unwrap();
         let (_, ac) =
             execute_transaction_step(&program, Rc::clone(&pager), header, autocommit).unwrap();
         autocommit = ac;

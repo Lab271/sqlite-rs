@@ -250,3 +250,114 @@ fn drop_view_fails_cleanly_not_wired_into_codegen() {
         "drop_view_fails_cleanly_not_wired_into_codegen (view still queryable)",
     );
 }
+
+/// A view whose body is itself a compound `UNION` `SELECT` — the same
+/// `materialize_from_subquery` guard that rejects a compound CTE body
+/// (`cte_test.rs::with_clause_cte_body_is_union_is_rejected_cleanly`)
+/// is shared by view expansion, so this must fail cleanly too rather
+/// than silently scanning only the view's first arm.
+#[test]
+fn create_view_body_is_union_is_rejected_cleanly() {
+    let db = view_fixture_db("union_body");
+    run_exec_ok(
+        &db,
+        "CREATE VIEW v AS SELECT x FROM t WHERE x > 15 UNION SELECT x FROM t WHERE x < 25",
+    );
+    let output = run_query(&db, "SELECT * FROM v ORDER BY x");
+    assert!(
+        !output.status.success(),
+        "expected a compound view body to be rejected (not yet supported), got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected a clean 'not yet supported' rejection, got: {stderr}"
+    );
+}
+
+/// `INSERT INTO t SELECT * FROM some_view` — a view-backed source for
+/// `INSERT ... SELECT` — resolves the view reference (the same
+/// `expand_views` pass `compile_select_program` runs for a plain
+/// `SELECT`) but is then cleanly rejected, since `compile_insert`'s scan
+/// path doesn't yet drive #257's FROM-subquery materialization the way
+/// a plain SELECT's codegen does. This pins the clear, explicit
+/// rejection message over the confusing "invalid root page (0)" a
+/// view's synthetic schema would otherwise surface.
+#[test]
+fn insert_select_from_view_is_rejected_cleanly() {
+    let db = view_fixture_db("insert_from_view");
+    run_exec_ok(&db, "CREATE TABLE dst(id INTEGER, x INTEGER)");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t WHERE x > 15");
+    let output = run_exec(&db, "INSERT INTO dst SELECT * FROM v");
+    assert!(
+        !output.status.success(),
+        "expected INSERT...SELECT FROM a view to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected a clean 'not yet supported' rejection, got: {stderr}"
+    );
+}
+
+/// The mirror image of `with_clause_cte_selects_from_view_matches_oracle`
+/// (`cte_test.rs`): a view's own body starts with a `WITH` clause. View
+/// expansion must run `expand_with_clause` on the substituted body
+/// before recursing into further view references, since only the
+/// outermost query gets that pass otherwise.
+#[test]
+fn create_view_body_selects_from_cte_matches_oracle() {
+    let db = view_fixture_db("view_from_cte");
+    run_exec_ok(
+        &db,
+        "CREATE VIEW v AS WITH cte AS (SELECT id, x FROM t WHERE x > 10) \
+         SELECT * FROM cte WHERE x < 30",
+    );
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v ORDER BY id",
+        "create_view_body_selects_from_cte_matches_oracle",
+    );
+}
+
+/// A view directly referencing itself must be rejected cleanly with a
+/// "circularly defined" error (matching stock SQLite's own wording),
+/// not recurse forever or silently mis-resolve.
+#[test]
+fn create_view_self_reference_is_rejected_cleanly() {
+    let db = view_fixture_db("self_ref");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT * FROM v");
+    let output = run_query(&db, "SELECT * FROM v");
+    assert!(
+        !output.status.success(),
+        "expected a self-referencing view to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("circularly defined"),
+        "expected a 'circularly defined' rejection, got: {stderr}"
+    );
+}
+
+/// Two views that reference each other (a longer cycle than direct
+/// self-reference) must also be rejected cleanly.
+#[test]
+fn create_view_mutual_reference_is_rejected_cleanly() {
+    let db = view_fixture_db("mutual_ref");
+    run_exec_ok(&db, "CREATE VIEW v1 AS SELECT * FROM v2");
+    run_exec_ok(&db, "CREATE VIEW v2 AS SELECT * FROM v1");
+    let output = run_query(&db, "SELECT * FROM v1");
+    assert!(
+        !output.status.success(),
+        "expected a mutually-recursive view pair to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("circularly defined"),
+        "expected a 'circularly defined' rejection, got: {stderr}"
+    );
+}

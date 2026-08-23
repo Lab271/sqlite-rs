@@ -95,7 +95,7 @@ pub enum Opcode {
     /// `CreateView` (#380): registers a `sqlite_master` row with
     /// `type = 'view'` and `rootpage = 0` (a view has no b-tree of its
     /// own) — otherwise identical to `CreateTable`'s single-instruction
-    /// shape, reusing `P4::CreateTable`'s `{ name, sql }` payload.
+    /// shape, carrying its own `P4::CreateView` payload.
     CreateView,
     // compare
     Eq,
@@ -392,6 +392,15 @@ pub enum P4 {
     /// `sqlite_master.sql` text (sliced from the original source via the
     /// AST's `span`, not reconstructed from the parsed columns).
     CreateTable {
+        name: String,
+        sql: String,
+    },
+    /// `CreateView` (#380): the new view's name and verbatim
+    /// `sqlite_master.sql` text — same shape as `CreateTable`'s payload,
+    /// but its own variant (rather than reusing `P4::CreateTable`) so a
+    /// `Program`'s P4 operand names the DDL kind it actually came from,
+    /// matching `CreateIndex`'s own dedicated variant below.
+    CreateView {
         name: String,
         sql: String,
     },

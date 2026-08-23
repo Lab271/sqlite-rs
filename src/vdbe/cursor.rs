@@ -1425,11 +1425,11 @@ pub fn create_table(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError>
 /// so unlike [`create_table`] this never allocates a root page.
 pub fn create_view(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let (name, sql) = match &instr.p4 {
-        P4::CreateTable { name, sql } => (name.clone(), sql.clone()),
+        P4::CreateView { name, sql } => (name.clone(), sql.clone()),
         other => {
             return Err(ExecError::MalformedInstruction {
                 opcode: "CreateView",
-                reason: format!("expected P4::CreateTable, got {other:?}"),
+                reason: format!("expected P4::CreateView, got {other:?}"),
             })
         }
     };

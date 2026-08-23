@@ -414,9 +414,7 @@ pub fn compile_select_compound(
     // each) — the shared dedup cursor sits right past the last arm's
     // block so it never collides with any arm's own table/sort/pseudo/
     // distinct cursors.
-    let dedup_cursor = i32::try_from(arm_schemas.len().saturating_add(1))
-        .unwrap_or(i32::MAX)
-        .saturating_mul(4);
+    let dedup_cursor = ScanCursors::after_arms(arm_schemas.len().saturating_add(1));
 
     let mut em = Emitter::new();
     let mut reg = RegAlloc::new();

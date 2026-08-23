@@ -226,3 +226,84 @@ fn with_clause_cte_body_is_union_is_rejected_cleanly() {
         "expected a clean 'not yet supported' rejection, got: {stderr}"
     );
 }
+
+/// A CTE referenced from inside an inline derived table's own `FROM`
+/// (`FROM (SELECT ... FROM cte) sub`), not just directly under the main
+/// query's `FROM` — `substitute_table_ref` must recurse into
+/// `TableRefKind::Subquery`, the same way view expansion already does.
+#[test]
+fn with_clause_cte_referenced_inside_derived_table_matches_oracle() {
+    let db = cte_fixture_db("derived_table");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t) \
+         SELECT * FROM (SELECT id, x FROM cte WHERE x > 15) sub ORDER BY id",
+        "with_clause_cte_referenced_inside_derived_table_matches_oracle",
+    );
+}
+
+/// A CTE name shadows a real table of the same name for the scope of
+/// its declaring `SELECT` — `FROM cte` must resolve to the CTE's body,
+/// not the real table.
+#[test]
+fn with_clause_cte_shadows_real_table_matches_oracle() {
+    let db = cte_fixture_db("shadow");
+    let create = "CREATE TABLE cte(id INTEGER PRIMARY KEY, x INTEGER)";
+    if let Some(oracle) = pinned_oracle() {
+        let status = Command::new(&oracle).arg(&db).arg(create).status().unwrap();
+        assert!(status.success(), "oracle setup failed: {create}");
+    } else {
+        let output = run_exec(&db, create);
+        assert!(
+            output.status.success(),
+            "setup {create:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let insert = "INSERT INTO cte VALUES (999, 999)";
+    if let Some(oracle) = pinned_oracle() {
+        let status = Command::new(&oracle).arg(&db).arg(insert).status().unwrap();
+        assert!(status.success(), "oracle setup failed: {insert}");
+    } else {
+        let output = run_exec(&db, insert);
+        assert!(
+            output.status.success(),
+            "setup {insert:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t WHERE x > 15) SELECT * FROM cte ORDER BY id",
+        "with_clause_cte_shadows_real_table_matches_oracle",
+    );
+}
+
+/// `INSERT INTO t WITH cte AS (...) SELECT ...` — a `WITH`-clause
+/// source for `INSERT ... SELECT` — resolves the CTE reference (the
+/// same `expand_with_clause` pass `compile_select_program` runs for a
+/// plain `SELECT`) but is then cleanly rejected, since `compile_insert`'s
+/// scan path doesn't yet drive #257's FROM-subquery materialization the
+/// way a plain SELECT's codegen does. This pins the clear, explicit
+/// rejection message over the confusing "invalid root page (0)" a CTE's
+/// synthetic schema would otherwise surface.
+#[test]
+fn insert_select_with_clause_source_is_rejected_cleanly() {
+    let db = cte_fixture_db("insert_with_clause");
+    let output = run_exec(&db, "CREATE TABLE dst(id INTEGER, x INTEGER)");
+    assert!(output.status.success());
+    let output = run_exec(
+        &db,
+        "INSERT INTO dst WITH cte AS (SELECT id, x FROM t WHERE x > 15) SELECT * FROM cte",
+    );
+    assert!(
+        !output.status.success(),
+        "expected INSERT...WITH...SELECT to be rejected, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected a clean 'not yet supported' rejection, got: {stderr}"
+    );
+}

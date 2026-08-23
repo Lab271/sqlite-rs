@@ -36,7 +36,7 @@ pub fn compile_create_view(create: &CreateView, source: &str) -> Result<Program,
         0,
         0,
         0,
-        P4::CreateTable {
+        P4::CreateView {
             name: create.name.clone(),
             sql,
         },

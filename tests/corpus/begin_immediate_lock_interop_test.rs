@@ -76,7 +76,7 @@ impl OurSession {
     }
 
     fn exec(&mut self, stmt: &str) {
-        let program = compile_statement(stmt, &self.schemas).unwrap();
+        let program = compile_statement(stmt, &self.schemas, &[]).unwrap();
         let (_, autocommit) = execute_transaction_step(
             &program,
             Rc::clone(&self.pager),
