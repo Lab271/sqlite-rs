@@ -7,14 +7,17 @@ finding below independently — run `make test` (or `cargo build`,
 `cargo test`, `cargo mvl prove src/lib.rs` directly; `make help` lists
 all targets) right here, no dependency on the rest of `sqlite-rs` — plus
 this findings doc. See "Disposition" at the end for why the main package
-carries none of this.
+carries none of this. For the short-form verdict, see
+[`README.md`](./README.md); this file is the detailed, round-by-round
+evidence behind it.
 
 ## Scope
 
-Evaluate `rust-refine` — one of the five `mvl-lang/mvl-rust` tools —
+This is an experiment in two things, not one: **does `rust-refine`
+work**, and **does adopting it make sense for `sqlite-rs`**. Evaluated
 against a real, `impl`-heavy, `Result`-returning parsing/validation
 function shaped like `sqlite-rs`'s actual `src/header.rs`
-(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`). Four
+(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`) — four
 rounds, each bumping the `mvl` pin to the latest fix and re-verifying
 concretely rather than trusting a closed-issue title.
 
@@ -145,14 +148,17 @@ avoid it; see "Open gaps" below.
 data point, `parse`'s real invariant still `runtime`-only, now for a
 third independently-confirmed reason.
 
-## Open gaps for a future `mvl-lang/mvl-rust` agent
+## Gaps filed upstream, not yet fixed
 
 Everything below is reproducible directly in this crate — run
 `cargo mvl prove src/lib.rs` and compare against the `Expected:` line in
-each function's doc comment. None of these are filed as GitHub issues
-yet.
+each function's doc comment. All three are now filed against
+`mvl-lang/mvl-rust`, open as of this writing (round 4's issues #94/#95/
+#97 all closed same-day they were filed, so these are plausibly close
+behind):
 
-1. **Cast expressions block solver variable-binding.**
+1. **Cast expressions block solver variable-binding** —
+   [mvl-lang/mvl-rust#113](https://github.com/mvl-lang/mvl-rust/issues/113).
    `PageWithNarrowField::usable_page_size_with_cast` (`src/lib.rs:181`)
    and `cast_on_bare_param_also_blocked` (`src/lib.rs:196`) both stay at
    `runtime` despite sufficient, explicit bounds — an `as` cast around
@@ -166,7 +172,9 @@ yet.
    real code casting a narrower unsigned field before combining it with
    a wider one (exactly `header.rs`'s `reserved_space as u32`) is common.
 2. **`||` doesn't propagate a folded-true branch past an unprovable
-   one.** `known_shape_fold_not_propagated_through_or` (`src/lib.rs:224`)
+   one** —
+   [mvl-lang/mvl-rust#114](https://github.com/mvl-lang/mvl-rust/issues/114).
+   `known_shape_fold_not_propagated_through_or` (`src/lib.rs:224`)
    shows `result.is_err() || <unprovable>` staying at `runtime` even
    though `result.is_err()` alone (see
    `known_shape_fold_in_isolation`, `src/lib.rs:210`) folds to `true` on
@@ -178,9 +186,10 @@ yet.
    functions (the common case: validate-then-construct, with the
    postcondition checking the successful case's fields) provable rather
    than perpetually `runtime`.
-3. **`pub mod { ... }` hides return-site/`impl` scanning.** Not
-   triggered by anything in `header.rs` (which is a flat file), but hit
-   while writing this spike's first draft: a free function's
+3. **`pub mod { ... }` hides return-site/`impl` scanning** —
+   [mvl-lang/mvl-rust#115](https://github.com/mvl-lang/mvl-rust/issues/115).
+   Not triggered by anything in `header.rs` (which is a flat file), but
+   hit while writing this spike's first draft: a free function's
    declaration-site `requires`/`ensures` are found correctly through a
    `mod`, but its return-site obligations are not generated at all, and
    an `impl` block nested in a `mod` is invisible entirely — not even a
@@ -190,6 +199,24 @@ yet.
    `content`). Lower priority than 1-2 since it doesn't block anything
    in this specific codebase, but worth fixing for any crate that
    organizes real code into modules (i.e. most of them).
+
+## The bigger unlock: method-call reasoning (in progress upstream)
+
+None of 1-3 above touch the deepest limitation:
+`DatabaseHeader::parse`'s real postcondition needs `is_power_of_two()`
+and `.unwrap()` to participate in a proof, and the native L1-L4 solver
+treats arbitrary method calls as opaque by design (ADR-0001) — #97 only
+special-cased a handful of known `Result`/`Option` shapes, not general
+method calls. Independently of this spike,
+[mvl-lang/mvl-rust#110](https://github.com/mvl-lang/mvl-rust/issues/110)
+(implementing
+[ADR-0011](https://github.com/mvl-lang/mvl-rust/blob/main/.openspec/adr/0011-resolved-pure-closure-licence.md),
+designed in
+[#103](https://github.com/mvl-lang/mvl-rust/issues/103)) is in progress:
+a sound purity licence letting a same-file, side-effect-free call
+participate in a proof instead of being opaque. If it lands, it's the
+thing to re-test `DatabaseHeader::parse`'s actual postcondition against
+next — see the README's "Next steps".
 
 ## Disposition
 
