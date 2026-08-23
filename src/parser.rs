@@ -12,6 +12,6 @@ pub mod tokenizer;
 pub use error::{
     parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
     parse_delete, parse_drop_index, parse_drop_table, parse_drop_view, parse_explain, parse_insert,
-    parse_rollback, parse_select, parse_update, ParseOutcome,
+    parse_pragma, parse_rollback, parse_select, parse_update, ParseOutcome,
 };
 pub use tokenizer::{ends_with_semicolon, split_statements};

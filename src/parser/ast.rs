@@ -536,6 +536,24 @@ pub struct Rollback {
     pub span: Span,
 }
 
+/// The only two `journal_mode` values `pragma-stmt` (grammar V6
+/// carve-out, #388) accepts — stock SQLite's `journal_mode` pragma also
+/// takes MEMORY/OFF/TRUNCATE/PERSIST, all deferred to V7's general
+/// PRAGMA support alongside every other pragma name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PragmaJournalMode {
+    Wal,
+    Delete,
+}
+
+/// `PRAGMA journal_mode = WAL|DELETE` (#388) — the narrow V6 carve-out;
+/// see [`PragmaJournalMode`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pragma {
+    pub journal_mode: PragmaJournalMode,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Or,

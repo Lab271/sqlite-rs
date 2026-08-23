@@ -10,7 +10,8 @@ use crate::parser::ast::{InsertSource, TableRefKind};
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
     parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
-    parse_delete, parse_drop_index, parse_drop_table, parse_insert, parse_rollback, parse_update,
+    parse_delete, parse_drop_index, parse_drop_table, parse_insert, parse_pragma, parse_rollback,
+    parse_update,
 };
 use crate::schema::{TableSchema, ViewSchema};
 use crate::vdbe::Program;
@@ -18,8 +19,8 @@ use crate::vdbe::Program;
 use super::{
     compile_begin, compile_commit, compile_create_index, compile_create_table, compile_create_view,
     compile_delete_with_catalog, compile_drop_index, compile_drop_table, compile_insert,
-    compile_rollback, compile_update_with_catalog, expand_views, expand_with_clause,
-    resolve_from_table_schema, resolve_views, CodegenError,
+    compile_pragma, compile_rollback, compile_update_with_catalog, expand_views,
+    expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -102,6 +103,10 @@ pub fn compile_statement(
         },
         "ROLLBACK" => match parse_rollback(sql) {
             ParseOutcome::Accepted(rollback) => Ok(compile_rollback(&rollback)),
+            other => Err(parse_error(other)),
+        },
+        "PRAGMA" => match parse_pragma(sql) {
+            ParseOutcome::Accepted(pragma) => Ok(compile_pragma(&pragma)),
             other => Err(parse_error(other)),
         },
         "INSERT" => match parse_insert(sql) {

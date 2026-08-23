@@ -94,6 +94,24 @@ impl Vfs for UnixVfs {
         }
         shm::read_backfill(&shm_path).map_err(|source| to_vfs_error(&shm_path, source))
     }
+
+    fn claim_wal_write_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(None);
+        }
+        shm::claim_wal_write_lock(&shm_path)
+            .map(|guard| Some(FileLock(Box::new(guard))))
+            .map_err(|source| to_lock_error(&shm_path, source))
+    }
+
+    fn publish_wal_mx_frame(&self, path: &Path, mx_frame: u32) -> Result<()> {
+        let shm_path = companion_path(path, "-shm");
+        if !shm_path.exists() {
+            return Ok(());
+        }
+        shm::publish_mx_frame(&shm_path, mx_frame).map_err(|source| to_vfs_error(&shm_path, source))
+    }
 }
 
 /// A single fd, shared (via `Rc`) between this file's I/O and any

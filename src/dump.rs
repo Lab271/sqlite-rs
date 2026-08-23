@@ -55,11 +55,46 @@ pub struct DumpResult {
     pub warnings: Vec<String>,
 }
 
+/// Bootstraps just `page_size` from raw page-1 bytes (magic string plus
+/// the page-size field, bytes 16-17 with the `1` = 65536 encoding),
+/// without the rest of [`DatabaseHeader::parse`]'s validation — used by
+/// [`open`]'s fallback path (#390), where fields set only by a
+/// transaction that hasn't reached the main file yet (see that
+/// function's doc comment) would otherwise make a full parse fail
+/// before `page_size` is ever in hand.
+fn bootstrap_page_size(raw: &[u8]) -> Option<u32> {
+    if raw.get(0..16)? != b"SQLite format 3\0" {
+        return None;
+    }
+    let raw_page_size = u16::from_be_bytes([*raw.get(16)?, *raw.get(17)?]);
+    Some(if raw_page_size == 1 {
+        65536
+    } else {
+        raw_page_size as u32
+    })
+}
+
 /// Opens `path` through `vfs`, parses its header, and returns a
 /// [`Pager`] over it. Shared by both `dump_database` and any caller that
 /// needs the same open path (e.g. re-opening per table, since [`Pager`]
 /// isn't [`Clone`] and this crate's own tests establish "open fresh per
 /// cursor" as the pattern — see `src/pager/mod.rs`'s fixture tests).
+///
+/// The common case parses the header straight from the main file's raw
+/// bytes, same as always. But for a WAL-mode database whose very first
+/// schema-creating transaction hasn't been checkpointed yet (#390's live
+/// interop tests hit this: a real, live second connection can leave a
+/// database in exactly this state), the *main* file's page 1 only has
+/// `page_size` and the journal-mode format bytes set — written directly
+/// to disk immediately on the mode switch, mirroring
+/// `Pager::set_journal_mode`'s own "never through `flush`" header-byte
+/// flip — while everything else (`text_encoding` included) is still
+/// zeroed: that transaction's real, valid page 1 exists only in the
+/// `-wal` file's frames until a checkpoint backfills it. When the raw
+/// parse fails, this falls back to bootstrapping just `page_size`
+/// leniently, opening the `Pager` (whose `read_page` *does* merge WAL
+/// frames — spec 007 Requirement 3), and re-deriving the real header
+/// from that WAL-aware read instead of giving up.
 pub fn open<V: Vfs + Clone + 'static>(
     vfs: &V,
     path: &Path,
@@ -67,9 +102,24 @@ pub fn open<V: Vfs + Clone + 'static>(
     let file = vfs.open_read(path)?;
     let mut header_buf = [0u8; HEADER_LEN];
     file.read_at(&mut header_buf, 0)?;
-    let header = DatabaseHeader::parse(&header_buf)?;
-    let pager = Pager::open(vfs, path, header.page_size)?;
-    Ok((header, pager))
+    match DatabaseHeader::parse(&header_buf) {
+        Ok(header) => {
+            let pager = Pager::open(vfs, path, header.page_size)?;
+            Ok((header, pager))
+        }
+        Err(e) => {
+            let page_size = bootstrap_page_size(&header_buf).ok_or(e)?;
+            let pager = Pager::open(vfs, path, page_size)?;
+            let page1 = pager.read_page(1).map_err(PagerError::from)?;
+            let mut buf = [0u8; HEADER_LEN];
+            let head = page1
+                .get(..HEADER_LEN)
+                .ok_or(HeaderError::TooShort { len: page1.len() })?;
+            buf.copy_from_slice(head);
+            let header = DatabaseHeader::parse(&buf)?;
+            Ok((header, pager))
+        }
+    }
 }
 
 /// Reads every table's schema and rows out of the database at `path`.

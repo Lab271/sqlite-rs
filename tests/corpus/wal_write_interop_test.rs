@@ -12,15 +12,22 @@
 //! there's no sqlite-rs-side WAL *mode* to compare against a journal-mode
 //! run of the same workload. Tracked for #388/#389 instead of stubbed
 //! speculatively here.
+//!
+//! `scratch_db`/`declared_page_size` are `pub(crate)` so
+//! `wal_concurrent_interop_test.rs` (#390 — SQL-level live interop with a
+//! real `sqlite3` process, one level up from this file's byte-level WAL
+//! frame tests) can reuse them instead of duplicating.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use sqlite_rs::header::JournalMode;
 use sqlite_rs::pager::checkpoint::checkpoint_passive;
 use sqlite_rs::pager::wal::{self, WalHeader, WalWriter};
-use sqlite_rs::vfs::{companion_path, AnyVfs, PageSource, UnixVfs, WritablePageSource};
+use sqlite_rs::pager::{Pager, PagerError};
+use sqlite_rs::vfs::{companion_path, AnyVfs, PageSource, UnixVfs, VfsError, WritablePageSource};
 
 use crate::oracle::{pinned_oracle, skip_no_oracle};
 
@@ -62,7 +69,7 @@ impl HeldLock {
     }
 }
 
-fn scratch_db(label: &str) -> PathBuf {
+pub(crate) fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -73,7 +80,7 @@ fn scratch_db(label: &str) -> PathBuf {
     dir.join("test.db")
 }
 
-fn declared_page_size(vfs: &UnixVfs, db: &std::path::Path) -> u32 {
+pub(crate) fn declared_page_size(vfs: &UnixVfs, db: &std::path::Path) -> u32 {
     let source = WritablePageSource::open(vfs, db, 4096).unwrap();
     let header = source.read_page(1).unwrap();
     let declared = u16::from_be_bytes([header[16], header[17]]) as u32;
@@ -184,6 +191,57 @@ fn checkpoint_mid_write_is_consistent_then_completes_once_unblocked() {
     let mut db_bytes = vec![0u8; page_size as usize];
     db_file.read_at(&mut db_bytes, 0).unwrap();
     assert_eq!(db_bytes, vec![0xBBu8; page_size as usize]);
+}
+
+/// #389: two concurrent *writers* must actually serialize through
+/// `WAL_WRITE_LOCK`, not just readers-vs-writer (the WAL reader-mark tests
+/// above). POSIX record locks never conflict with a second request from
+/// the *same* process, so proving this requires a real second OS process
+/// (`HeldLock`, same technique `checkpoint_mid_write_is_consistent_then_completes_once_unblocked`
+/// uses for the reader-mark byte) holding `WAL_WRITE_LOCK` — offset
+/// `UNIX_SHM_BASE` (120), 1 byte, matching `src/vfs/shm.rs`'s private
+/// `WAL_WRITE_LOCK_BYTE` — while this crate's own [`Pager::flush`]
+/// attempts to commit a WAL-mode transaction. The attempt must be
+/// refused ([`VfsError::Locked`]), not silently interleave frames or
+/// corrupt the WAL; once the lock is released, the same writer commits
+/// successfully.
+#[test]
+fn concurrent_writer_is_refused_the_wal_write_lock() {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "sqlite-rs-wal-write-lock-contend-{}-{n}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("test.db");
+    let page_size = 512u32;
+    std::fs::write(&db_path, vec![0u8; page_size as usize]).unwrap();
+
+    let vfs = UnixVfs;
+    let mut pager = Pager::open(&vfs, &db_path, page_size).unwrap();
+    pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+    let shm_path = companion_path(&db_path, "-shm");
+    const WAL_WRITE_LOCK_BYTE: i64 = 120;
+    let held = HeldLock::spawn(&shm_path, "wrlock", WAL_WRITE_LOCK_BYTE, 1);
+
+    pager.get_page_mut(1).unwrap().fill(0xAB);
+    let result = pager.flush();
+    assert!(
+        matches!(&result, Err(PagerError::Vfs(VfsError::Locked { .. }))),
+        "expected VfsError::Locked while a second process holds WAL_WRITE_LOCK, got {result:?}"
+    );
+
+    held.release();
+
+    // Once the contending process releases the lock, the same writer
+    // (its dirty page untouched by the failed attempt) commits cleanly.
+    pager.flush().unwrap();
+    assert_eq!(
+        pager.read_page(1).unwrap(),
+        vec![0xABu8; page_size as usize]
+    );
 }
 
 /// A `-wal` frame written by our own [`WalWriter`] must be readable by a

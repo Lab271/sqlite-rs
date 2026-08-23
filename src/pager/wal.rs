@@ -310,6 +310,65 @@ pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Ve
     (committed, committed_db_size)
 }
 
+/// Walks every valid frame in `wal_bytes` (the same validity rules as
+/// [`committed_pages`]: matching salts, verified running checksum) and
+/// returns the byte offset just past the last valid frame, plus the
+/// running checksum at that point — the exact state
+/// [`WalWriter::open_existing`] (#389) must resume from to append further
+/// frames without re-chaining the checksum incorrectly or clobbering
+/// anything already durable.
+///
+/// Unlike [`committed_pages`], commit status doesn't matter here: this
+/// resumes past the last *valid* frame regardless of whether it ended a
+/// transaction. That's safe because this crate's own writer never leaves
+/// an uncommitted trailing frame lying around — frames are only appended
+/// at flush/commit time (`Pager::flush`), with the very last one always
+/// the commit frame — so "last valid frame" and "last committed frame"
+/// coincide for a WAL this crate produced. A genuinely corrupt tail (bad
+/// checksum, foreign salts) still stops the scan, the same as
+/// `committed_pages`.
+fn last_valid_frame_state(header: &WalHeader, wal_bytes: &[u8]) -> (u64, (u32, u32)) {
+    let frame_size = FRAME_HEADER_LEN.saturating_add(header.page_size as usize);
+    let mut offset = HEADER_LEN;
+    let mut running = header.header_checksum;
+
+    while offset.saturating_add(frame_size) <= wal_bytes.len() {
+        let Some(fh) = wal_bytes.get(offset..offset.saturating_add(FRAME_HEADER_LEN)) else {
+            break;
+        };
+        let (Some(salt1), Some(salt2)) = (read_u32_opt(fh, 8), read_u32_opt(fh, 12)) else {
+            break;
+        };
+        let (Some(c1), Some(c2)) = (read_u32_opt(fh, 16), read_u32_opt(fh, 20)) else {
+            break;
+        };
+        let stored_checksum = (c1, c2);
+
+        if salt1 != header.salt1 || salt2 != header.salt2 {
+            break;
+        }
+
+        let Some(page_content) = wal_bytes
+            .get(offset.saturating_add(FRAME_HEADER_LEN)..offset.saturating_add(frame_size))
+        else {
+            break;
+        };
+        let Some(fh_header_bytes) = fh.get(0..8) else {
+            break;
+        };
+        let after_frame_header = checksum(header.native_checksum, fh_header_bytes, running);
+        let after_page = checksum(header.native_checksum, page_content, after_frame_header);
+
+        if after_page != stored_checksum {
+            break;
+        }
+        running = after_page;
+        offset = offset.saturating_add(frame_size);
+    }
+
+    (offset as u64, running)
+}
+
 /// Appends frames to a `-wal` file: writes the header once on
 /// [`WalWriter::create`], then each [`WalWriter::append_frame`] call
 /// carries the running checksum forward exactly as [`committed_pages`]
@@ -377,6 +436,55 @@ impl WalWriter {
     pub fn sync(&self) -> Result<(), WalError> {
         self.file.sync()?;
         Ok(())
+    }
+
+    /// Reopens the existing `-wal` file at `path` to append further frames
+    /// (#389), continuing from wherever the last valid frame left off —
+    /// unlike [`WalWriter::create`], this must never rewrite the header or
+    /// reset the running checksum/offset back to the start, which would
+    /// silently discard every frame a previous flush already committed.
+    /// `page_size` must match the header's own declared page size (an
+    /// `Err` otherwise), the same consistency check
+    /// `crate::pager::read_wal_pages`/`checkpoint_passive` already apply
+    /// when merging/checkpointing this same file.
+    pub fn open_existing(vfs: &AnyVfs, path: &Path, page_size: u32) -> Result<Self, WalError> {
+        let file = vfs.open_write(path)?;
+        let size = file.size()?;
+        let mut bytes = vec![0u8; size as usize];
+        let n = file.read_at(&mut bytes, 0)?;
+        bytes.truncate(n);
+
+        let header = WalHeader::parse(&bytes)?;
+        if header.page_size != page_size {
+            return Err(WalError::InvalidPageSize {
+                page_size: header.page_size,
+            });
+        }
+
+        let (offset, running) = last_valid_frame_state(&header, &bytes);
+
+        Ok(WalWriter {
+            file,
+            header,
+            running,
+            offset,
+        })
+    }
+
+    /// Total frames now in the WAL, including any written before this
+    /// writer was opened (#389's `mxFrame`). `self.offset` is always
+    /// `HEADER_LEN + frame_count * frame_size` by construction: `create`
+    /// starts at `HEADER_LEN` with zero frames, and `open_existing`
+    /// resumes at exactly the offset just past the last valid frame.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame_size.max(1) rules out division by zero"
+    )]
+    pub fn frame_count(&self) -> u32 {
+        let frame_size = FRAME_HEADER_LEN
+            .saturating_add(self.header.page_size as usize)
+            .max(1) as u64;
+        (self.offset.saturating_sub(HEADER_LEN as u64) / frame_size) as u32
     }
 }
 
@@ -542,5 +650,70 @@ mod tests {
         let (pages, db_size) = committed_pages(&parsed, &bytes);
         assert_eq!(db_size, 0);
         assert!(pages.is_empty());
+    }
+
+    /// #389: a second `WalWriter::open_existing` session must resume
+    /// appending exactly where the first session's frames left off,
+    /// without rewriting the header or re-chaining the checksum from
+    /// scratch — a naive re-`create` here would silently clobber the
+    /// first session's already-committed frame.
+    #[test]
+    fn open_existing_resumes_appending_after_a_prior_session() {
+        use crate::vfs::{AnyVfs, MemoryVfs};
+
+        let memory = MemoryVfs::new();
+        let vfs = AnyVfs::new(memory);
+        let path = Path::new("/test.db-wal");
+
+        let header = WalHeader::new(true, 512, 0x1234, 0x5678, 1);
+        {
+            let mut writer = WalWriter::create(&vfs, path, header).unwrap();
+            writer.append_frame(1, &vec![0xAAu8; 512], 1).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(writer.frame_count(), 1);
+        }
+
+        {
+            let mut writer = WalWriter::open_existing(&vfs, path, 512).unwrap();
+            assert_eq!(
+                writer.frame_count(),
+                1,
+                "must see the prior session's frame before appending"
+            );
+            writer.append_frame(2, &vec![0xBBu8; 512], 2).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(writer.frame_count(), 2);
+        }
+
+        let file = vfs.open_read(path).unwrap();
+        let size = file.size().unwrap();
+        let mut bytes = vec![0u8; size as usize];
+        file.read_at(&mut bytes, 0).unwrap();
+
+        let parsed = WalHeader::parse(&bytes).unwrap();
+        let (pages, db_size) = committed_pages(&parsed, &bytes);
+        assert_eq!(db_size, 2, "both frames must still be intact and committed");
+        assert_eq!(pages.get(&1), Some(&vec![0xAAu8; 512]));
+        assert_eq!(pages.get(&2), Some(&vec![0xBBu8; 512]));
+    }
+
+    /// A page size mismatch between the caller and the existing WAL's own
+    /// header must be rejected, the same as `read_wal_pages`/
+    /// `checkpoint_passive` already require on the read side.
+    #[test]
+    fn open_existing_rejects_page_size_mismatch() {
+        use crate::vfs::{AnyVfs, MemoryVfs};
+
+        let memory = MemoryVfs::new();
+        let vfs = AnyVfs::new(memory);
+        let path = Path::new("/test.db-wal");
+        let header = WalHeader::new(true, 512, 1, 2, 1);
+        WalWriter::create(&vfs, path, header).unwrap();
+
+        let result = WalWriter::open_existing(&vfs, path, 4096);
+        assert!(matches!(
+            result,
+            Err(WalError::InvalidPageSize { page_size: 512 })
+        ));
     }
 }

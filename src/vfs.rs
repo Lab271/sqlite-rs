@@ -117,6 +117,27 @@ pub trait Vfs {
         let _ = path;
         Ok(0)
     }
+
+    /// Claims the WAL write lock on `path`'s `-shm` companion file (if one
+    /// exists), so only one writer at a time appends frames or advances
+    /// `mxFrame` (#389) — a second concurrent writer is refused rather
+    /// than interleaving frames or racing the `mxFrame` publish. Released
+    /// when the returned [`FileLock`] drops. Default: a no-op (`Ok(None)`)
+    /// — correct for backends with no real `-shm` file to coordinate
+    /// through, e.g. [`MemoryVfs`].
+    fn claim_wal_write_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let _ = path;
+        Ok(None)
+    }
+
+    /// Publishes a new `mxFrame` (the WAL's current end-of-valid-data, in
+    /// frames) to `path`'s `-shm` companion file after a writer commits
+    /// one or more frames (#389). Default: a no-op — nothing to publish
+    /// without a real `-shm` file.
+    fn publish_wal_mx_frame(&self, path: &Path, mx_frame: u32) -> Result<()> {
+        let _ = (path, mx_frame);
+        Ok(())
+    }
 }
 
 /// Builds the path of a companion file (e.g. `-wal`, `-journal`) by
@@ -259,6 +280,14 @@ impl AnyVfs {
 
     pub fn read_wal_backfill(&self, path: &Path) -> Result<u32> {
         self.0.read_wal_backfill(path)
+    }
+
+    pub fn claim_wal_write_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        self.0.claim_wal_write_lock(path)
+    }
+
+    pub fn publish_wal_mx_frame(&self, path: &Path, mx_frame: u32) -> Result<()> {
+        self.0.publish_wal_mx_frame(path, mx_frame)
     }
 }
 

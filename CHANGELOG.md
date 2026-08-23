@@ -6,6 +6,96 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-23 — V6.3 Concurrency
+
+Phase V6.3 of epic #354 (V6 Slim), finalizing V6 and unlocking 1.0: real
+WAL-mode writes with multi-reader/single-writer concurrency, and the
+sqlite3-interop demo that was the epic's stated goal. Closes #388, #389,
+#390, #391.
+
+feat: minimal `PRAGMA journal_mode=WAL|DELETE` switching (#388) — a
+narrow V6 grammar carve-out (`.openspec/grammar/sqlite.ebnf`, general
+PRAGMA support stays deferred to V7) parses only this one pragma
+name/value pair, with everything else falling through to a clean
+`Unsupported`. Codegen/VDBE wiring (`Opcode::SetJournalMode`) actually
+runs the switch: `Pager::set_journal_mode` creates a fresh `-wal`/`-shm`
+and flips the header's version bytes going into WAL, or checkpoints
+every pending WAL frame, deletes `-wal`/`-shm`, and flips the header
+bytes back going to DELETE. Refuses mid-transaction, matching stock
+SQLite.
+
+feat: WAL-mode writes actually go through the WAL (#389) — `Pager::flush`
+now branches on the tracked journal mode: in `journal_mode=WAL`, every
+dirty page is appended as a WAL frame (`WalWriter::open_existing`,
+resuming across sessions rather than truncating), the last one marked as
+the commit frame, `mxFrame` published to `-shm`, and the writer's own
+subsequent reads served by folding the new pages into its in-memory
+`wal_pages` overlay — all without ever escalating the main file's SHARED
+lock to EXCLUSIVE, so readers are never blocked. A new `WAL_WRITE_LOCK`
+(`src/vfs/shm.rs`, `Vfs::claim_wal_write_lock`) serializes concurrent
+writers, surfacing contention as the existing `VfsError::Locked` path.
+`rollback` in WAL mode was already correct (frames are only ever appended
+at commit time). See ADR-0026 for the writer-reopens-and-rescans
+trade-off. Un-ignoring `tests/tiers/tier3.rs`'s
+`t3_wal_writing_and_live_interop` stays for #390 (live interop with a
+real stock `sqlite3` process).
+
+test: sqlite-rs + stock sqlite3 concurrent WAL interop (#390) — the "V6
+demo" gate for epic #354: `tests/corpus/wal_concurrent_interop_test.rs`
+drives sqlite-rs through the same SQL-level entry point
+(`execute_transaction_step`/`compile_statement`, the machinery
+`sqlite-rs exec` already wraps) a real caller would, proving all four
+scenarios against a live, pinned `sqlite3` process — sqlite-rs writes/
+oracle reads, oracle writes/sqlite-rs reads, both alternate commits
+(round-tripping WAL frames through each other's checksum chains), and a
+checkpoint by either side is read correctly by the other. Un-ignores
+`tests/tiers/tier3.rs`'s `t3_wal_writing_and_live_interop`. Also fixes a
+real gap this surfaced: `dump::open` (the CLI's `dump`/`query`/`exec`
+bootstrap) parsed the database header from the main file's raw bytes
+only, which fails for a WAL-mode database whose very first
+schema-creating transaction hasn't been checkpointed yet (that page 1's
+real content lives only in the `-wal` file) — it now falls back to a
+lenient `page_size`-only bootstrap and re-derives the header from the
+`Pager`'s WAL-aware read of page 1.
+
+bench: V6 WAL benchmarks (#391) — `tests/performance/v6.rs` (`make
+bench-v6` / `cargo bench --bench v6`), four scenarios adapted from the
+ticket to what the codebase can measure honestly: `insert_batch_wal`
+(1000-row batch INSERT, journal vs WAL mode, driven through the real
+`PRAGMA`/`compile_statement`/`execute_transaction_step` SQL path, plus
+the pinned oracle's own journal-vs-WAL numbers as a sanity check);
+`concurrent_read_write` (a documented sequential interleaving — a
+long-open reader's pinned WAL snapshot alongside 20 writer commits, not
+a wall-clock-parallel harness; #390's own tests already prove the
+non-blocking property, this just measures throughput); `checkpoint_10mb`
+(`checkpoint_passive` against a directly-built ~10MB single-commit WAL);
+and `cte_reuse_10x` (a CTE referenced 10x via self-join vs. the same
+subquery repeated 10x inline). First run (`--sample-size 10`, informal):
+`insert_batch_wal` ours journal ~65ms vs WAL ~59ms (a small WAL win, not
+the ticket's hoped-for 2.5x — ADR-0026's per-flush `-wal` rescan caps it;
+oracle's own journal/WAL numbers are ~3.3ms/~3.4ms, indistinguishable at
+this batch size); `concurrent_read_write` ~338ms/20 cycles; `checkpoint_10mb`
+~27-31ms; `cte_reuse_10x` cte ~40.9ms vs inline ~40.6ms — parity, not a
+win, because `expand_with_clause` rewrites every CTE reference into its
+own independent materialization (confirmed by reading
+`src/codegen/subquery/cte.rs`), identical cost to inline repetition —
+there is no shared-materialization optimization yet (filed as #425).
+Also surfaced, not fixed here (out of scope for a benchmark ticket): a
+10-way `UNION ALL` of `SELECT count(*) FROM cte` fails compilation past
+the first arm ("table cte has an invalid root page (0)") — a
+compound-arm/CTE codegen gap, filed as #424. spend: roughly matched the
+issue's 1-day estimate.
+
+Also filed from this phase's work: #422 (`Pager` should recover, not
+error, when another connection's auto-checkpoint deletes `-wal`/`-shm`
+out from under it — found while building #390's interop tests).
+
+spend: V6.3 as a whole ran noticeably over its ~5-day estimate — #388
+also had to add a minimal PRAGMA parser (none existed), and #389 had to
+make `Pager::flush` genuinely WAL-aware (the write path was entirely
+rollback-journal-only beforehand) — both prerequisites the original
+per-ticket estimates didn't account for.
+
 ## [0.16.1] - 2026-08-23
 
 fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row

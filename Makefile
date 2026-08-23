@@ -210,6 +210,9 @@ fixtures-bench: ## Regenerate the ~1MB/~50MB bench fixtures (target/bench-fixtur
 bench: fixtures-bench ## Tier 1 (engine-to-engine): criterion bench, sqlite-rs vs rusqlite linked to the pinned oracle (tests/performance/engine.rs)
 	@bash -c '. ./tools/bench_env.sh && cargo bench --bench engine'
 
+bench-v6: fixtures-bench ## V6 (epic #354, #391): WAL journal-vs-WAL/concurrent-read-write/checkpoint + CTE-reuse benches (tests/performance/v6.rs)
+	@bash -c '. ./tools/bench_env.sh && cargo bench --bench v6'
+
 bench-cli: fixtures-bench ## Tier 2 (CLI-to-CLI): hyperfine, sqlite-rs dump/query vs sqlite3 (tools/bench_cli.sh)
 	./tools/bench_cli.sh
 

@@ -1,6 +1,6 @@
 [package]
 name = "sqlite-rs"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
@@ -60,6 +60,10 @@ path = "tests/unit/ddl_parser.rs"
 [[test]]
 name = "unit_transaction_parser"
 path = "tests/unit/transaction_parser.rs"
+
+[[test]]
+name = "unit_pragma_parser"
+path = "tests/unit/pragma_parser.rs"
 
 [[test]]
 name = "unit_codegen"
@@ -155,6 +159,11 @@ harness = false
 [[bench]]
 name = "crud"
 path = "tests/performance/crud.rs"
+harness = false
+
+[[bench]]
+name = "v6"
+path = "tests/performance/v6.rs"
 harness = false
 
 # Single source of truth for the pinned sqlite3 version — the oracle binary,

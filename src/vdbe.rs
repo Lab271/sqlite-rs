@@ -15,6 +15,7 @@ mod cursor;
 mod exec;
 pub mod explain;
 mod functions;
+mod pragma;
 mod program;
 mod result;
 mod sorter;
@@ -37,5 +38,6 @@ pub use exec::{
 };
 pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, like_match, FunctionError};
+pub use pragma::{JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL};
 pub use program::{Instruction, Opcode, Program, SortKeyColumn, P4};
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};
