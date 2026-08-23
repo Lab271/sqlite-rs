@@ -465,7 +465,7 @@ performs the extraction; `make extract-sql-corpus` regenerates it offline.
 - WHEN each statement is tokenized by sqlite-rs
 - THEN no statement produces `TokenKind::Error` — the tokenizer is total over SQL real SQLite lexes
 
-**Tests:** `tests/corpus/extracted_sql_test.rs::every_extracted_statement_tokenizes_without_error`, `tests/corpus/extracted_sql_test.rs::extracted_corpus_is_present`
+**Tests:** `tests/corpus/extracted_sql_test.rs::every_extracted_tcl_statement_tokenizes_without_error`, `tests/corpus/extracted_sql_test.rs::every_extracted_sqllogictest_statement_tokenizes_without_error`, `tests/corpus/extracted_sql_test.rs::extracted_corpus_is_present_tcl`, `tests/corpus/extracted_sql_test.rs::extracted_corpus_is_present_sqllogictest`
 
 #### Scenario: Extracted SELECT is never misreported as invalid
 
