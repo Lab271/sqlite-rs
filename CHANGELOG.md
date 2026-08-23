@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-08-23
+
+perf: reuse row buffer and move registers in `ResultRow` (#465) —
+eliminates the per-row `Vec` allocation and per-column `Value` clone by
+reusing a `Vm`-owned scratch buffer (mirroring `record_scratch`, #454)
+and taking each register's value via `take_register` instead of
+cloning it, safe because every scan loop reloads its projected
+registers before the next `ResultRow` reads them again. Also corrects
+a hand-built DISTINCT VDBE test whose instruction order
+(`ResultRow` before `IdxInsert`) didn't match what real codegen
+produces.
+
 ## [0.17.4] - 2026-08-23
 
 perf: cache parsed row header for repeated `OP_Column` reads (#458) —
