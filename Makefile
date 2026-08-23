@@ -34,7 +34,7 @@
 MVL_LIMIT ?= cargo-mvl-limit
 MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/memory.rs src/vfs/unix.rs src/vfs/page_source.rs src/vdbe/exec.rs src/vdbe/cursor.rs src/bin/*
 
-COVERAGE_MIN := 75
+COVERAGE_MIN := 80
 
 help: ## Show this help
 	@echo ""
@@ -224,8 +224,8 @@ bench-point-lookup: ## Quick wall-clock demos: rowid seek vs scan (#137), and in
 assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence, with per-requirement/model detail
 	@python3 tools/assurance.py --verbose
 
-assurance-gate: ## CI gate: fail if completeness or scenario-weighted coverage is below 75%
-	@python3 tools/assurance.py --min 0.75
+assurance-gate: ## CI gate: fail if completeness or scenario-weighted coverage is below 80%
+	@python3 tools/assurance.py --min 0.80
 
 traceability: ## Fast path: traceability only, no corpus/coverage I/O
 	@python3 tools/assurance.py --traceability-only $(if $(VERBOSE),--verbose)

@@ -864,3 +864,182 @@ fn correlated_subquery_memoization_cache_opens_before_outer_rewind() {
          the outer scan's Rewind (addr {rewind_addr}); program:\n{program}"
     );
 }
+
+// Coverage: `collect_correlated_column` (memoize.rs) walks every
+// `ExprKind` variant looking for the single outer column a memoizable
+// subquery is correlated against; the tests above only exercise the
+// plain `cat = catalog.category` shape. Each test below wraps the
+// correlated reference in one more expression shape while keeping the
+// candidate still single-outer-column (so #314's memoization still
+// applies), matching `collect_correlated_column`'s own match arms.
+
+/// A correlated reference wrapped in a unary `+` — covers
+/// `collect_correlated_column`'s shared `Unary | IsNull | Cast |
+/// Collate | Paren` arm.
+#[test]
+fn memoized_correlated_subquery_with_unary_wrapped_reference_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_unary");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = +catalog.category) ORDER BY id",
+        "memoized_correlated_subquery_with_unary_wrapped_reference_matches_oracle",
+    );
+}
+
+/// A correlated reference on both sides of a `BETWEEN` — covers
+/// `collect_correlated_column`'s `Between` arm, and revisits the
+/// already-`found` column (the `Some(existing) if existing == name`
+/// branch).
+#[test]
+fn memoized_correlated_subquery_with_between_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_between");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup \
+         WHERE cat BETWEEN catalog.category AND catalog.category) ORDER BY id",
+        "memoized_correlated_subquery_with_between_matches_oracle",
+    );
+}
+
+/// A correlated reference inside an `IN (...)` list — covers
+/// `collect_correlated_column`'s `In` arm.
+#[test]
+fn memoized_correlated_subquery_with_in_list_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_in_list");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat IN (catalog.category)) ORDER BY id",
+        "memoized_correlated_subquery_with_in_list_matches_oracle",
+    );
+}
+
+/// A correlated reference inside a `LIKE ... ESCAPE` — covers
+/// `collect_correlated_column`'s `Like` arm, including the `escape`
+/// operand branch.
+#[test]
+fn memoized_correlated_subquery_with_like_escape_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_like");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup \
+         WHERE CAST(cat AS TEXT) LIKE CAST(catalog.category AS TEXT) ESCAPE '\\') ORDER BY id",
+        "memoized_correlated_subquery_with_like_escape_matches_oracle",
+    );
+}
+
+/// A correlated reference as a `CASE` operand — covers
+/// `collect_correlated_column`'s `Case` arm, including the `operand`
+/// and `else_` branches.
+#[test]
+fn memoized_correlated_subquery_with_case_operand_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_case");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup \
+         WHERE cat = CASE catalog.category WHEN 0 THEN 0 WHEN 1 THEN 1 WHEN 2 THEN 2 ELSE 3 END) \
+         ORDER BY id",
+        "memoized_correlated_subquery_with_case_operand_matches_oracle",
+    );
+}
+
+/// A correlated reference inside a function call's argument list —
+/// covers `collect_correlated_column`'s `FunctionCall` arm.
+#[test]
+fn memoized_correlated_subquery_with_function_call_arg_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_func");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = abs(catalog.category)) ORDER BY id",
+        "memoized_correlated_subquery_with_function_call_arg_matches_oracle",
+    );
+}
+
+/// A subquery correlated against *two* distinct outer columns is not
+/// memoizable (the cache only has room for one probe value) — covers
+/// `collect_correlated_column`'s second-distinct-outer-column
+/// `ambiguous` branch. Falls back to the ordinary (unmemoized)
+/// per-row correlated path, same result either way.
+#[test]
+fn correlated_subquery_with_two_outer_columns_is_not_memoized_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_two_outer_cols");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category AND val <> catalog.id) \
+         ORDER BY id",
+        "correlated_subquery_with_two_outer_columns_is_not_memoized_matches_oracle",
+    );
+}
+
+/// A subquery containing a nested subquery-bearing expression
+/// (`IN (SELECT ...)`) alongside its correlated reference is
+/// conservatively not memoizable — covers `collect_correlated_column`'s
+/// nested-subquery `ambiguous` branch.
+#[test]
+fn correlated_subquery_with_nested_subquery_is_not_memoized_matches_oracle() {
+    let db = memoized_correlated_fixture_db("memo_nested_subquery");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup \
+         WHERE cat = catalog.category AND val IN (SELECT val FROM lookup)) ORDER BY id",
+        "correlated_subquery_with_nested_subquery_is_not_memoized_matches_oracle",
+    );
+}
+
+// Coverage: `correlation.rs`'s `walk_expr_for_correlation` (the #306
+// hoist's correlation check) walks the same `ExprKind` shapes, but for
+// a WHERE-clause scalar subquery — as opposed to memoize.rs's
+// `collect_correlated_column` above, which only fires once a subquery
+// is already known to be correlated. These use `t`/`other` (not the
+// memoization fixture) since #306's hoist, unlike #314's memoize,
+// doesn't need a low-cardinality correlated column.
+
+/// An uncorrelated scalar subquery whose own WHERE clause exercises
+/// `walk_expr_for_correlation`'s `Between`/`In`/`Like`/`Case`/`Unary`/
+/// `IsNull`/`Paren`/`Collate`/`FunctionCall` arms, all referencing only
+/// the subquery's own column — none of them should trip `correlated`,
+/// so the subquery stays hoistable (#306) and this doubles as coverage
+/// for `hoist_uncorrelated_where_subqueries`'s success path.
+#[test]
+fn hoistable_scalar_subquery_with_every_expr_shape_matches_oracle() {
+    let db = subquery_fixture_db("hoist_expr_shapes");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t WHERE x < (SELECT other.id FROM other \
+         WHERE other.a_id BETWEEN 1 AND 100 \
+         AND other.a_id IN (1, 2, 3) \
+         AND CAST(other.a_id AS TEXT) LIKE '1%' ESCAPE '\\' \
+         AND CASE WHEN other.a_id = 1 THEN 1 ELSE 0 END = 1 \
+         AND -other.a_id < 0 \
+         AND other.a_id IS NOT NULL \
+         AND (other.a_id) = other.a_id \
+         AND other.a_id COLLATE NOCASE = other.a_id \
+         AND abs(other.a_id) >= 0)",
+        "hoistable_scalar_subquery_with_every_expr_shape_matches_oracle",
+    );
+}
+
+/// A scalar subquery whose own WHERE clause is a nested `EXISTS (...)`
+/// — conservatively correlated regardless of whether the nested
+/// subquery itself references the outer scope — covers
+/// `walk_expr_for_correlation`'s nested-subquery-bearing arm, and
+/// exercises `try_hoist_conjunct`'s "not hoistable" fallback for a
+/// WHERE-clause scalar subquery (#306's success path is covered
+/// elsewhere; this is the graceful non-hoist path for the same
+/// `Binary`-comparison shape).
+#[test]
+fn correlated_via_nested_exists_scalar_subquery_is_not_hoisted_matches_oracle() {
+    let db = subquery_fixture_db("hoist_nested_exists");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, x FROM t WHERE x < (SELECT other.id FROM other WHERE EXISTS (SELECT 1 FROM other))",
+        "correlated_via_nested_exists_scalar_subquery_is_not_hoisted_matches_oracle",
+    );
+}

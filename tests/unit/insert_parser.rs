@@ -153,6 +153,16 @@ fn test_invalid_insert_trailing_garbage() {
     invalid("INSERT INTO t VALUES (1) EXTRA");
 }
 
+/// `parse_insert`'s own `Err(ParseFail::Unsupported)` arm fires when
+/// `parse_insert_stmt` itself — via a `VALUES` row's `expr()` call —
+/// hits an unimplemented construct, as opposed to the nested-SELECT
+/// route `test_unsupported_insert_select_source_intersect` below
+/// exercises.
+#[test]
+fn test_unsupported_insert_values_current_timestamp() {
+    unsupported("INSERT INTO t VALUES (CURRENT_TIMESTAMP)");
+}
+
 /// #377 made plain `UNION` parse successfully wherever a `select-stmt`
 /// grammar production appears — `INSERT ... SELECT`'s source included
 /// — the same way `UNION ALL` already did (#240). Parsing accepts it;

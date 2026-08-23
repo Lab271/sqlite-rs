@@ -99,7 +99,7 @@ Usage:
     python3 tools/assurance.py                    # full dashboard (traceability + evidence)
     python3 tools/assurance.py --verbose           # per-requirement detail + dead links
     python3 tools/assurance.py --traceability-only # fast path: no corpus/coverage I/O
-    python3 tools/assurance.py --min 0.75          # CI gate: exit 1 if below 75%
+    python3 tools/assurance.py --min 0.80          # CI gate: exit 1 if below 80%
 
 Link syntax accepted on **Tests:** / **Implementation:** lines:
     `tests/record_test.rs`                          file only

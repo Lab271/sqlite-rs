@@ -851,6 +851,43 @@ fn explain_query_plan_reports_full_scan_fallback() {
     assert_eq!(output, "0|0|0|SCAN a\n1|0|0|SCAN b\n");
 }
 
+/// #243: `EXPLAIN QUERY PLAN` reports an aliased table's `FROM`-clause
+/// display name (`name AS alias`), not just its bare name — covers
+/// `eqp_display_name`'s aliased branch.
+#[test]
+fn explain_query_plan_reports_aliased_table_name() {
+    let db = join_fixture_db("eqp_aliased");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM a AS x");
+    assert_eq!(output, "0|0|0|SCAN a AS x\n");
+}
+
+/// #243: a top-level (non-joined) `WHERE` with the rowid reference on
+/// the right-hand side of the equality (`? = rowid` rather than
+/// `rowid = ?`) still reports the rowid-seek plan — covers the
+/// right-hand-side branch of `explain_query_plan`'s level-0 rowid
+/// check.
+#[test]
+fn explain_query_plan_reports_rowid_search_with_reversed_equality_operands() {
+    let db = join_fixture_db("eqp_reversed_rowid");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM a WHERE 1 = id");
+    assert_eq!(
+        output,
+        "0|0|0|SEARCH a USING INTEGER PRIMARY KEY (rowid=?)\n"
+    );
+}
+
+/// #243: a `JOIN ... USING (...)` reports a full `SCAN` for the inner
+/// table — `explain_query_plan` only recognizes an `ON`-clause
+/// equality for its seek check, so a `USING` join constraint falls
+/// through to the plain scan fallback, matching `choose_join_access`'s
+/// own `JoinConstraint::Using(_) => None` shape.
+#[test]
+fn explain_query_plan_reports_scan_for_using_join() {
+    let db = using_natural_fixture_db("eqp_using");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM p JOIN q USING (id)");
+    assert_eq!(output, "0|0|0|SCAN p\n1|0|0|SCAN q\n");
+}
+
 /// #333: `GROUP BY` + `count(*)` combined with a JOIN — `a.id=1`
 /// matches `b` twice (rows 10, 11), `a.id=2` no longer matches
 /// (`a_id=99` in the fixture), so the group counts fan out 2/0.
