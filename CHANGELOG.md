@@ -51,6 +51,34 @@ real content lives only in the `-wal` file) — it now falls back to a
 lenient `page_size`-only bootstrap and re-derives the header from the
 `Pager`'s WAL-aware read of page 1.
 
+bench: V6 WAL benchmarks (#391) — `tests/performance/v6.rs` (`make
+bench-v6` / `cargo bench --bench v6`), four scenarios adapted from the
+ticket to what the codebase can measure honestly: `insert_batch_wal`
+(1000-row batch INSERT, journal vs WAL mode, driven through the real
+`PRAGMA`/`compile_statement`/`execute_transaction_step` SQL path, plus
+the pinned oracle's own journal-vs-WAL numbers as a sanity check);
+`concurrent_read_write` (a documented sequential interleaving — a
+long-open reader's pinned WAL snapshot alongside 20 writer commits, not
+a wall-clock-parallel harness; #390's own tests already prove the
+non-blocking property, this just measures throughput); `checkpoint_10mb`
+(`checkpoint_passive` against a directly-built ~10MB single-commit WAL);
+and `cte_reuse_10x` (a CTE referenced 10x via self-join vs. the same
+subquery repeated 10x inline). First run (`--sample-size 10`, informal):
+`insert_batch_wal` ours journal ~65ms vs WAL ~59ms (a small WAL win, not
+the ticket's hoped-for 2.5x — ADR-0026's per-flush `-wal` rescan caps it;
+oracle's own journal/WAL numbers are ~3.3ms/~3.4ms, indistinguishable at
+this batch size); `concurrent_read_write` ~338ms/20 cycles; `checkpoint_10mb`
+~27-31ms; `cte_reuse_10x` cte ~40.9ms vs inline ~40.6ms — parity, not a
+win, because `expand_with_clause` rewrites every CTE reference into its
+own independent materialization (confirmed by reading
+`src/codegen/subquery/cte.rs`), identical cost to inline repetition —
+there is no shared-materialization optimization yet. Also surfaced, not
+fixed here (out of scope for a benchmark ticket): a 10-way `UNION ALL`
+of `SELECT count(*) FROM cte` fails compilation past the first arm
+("table cte has an invalid root page (0)") — a compound-arm/CTE codegen
+gap, worth a follow-up ticket alongside the no-shared-materialization
+finding above. spend: roughly matched the issue's 1-day estimate.
+
 ## [0.16.1] - 2026-08-23
 
 fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row

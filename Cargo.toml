@@ -161,6 +161,11 @@ name = "crud"
 path = "tests/performance/crud.rs"
 harness = false
 
+[[bench]]
+name = "v6"
+path = "tests/performance/v6.rs"
+harness = false
+
 # Single source of truth for the pinned sqlite3 version — the oracle binary,
 # the parse.y the grammar is re-derived from, and the TCL suite the SQL corpus
 # is extracted from all track this one value.
