@@ -270,6 +270,20 @@ pub fn compile_insert(
     // reported before any code is emitted, matching the literal-`VALUES`
     // check above.
     if let InsertSource::Select(select) = &insert.source {
+        // #377/#378 made a compound (`UNION`/`UNION ALL`) `SELECT`
+        // parse successfully wherever any `select-stmt` grammar
+        // production is used, `INSERT ... SELECT`'s source included —
+        // but this codegen path only ever compiles `select`'s own
+        // core, silently dropping every `select.compound` arm. Reject
+        // it explicitly rather than insert a silently incomplete row
+        // set; wiring a compound source through is future scope.
+        if !select.compound.is_empty() {
+            return Err(CodegenError::Unsupported {
+                reason: "INSERT ... SELECT with a compound (UNION/UNION ALL) source is not yet \
+                         supported"
+                    .to_string(),
+            });
+        }
         let found = match select_schemas {
             Some([single]) => select_result_column_count(select, single),
             Some(joined) if joined.len() > 1 => {

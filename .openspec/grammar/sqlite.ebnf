@@ -32,13 +32,16 @@
 
 (* ===================== Top level ===================== *)
 
-sql-stmt        ::= select-stmt        (* V2 *)
+sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
+                                              optional leading with-clause, see below *)
                   | insert-stmt        (* V3 *)
                   | update-stmt        (* V3 *)
                   | delete-stmt        (* V3 *)
                   | create-table-stmt  (* V3 *)
                   | create-index-stmt  (* V3 *)
                   | drop-stmt          (* V3 *)
+                  | create-view-stmt   (* V6 *)
+                  | drop-view-stmt     (* V6 *)
                   | explain-stmt       (* V4 *)
                   | begin-stmt         (* V5 *)
                   | commit-stmt        (* V5 *)
@@ -55,7 +58,7 @@ sql-stmt        ::= select-stmt        (* V2 *)
 explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
                      (* V4 [parse.y:173 explain] *)
 
-(* ===================== SELECT (V2 slice, FROM/JOIN + GROUP BY/HAVING + UNION ALL V4 slice) =====================
+(* ===================== SELECT (V2 slice, FROM/JOIN + GROUP BY/HAVING + UNION/UNION ALL V4/V6 slice) =====================
  * [parse.y:520 cmd, :654 oneselect, :710 selcollist, :750 from, :925 orderby_opt, :967 limit_opt, :1002 where_opt]
  * V2 restrictions vs full parse.y: no window clause (V9). The FROM
  * clause itself (`from-clause` below) is now the V4 full JOIN slice
@@ -64,15 +67,51 @@ explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
  * rather than V2's single-table-only restriction — subqueries in FROM
  * (#238) remain a future-block stub, see below. `group-by-clause`
  * below is the V4 GROUP BY/HAVING slice (#239). The compound-select
- * tail is now the V4 `UNION ALL` slice (#240) — plain `UNION` (dedup),
- * `INTERSECT`, and `EXCEPT` remain future-block stubs.
+ * tail is the V4 `UNION ALL` slice (#240) plus the V6 plain `UNION`
+ * slice (#377/#378) — see compound-op below. `INTERSECT`/`EXCEPT`
+ * remain a V7 future-block stub.
  *)
 
-select-stmt     ::= select-core { "UNION" "ALL" select-core }            (* V2 core; V4 [parse.y:623 selectnowith,
-                                                                              :647 multiselect_op UNION ALL] compound tail *)
+select-stmt     ::= [ with-clause ]                                      (* V6 [parse.y:614 cmd ::= select KW_EXPLAIN? no --
+                                                                              select ::= with selectnowith orderby_opt] *)
+                     select-core { compound-op select-core }              (* V2 core; V4/V6 [parse.y:623 selectnowith,
+                                                                              :645 multiselect_op] compound tail --
+                                                                              see compound-op below *)
                      [ "ORDER" "BY" ordering-term { "," ordering-term } ]
                      [ "LIMIT" expr [ ( "OFFSET" | "," ) expr ] ] ;   (* V2/V4 -- ORDER BY/LIMIT bind to the whole
                                                                           compound statement, not any one arm *)
+
+compound-op     ::= "UNION" [ "ALL" ] ;                                   (* V4 `UNION ALL` [parse.y:647
+                                                                              multiselect_op UNION ALL]; V6 plain
+                                                                              `UNION` [parse.y:646 multiselect_op
+                                                                              UNION] added #377/#378 -- dedup via a
+                                                                              shared ephemeral index across every
+                                                                              arm, see codegen::select::
+                                                                              compile_select_compound.
+                                                                              `INTERSECT`/`EXCEPT`
+                                                                              [parse.y:648 multiselect_op EXCEPT|
+                                                                              INTERSECT] are parsed far enough to be
+                                                                              reported `unsupported(..)` rather than
+                                                                              a bare syntax error -- deferred to V7,
+                                                                              see Future blocks below. *)
+
+with-clause     ::= "WITH" [ "RECURSIVE" ] common-table-expr { "," common-table-expr } ;
+                                                                          (* V6 [parse.y:601 with ::= WITH wqlist,
+                                                                              :602 with ::= WITH RECURSIVE wqlist] --
+                                                                              #375: only the non-recursive form is
+                                                                              implemented; `WITH RECURSIVE` is parsed
+                                                                              far enough to be reported
+                                                                              `unsupported(..)` rather than a bare
+                                                                              syntax error *)
+
+common-table-expr ::= identifier [ "(" identifier { "," identifier } ")" ]
+                       "AS" "(" select-stmt ")" ;
+                                                                          (* V6 [parse.y:605 wqitem ::= nm eidlist_opt
+                                                                              AS LP select RP, :592 eidlist_opt] --
+                                                                              #375: the CTE name is parsed into
+                                                                              `CommonTableExpr` but not yet resolvable
+                                                                              in from-clause/table-ref -- materializing
+                                                                              it as a queryable table is #376's scope *)
 
 select-core     ::= "SELECT" [ "DISTINCT" | "ALL" ] result-column { "," result-column }
                      [ "FROM" from-clause ]
@@ -282,6 +321,24 @@ create-index-stmt ::= "CREATE" [ "UNIQUE" ] "INDEX" [ "IF" "NOT" "EXISTS" ] iden
 
 drop-stmt       ::= "DROP" ( "TABLE" | "INDEX" ) [ "IF" "EXISTS" ] identifier ;  (* V3 [parse.y cmd ::= DROP TABLE ifexists fullname] *)
 
+create-view-stmt ::= "CREATE" "VIEW" [ "IF" "NOT" "EXISTS" ] view-name
+                      [ "(" identifier { "," identifier } ")" ]
+                      "AS" select-stmt ;
+                                                                          (* V6 [parse.y:509-512 cmd] -- #379: the
+                                                                              `AS select-stmt` body is the same
+                                                                              select-stmt production as a top-level
+                                                                              SELECT (no extra wrapping parens,
+                                                                              matching real SQLite's grammar, unlike
+                                                                              common-table-expr's `AS ( select-stmt )`
+                                                                              form above); #380 is where the parsed
+                                                                              view becomes queryable (sqlite_master
+                                                                              storage + FROM-clause expansion) *)
+
+drop-view-stmt  ::= "DROP" "VIEW" [ "IF" "EXISTS" ] view-name ;
+                                                                          (* V6 [parse.y:513-515 cmd] -- #379 *)
+
+view-name       ::= identifier ;                                         (* V6 *)
+
 (* ===================== Transaction control (V5 slice) =====================
  * [parse.y:181 cmd ::= BEGIN transtype trans_opt, :186 transtype,
  *  :190 cmd ::= COMMIT|END trans_opt, :191 cmd ::= ROLLBACK trans_opt]
@@ -317,15 +374,25 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      correlated ones -- see equality-tail/primary-expr above;
  *      correlation is resolved at codegen time via a scope fallback, not
  *      a distinct grammar production; #240 landed the `UNION ALL`
- *      compound-select tail -- see select-stmt/select-core above),
- *      plain UNION (dedup)/INTERSECT/EXCEPT compound-select ops,
- *      WITH/CTEs (incl. RECURSIVE), CREATE VIEW
- *      (GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
+ *      compound-select tail, #377/#378 landed plain `UNION` -- see
+ *      select-stmt/compound-op above; `INTERSECT`/`EXCEPT` moved to V7,
+ *      see compound-op above),
+ *      (CREATE VIEW landed -- #379, see create-view-stmt/drop-view-stmt
+ *      above under V6;
+ *      GROUP BY / HAVING landed -- #239, see select-stmt/group-by-clause
+ *      above; WITH/CTEs moved to V6 -- see with-clause/common-table-expr
  *      above)
  * V5:  SAVEPOINT/RELEASE, ROLLBACK ... TO SAVEPOINT
  *      (BEGIN/COMMIT/ROLLBACK landed -- #356, see begin-stmt/commit-stmt/
  *      rollback-stmt above)
- * V7:  PRAGMA, ANALYZE (EXPLAIN [QUERY PLAN] pulled forward to V4 -- #243)
+ * V6:  WITH RECURSIVE (non-recursive WITH/CTEs landed -- #375, see
+ *      with-clause/common-table-expr above; codegen materialization of a
+ *      CTE as a queryable table is a separate ticket, #376; plain
+ *      `UNION` landed -- #377/#378, see compound-op above; CREATE VIEW /
+ *      DROP VIEW landed -- #379, see create-view-stmt/drop-view-stmt
+ *      above; view storage + FROM-clause expansion is #380)
+ * V7:  PRAGMA, ANALYZE (EXPLAIN [QUERY PLAN] pulled forward to V4 -- #243),
+ *      `INTERSECT`/`EXCEPT` compound-select ops (see compound-op above)
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),
  *      ALTER TABLE (RENAME / ADD|DROP|RENAME COLUMN)
  * V9:  UPSERT (ON CONFLICT DO ...), RETURNING, window functions (OVER/PARTITION/frames),

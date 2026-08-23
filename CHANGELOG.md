@@ -6,6 +6,51 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-23 — V6.1 SQL completeness
+
+Phase V6.1 of epic #354 (V6 Slim): non-recursive CTEs, `UNION`/`UNION ALL`
+compound `SELECT`, and `CREATE VIEW`/`DROP VIEW`.
+
+feat: `WITH` clause (non-recursive CTE) parsing and codegen materialization
+— a CTE reference in `FROM`/`JOIN` is rewritten into the same
+`TableRefKind::Subquery` shape #257's subquery-in-FROM machinery already
+materializes and scans, including multi-CTE chaining, explicit `(col,
+...)` lists, and self-joins. `WITH RECURSIVE` parses far enough to report
+a clean `Unsupported` rather than a syntax error. Closes #375, #376.
+
+feat: plain `UNION` compound `SELECT` (`UNION ALL` pre-existed via #240),
+deduplicated via a shared ephemeral-index cursor reusing `SELECT
+DISTINCT`'s guard shape. Closes #377, #378.
+
+feat: `CREATE VIEW`/`DROP VIEW` parsing, view storage in `sqlite_master`,
+and query expansion — a view reference in `FROM`/`JOIN` is rewritten the
+same way a CTE is, runs after CTE expansion so CTE-of-view and
+view-of-CTE both resolve, and detects direct/mutual view-definition
+cycles with the same "view X is circularly defined" message stock
+SQLite reports. `DROP VIEW` parses but is not yet wired into codegen —
+cleanly rejected rather than panicking. Closes #379, #380.
+
+fix: `INSERT ... SELECT` was silently dropping compound-SELECT arms in
+codegen, and CTE/view materialization was silently scanning only the
+first arm of a compound-SELECT body — both real correctness gaps found
+while building this phase, now cleanly rejected instead of producing
+wrong results. A CTE substituted into an inline derived table's own
+`FROM`, and a view's own body starting with `WITH`, now also resolve
+correctly (fixed asymmetries against the already-working paths). Three
+extracted-SQL-corpus statements (`[NOT] MATERIALIZED` CTE hint, `WITH`
+feeding `INSERT`, single-quoted alias) that the new `WITH`/`UNION`
+parsing reached further into were reclassified from `Invalid` to
+`Unsupported`, lowering `SELECT_INVALID_BASELINE` from 8 to 3.
+
+test: oracle-diff parity coverage across `tests/corpus/{cte,union,
+view}_test.rs` for all of the above, including circular/mutual view
+references, CTE shadowing a real table, and clean-rejection pins for
+every not-yet-supported combination (compound CTE/view bodies, compound
+INSERT source, CTE/view-backed INSERT source, `DROP VIEW`). Closes #382.
+
+Refs: 009/Req-13 (CTE materialization), 009/Req-14 (compound SELECT),
+009/Req-15 (view storage and expansion).
+
 ## [0.14.1] - 2026-08-23 — V5 review fixes
 
 Follow-up fixes from the combined code-review/security-review pass over

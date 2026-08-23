@@ -512,10 +512,12 @@ fn query_unsupported_sql_fails_cleanly_and_says_so() {
         // construct, but #250 gave it real grammar (CROSS JOIN sugar),
         // so it now parses and instead fails on table lookup. A
         // subquery in FROM was the next stand-in, but #257 gave that
-        // real support too. `WITH` / CTEs remain parser-`unsupported(..)`
-        // regardless of what tables exist, so that's used here as the
-        // generic "unsupported construct fails cleanly" vehicle instead.
-        .arg("WITH cte AS (SELECT a FROM t) SELECT * FROM cte")
+        // real support too. Non-recursive `WITH` / CTEs were the next
+        // stand-in, but #375 gave that real grammar too. `WITH
+        // RECURSIVE` remains parser-`unsupported(..)` regardless of what
+        // tables exist, so that's used here as the generic "unsupported
+        // construct fails cleanly" vehicle instead.
+        .arg("WITH RECURSIVE cte AS (SELECT a FROM t) SELECT * FROM cte")
         .output()
         .unwrap_or_else(|e| panic!("running {CLI} query {}: {e}", db.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);

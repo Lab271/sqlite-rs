@@ -1,7 +1,8 @@
 //! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
 //! 002-parser Requirements 2-4), plus the V4 join slice (#237), the V4
-//! subquery-expression slice (#238), and the V4 GROUP BY/HAVING slice
-//! (#239).
+//! subquery-expression slice (#238), the V4 GROUP BY/HAVING slice
+//! (#239), and the V6 non-recursive `WITH`/CTE slice (#375,
+//! `WithClause`/`CommonTableExpr`).
 //!
 //! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`/`(* V3 *)`/
 //! `(* V4 *)`-tagged rules: SELECT with an INNER/LEFT [OUTER]/CROSS join
@@ -44,6 +45,13 @@ pub struct Assignment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Select {
+    /// `WITH cte { , cte }` prefix (#375, non-recursive only —
+    /// `WITH RECURSIVE` is out of scope here). #376's
+    /// `codegen::expand_with_clause` rewrites this away before codegen
+    /// proper runs: each CTE reference in `FROM`/`JOIN` becomes a
+    /// `TableRefKind::Subquery`, materialized into an ephemeral table
+    /// the same way #257's `FROM`-subqueries already are.
+    pub with_clause: Option<WithClause>,
     pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,
     pub from: Option<FromClause>,
@@ -62,6 +70,25 @@ pub struct Select {
     pub span: Span,
 }
 
+/// Non-recursive `WITH` clause (#375): `WITH cte { , cte }`, prefixing a
+/// `select-stmt`. `WITH RECURSIVE` is not represented here — a bare
+/// `WITH` is parsed, `WITH RECURSIVE` remains `unsupported(..)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    pub ctes: Vec<CommonTableExpr>,
+    pub span: Span,
+}
+
+/// One `cte_name [(col, ...)] AS (select-stmt)` definition within a
+/// `WithClause`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommonTableExpr {
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+    pub query: Box<Select>,
+    pub span: Span,
+}
+
 /// One `UNION ALL SELECT ...` arm of a compound `SELECT` (#240). Same
 /// shape as `Select`'s own core, minus `order_by`/`limit` (see
 /// [`Select::compound`]).
@@ -77,11 +104,15 @@ pub struct CompoundSelect {
     pub span: Span,
 }
 
-/// Only `UnionAll` is implemented (#240); plain `UNION` (dedup) is
-/// deferred to V4 Phase 2, and `INTERSECT`/`EXCEPT` remain unsupported.
+/// `UnionAll` (#240) and plain `Union` (#377/#378, dedup via a shared
+/// ephemeral index across every arm — see
+/// [`crate::codegen::select::compile_select_compound`]) are
+/// implemented; `INTERSECT`/`EXCEPT` remain unsupported (deferred to
+/// V7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompoundOp {
     UnionAll,
+    Union,
 }
 
 /// `EXPLAIN [QUERY PLAN] select-stmt` (#243) — pulled forward from its
@@ -448,6 +479,28 @@ pub struct CreateIndex {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropTable {
+    pub if_exists: bool,
+    pub name: String,
+    pub span: Span,
+}
+
+/// `CREATE VIEW view_name ['(' column_list ')'] AS select_stmt` (#379,
+/// grammar V6 block). `query` is boxed for the same reason
+/// [`CommonTableExpr::query`] is: it recurses through the full `Select`
+/// AST, so an unboxed field would make [`super::ast`]'s types
+/// infinitely-sized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateView {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+    pub query: Box<Select>,
+    pub span: Span,
+}
+
+/// `DROP VIEW [IF EXISTS] view_name` (#379).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropView {
     pub if_exists: bool,
     pub name: String,
     pub span: Span,

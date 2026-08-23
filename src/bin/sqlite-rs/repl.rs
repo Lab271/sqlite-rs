@@ -28,7 +28,7 @@ use sqlite_rs::codegen::{compile_statement, leading_keywords};
 use sqlite_rs::dump;
 use sqlite_rs::format::format_query_value;
 use sqlite_rs::parser::{ends_with_semicolon, parse_select, split_statements, ParseOutcome};
-use sqlite_rs::schema::read_schema;
+use sqlite_rs::schema::{read_schema, read_views};
 use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
@@ -122,6 +122,17 @@ fn run_one_statement(
             }
         }
     };
+    let views = {
+        let borrowed = pager.borrow();
+        let mut view_cursor = TableCursor::new(&*borrowed, &header, 1);
+        match read_views(&mut view_cursor, header.text_encoding) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                return;
+            }
+        }
+    };
 
     let keywords = leading_keywords(stmt);
     let is_select = keywords.first().is_some_and(|kw| kw.as_str() == "SELECT");
@@ -144,7 +155,7 @@ fn run_one_statement(
                 return;
             }
         };
-        let program = match compile_select_program(&select, false, &schemas) {
+        let program = match compile_select_program(&select, false, &schemas, &views) {
             Ok(SelectOutcome::Program(p)) => p,
             // `eqp_mode` is always `false` above, so `Eqp` never comes back.
             Ok(SelectOutcome::Eqp(_)) => unreachable!("eqp_mode was false"),
@@ -175,7 +186,7 @@ fn run_one_statement(
         return;
     }
 
-    let program = match compile_statement(stmt, &schemas) {
+    let program = match compile_statement(stmt, &schemas, &views) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");

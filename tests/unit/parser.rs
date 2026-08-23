@@ -592,9 +592,11 @@ fn test_unsupported_cross_join_with_on() {
     assert!(msg.contains("CROSS"), "message: {msg}");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported — only `UNION`/`UNION
+/// ALL` are implemented for V6.1.
 #[test]
 fn test_unsupported_compound_select() {
-    let msg = unsupported("SELECT a UNION SELECT b");
+    let msg = unsupported("SELECT a INTERSECT SELECT b");
     assert!(msg.contains("compound"), "message: {msg}");
 }
 
@@ -679,6 +681,36 @@ fn test_accept_union_all_with_trailing_order_by_limit() {
     assert!(select.limit.is_some());
 }
 
+/// #377: plain `UNION` parses into `Select::compound` with
+/// `CompoundOp::Union`.
+#[test]
+fn test_accept_union() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u");
+    assert_eq!(select.compound.len(), 1);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert!(select.compound[0].from.is_some());
+}
+
+/// #377: multiple `UNION` arms chain into one `compound` vec, same as
+/// `UNION ALL` (#240).
+#[test]
+fn test_accept_multiple_union_arms() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u UNION SELECT c FROM v");
+    assert_eq!(select.compound.len(), 2);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert_eq!(select.compound[1].op, CompoundOp::Union);
+}
+
+/// #377: `UNION` and `UNION ALL` arms can be mixed in one compound
+/// statement — each arm carries its own `op`.
+#[test]
+fn test_accept_mixed_union_and_union_all_arms() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT c FROM v");
+    assert_eq!(select.compound.len(), 2);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert_eq!(select.compound[1].op, CompoundOp::UnionAll);
+}
+
 #[test]
 fn test_scalar_subquery_parses() {
     // #238: scalar subqueries are now a supported expression form.
@@ -692,11 +724,9 @@ fn test_scalar_subquery_parses() {
     assert!(matches!(expr.kind, ExprKind::Subquery(_)));
 }
 
-#[test]
-fn test_unsupported_cte() {
-    let msg = unsupported("WITH cte AS (SELECT 1) SELECT * FROM cte");
-    assert!(msg.contains("CTE"), "message: {msg}");
-}
+// Non-recursive `WITH` (CTEs) is now supported (#375) — see the
+// "#375: non-recursive WITH clause (CTEs)" test block below.
+// `WITH RECURSIVE` remains unsupported: `test_with_recursive_is_unsupported`.
 
 // ---- three-way outcome: invalid ----------------------------------------
 
@@ -902,10 +932,21 @@ fn test_exists_requires_a_select() {
     unsupported("SELECT id FROM t WHERE EXISTS (1, 2)");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported inside a subquery too
+/// — plain `UNION` (unlike `UNION ALL` since #240) is now accepted
+/// here the same way it is at the top level.
 #[test]
 fn test_compound_select_inside_subquery_is_unsupported_not_invalid() {
-    let msg = unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
+    let msg =
+        unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u INTERSECT SELECT b FROM v)");
     assert!(msg.contains("compound"), "message: {msg}");
+}
+
+/// #377: plain `UNION` inside an `IN (...)` subquery parses like
+/// `UNION ALL` already did (#240) — no special-casing by op.
+#[test]
+fn test_union_inside_subquery_parses() {
+    accept("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
 }
 
 #[test]
@@ -1001,9 +1042,113 @@ fn test_bare_tuple_without_in_is_invalid() {
     invalid("SELECT (a, b) FROM t");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported inside a multi-column
+/// `IN (...)` subquery too.
 #[test]
 fn test_multi_column_in_rejects_compound_subquery() {
     let msg =
-        unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u UNION SELECT 1, 2)");
+        unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u INTERSECT SELECT 1, 2)");
     assert!(msg.contains("compound"), "message: {msg}");
+}
+
+// ---- #375: non-recursive WITH clause (CTEs) --------------------------
+
+/// A single `WITH name AS (...)` prefix parses, and `with_clause` carries
+/// exactly one `CommonTableExpr` with no explicit column list.
+#[test]
+fn test_with_clause_single_cte() {
+    let select = accept("WITH cte AS (SELECT 1) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes.len(), 1);
+    assert_eq!(with_clause.ctes[0].name, "cte");
+    assert_eq!(with_clause.ctes[0].columns, None);
+}
+
+/// Multiple comma-separated CTEs in one WITH clause.
+#[test]
+fn test_with_clause_multiple_ctes() {
+    let select = accept("WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a, b");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes.len(), 2);
+    assert_eq!(with_clause.ctes[0].name, "a");
+    assert_eq!(with_clause.ctes[1].name, "b");
+}
+
+/// A CTE with an explicit column list: `cte(x, y) AS (...)`.
+#[test]
+fn test_with_clause_cte_with_column_list() {
+    let select = accept("WITH cte(x, y) AS (SELECT 1, 2) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(
+        with_clause.ctes[0].columns,
+        Some(vec!["x".to_string(), "y".to_string()])
+    );
+}
+
+/// The CTE's own body is a full `Select`, and the outer query can
+/// reference the CTE name in its FROM clause (parsing only — codegen
+/// resolution of the CTE name is #376's scope, not this ticket's).
+#[test]
+fn test_with_clause_cte_referenced_in_from() {
+    let select = accept("WITH cte AS (SELECT id FROM t WHERE id > 0) SELECT * FROM cte");
+    let with_clause = select.with_clause.as_ref().expect("expected a WITH clause");
+    assert_eq!(with_clause.ctes[0].query.columns.len(), 1);
+    assert!(with_clause.ctes[0].query.where_clause.is_some());
+    let from = select.from.as_ref().expect("expected a FROM clause");
+    assert!(matches!(&from.first.kind, TableRefKind::Name(name) if name == "cte"));
+}
+
+/// `WITH RECURSIVE` is grammatically distinct and out of scope here —
+/// only the non-recursive form is implemented.
+#[test]
+fn test_with_recursive_is_unsupported() {
+    let msg = unsupported("WITH RECURSIVE cte AS (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("RECURSIVE"), "message: {msg}");
+}
+
+/// `[NOT] MATERIALIZED` (SQLite 3.35+ CTE query-planner hint) is
+/// recognized syntax the parser doesn't act on yet — pinned as
+/// `Unsupported`, not `Invalid`, per the extracted-corpus regression
+/// this PR fixed (`tests/corpus/extracted_sql_test.rs`).
+#[test]
+fn test_with_materialized_hint_is_unsupported() {
+    let msg = unsupported("WITH cte AS MATERIALIZED (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("MATERIALIZED"), "message: {msg}");
+}
+
+#[test]
+fn test_with_not_materialized_hint_is_unsupported() {
+    let msg = unsupported("WITH cte AS NOT MATERIALIZED (SELECT 1) SELECT * FROM cte");
+    assert!(msg.contains("MATERIALIZED"), "message: {msg}");
+}
+
+/// A `WITH` clause feeding `INSERT`/`UPDATE`/`DELETE` instead of
+/// `SELECT` (a CTE-backed data-modifying statement) is recognized SQL
+/// this grammar slice doesn't parse — pinned as `Unsupported`, not
+/// `Invalid`, per the same extracted-corpus regression.
+#[test]
+fn test_with_clause_feeding_insert_is_unsupported() {
+    let msg = unsupported("WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte");
+    assert!(msg.contains("INSERT"), "message: {msg}");
+}
+
+/// A single-quoted string literal used as a `SELECT`-list alias is a
+/// legacy SQLite compatibility quirk it accepts — recognized syntax,
+/// not malformed SQL, so `AS '...'` must be `Unsupported`, not
+/// `Invalid`.
+#[test]
+fn test_quoted_string_alias_is_unsupported() {
+    let msg = unsupported("SELECT 1 AS 'x'");
+    assert!(msg.contains("alias"), "message: {msg}");
+}
+
+/// Printer roundtrip: WITH-prefixed SELECT reparses to the same AST
+/// (spec 002-parser Requirement 3).
+#[test]
+fn test_with_clause_printer_roundtrip() {
+    let select1 = accept("WITH cte(x) AS (SELECT 1) SELECT * FROM cte");
+    let printed1 = select1.to_string();
+    let select2 = accept(&printed1);
+    let printed2 = select2.to_string();
+    assert_eq!(printed1, printed2);
 }

@@ -274,8 +274,8 @@ fn bench_write(
     catalog: &[TableSchema],
     fixture_path: &Path,
 ) {
-    let program =
-        compile_statement(sql, catalog).unwrap_or_else(|e| fail(format!("compile {sql:?}: {e}")));
+    let program = compile_statement(sql, catalog, &[])
+        .unwrap_or_else(|e| fail(format!("compile {sql:?}: {e}")));
 
     group.bench_function("ours", |b| {
         b.iter_batched(

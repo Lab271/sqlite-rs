@@ -26,7 +26,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::compile_statement;
 use sqlite_rs::dump;
 use sqlite_rs::parser::split_statements;
-use sqlite_rs::schema::read_schema;
+use sqlite_rs::schema::{read_schema, read_views};
 use sqlite_rs::vdbe::execute_transaction_step;
 use sqlite_rs::vfs::UnixVfs;
 
@@ -45,16 +45,22 @@ pub fn run_exec(path: &Path, sql: &str) -> ExitCode {
         // front: a script that `CREATE TABLE`s and then writes to that
         // same table in a later statement needs the catalog to reflect
         // what already ran earlier in this same script.
-        let schemas = {
+        let (schemas, views) = {
             let borrowed = pager.borrow();
             let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
-            match read_schema(&mut schema_cursor, header.text_encoding) {
+            let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
                 Ok(s) => s,
                 Err(e) => return fatal(path, &e),
-            }
+            };
+            let mut view_cursor = TableCursor::new(&*borrowed, &header, 1);
+            let views = match read_views(&mut view_cursor, header.text_encoding) {
+                Ok(v) => v,
+                Err(e) => return fatal(path, &e),
+            };
+            (schemas, views)
         };
 
-        let program = match compile_statement(&stmt, &schemas) {
+        let program = match compile_statement(&stmt, &schemas, &views) {
             Ok(p) => p,
             Err(e) => return fatal(path, &e),
         };

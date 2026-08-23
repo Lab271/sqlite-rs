@@ -8,8 +8,42 @@
 use super::ast::*;
 use std::fmt;
 
+impl fmt::Display for WithClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WITH ")?;
+        for (i, cte) in self.ctes.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{cte}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for CommonTableExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(columns) = &self.columns {
+            write!(f, " (")?;
+            for (i, col) in columns.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{col}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " AS ({})", self.query)?;
+        Ok(())
+    }
+}
+
 impl fmt::Display for Select {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(with_clause) = &self.with_clause {
+            write!(f, "{with_clause} ")?;
+        }
         write!(f, "SELECT")?;
         match self.distinct {
             Some(Distinctness::Distinct) => write!(f, " DISTINCT")?,
@@ -68,6 +102,7 @@ impl fmt::Display for CompoundSelect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.op {
             CompoundOp::UnionAll => write!(f, "UNION ALL SELECT")?,
+            CompoundOp::Union => write!(f, "UNION SELECT")?,
         }
         match self.distinct {
             Some(Distinctness::Distinct) => write!(f, " DISTINCT")?,
@@ -577,6 +612,37 @@ impl fmt::Display for CreateIndex {
             write!(f, " WHERE {where_clause}")?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for CreateView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CREATE VIEW ")?;
+        if self.if_not_exists {
+            write!(f, "IF NOT EXISTS ")?;
+        }
+        write!(f, "{}", self.name)?;
+        if let Some(columns) = &self.columns {
+            write!(f, " (")?;
+            for (i, col) in columns.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{col}")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " AS {}", self.query)
+    }
+}
+
+impl fmt::Display for DropView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DROP VIEW ")?;
+        if self.if_exists {
+            write!(f, "IF EXISTS ")?;
+        }
+        write!(f, "{}", self.name)
     }
 }
 

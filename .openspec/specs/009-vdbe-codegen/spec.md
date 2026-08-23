@@ -890,6 +890,234 @@ cursor machinery is introduced by this requirement.
 **Tests:** `src/vdbe/exec.rs::tests::agg_step_min_honours_a_nocase_collation`,
 `tests/codegen/select_test.rs::min_max_aggregate_honours_collate_nocase`
 
+### Requirement 13: Non-Recursive CTE Materialization [MUST]
+
+A non-recursive `WITH` clause (#375's parser support) MUST be rewritten
+away before the rest of codegen runs, rather than given its own
+materialization path: `codegen::expand_with_clause` replaces every
+`FROM`/`JOIN` table reference that names a CTE with a
+`TableRefKind::Subquery` wrapping that CTE's own query, reusing
+Requirement 4's existing `OpenEphemeral`-backed `FROM`-subquery
+materialization unchanged. A CTE name shadows a same-named real table
+for the scope of the one `SELECT` that declared it — the rewrite is a
+local AST transformation, never a catalog mutation, so it cannot leak
+into a sibling statement. Later CTEs in the same `WITH` list may
+reference an earlier one by name (non-recursively); an explicit
+`WITH cte(a, b) AS (...)` column list renames that CTE's exposed output
+columns positionally. `WITH RECURSIVE` stays out of scope (rejected by
+the parser, #375).
+
+**Implementation:** `src/codegen/subquery/cte.rs::expand_with_clause`,
+`src/codegen/subquery/from_clause.rs::materialize_from_subquery`
+
+#### Scenario: A CTE referenced in FROM materializes and scans like any table
+
+- GIVEN `WITH cte AS (SELECT id, x FROM t WHERE x > 15) SELECT * FROM cte`
+- THEN `cte`'s query is materialized into an ephemeral table and the
+  main query scans it, yielding the same rows a real table with those
+  contents would
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_single_cte_matches_oracle`, `tests/corpus/cte_test.rs::with_clause_cte_referenced_twice_self_join_matches_oracle`, `tests/corpus/cte_test.rs::with_clause_cte_with_internal_order_by_limit_matches_oracle`
+
+#### Scenario: An explicit CTE column list renames its output columns
+
+- GIVEN `WITH cte(a, b) AS (SELECT id, x FROM t) SELECT a, b FROM cte`
+- THEN `a`/`b` resolve to `cte`'s query's first/second projected column
+  respectively
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_explicit_column_list_matches_oracle`
+
+#### Scenario: A CTE joined against another table, further filtered by WHERE
+
+- GIVEN `WITH cte AS (SELECT id, x FROM t) SELECT ... FROM cte JOIN other
+  ON ... WHERE cte.x < 25`
+- THEN the join and the `WHERE` filter both resolve against the
+  materialized `cte` cursor exactly as they would against a real table
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_cte_joined_and_filtered_matches_oracle`
+
+#### Scenario: A later CTE in the same WITH list references an earlier one
+
+- GIVEN `WITH a AS (SELECT id, x FROM t WHERE x > 10), b AS (SELECT *
+  FROM a WHERE x < 30) SELECT * FROM b`
+- THEN `b`'s own materialization scans `a`'s already-rewritten query
+  (nested `FROM`-subquery materialization), not a catalog table named
+  `a`
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_second_cte_references_first_matches_oracle`
+
+#### Scenario: A CTE whose body is a compound (UNION) SELECT is rejected cleanly
+
+- GIVEN `WITH cte AS (SELECT x FROM t WHERE x > 15 UNION SELECT x FROM t
+  WHERE x < 25) SELECT * FROM cte`
+- THEN compilation MUST fail with `CodegenError::Unsupported`, not
+  silently scan only the CTE body's `first` arm (a real data-loss bug
+  found and fixed by #382 — `materialize_from_subquery` previously
+  ignored every `compound` arm past `first`)
+
+**Tests:** `tests/corpus/cte_test.rs::with_clause_cte_body_is_union_is_rejected_cleanly`
+
+### Requirement 14: Compound SELECT (UNION / UNION ALL) [MUST]
+
+A compound `SELECT`'s `first` arm and every `select.compound` arm each
+get their own `OpenRead`/scan/`ResultRow` block, with cursor numbers
+offset by `ScanCursors::for_arm` (4 cursors per arm) so no arm's own
+sort/pseudo/DISTINCT cursor collides with another arm's. `UNION ALL`
+(#240) concatenates every arm's rows with no deduplication. Plain
+`UNION` (#377/#378) additionally routes every row from every arm
+through one ephemeral index (`OpenEphemeral`) opened once for the whole
+statement, past the last arm's own cursor block — a `Found`/`IdxInsert`
+check before each `ResultRow`, reusing the exact dedup mechanism
+Requirement 8's `SELECT DISTINCT` already performs
+(`projection::emit_dedup_guard`, factored out of
+`projection::emit_distinct_guard`) — drops a row already seen from an
+earlier arm instead of re-emitting it. Mixing `UNION` and `UNION ALL`
+arms in one statement is simplified to "any `UNION` arm dedups the
+whole result" rather than SQLite's pairwise left-to-right operator
+semantics — a documented narrowing, not the general case. Every arm
+must project the same number of result columns as `first` — checked at
+compile time via `select_result_column_count` and reported as
+`CodegenError::CompoundColumnMismatch`, never silently
+padded/truncated. `ORDER BY`/`LIMIT` on the whole compound statement,
+joins/subqueries within an arm, and `INTERSECT`/`EXCEPT` (unsupported
+at the parser level, #377) remain out of scope.
+
+**Implementation:** `src/codegen/select/entry.rs::compile_select_compound`,
+`src/codegen/select/projection.rs::emit_dedup_guard`
+
+#### Scenario: UNION ALL concatenates without deduplication
+
+- GIVEN `SELECT a FROM t1 UNION ALL SELECT a FROM t1` over a two-row `t1`
+- THEN every row from both arms is emitted, duplicates included
+
+**Tests:** `tests/corpus/union_test.rs::union_all_concatenates_without_deduplication`, `tests/corpus/union_test.rs::union_all_keeps_duplicate_rows`, `tests/corpus/union_test.rs::multiple_union_all_arms_chain`, `tests/corpus/union_test.rs::where_clause_filters_only_its_own_arm`, `tests/corpus/union_test.rs::union_all_does_not_coerce_between_mismatched_arm_types`, `tests/corpus/union_test.rs::union_vs_union_all_row_counts_differ_on_same_overlapping_inputs`
+
+#### Scenario: UNION deduplicates rows across arms
+
+- GIVEN `SELECT a FROM t1 UNION SELECT a FROM t1` over a two-row `t1`
+  with no duplicate rows within either arm alone
+- THEN each distinct row is emitted exactly once, even though it
+  appears in both arms
+
+**Tests:** `tests/corpus/union_test.rs::union_dedups_duplicate_rows`, `tests/corpus/union_test.rs::union_basic_no_duplicates`, `tests/corpus/union_test.rs::union_does_not_coerce_between_mismatched_arm_types`, `tests/corpus/union_test.rs::three_way_union_chain_dedups_across_all_arms`
+
+#### Scenario: A compound arm's column-count mismatch is rejected
+
+- GIVEN `SELECT a FROM t1 UNION [ALL] SELECT a, b FROM t2` (arm projects
+  two columns against `first`'s one)
+- THEN compilation fails with `CompoundColumnMismatch`, not a
+  padded/truncated row
+
+**Tests:** `tests/corpus/union_test.rs::column_count_mismatch_is_rejected`, `tests/corpus/union_test.rs::union_column_count_mismatch_is_rejected`
+
+#### Scenario: ORDER BY/LIMIT on the whole compound statement is rejected
+
+- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC`
+- THEN compilation fails cleanly with the documented "not yet supported"
+  `CodegenError::Unsupported`, per this requirement's explicit
+  out-of-scope note, rather than silently sorting only the last arm
+
+**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_is_rejected_cleanly`
+
+### Requirement 15: View Storage and Query Expansion [MUST]
+
+`CREATE VIEW` (#379's parser support) MUST register a `sqlite_master`
+row exactly like `CREATE TABLE`/`CREATE INDEX` (Requirement 9's DDL
+opcodes) do — `type = 'view'`, `name`/`tbl_name` the view's name,
+`rootpage = 0` (a view owns no b-tree of its own, matching stock
+SQLite's own storage convention), `sql` the verbatim `CREATE VIEW ...`
+source text — via a single `Opcode::CreateView` instruction
+(`P4::CreateTable`'s `{ name, sql }` payload, reused rather than
+duplicated since the two opcodes' payloads are identical). Unlike a CTE
+(Requirement 13, a pure in-query AST rewrite with no persistent state),
+a view's definition MUST survive being reloaded from `sqlite_master` by
+a fresh connection: `schema::read_views` decodes every `type = 'view'`
+row into a `ViewSchema { name, sql }`, and `codegen::resolve_views` then
+parses each one's `sql` back into a `CreateView` AST via #379's parser.
+`codegen::expand_views` mirrors `expand_with_clause`'s exact rewrite
+shape — every `FROM`/`JOIN` table reference naming a catalog view
+becomes a `TableRefKind::Subquery` wrapping that view's stored query,
+reusing Requirement 4's `OpenEphemeral`-backed `FROM`-subquery
+materialization unchanged — except it resolves against the always-fully-
+known view catalog rather than an in-declaration-order CTE list, and
+therefore recurses into any nested `TableRefKind::Subquery` (bounded by
+`views::MAX_DEPTH`) so a view-of-view resolves to arbitrary depth. An
+explicit `CREATE VIEW v(a, b) AS ...` column list renames the view's
+exposed output columns via the same `apply_column_aliases` helper
+Requirement 13's CTE column-list rename already uses. `expand_views`
+runs after `expand_with_clause` in `compile_select_program` so it also
+reaches into any `TableRefKind::Subquery` the CTE rewrite just produced
+(a CTE body that itself references a view), and so that a CTE shadows a
+same-named view for the scope of its declaring `SELECT`, matching how a
+CTE already shadows a same-named real table. `DROP VIEW` is parsed
+(#379) but not yet compiled — out of scope here.
+
+**Implementation:** `src/codegen/ddl/create_view.rs::compile_create_view`,
+`src/vdbe/cursor.rs::create_view`, `src/schema/ddl_reader.rs::read_views`,
+`src/codegen/subquery/views.rs::{expand_views, resolve_views}`
+
+#### Scenario: CREATE VIEW registers a sqlite_master row with rootpage 0
+
+- GIVEN `CREATE VIEW v AS SELECT id, x FROM t WHERE x > 15`
+- WHEN executed
+- THEN `sqlite_master` gains a row with `type = 'view'`, `rootpage = 0`,
+  and `sql` equal to the verbatim statement text
+
+**Tests:** `tests/corpus/view_test.rs::create_view_persists_across_reload`
+
+#### Scenario: A view referenced in FROM expands and scans like any table
+
+- GIVEN the view above and `SELECT * FROM v`
+- THEN `v`'s stored query is materialized into an ephemeral table and
+  the main query scans it, yielding the same rows a real table with
+  those contents would
+
+**Tests:** `tests/corpus/view_test.rs::create_view_simple_matches_oracle`, `tests/corpus/view_test.rs::with_clause_cte_selects_from_view_matches_oracle`
+
+#### Scenario: An explicit view column list renames its output columns
+
+- GIVEN `CREATE VIEW v (a, b) AS SELECT id, x FROM t` and `SELECT a, b
+  FROM v`
+- THEN `a`/`b` resolve to `v`'s query's first/second projected column
+  respectively
+
+**Tests:** `tests/corpus/view_test.rs::create_view_explicit_column_list_matches_oracle`
+
+#### Scenario: A view of a view (nested views) resolves to arbitrary depth
+
+- GIVEN `CREATE VIEW v1 AS SELECT id, x FROM t WHERE x > 10`, `CREATE
+  VIEW v2 AS SELECT id, x FROM v1 WHERE x < 30`, and `SELECT * FROM v2`
+- THEN `v2`'s expansion recurses into `v1`'s own `FROM` reference,
+  yielding the same rows as evaluating both filters against `t` directly
+
+**Tests:** `tests/corpus/view_test.rs::create_view_of_view_matches_oracle`
+
+#### Scenario: A view joined against another table, further filtered by WHERE
+
+- GIVEN a view `v` and `SELECT ... FROM v JOIN other ON ... WHERE v.x <
+  25`
+- THEN the join and the `WHERE` filter both resolve against the
+  materialized `v` cursor exactly as they would against a real table
+
+**Tests:** `tests/corpus/view_test.rs::create_view_joined_and_filtered_matches_oracle`
+
+#### Scenario: DROP VIEW fails cleanly rather than being silently ignored
+
+- GIVEN `DROP VIEW v` run against a real connection, with `DROP VIEW`
+  parsed (#379) but not dispatched to any codegen path (this
+  requirement's own out-of-scope note above)
+- THEN the statement MUST be rejected with a clean error (`statement
+  dispatch` reports it as unrecognized) rather than panicking or
+  silently no-opping, and `v` remains queryable afterward — #382
+  verified this end-to-end and found the existing behavior already
+  clean (no codegen path is reached at all: `compile_statement`'s
+  keyword dispatch has no `"DROP" if kw(1) == "VIEW"` arm, so it falls
+  through to `DispatchError::Unrecognized` before ever touching a
+  parser or opcode). Wiring an actual `Opcode::DropView` remains a
+  fast-follow, tracked separately from this scenario.
+
+**Tests:** `tests/corpus/view_test.rs::drop_view_fails_cleanly_not_wired_into_codegen`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made

@@ -199,25 +199,26 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 /// asserts the SQL is malformed, whereas `Unsupported` is what a
 /// recognized-but-unimplemented construct should yield. The known causes,
 /// #113 fixed the bulk of these (#110), taking the count from 131 to 7;
-/// #239 fixed the two `GROUP BY` cases, taking it to 5. The remainder, all
-/// valid SQL real sqlite3 accepts:
+/// #239 fixed the two `GROUP BY` cases, taking it to 5. #375/#377 (V6.1's
+/// `WITH`/`UNION` parsing) made three more pre-existing misclassifications
+/// reachable — a quoted alias on a plain-`UNION` arm, `[NOT] MATERIALIZED`
+/// after `WITH cte AS`, and a `WITH`-clause feeding `INSERT` instead of
+/// `SELECT` — all fixed in the same PR (#403) that made them reachable,
+/// which also fixed the single-quoted-alias bug at its root (`opt_alias`)
+/// instead of leaving it to keep resurfacing every time a future ticket
+/// parses one arm/branch deeper, taking the count from 8 to 3. The
+/// remainder, all valid SQL real sqlite3 accepts:
 ///
-/// - single-quoted aliases, `... AS 'm'` (x5) — SQLite accepts a string
-///   literal where an alias identifier is expected. #240 (`UNION ALL`)
-///   made a 3rd occurrence of this same pre-existing bug reachable (a
-///   quoted alias on a compound arm); #257 (subqueries in FROM) made a
-///   4th and 5th occurrence reachable (a quoted alias inside a
-///   FROM-subquery, both standalone and joined) — same pre-existing bug
-///   class, not a new one.
 /// - `temp.sqlite_master` — schema-qualified name with a keyword schema
 /// - `SELECT (VALUES(1),(2))` — VALUES in expression position
 /// - `SELECT release FROM savepoint` — non-reserved keywords used as
 ///   identifiers (SQLite's `%fallback ID`)
 ///
 /// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
-/// never raise it without a documented cause like the #240/#257 bumps above. A
-/// raise means a regression that reclassified valid SQL as malformed.
-const SELECT_INVALID_BASELINE: usize = 8;
+/// never raise it without a documented cause like the #240/#257/#403 bumps
+/// above. A raise means a regression that reclassified valid SQL as
+/// malformed.
+const SELECT_INVALID_BASELINE: usize = 3;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

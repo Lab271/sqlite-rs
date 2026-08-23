@@ -760,6 +760,57 @@ impl Parser {
         })
     }
 
+    /// `create_view_stmt` (#379, grammar V6): `CREATE VIEW view_name
+    /// ['(' column_list ')'] AS select_stmt`.
+    pub(super) fn parse_create_view_stmt(&mut self) -> PResult<CreateView> {
+        let start = self.expect_kw(Keyword::CREATE)?;
+        if self.at_kw(Keyword::TEMP) || self.at_kw(Keyword::TEMPORARY) {
+            return self.unsupported("CREATE TEMP/TEMPORARY VIEW not yet supported");
+        }
+        self.expect_kw(Keyword::VIEW)?;
+        let if_not_exists = self.opt_if_not_exists()?;
+        let (name, _) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+
+        let columns = if self.eat_punct(&TokenKind::LParen) {
+            let mut cols = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                cols.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')'")?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        self.expect_kw(Keyword::AS)?;
+        let query = self.parse_select_stmt()?;
+        let end = query.span;
+
+        Ok(CreateView {
+            if_not_exists,
+            name,
+            columns,
+            query: Box::new(query),
+            span: join_span(start, end),
+        })
+    }
+
+    /// `drop_view_stmt` (#379, grammar V6): `DROP VIEW [IF EXISTS]
+    /// view_name`.
+    pub(super) fn parse_drop_view_stmt(&mut self) -> PResult<DropView> {
+        let start = self.expect_kw(Keyword::DROP)?;
+        self.expect_kw(Keyword::VIEW)?;
+        let if_exists = self.opt_if_exists()?;
+        let (name, end) = self.identifier()?;
+        self.check_no_schema_qualifier()?;
+        Ok(DropView {
+            if_exists,
+            name,
+            span: join_span(start, end),
+        })
+    }
+
     pub(super) fn parse_drop_table_stmt(&mut self) -> PResult<DropTable> {
         let start = self.expect_kw(Keyword::DROP)?;
         self.expect_kw(Keyword::TABLE)?;
@@ -872,13 +923,29 @@ impl Parser {
     }
 
     pub(super) fn parse_select_stmt(&mut self) -> PResult<Select> {
-        if self.at_kw(Keyword::WITH) {
-            return self.unsupported("WITH / CTEs not yet supported");
-        }
+        let with_clause = if self.at_kw(Keyword::WITH) {
+            Some(self.parse_with_clause()?)
+        } else {
+            None
+        };
         if self.at_kw(Keyword::VALUES) {
             return self.unsupported("bare VALUES not yet supported");
         }
-        let start = self.expect_kw(Keyword::SELECT)?;
+        // A `WITH` clause can also introduce `INSERT`/`UPDATE`/`DELETE`
+        // (a CTE feeding a data-modifying statement) in real SQLite —
+        // recognized syntax this grammar slice doesn't parse, so it's
+        // surfaced as `Unsupported` rather than falling through to the
+        // generic `SELECT` expectation below, which would misreport it
+        // as malformed SQL.
+        if with_clause.is_some()
+            && (self.at_kw(Keyword::INSERT)
+                || self.at_kw(Keyword::UPDATE)
+                || self.at_kw(Keyword::DELETE))
+        {
+            return self.unsupported("WITH ... INSERT/UPDATE/DELETE not yet supported");
+        }
+        let select_start = self.expect_kw(Keyword::SELECT)?;
+        let start = with_clause.as_ref().map_or(select_start, |w| w.span);
 
         let distinct = if self.eat_kw(Keyword::DISTINCT) {
             Some(Distinctness::Distinct)
@@ -936,12 +1003,12 @@ impl Parser {
                 break;
             }
             let union_start = self.advance().span;
-            if !self.eat_kw(Keyword::ALL) {
-                return self.unsupported(
-                    "compound SELECT (plain UNION, with dedup) not yet supported; use UNION ALL",
-                );
-            }
-            compound.push(self.parse_compound_select_arm(union_start)?);
+            let op = if self.eat_kw(Keyword::ALL) {
+                CompoundOp::UnionAll
+            } else {
+                CompoundOp::Union
+            };
+            compound.push(self.parse_compound_select_arm(union_start, op)?);
         }
 
         let mut order_by = Vec::new();
@@ -973,6 +1040,7 @@ impl Parser {
             .get(self.pos.saturating_sub(1))
             .map_or(start, |t| t.span);
         Ok(Select {
+            with_clause,
             distinct,
             columns,
             from,
@@ -986,12 +1054,77 @@ impl Parser {
         })
     }
 
-    /// One `UNION ALL SELECT ...` arm (#240): same core shape as
-    /// [`Self::parse_select_stmt`] minus ORDER BY/LIMIT, which bind to
-    /// the whole compound statement rather than any one arm.
-    fn parse_compound_select_arm(&mut self, union_start: Span) -> PResult<CompoundSelect> {
+    /// `with-clause` (#375, grammar V6): `WITH cte { , cte }`, where each
+    /// `cte` is `cte_name [(col, ...)] AS (select-stmt)`. `WITH
+    /// RECURSIVE` is not yet supported — only the non-recursive form.
+    fn parse_with_clause(&mut self) -> PResult<WithClause> {
+        let start = self.expect_kw(Keyword::WITH)?;
+        if self.at_kw(Keyword::RECURSIVE) {
+            return self.unsupported("WITH RECURSIVE not yet supported");
+        }
+        let mut ctes = vec![self.parse_common_table_expr()?];
+        while self.eat_punct(&TokenKind::Comma) {
+            ctes.push(self.parse_common_table_expr()?);
+        }
+        let end = ctes.last().map_or(start, |cte| cte.span);
+        Ok(WithClause {
+            ctes,
+            span: join_span(start, end),
+        })
+    }
+
+    /// `cte_name [(col, ...)] AS (select-stmt)`.
+    fn parse_common_table_expr(&mut self) -> PResult<CommonTableExpr> {
+        let (name, name_span) = self.identifier()?;
+
+        let columns = if self.eat_punct(&TokenKind::LParen) {
+            let mut cols = vec![self.identifier()?.0];
+            while self.eat_punct(&TokenKind::Comma) {
+                cols.push(self.identifier()?.0);
+            }
+            self.expect_punct(TokenKind::RParen, "')'")?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        self.expect_kw(Keyword::AS)?;
+        // `[NOT] MATERIALIZED` (a query-planner hint, SQLite 3.35+) is
+        // recognized syntax we don't yet act on — surfacing it as
+        // `Unsupported` rather than falling through to the generic `'('`
+        // expectation below, which would misreport it as malformed SQL.
+        if self.at_kw(Keyword::MATERIALIZED)
+            || (self.at_kw(Keyword::NOT)
+                && matches!(
+                    self.peek_at(1).kind,
+                    TokenKind::Keyword(Keyword::MATERIALIZED)
+                ))
+        {
+            return self.unsupported("[NOT] MATERIALIZED CTE hint not yet supported");
+        }
+        self.expect_punct(TokenKind::LParen, "'('")?;
+        let query = self.parse_select_stmt()?;
+        let end = self.expect_punct(TokenKind::RParen, "')'")?;
+
+        Ok(CommonTableExpr {
+            name,
+            columns,
+            query: Box::new(query),
+            span: join_span(name_span, end),
+        })
+    }
+
+    /// One `UNION [ALL] SELECT ...` arm (#240 for `UNION ALL`, #377 for
+    /// plain `UNION`): same core shape as [`Self::parse_select_stmt`]
+    /// minus ORDER BY/LIMIT, which bind to the whole compound statement
+    /// rather than any one arm.
+    fn parse_compound_select_arm(
+        &mut self,
+        union_start: Span,
+        op: CompoundOp,
+    ) -> PResult<CompoundSelect> {
         if self.at_kw(Keyword::VALUES) {
-            return self.unsupported("UNION ALL VALUES (...) not yet supported");
+            return self.unsupported("UNION [ALL] VALUES (...) not yet supported");
         }
         let start = self.expect_kw(Keyword::SELECT)?;
 
@@ -1044,7 +1177,7 @@ impl Parser {
             .get(self.pos.saturating_sub(1))
             .map_or(start, |t| t.span);
         Ok(CompoundSelect {
-            op: CompoundOp::UnionAll,
+            op,
             distinct,
             columns,
             from,
@@ -1080,6 +1213,18 @@ impl Parser {
     /// alias, never a keyword (keywords are never `TokenKind::Identifier`).
     fn opt_alias(&mut self) -> PResult<Option<String>> {
         if self.eat_kw(Keyword::AS) {
+            // Stock SQLite accepts a single-quoted string literal as an
+            // alias too (a legacy compatibility quirk — `'m'` is treated
+            // as if it were the identifier `m`), which our tokenizer
+            // sees as a `TokenKind::String` rather than `Identifier`.
+            // Recognized syntax we don't yet implement, not malformed
+            // SQL: a plain `identifier()` call here would misreport it
+            // as `Invalid` instead of `Unsupported`.
+            if matches!(self.peek().kind, TokenKind::String(_)) {
+                return self.unsupported(
+                    "a quoted string literal as an alias (e.g. AS 'name') is not yet supported",
+                );
+            }
             let (name, _) = self.identifier()?;
             return Ok(Some(name));
         }
@@ -2190,13 +2335,17 @@ mod tests {
 
     /// #368 tagged MC/DC vector (obligation `grammar_244`): leaf B true,
     /// leaf A false. Independence pair for B against
-    /// `mcdc__grammar_244__v2_neither_select_nor_with`.
+    /// `mcdc__grammar_244__v2_neither_select_nor_with`. #375 landed
+    /// non-recursive `WITH`, so this now parses successfully instead of
+    /// erroring out on the (then-)unimplemented WITH clause — the leaf
+    /// still exercises the WITH branch of `grammar_244`'s decision, just
+    /// via an `Ok` result now.
     #[test]
     #[allow(non_snake_case)]
     fn mcdc__grammar_244__v3_with_source() {
         assert!(parser("INSERT INTO t WITH x AS (SELECT 1) SELECT 1")
             .parse_insert_stmt()
-            .is_err());
+            .is_ok());
     }
 
     /// #368 tagged MC/DC vector (obligation `grammar_438`,

@@ -6,7 +6,7 @@ use crate::codegen::select::{
     compile_select_joined_scan, compile_select_scan, CodegenError, ScanCursors,
 };
 use crate::codegen::{Emitter, RegAlloc};
-use crate::parser::ast::{ExprKind, ResultColumn, Select, TableRef};
+use crate::parser::ast::{ExprKind, ResultColumn, Select, TableRef, TableRefKind};
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, P4};
 
@@ -106,30 +106,18 @@ pub(super) fn subquery_own_table_refs(subquery: &Select) -> Result<Vec<&TableRef
 }
 
 /// Resolves each of `table_refs` against `catalog` — one schema per
-/// table, same order. A subquery nested inside another subquery's
-/// `FROM` is not yet supported (this pass materializes one level).
+/// table, same order. Delegates to [`resolve_from_table_schema`], which
+/// itself recurses for a nested `TableRefKind::Subquery` (e.g. a CTE
+/// whose own body's `FROM` names another CTE, #376), so nesting to
+/// arbitrary depth just falls out rather than needing its own handling
+/// here.
 fn resolve_subquery_schemas(
     table_refs: &[&TableRef],
     catalog: &[TableSchema],
 ) -> Result<Vec<TableSchema>, CodegenError> {
     table_refs
         .iter()
-        .map(|table_ref| {
-            let Some(name) = table_ref.name() else {
-                return Err(CodegenError::Unsupported {
-                    reason: "a subquery nested inside another subquery's FROM is not yet \
-                             supported"
-                        .to_string(),
-                });
-            };
-            catalog
-                .iter()
-                .find(|s| s.name.eq_ignore_ascii_case(name))
-                .cloned()
-                .ok_or_else(|| CodegenError::Unsupported {
-                    reason: format!("no such table: {name}"),
-                })
-        })
+        .map(|table_ref| resolve_from_table_schema(table_ref, catalog))
         .collect()
 }
 
@@ -208,6 +196,24 @@ pub(crate) fn materialize_from_subquery(
     catalog: &[TableSchema],
     dest_cursor: i32,
 ) -> Result<TableSchema, CodegenError> {
+    // #382: a compound (`UNION`/`UNION ALL`) body isn't handled by this
+    // materialization path yet — only `subquery`'s own `first` arm would
+    // be scanned into `dest_cursor`, silently dropping every other
+    // arm's rows (discovered via a CTE-body-is-UNION corpus regression).
+    // Reject cleanly here rather than let that data loss reach a
+    // caller, matching the "not yet supported" pattern used just below
+    // for a joined subquery-in-FROM. Fast-follow: teach this function
+    // (and its view-expansion counterpart, `expand_views`, which shares
+    // the same underlying materialization) to loop over every compound
+    // arm like `compile_select_compound` does at the top level.
+    if !subquery.compound.is_empty() {
+        return Err(CodegenError::Unsupported {
+            reason: "a compound (UNION) SELECT as a CTE/view/derived-table body is not yet \
+                     supported"
+                .to_string(),
+        });
+    }
+
     let table_refs = subquery_own_table_refs(subquery)?;
     let schemas = resolve_subquery_schemas(&table_refs, catalog)?;
     let Some(from) = &subquery.from else {
@@ -261,13 +267,24 @@ pub(crate) fn materialize_from_subquery(
             pseudo: reg.alloc_cursor(),
             distinct: reg.alloc_cursor(),
         };
-        let root_page = valid_table_root_page(schema)?;
-        em.emit(Instruction::new(
-            Opcode::OpenRead,
-            cursors.table,
-            root_page,
-            0,
-        ));
+        match &from.first.kind {
+            TableRefKind::Name(_) => {
+                let root_page = valid_table_root_page(schema)?;
+                em.emit(Instruction::new(
+                    Opcode::OpenRead,
+                    cursors.table,
+                    root_page,
+                    0,
+                ));
+            }
+            TableRefKind::Subquery(inner) => {
+                // A subquery-in-FROM nested inside this one (#376: a CTE
+                // whose own body's FROM names another CTE) — materialize
+                // it into the same cursor this level would otherwise
+                // `OpenRead` a real table into.
+                materialize_from_subquery(em, reg, inner, catalog, cursors.table)?;
+            }
+        }
         compile_select_scan(
             em, reg, subquery, schema, cursors, end_label, catalog, &mut sink,
         )?;

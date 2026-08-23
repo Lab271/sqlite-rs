@@ -6,8 +6,8 @@
 //! feature reads identically to a typo.
 
 use super::ast::{
-    Begin, Commit, CreateIndex, CreateTable, Delete, DropIndex, DropTable, Explain, Insert,
-    Rollback, Select, Update,
+    Begin, Commit, CreateIndex, CreateTable, CreateView, Delete, DropIndex, DropTable, DropView,
+    Explain, Insert, Rollback, Select, Update,
 };
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
@@ -172,6 +172,48 @@ pub fn parse_create_index(src: &str) -> ParseOutcome<CreateIndex> {
     let tokens = Tokenizer::tokenize(src);
     let mut parser = Parser::new(tokens);
     match parser.parse_create_index_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single CREATE VIEW statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V6 block, #379). Never panics — any
+/// input produces one of the three [`ParseOutcome`] variants.
+pub fn parse_create_view(src: &str) -> ParseOutcome<CreateView> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_create_view_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single DROP VIEW statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V6 block, #379). Never panics — any
+/// input produces one of the three [`ParseOutcome`] variants.
+pub fn parse_drop_view(src: &str) -> ParseOutcome<DropView> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_drop_view_stmt() {
         Ok(stmt) => match parser.expect_end() {
             Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
             Err(ParseFail::Unsupported { message, span }) => {

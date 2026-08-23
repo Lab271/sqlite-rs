@@ -13,14 +13,15 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    explain_query_plan, resolve_from_table_schema, CodegenError, EqpRow,
+    compile_select_compound, compile_select_joined, compile_select_with_catalog, expand_views,
+    expand_with_clause, explain_query_plan, resolve_from_table_schema, resolve_views, CodegenError,
+    EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
 use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
-use sqlite_rs::schema::{read_schema, TableSchema};
+use sqlite_rs::schema::{read_schema, read_views, TableSchema, ViewSchema};
 use sqlite_rs::vdbe::{execute_with_db, explain, Program};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
@@ -47,7 +48,28 @@ pub(crate) fn compile_select_program(
     select: &Select,
     eqp_mode: bool,
     schemas: &[TableSchema],
+    views: &[ViewSchema],
 ) -> Result<SelectOutcome, String> {
+    // #376: a `WITH` clause is rewritten away before any table
+    // resolution happens — every CTE reference in `FROM`/`JOIN` becomes
+    // a `TableRefKind::Subquery` wrapping that CTE's own query, so the
+    // rest of this pipeline (and #257's subquery-in-FROM codegen) needs
+    // no CTE-specific handling at all.
+    let cte_expanded = expand_with_clause(select);
+    // #380: every catalog-view reference in `FROM`/`JOIN` is rewritten
+    // away next, the same shape as the CTE rewrite above — into a
+    // `TableRefKind::Subquery` wrapping the view's own stored query,
+    // reusing #257's subquery-in-FROM codegen unchanged. Runs *after*
+    // the CTE rewrite (rather than before) so it also reaches into any
+    // `TableRefKind::Subquery` the CTE rewrite just produced — a CTE
+    // whose own body references a view is resolved this way, without
+    // `expand_views` needing any CTE-specific handling of its own; a
+    // CTE also shadows a same-named view for the scope of its declaring
+    // `SELECT`, matching how it already shadows a same-named real table.
+    let resolved_views = resolve_views(views);
+    let expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
+    let select = &expanded;
+
     let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
         resolve_from_table_schema(table_ref, schemas)
     };
@@ -186,8 +208,13 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
         Ok(s) => s,
         Err(e) => return fatal(path, &e),
     };
+    let mut view_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    let views = match read_views(&mut view_cursor, header.text_encoding) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
 
-    match compile_select_program(&select, eqp_mode, &schemas) {
+    match compile_select_program(&select, eqp_mode, &schemas, &views) {
         Ok(SelectOutcome::Eqp(rows)) => {
             for row in rows {
                 println!("{}|{}|{}|{}", row.id, row.parent, row.notused, row.detail);

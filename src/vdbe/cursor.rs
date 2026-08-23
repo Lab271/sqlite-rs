@@ -1420,6 +1420,45 @@ pub fn create_table(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError>
     Ok(Step::Next)
 }
 
+/// `CreateView` (#380): registers a `sqlite_master` row with
+/// `type = 'view'` and `rootpage = 0` — a view has no b-tree of its own,
+/// so unlike [`create_table`] this never allocates a root page.
+pub fn create_view(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let (name, sql) = match &instr.p4 {
+        P4::CreateView { name, sql } => (name.clone(), sql.clone()),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "CreateView",
+                reason: format!("expected P4::CreateView, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("CreateView")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+    btree::insert_master_row(
+        &mut pager,
+        &header,
+        &btree::MasterEntry {
+            kind: "view".to_string(),
+            name: name.clone(),
+            tbl_name: name,
+            rootpage: 0,
+            sql,
+        },
+    )
+    .map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateView",
+        reason: e.to_string(),
+    })?;
+    btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
+        opcode: "CreateView",
+        reason: e.to_string(),
+    })?;
+    Ok(Step::Next)
+}
+
 /// `DropTable` (#215): frees the target table's b-tree pages plus every
 /// index on it (cascading), removes the corresponding `sqlite_master`
 /// rows, and bumps the schema cookie once.

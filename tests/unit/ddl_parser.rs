@@ -10,8 +10,23 @@
 
 use sqlite_rs::parser::ast::*;
 use sqlite_rs::parser::{
-    parse_create_index, parse_create_table, parse_drop_index, parse_drop_table, ParseOutcome,
+    parse_create_index, parse_create_table, parse_create_view, parse_drop_index, parse_drop_table,
+    parse_drop_view, ParseOutcome,
 };
+
+fn accept_view(src: &str) -> CreateView {
+    match parse_create_view(src) {
+        ParseOutcome::Accepted(stmt) => *stmt,
+        other => panic!("expected accept for {src:?}, got {other:?}"),
+    }
+}
+
+fn accept_drop_view(src: &str) -> DropView {
+    match parse_drop_view(src) {
+        ParseOutcome::Accepted(stmt) => *stmt,
+        other => panic!("expected accept for {src:?}, got {other:?}"),
+    }
+}
 
 fn accept_table(src: &str) -> CreateTable {
     match parse_create_table(src) {
@@ -453,4 +468,48 @@ fn test_invalid_drop_index_trailing_garbage() {
 #[test]
 fn test_invalid_drop_index_missing_name() {
     invalid_drop_index("DROP INDEX");
+}
+
+#[test]
+fn test_accept_create_view_simple() {
+    let view = accept_view("CREATE VIEW v AS SELECT a, b FROM t");
+    assert_eq!(view.name, "v");
+    assert!(view.columns.is_none());
+    assert!(!view.if_not_exists);
+    assert_eq!(view.query.columns.len(), 2);
+}
+
+#[test]
+fn test_accept_create_view_with_column_list() {
+    let view = accept_view("CREATE VIEW v (x, y) AS SELECT a, b FROM t");
+    assert_eq!(view.name, "v");
+    assert_eq!(view.columns, Some(vec!["x".to_string(), "y".to_string()]));
+}
+
+#[test]
+fn test_accept_create_view_if_not_exists() {
+    let view = accept_view("CREATE VIEW IF NOT EXISTS v AS SELECT 1");
+    assert!(view.if_not_exists);
+}
+
+#[test]
+fn test_printer_roundtrip_create_view() {
+    let view = accept_view("CREATE VIEW v (x, y) AS SELECT a, b FROM t");
+    let printed = view.to_string();
+    let reparsed = accept_view(&printed);
+    assert_eq!(reparsed.name, view.name);
+    assert_eq!(reparsed.columns, view.columns);
+}
+
+#[test]
+fn test_accept_drop_view() {
+    let drop = accept_drop_view("DROP VIEW v");
+    assert_eq!(drop.name, "v");
+    assert!(!drop.if_exists);
+}
+
+#[test]
+fn test_accept_drop_view_if_exists() {
+    let drop = accept_drop_view("DROP VIEW IF EXISTS v");
+    assert!(drop.if_exists);
 }

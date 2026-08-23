@@ -49,7 +49,7 @@ fn main() {
             format!("UPDATE t SET a = a + 1 WHERE a = {n}"),
             "COMMIT".to_string(),
         ] {
-            let program = compile_statement(&stmt, &schemas)
+            let program = compile_statement(&stmt, &schemas, &[])
                 .unwrap_or_else(|e| panic!("compiling {stmt:?}: {e}"));
             let (_, ac) = execute_transaction_step(&program, Rc::clone(&pager), header, autocommit)
                 .unwrap_or_else(|e| panic!("running {stmt:?}: {e}"));

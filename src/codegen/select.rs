@@ -23,7 +23,7 @@ use crate::codegen::{
     p4_coll_seq, CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target,
 };
 use crate::parser::ast::{
-    BinaryOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
+    BinaryOp, CompoundOp, CompoundSelect, Distinctness, Expr, ExprKind, FromClause, FunctionArgs,
     JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef, TableRefKind,
 };
 use crate::parser::tokenizer::Span;
@@ -65,6 +65,13 @@ pub enum CodegenError {
          columns: expected {expected}, found {found}"
     )]
     CompoundColumnMismatch { expected: usize, found: usize },
+
+    /// #380 follow-up: a view (directly or transitively, via other
+    /// views) references itself in its own `FROM`/`JOIN` clause. Message
+    /// matches stock SQLite's own wording (`view {name} is circularly
+    /// defined`) for oracle-diff parity.
+    #[error("view {name} is circularly defined")]
+    CircularView { name: String },
 }
 
 const TABLE_CURSOR: i32 = 0;
@@ -108,6 +115,15 @@ impl ScanCursors {
             pseudo: base.saturating_add(2),
             distinct: base.saturating_add(3),
         }
+    }
+
+    /// First cursor number past `count` arms' worth of
+    /// [`Self::for_arm`] blocks — the single block size (4 cursors)
+    /// lives here so a caller allocating a cursor after all arm blocks
+    /// (e.g. the UNION dedup ephemeral index in `select/entry.rs`)
+    /// never hardcodes it independently.
+    pub(crate) fn after_arms(count: usize) -> i32 {
+        i32::try_from(count).unwrap_or(i32::MAX).saturating_mul(4)
     }
 }
 
