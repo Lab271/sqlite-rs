@@ -119,7 +119,11 @@ impl Vfs for UnixVfs {
             return Ok(None);
         }
         shm::open_wal_shm(&shm_path)
-            .map(|handle| Some(crate::vfs::AnyWalShm::from(Box::new(handle) as Box<dyn crate::vfs::WalShm>)))
+            .map(|handle| {
+                Some(crate::vfs::AnyWalShm::from(
+                    Box::new(handle) as Box<dyn crate::vfs::WalShm>
+                ))
+            })
             .map_err(|source| to_vfs_error(&shm_path, source))
     }
 }

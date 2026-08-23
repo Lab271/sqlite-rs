@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use crate::header::JournalMode;
 use crate::vfs::{
-    companion_path, AnyVfs, AnyVfsFile, AnyWalShm, FileLock, PageError, PageSource, Vfs,
-    VfsError, WritablePageSource,
+    companion_path, AnyVfs, AnyVfsFile, AnyWalShm, FileLock, PageError, PageSource, Vfs, VfsError,
+    WritablePageSource,
 };
 use journal::{JournalError, JournalWriter};
 
