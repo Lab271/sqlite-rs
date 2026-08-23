@@ -35,7 +35,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 
 use nix::libc::{self, off_t};
@@ -69,7 +69,7 @@ const UNIX_SHM_BASE: off_t = 120;
 /// `slot` ranges 1..=4 — slot 0 is reserved (always considered "in use" by
 /// SQLite's own protocol) and is never claimed by a reader here, matching
 /// spike 005 experiment 4.
-fn wal_read_lock_byte(slot: usize) -> off_t {
+pub(crate) fn wal_read_lock_byte(slot: usize) -> off_t {
     UNIX_SHM_BASE
         .saturating_add(3)
         .saturating_add(slot as off_t)
@@ -83,6 +83,20 @@ fn wal_read_lock_byte(slot: usize) -> off_t {
 /// read(0..4) — this module doesn't yet claim the write lock itself,
 /// tracked with the rest of the write-side wal-index wiring at #388/#389).
 const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
+
+/// Opens `-shm` at `shm_path` with `O_NOFOLLOW`, so a symlink planted at
+/// that path (e.g. in a shared or world-writable directory) can't redirect
+/// a lock claim or a raw `nBackfill` write onto an arbitrary file this
+/// process happens to have write access to. Every `-shm` open in this
+/// module goes through here rather than a bare `OpenOptions::open`.
+fn open_shm(shm_path: &Path, write: bool) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).custom_flags(libc::O_NOFOLLOW);
+    if write {
+        opts.write(true);
+    }
+    opts.open(shm_path)
+}
 
 /// `WalCkptInfo.nBackfill` (`wal.c`): how many leading frames a checkpoint
 /// has already copied into the main database file.
@@ -106,7 +120,7 @@ impl Drop for WalCheckpointLock {
 }
 
 pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckpointLock> {
-    let file = OpenOptions::new().read(true).write(true).open(shm_path)?;
+    let file = open_shm(shm_path, true)?;
     validate_shm_len(&file)?;
     fcntl_lock(&file, libc::F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
     Ok(WalCheckpointLock { file })
@@ -121,7 +135,7 @@ pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckp
 /// `claim_wal_read_lock`'s "the lock decides occupancy, not the mark
 /// value" rule.
 pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
-    let file = OpenOptions::new().read(true).write(true).open(shm_path)?;
+    let file = open_shm(shm_path, true)?;
     validate_shm_len(&file)?;
 
     let mut marks = Vec::new();
@@ -143,14 +157,14 @@ pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
 /// Reads `nBackfill`: how many leading frames the last checkpoint already
 /// copied to the main file.
 pub(crate) fn read_backfill(shm_path: &Path) -> io::Result<u32> {
-    let file = OpenOptions::new().read(true).open(shm_path)?;
+    let file = open_shm(shm_path, false)?;
     read_u32_at(&file, N_BACKFILL_OFFSET)
 }
 
 /// Publishes a new `nBackfill` after a PASSIVE checkpoint (#386) copies
 /// frames `1..=nBackfill` into the main database file.
 pub(crate) fn publish_backfill(shm_path: &Path, n_backfill: u32) -> io::Result<()> {
-    let file = OpenOptions::new().read(true).write(true).open(shm_path)?;
+    let file = open_shm(shm_path, true)?;
     write_u32_at(&file, N_BACKFILL_OFFSET, n_backfill)
 }
 
@@ -248,7 +262,7 @@ impl Drop for WalReadLock {
 /// mark. `Err` on the first non-contention `fcntl` failure, or if every
 /// slot is genuinely contended (`EAGAIN`/`EACCES`).
 pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadLock>> {
-    let file = match OpenOptions::new().read(true).write(true).open(shm_path) {
+    let file = match open_shm(shm_path, true) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),

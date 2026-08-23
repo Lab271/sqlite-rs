@@ -144,8 +144,10 @@ impl WalHeader {
     }
 
     /// Builds a fresh header for a brand-new WAL file — `checkpoint_seq`
-    /// is the generation counter a checkpoint bumps (#386); a first-ever
-    /// WAL for a database starts at 1, matching stock SQLite.
+    /// is the generation counter a RESTART/TRUNCATE checkpoint bumps when
+    /// it rewrites the WAL header (deferred to V7, not this crate's
+    /// PASSIVE-only checkpoint_passive); a first-ever WAL for a database
+    /// starts at 1, matching stock SQLite.
     pub fn new(
         native_checksum: bool,
         page_size: u32,

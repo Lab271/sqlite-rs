@@ -11,6 +11,10 @@
 //! `mxFrame` value taken at a moment its writer had just committed), so
 //! the truncated slice's last frame is itself a valid commit and
 //! `committed_pages` resolves it the same way it resolves a full WAL.
+//!
+//! See `.openspec/adr/0025-passive-only-checkpoint-linear-frame-scan.md`
+//! for why this is PASSIVE-only with a linear scan rather than FULL/RESTART
+//! plus a page→frame hash table.
 
 use std::path::Path;
 
@@ -96,6 +100,12 @@ pub fn checkpoint_passive(
         });
     }
 
+    // A live reader's mark is never 0 in slots 1..=4 — a reader that opens
+    // an empty WAL (mxFrame == 0) claims the reserved slot-0 lock instead
+    // of one of these four (mirrors stock SQLite's `walTryBeginRead`), so
+    // this filter can't accidentally drop a real reader's bound. It exists
+    // only to ignore a slot's leftover mark from before any reader ever
+    // claimed it (see `active_reader_marks`'s doc comment).
     let marks = vfs.active_wal_reader_marks(db_path)?;
     let safe_frame = marks
         .into_iter()
@@ -128,10 +138,31 @@ pub fn checkpoint_passive(
     let boundary_len =
         wal::HEADER_LEN.saturating_add((safe_frame as usize).saturating_mul(frame_size));
     let boundary_bytes = wal_bytes.get(..boundary_len).unwrap_or(&wal_bytes);
-    let (pages, _db_size) = wal::committed_pages(&header, boundary_bytes);
+    let (pages, db_size) = wal::committed_pages(&header, boundary_bytes);
 
     let db_file = vfs.open_write(db_path)?;
+    // A frame's page_num is bounded by the WAL's own commit record
+    // (`db_size`) or, if this pass's commit predates the file's current
+    // size, by the main file's existing page count — either way, a
+    // corrupted-but-checksum-valid WAL (a `page_num` near `u32::MAX`, say)
+    // must never be allowed to drive `write_at` to an arbitrary offset far
+    // beyond the database's actual extent.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "page_size.max(1) rules out division by zero"
+    )]
+    let current_pages = u32::try_from(
+        db_file
+            .size()?
+            .saturating_add(u64::from(header.page_size).saturating_sub(1))
+            / u64::from(header.page_size).max(1),
+    )
+    .unwrap_or(u32::MAX);
+    let max_page = db_size.max(current_pages);
     for (page_num, content) in &pages {
+        if *page_num == 0 || *page_num > max_page {
+            continue;
+        }
         let offset =
             u64::from(page_num.saturating_sub(1)).saturating_mul(u64::from(header.page_size));
         db_file.write_at(content, offset)?;
@@ -204,11 +235,10 @@ mod tests {
     /// `src/vfs/shm.rs`'s private `wal_read_lock_byte(1)`.
     #[test]
     fn reader_mark_bounds_the_checkpoint() {
+        use crate::vfs::shm::wal_read_lock_byte;
         use crate::vfs::test_lock_probe::{hold_multiple, release_all};
         use crate::vfs::UnixVfs;
         use std::os::unix::fs::FileExt;
-
-        const WAL_READ_LOCK_SLOT_1_BYTE: i64 = 124;
 
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -232,7 +262,7 @@ mod tests {
 
         // Pin a reader at frame 1 (slot 1's read-lock byte), so the
         // checkpoint can only backfill through frame 1, not frame 2.
-        let held = hold_multiple(&shm_path, &[("rdlock", WAL_READ_LOCK_SLOT_1_BYTE, 1)]);
+        let held = hold_multiple(&shm_path, &[("rdlock", wal_read_lock_byte(1), 1)]);
         {
             let file = std::fs::OpenOptions::new()
                 .write(true)
