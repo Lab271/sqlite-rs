@@ -28,9 +28,13 @@ env:
   MVL_RUST_REV: "a64eb33e7c9ef9ad031d22a70405e59aa1ad3cb0"
 
 jobs:
-  gate:
-    name: PR gate
+  # Split out on its own so the check runs fast without blocking the
+  # heavier jobs from starting. It still fails the PR gate on its own if
+  # the branch is behind — see the step's own comment for why it exists.
+  branch-check:
+    name: Branch up to date
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,7 +52,6 @@ jobs:
       # NOTE: this reports, it cannot block — enforcing "don't merge a red
       # PR" still needs branch protection (make the repo public, or Pro).
       - name: Branch must be up to date with main
-        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           git fetch --quiet origin main
@@ -70,38 +73,24 @@ jobs:
           echo "Commits on main not in this branch:"
           git log --oneline "$head"..origin/main
           exit 1
-      # nightly first, stable last: dtolnay/rust-toolchain sets whichever
-      # toolchain it just installed as the default for every later step in
-      # this job (no opt-out flag) — installing stable last is what makes
-      # `make test`/`make lint` (bare `cargo ...`, no `+stable`) run under
-      # stable rather than nightly. Getting this backwards silently switches
-      # the whole job to nightly and was exactly how the "ci: add
-      # cargo-semver-checks, cargo-udeps, cargo-vet" commit (which added
-      # this nightly step for `cargo +nightly udeps`) broke `make test`'s
-      # `lock_probe` helper-binary lookup — mismatched target/ artifacts
-      # from switching toolchains mid-job — without touching a single line
-      # of Rust source.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # nightly
-        with:
-          toolchain: nightly
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
-        with:
-          # cargo-vet pinned to 0.10.2: a newer release changed
-          # supply-chain/imports.lock's schema (added a required
-          # `publisher.user-id` field), breaking CI against the
-          # committed file without any change to this repo — pin so a
-          # tool release can't silently break the gate again; bump
-          # deliberately alongside a regenerated imports.lock.
-          tool: cargo-deny,cargo-semver-checks,cargo-udeps,cargo-vet@0.10.2
 
-      # ubuntu-latest ships its own sqlite3, but never the pinned version,
-      # and a mismatched oracle is worse than none: the Apple/system builds
-      # disagree with upstream on CSV row terminators, which is exactly how
-      # three CSV bugs reached main unnoticed (#55). Build the pin instead.
+  # Cheap, dependency-free policy gates plus the unit/public-API/proptest
+  # suite. Runs under stable only.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: test
+
+      # `make test` includes tests whose oracle-fallback path (bootstrapping
+      # a scratch db via our own CLI instead of the pinned sqlite3) is
+      # exercised only when no oracle is present — build it here so this
+      # job's environment matches the old single-job gate exactly, rather
+      # than silently exercising an untested code path.
       - name: Cache pinned sqlite3 oracle
         id: cache-sqlite
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
@@ -155,30 +144,150 @@ jobs:
             --rev "$MVL_RUST_REV" rust-limit --bin cargo-mvl-limit --locked --force
       - run: make mvl-limit
       - run: make test
+
+  # Lint plus the supply-chain / spec-coverage gates. None of these need
+  # the pinned sqlite3 oracle, so this job never builds it.
+  lint-and-supply-chain:
+    name: Lint & supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: lint
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          # cargo-vet pinned to 0.10.2: a newer release changed
+          # supply-chain/imports.lock's schema (added a required
+          # `publisher.user-id` field), breaking CI against the
+          # committed file without any change to this repo — pin so a
+          # tool release can't silently break the gate again; bump
+          # deliberately alongside a regenerated imports.lock.
+          tool: cargo-deny,cargo-semver-checks,cargo-vet@0.10.2
       - run: make lint
       - run: make deny
-      # Supply-chain quality gates — semver, unused deps, vet
       - name: Check semver compatibility
         if: github.event_name == 'pull_request'
         run: cargo semver-checks check-release
-      - name: Check for unused dependencies
-        run: cargo +nightly udeps --all-targets
-        continue-on-error: true  # informational until clean
       - name: Supply chain audit (cargo vet)
         run: cargo vet
       - run: make assurance-gate
-      # Runs last: it is the slowest step in this job (~8s) and the only one
-      # depending on the oracle built above.
+
+  # The oracle-diff corpus, the only job that needs the pinned real
+  # sqlite3 build.
+  corpus:
+    name: Corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: corpus
+
+      # ubuntu-latest ships its own sqlite3, but never the pinned version,
+      # and a mismatched oracle is worse than none: the Apple/system builds
+      # disagree with upstream on CSV row terminators, which is exactly how
+      # three CSV bugs reached main unnoticed (#55). Build the pin instead.
+      - name: Cache pinned sqlite3 oracle
+        id: cache-sqlite
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
+        with:
+          path: ~/.local/sqlite-oracle
+          key: sqlite-oracle-${{ env.SQLITE_ORACLE_VERSION }}-${{ runner.os }}
+      - name: Build pinned sqlite3 oracle
+        if: steps.cache-sqlite.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://sqlite.org/2026/${SQLITE_ORACLE_TARBALL}.tar.gz" -o sqlite.tar.gz
+          tar xzf sqlite.tar.gz
+          cd "${SQLITE_ORACLE_TARBALL}"
+          ./configure --prefix="$HOME/.local/sqlite-oracle"
+          make -j"$(nproc)"
+          make install
+      - name: Verify the oracle is the pinned, non-codec build
+        run: |
+          set -euo pipefail
+          ORACLE="$HOME/.local/sqlite-oracle/bin/sqlite3"
+          echo "ORACLE_SQLITE3=$ORACLE" >> "$GITHUB_ENV"
+          found="$("$ORACLE" -version | awk '{print $1}')"
+          if [ "$found" != "$SQLITE_ORACLE_VERSION" ]; then
+            echo "error: oracle is $found, expected $SQLITE_ORACLE_VERSION"; exit 1
+          fi
+          if "$ORACLE" :memory: "PRAGMA compile_options;" | grep -qi codec; then
+            echo "error: oracle is a codec build"; exit 1
+          fi
+          echo "oracle: $ORACLE ($found, non-codec)"
       - run: make test-corpus
 
-      # Informational, NOT a gate (#96). The sqllogictest slice is a
-      # coverage ratchet rather than a pass/fail contract: today it
-      # attempts ~7% of the vendored corpus and skips the rest as
-      # out-of-slice, so a red run here means "a query we DO support
-      # diverged", which is worth surfacing but is already covered by
-      # the gating suites above. Flip `continue-on-error` off once the
-      # slice's coverage is high enough that a divergence should block
-      # a merge on its own.
+  # Informational only (#96) — never blocks the PR gate. Isolated in its
+  # own job so `continue-on-error` steps and the nightly toolchain they
+  # need don't sit on the critical path of the actual gates above.
+  informational:
+    name: Informational
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # nightly first, stable last: dtolnay/rust-toolchain sets whichever
+      # toolchain it just installed as the default for every later step in
+      # this job (no opt-out flag) — installing stable last is what makes
+      # the bare `cargo test` in `make test-sqllogictest` run under stable
+      # rather than nightly.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # nightly
+        with:
+          toolchain: nightly
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: informational
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          tool: cargo-udeps
+
+      - name: Cache pinned sqlite3 oracle
+        id: cache-sqlite
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
+        with:
+          path: ~/.local/sqlite-oracle
+          key: sqlite-oracle-${{ env.SQLITE_ORACLE_VERSION }}-${{ runner.os }}
+      - name: Build pinned sqlite3 oracle
+        if: steps.cache-sqlite.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://sqlite.org/2026/${SQLITE_ORACLE_TARBALL}.tar.gz" -o sqlite.tar.gz
+          tar xzf sqlite.tar.gz
+          cd "${SQLITE_ORACLE_TARBALL}"
+          ./configure --prefix="$HOME/.local/sqlite-oracle"
+          make -j"$(nproc)"
+          make install
+      - name: Verify the oracle is the pinned, non-codec build
+        run: |
+          set -euo pipefail
+          ORACLE="$HOME/.local/sqlite-oracle/bin/sqlite3"
+          echo "ORACLE_SQLITE3=$ORACLE" >> "$GITHUB_ENV"
+          found="$("$ORACLE" -version | awk '{print $1}')"
+          if [ "$found" != "$SQLITE_ORACLE_VERSION" ]; then
+            echo "error: oracle is $found, expected $SQLITE_ORACLE_VERSION"; exit 1
+          fi
+          if "$ORACLE" :memory: "PRAGMA compile_options;" | grep -qi codec; then
+            echo "error: oracle is a codec build"; exit 1
+          fi
+          echo "oracle: $ORACLE ($found, non-codec)"
+
+      - name: Check for unused dependencies
+        run: cargo +nightly udeps --all-targets
+        continue-on-error: true  # informational until clean
+
+      # The sqllogictest slice is a coverage ratchet rather than a
+      # pass/fail contract: today it attempts ~7% of the vendored corpus
+      # and skips the rest as out-of-slice, so a red run here means "a
+      # query we DO support diverged", which is worth surfacing but is
+      # already covered by the gating suites above. Flip
+      # `continue-on-error` off once the slice's coverage is high enough
+      # that a divergence should block a merge on its own.
       - name: sqllogictest slice (informational)
         continue-on-error: true
         run: make test-sqllogictest
