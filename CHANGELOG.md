@@ -6,6 +6,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-08-23
+
+feat: no-stats query optimizations (#444) — two "always wins, no
+ANALYZE/cost model needed" optimizations. Covering-index scan: a
+single-table `SELECT` whose `WHERE` is a top-level equality on a
+`UNIQUE` index's leading column, with every result column already
+carried by that index, compiles to `SeekIndexEq` + `Column` reads
+straight off the index cursor, never opening the table cursor.
+Index-only `COUNT(*)`: counts via the index cursor (`IdxRewind`/
+`IdxNext` or a single `SeekIndexEq` probe) without ever decoding a
+table row. LIMIT early-out (#128's third example) needed no new
+codegen — the existing `emit_limit_guard`/sorter top-K bound already
+cover it. `find_covering_index` is shared between codegen and
+`EXPLAIN QUERY PLAN` so the two can't drift apart. Non-unique-index
+duplicate-key matches deferred to #450. See spec 009 Requirement 16.
+
 ## [0.17.2] - 2026-08-23
 
 fix: correlated scalar subquery equality seeks instead of scanning (#434)
