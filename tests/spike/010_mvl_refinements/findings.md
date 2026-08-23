@@ -296,6 +296,36 @@ reasoning inside a function's own return-site closure) is real,
 confirmed twice over (empirically and against the tool's own test
 suite), and not yet tracked as its own upstream issue.
 
+## Conclusion (spike closed)
+
+Six rounds, five real upstream defects found and fixed same-day, one
+(round 6) tested and correctly found *not* to apply. Final state as of
+`mvl-rust` v0.8.0:
+
+- **Runtime enforcement: proven, unconditionally adoptable now.**
+  `#[mvl::requires]`/`#[mvl::ensures]` on real `impl` methods compile,
+  are scanned, and are enforced with a real `assert!` at every return
+  path.
+- **Static proof: 3 of `DatabaseHeader::parse`'s 4 obligations discharge
+  at L1**, plus one independent pure-arithmetic proof at L4
+  (`compute_usable_page_size`). The 4th — the actual field-validation
+  success case — is `runtime`, blocked by a precisely-named,
+  not-yet-filed gap: a function's own return-site closure has no path
+  to reason about an unwrapped known-shape value's fields or method
+  calls, distinct from #110's (working) cross-function call-site
+  licence.
+
+**Decision: adopt now, for runtime enforcement, starting with two real
+files.** Waiting for full static proof of `header.rs`-shaped invariants
+is no longer the gate — the contract-enforcement value stands on its
+own and doesn't depend on the remaining solver gap closing. See the
+tracking issue linked from `README.md`'s "Next steps" for the production
+rollout. This spike is closed; the crate stays in place (not deleted,
+per the `spike/DDD_xxxxx` convention's normal disposition — the working
+`cargo mvl prove` repros are worth more as a live regression corpus than
+as a one-time write-up) as the reference point if the remaining solver
+gap is ever fixed and full static proof becomes worth re-evaluating.
+
 ## Disposition
 
 Per the `spike/DDD_xxxxx` convention (`CLAUDE.md`), this is a disposable
@@ -308,4 +338,6 @@ isolated here from the start, and have been reverted. This directory is
 the sole trace of the spike; `.openspec/` carries no reference to it.
 Should `rust-refine` adopt the fixes suggested above and someone wants
 to re-evaluate broader adoption, this crate is the starting point — bump
-the `mvl` rev in `Cargo.toml` and rerun.
+the `mvl` rev in `Cargo.toml` and rerun. Production adoption itself is
+tracked as its own feature ticket, not folded into this spike — see
+`README.md`.
