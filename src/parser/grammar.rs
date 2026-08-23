@@ -2149,21 +2149,22 @@ impl Parser {
                     .get(self.pos.saturating_sub(1))
                     .map_or(tok.span, |t| t.span);
                 let span = join_span(tok.span, end);
+                let mut parts = parts.into_iter();
                 let kind = match parts.len() {
                     1 => ExprKind::Column {
                         table: None,
                         catalog: None,
-                        name: parts.remove(0),
+                        name: parts.next().unwrap_or_default(),
                     },
                     2 => ExprKind::Column {
                         catalog: None,
-                        table: Some(parts.remove(0)),
-                        name: parts.remove(0),
+                        table: Some(parts.next().unwrap_or_default()),
+                        name: parts.next().unwrap_or_default(),
                     },
                     _ => ExprKind::Column {
-                        catalog: Some(parts.remove(0)),
-                        table: Some(parts.remove(0)),
-                        name: parts.remove(0),
+                        catalog: Some(parts.next().unwrap_or_default()),
+                        table: Some(parts.next().unwrap_or_default()),
+                        name: parts.next().unwrap_or_default(),
                     },
                 };
                 Ok(Expr { kind, span })
