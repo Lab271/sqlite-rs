@@ -305,6 +305,18 @@ impl Vm {
         Ok(())
     }
 
+    /// Takes ownership of register `reg`'s value, leaving `Value::Null`
+    /// behind, without cloning. For opcodes that read-modify-write a
+    /// single register (e.g. in-place affinity coercion) where the old
+    /// value is discarded anyway.
+    pub(crate) fn take_register(&mut self, reg: i32) -> Result<Value, ExecError> {
+        let idx = Self::index("register read", reg)?;
+        Ok(match self.registers.get_mut(idx) {
+            Some(slot) => std::mem::replace(slot, Value::Null),
+            None => Value::Null,
+        })
+    }
+
     /// Reads cursor slot `slot`. Occupies a namespace disjoint from
     /// `register` — the same integer index in each never aliases.
     /// Errors if the slot has no cursor open on it (no `Open*` opcode
@@ -427,12 +439,18 @@ fn compare_jump(
     };
     // Affinity applies to *copies* of the operands, not the live
     // registers — a comparison must not mutate the row being compared
-    // (spec 008 Requirement 1's comparison-affinity half, #138).
-    let mut a = a.clone();
-    let mut b = b.clone();
-    apply_affinity(&mut a, affinity);
-    apply_affinity(&mut b, affinity);
-    let ord = compare(&a, &b, collation);
+    // (spec 008 Requirement 1's comparison-affinity half, #138). BLOB
+    // affinity is a no-op for apply_affinity, so skip the clone in that
+    // (common, P4-absent-default) case and compare the registers directly.
+    let ord = if matches!(affinity, Affinity::Blob) {
+        compare(a, b, collation)
+    } else {
+        let mut a = a.clone();
+        let mut b = b.clone();
+        apply_affinity(&mut a, affinity);
+        apply_affinity(&mut b, affinity);
+        compare(&a, &b, collation)
+    };
     Ok(if holds(ord) {
         Step::Jump(to_pc(instr.p2))
     } else {
@@ -444,7 +462,7 @@ fn compare_jump(
 /// place, delegating to the kernel's affinity rules — independent of
 /// any comparison, per spec 009 Requirement 5.
 fn real_affinity(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let mut v = vm.register(instr.p1)?.clone();
+    let mut v = vm.take_register(instr.p1)?;
     apply_affinity(&mut v, Affinity::Real);
     vm.set_register(instr.p1, v)?;
     Ok(Step::Next)
@@ -461,7 +479,7 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let affinity_byte = instr.p2 as u8;
     let affinity = Affinity::from_p4_byte(affinity_byte);
-    let v = vm.register(instr.p1)?.clone();
+    let v = vm.take_register(instr.p1)?;
     vm.set_register(instr.p1, cast_to(&v, affinity))?;
     Ok(Step::Next)
 }

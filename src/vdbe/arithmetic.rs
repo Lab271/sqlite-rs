@@ -20,12 +20,14 @@ fn binary_op(
     instr: &Instruction,
     op: fn(&Value, &Value) -> Value,
 ) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        op(&a, &b)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            op(a, b)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -39,12 +41,14 @@ pub fn add(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `Subtract`: `r[P3] = r[P2] - r[P1]`, matching SQLite's operand order
 /// (the harvested `Subtract` computes P2 minus P1, not P1 minus P2).
 pub fn subtract(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        checked_sub(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            checked_sub(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -57,12 +61,14 @@ pub fn multiply(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 /// `Divide`: `r[P3] = r[P2] / r[P1]`, matching SQLite's operand order.
 pub fn divide(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        checked_div(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            checked_div(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -70,12 +76,14 @@ pub fn divide(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 /// `Remainder`: `r[P3] = r[P2] % r[P1]`, matching SQLite's operand order.
 pub fn remainder(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        checked_rem(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            checked_rem(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -95,12 +103,14 @@ pub fn bit_or(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `ShiftLeft`: `r[P3] = r[P2] << r[P1]`, matching SQLite's operand
 /// order (same P2-op-P1 convention as `Subtract`/`Divide`/`Remainder`).
 pub fn shift_left(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        coerce::shift_left(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            coerce::shift_left(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -109,12 +119,14 @@ pub fn shift_left(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `ShiftRight`: `r[P3] = r[P2] >> r[P1]`, matching SQLite's operand
 /// order.
 pub fn shift_right(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        coerce::shift_right(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            coerce::shift_right(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -124,12 +136,14 @@ pub fn shift_right(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// Unlike `Not`, a NULL operand yields NULL rather than a defined
 /// value — handled by `binary_op`'s shared NULL check, not here.
 pub fn concat(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let a = vm.register(instr.p1)?.clone();
-    let b = vm.register(instr.p2)?.clone();
-    let result = if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        Value::Null
-    } else {
-        coerce::concat(&b, &a)
+    let result = {
+        let a = vm.register(instr.p1)?;
+        let b = vm.register(instr.p2)?;
+        if matches!(a, Value::Null) || matches!(b, Value::Null) {
+            Value::Null
+        } else {
+            coerce::concat(b, a)
+        }
     };
     vm.set_register(instr.p3, result)?;
     Ok(Step::Next)
@@ -141,10 +155,9 @@ pub fn concat(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// register (the jump-mode compiler folds unknown into one of its two
 /// continuations by design; see `src/codegen/expr.rs`'s `NullTarget`).
 pub fn not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let v = vm.register(instr.p1)?.clone();
-    let result = match v {
+    let result = match vm.register(instr.p1)? {
         Value::Null => Value::Null,
-        other => Value::Integer(i64::from(crate::vdbe::control::is_falsy(&other))),
+        other => Value::Integer(i64::from(crate::vdbe::control::is_falsy(other))),
     };
     vm.set_register(instr.p2, result)?;
     Ok(Step::Next)
@@ -153,10 +166,9 @@ pub fn not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// `BitNot`: `r[P2] = ~r[P1]`. Unlike `Not`, NULL stays NULL rather than
 /// resolving to a defined boolean — SQLite's `~NULL` is NULL.
 pub fn bit_not(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let v = vm.register(instr.p1)?.clone();
-    let result = match v {
+    let result = match vm.register(instr.p1)? {
         Value::Null => Value::Null,
-        other => coerce::bit_not(&other),
+        other => coerce::bit_not(other),
     };
     vm.set_register(instr.p2, result)?;
     Ok(Step::Next)
