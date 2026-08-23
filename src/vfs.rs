@@ -29,14 +29,18 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+/// Failure opening, reading, or locking a database file through the VFS.
 #[derive(Debug, Error)]
 pub enum VfsError {
+    /// No file exists at the given path.
     #[error("file not found: {path}")]
     NotFound { path: String },
 
+    /// The database is held by another connection's lock.
     #[error("database is locked: {path}")]
     Locked { path: String },
 
+    /// The underlying OS file operation failed.
     #[error("I/O error on {path}: {source}")]
     Io {
         path: String,
@@ -45,6 +49,7 @@ pub enum VfsError {
     },
 }
 
+/// Shorthand for a [`VfsError`]-producing result.
 pub type Result<T> = std::result::Result<T, VfsError>;
 
 /// A source of database files, opened by path.

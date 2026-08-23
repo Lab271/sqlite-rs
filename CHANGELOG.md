@@ -6,6 +6,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+docs: crate-level rustdoc polish (#428) — crate-level `//!` docs, Cargo.toml
+publication metadata (`description`, `repository`, `documentation`,
+`keywords`, `categories`), and doc comments on previously-undocumented
+top-level public items (`DumpError`, `HEADER_LEN`, `HeaderError`,
+`VfsError`, `vfs::Result`). Closing the remaining ~884 `missing_docs`
+warnings in nested submodules is tracked in #430.
+
 ## [0.17.0] - 2026-08-23 — V6.3 Concurrency
 
 Phase V6.3 of epic #354 (V6 Slim), finalizing V6 and unlocking 1.0: real
