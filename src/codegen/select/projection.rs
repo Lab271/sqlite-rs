@@ -198,42 +198,30 @@ pub(super) fn emit_distinct_guard(
         return Ok(());
     }
     let cols = result_columns(select, schema);
-    emit_dedup_guard(
-        em,
-        reg,
-        &cols,
-        schema,
-        cursor,
-        pseudo,
-        distinct_cursor,
-        skip_label,
-        catalog,
-    )
+    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
+    let count = i32::try_from(count).unwrap_or(0);
+    emit_dedup_check(em, distinct_cursor, first, count, skip_label);
+    Ok(())
 }
 
-/// The `Found`/`IdxInsert` dedup check `emit_distinct_guard` uses for
-/// `SELECT DISTINCT` (against `select.distinct`), factored out so
-/// plain `UNION`'s compound-select dedup (#378) can drive the same
-/// ephemeral-index check across every arm's own result columns/schema,
-/// sharing one `distinct_cursor` opened once for the whole compound
-/// statement rather than once per arm.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_dedup_guard(
+/// The `Found`/`IdxInsert` ephemeral-index dedup check, at the
+/// register level: given a row already computed into `first..first+count`,
+/// skip to `skip_label` if `dedup_cursor` has seen it before, else record
+/// it. Shared by `emit_distinct_guard` (`SELECT DISTINCT`, against
+/// `select.distinct`) and plain `UNION`'s compound-select dedup (#378),
+/// which drives the same check across every arm's own result
+/// columns/schema, sharing one cursor opened once for the whole
+/// compound statement rather than once per arm.
+pub(super) fn emit_dedup_check(
     em: &mut Emitter,
-    reg: &mut RegAlloc,
-    cols: &[ResultColumnPlan],
-    schema: &TableSchema,
-    cursor: i32,
-    pseudo: bool,
-    distinct_cursor: i32,
+    dedup_cursor: i32,
+    first: i32,
+    count: i32,
     skip_label: Label,
-    catalog: &[TableSchema],
-) -> Result<(), CodegenError> {
-    let (first, count) = compile_row_values(em, reg, schema, cols, cursor, pseudo, catalog)?;
-    let count = i32::try_from(count).unwrap_or(0);
+) {
     let addr = em.emit(Instruction::with_p4(
         Opcode::Found,
-        distinct_cursor,
+        dedup_cursor,
         0,
         first,
         P4::Int(i64::from(count)),
@@ -241,10 +229,9 @@ pub(super) fn emit_dedup_guard(
     em.patch_p2(addr, skip_label);
     em.emit(Instruction::with_p4(
         Opcode::IdxInsert,
-        distinct_cursor,
+        dedup_cursor,
         first,
         0,
         P4::Int(i64::from(count)),
     ));
-    Ok(())
 }
