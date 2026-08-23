@@ -60,7 +60,16 @@ fn run_repl(db: &Path, script: &[&str]) -> Output {
     {
         let stdin = child.stdin.as_mut().unwrap();
         for line in script {
-            writeln!(stdin, "{line}").unwrap();
+            // The child can exit (and close its stdin) before every line is
+            // written — e.g. it fails to open its database up front, before
+            // ever reading from stdin. That's a legitimate outcome the test
+            // asserts on via `output.status`/`output.stderr`, not a bug in
+            // this helper, so a closed pipe here must not panic.
+            match writeln!(stdin, "{line}") {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+                Err(e) => panic!("writing {line:?} to repl stdin: {e}"),
+            }
         }
     }
     child.wait_with_output().unwrap()
