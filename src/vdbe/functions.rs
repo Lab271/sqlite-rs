@@ -83,7 +83,7 @@ fn value_int(v: &Value) -> i64 {
     match v {
         Value::Integer(i) => *i,
         Value::Real(r) => *r as i64,
-        Value::Text(s) => crate::vdbe::coerce::cast_to_integer(&Value::Text(s.clone())),
+        Value::Text(_) => crate::vdbe::coerce::cast_to_integer(v),
         Value::Null | Value::Blob(_) => 0,
     }
 }
@@ -352,11 +352,10 @@ fn instr(args: &[Value]) -> Result<Value, FunctionError> {
         return Ok(Value::Null);
     }
     let pos = if let Value::Blob(hay) = &args[0] {
-        let needle = match &args[1] {
-            Value::Blob(b) => b.clone(),
-            other => as_text(other).into_bytes().into(),
-        };
-        find_bytes(hay, &needle)
+        match &args[1] {
+            Value::Blob(b) => find_bytes(hay, b),
+            other => find_bytes(hay, as_text(other).as_bytes()),
+        }
     } else {
         let haystack = as_text(&args[0]);
         let needle = as_text(&args[1]);
