@@ -83,6 +83,40 @@ pub trait Vfs {
         let _ = path;
         Ok(None)
     }
+
+    /// Claims the WAL checkpoint lock on `path`'s `-shm` companion file (if
+    /// one exists), so a concurrent checkpoint attempt is refused rather
+    /// than racing on the same backfill state (#386). Released when the
+    /// returned [`FileLock`] drops. Default: a no-op (`Ok(None)`) —
+    /// correct for backends with no real `-shm` file to coordinate through.
+    fn claim_wal_checkpoint_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        let _ = path;
+        Ok(None)
+    }
+
+    /// The frame marks of readers currently pinned to this WAL generation
+    /// (via `path`'s `-shm` companion file), bounding how far a PASSIVE
+    /// checkpoint (#386) may safely backfill. Default: empty — no `-shm`
+    /// to coordinate through, so nothing constrains the checkpoint.
+    fn active_wal_reader_marks(&self, path: &Path) -> Result<Vec<u32>> {
+        let _ = path;
+        Ok(Vec::new())
+    }
+
+    /// Publishes `n_backfill` (how many leading WAL frames a checkpoint
+    /// just copied into the main file) to `path`'s `-shm` companion file.
+    /// Default: a no-op — nothing to publish without a real `-shm` file.
+    fn publish_wal_backfill(&self, path: &Path, n_backfill: u32) -> Result<()> {
+        let _ = (path, n_backfill);
+        Ok(())
+    }
+
+    /// Reads back the `nBackfill` a prior checkpoint published (0 if none
+    /// ever ran, or there's no real `-shm` file to read it from).
+    fn read_wal_backfill(&self, path: &Path) -> Result<u32> {
+        let _ = path;
+        Ok(0)
+    }
 }
 
 /// Builds the path of a companion file (e.g. `-wal`, `-journal`) by
@@ -209,6 +243,22 @@ impl AnyVfs {
 
     pub fn delete(&self, path: &Path) -> Result<()> {
         self.0.delete(path)
+    }
+
+    pub fn claim_wal_checkpoint_lock(&self, path: &Path) -> Result<Option<FileLock>> {
+        self.0.claim_wal_checkpoint_lock(path)
+    }
+
+    pub fn active_wal_reader_marks(&self, path: &Path) -> Result<Vec<u32>> {
+        self.0.active_wal_reader_marks(path)
+    }
+
+    pub fn publish_wal_backfill(&self, path: &Path, n_backfill: u32) -> Result<()> {
+        self.0.publish_wal_backfill(path, n_backfill)
+    }
+
+    pub fn read_wal_backfill(&self, path: &Path) -> Result<u32> {
+        self.0.read_wal_backfill(path)
     }
 }
 
