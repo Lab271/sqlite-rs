@@ -3,10 +3,11 @@
 Issue #371. Branch `spike/010_mvl_refinements`. This directory is the
 disposition of that issue: a self-contained crate (`Cargo.toml`,
 `src/lib.rs`, `tests/runtime_enforcement.rs`) that reproduces every
-finding below independently — run `cargo build`, `cargo test`, and
-`cargo mvl prove src/lib.rs` right here, no dependency on the rest of
-`sqlite-rs` — plus this findings doc. See "Disposition" at the end for
-why the main package carries none of this.
+finding below independently — run `make test` (or `cargo build`,
+`cargo test`, `cargo mvl prove src/lib.rs` directly; `make help` lists
+all targets) right here, no dependency on the rest of `sqlite-rs` — plus
+this findings doc. See "Disposition" at the end for why the main package
+carries none of this.
 
 ## Scope
 
