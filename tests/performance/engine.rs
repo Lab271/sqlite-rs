@@ -48,6 +48,12 @@ pub const ORACLE_VERSION: &str = "3.53.4";
 /// execution.
 const SCENARIOS: &[(&str, &str)] = &[
     ("full_scan", "SELECT id, n, x, f, s FROM bench_data"),
+    // Column-count variants (#465): isolate ResultRow's per-column cost
+    // (register clone/move) from its per-row cost (Vec allocation) by
+    // holding the row count fixed and varying the projected column
+    // count. `full_scan` above is the 5-column ceiling of this series.
+    ("full_scan_1col", "SELECT id FROM bench_data"),
+    ("full_scan_3col", "SELECT id, n, x FROM bench_data"),
     (
         "point_lookup",
         "SELECT id, n, x, f, s FROM bench_data WHERE id = 4200",

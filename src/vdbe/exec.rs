@@ -169,6 +169,10 @@ pub struct Vm {
     /// payload's allocation across every row a statement emits, instead
     /// of a fresh `Vec<u8>` per `MakeRecord` execution.
     record_scratch: Vec<u8>,
+    /// Reused `Vec<Value>` buffer for `ResultRow` (#465): amortizes the
+    /// output row's allocation across every row a statement emits,
+    /// instead of a fresh `Vec::with_capacity` per `ResultRow` execution.
+    row_scratch: Vec<Value>,
 }
 
 impl Default for Vm {
@@ -183,6 +187,7 @@ impl Default for Vm {
             params: Vec::new(),
             autocommit: true,
             record_scratch: Vec::new(),
+            row_scratch: Vec::new(),
         }
     }
 }
@@ -204,6 +209,12 @@ impl Vm {
     /// [`Vm::record_scratch`]'s field doc.
     pub(crate) fn record_scratch(&mut self) -> &mut Vec<u8> {
         &mut self.record_scratch
+    }
+
+    /// Reused scratch buffer for `ResultRow` (#465) — see
+    /// [`Vm::row_scratch`]'s field doc.
+    pub(crate) fn row_scratch(&mut self) -> &mut Vec<Value> {
+        &mut self.row_scratch
     }
 
     /// Builds a `Vm` that can service `OpenRead` against `source` (page
