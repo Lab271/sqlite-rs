@@ -1043,3 +1043,157 @@ fn correlated_via_nested_exists_scalar_subquery_is_not_hoisted_matches_oracle() 
         "correlated_via_nested_exists_scalar_subquery_is_not_hoisted_matches_oracle",
     );
 }
+
+// #434: a correlated scalar subquery whose own WHERE clause is a single
+// equality against its table's rowid (INTEGER PRIMARY KEY) or a
+// UNIQUE-indexed column compiles to a SeekRowid/SeekIndexEq point
+// lookup (mirroring #243's join-level access strategy) instead of a
+// per-outer-row full table scan — this is also the actual technique
+// the sqlite3 oracle itself uses for this shape (confirmed via
+// `EXPLAIN`: no caching, just a cheap indexed point lookup per row).
+
+/// A fixture with a *high*-cardinality correlated column (every row a
+/// distinct value) — well beyond #314's memoization cache's cap, so
+/// this only runs fast if the SeekRowid fast path (not caching) is
+/// what's actually firing.
+fn high_cardinality_correlated_fixture_db(label: &str) -> PathBuf {
+    let db = scratch_db(label);
+    let ddls = [
+        "CREATE TABLE catalog(id INTEGER PRIMARY KEY, category INTEGER)",
+        "CREATE TABLE lookup(cat INTEGER PRIMARY KEY, val INTEGER)",
+    ];
+    let catalog_values: Vec<String> = (0..50).map(|i| format!("({}, {})", i + 1, i)).collect();
+    let lookup_values: Vec<String> = (0..50).map(|i| format!("({i}, {})", i * 10)).collect();
+    let rows = [
+        format!("INSERT INTO catalog VALUES {}", catalog_values.join(", ")),
+        format!("INSERT INTO lookup VALUES {}", lookup_values.join(", ")),
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    db
+}
+
+/// Correctness for a high-cardinality correlated column matched against
+/// the inner subquery's rowid (INTEGER PRIMARY KEY): every row's
+/// correlated value is distinct, so a buggy seek (e.g. an off-by-one on
+/// the rowid, or a stale positioned cursor from a prior row) would
+/// surface as a wrong result rather than staying masked by repetition.
+#[test]
+fn correlated_subquery_seek_on_rowid_matches_oracle() {
+    let db = high_cardinality_correlated_fixture_db("seek_rowid");
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "correlated_subquery_seek_on_rowid_matches_oracle",
+    );
+}
+
+/// A `NULL` correlated value must never reach `SeekRowid` as a target
+/// (it would be a malformed-instruction error, since `NULL` isn't a
+/// valid rowid) — SQL's `NULL = NULL` is unknown, so the subquery must
+/// short-circuit to NULL instead.
+#[test]
+fn correlated_subquery_seek_on_rowid_with_null_correlated_value_matches_oracle() {
+    let db = high_cardinality_correlated_fixture_db("seek_rowid_null");
+    let insert_null = "INSERT INTO catalog VALUES (51, NULL)";
+    if let Some(oracle) = pinned_oracle() {
+        let status = Command::new(&oracle)
+            .arg(&db)
+            .arg(insert_null)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    } else {
+        let output = run_exec(&db, insert_null);
+        assert!(output.status.success());
+    }
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "correlated_subquery_seek_on_rowid_with_null_correlated_value_matches_oracle",
+    );
+}
+
+/// A correlated equality against a `UNIQUE`-indexed (non-rowid) column
+/// takes the `SeekIndexEq`/`IdxRowid`/`SeekRowid` fast path instead of
+/// the plain `SeekRowid` one.
+#[test]
+fn correlated_subquery_seek_on_unique_index_matches_oracle() {
+    let db = scratch_db("seek_unique_index");
+    let ddls = [
+        "CREATE TABLE catalog(id INTEGER PRIMARY KEY, category INTEGER)",
+        "CREATE TABLE lookup(rowid_col INTEGER PRIMARY KEY, cat INTEGER UNIQUE, val INTEGER)",
+    ];
+    let catalog_values: Vec<String> = (0..30).map(|i| format!("({}, {})", i + 1, i)).collect();
+    let lookup_values: Vec<String> = (0..30)
+        .map(|i| format!("({}, {i}, {})", i + 100, i * 10))
+        .collect();
+    let rows = [
+        format!("INSERT INTO catalog VALUES {}", catalog_values.join(", ")),
+        format!("INSERT INTO lookup VALUES {}", lookup_values.join(", ")),
+    ];
+    if let Some(oracle) = pinned_oracle() {
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+            assert!(status.success(), "oracle setup failed: {stmt}");
+        }
+    } else {
+        assert!(run_exec(&db, "CREATE TABLE seed_bootstrap(x)")
+            .status
+            .success());
+        for stmt in ddls.iter().copied().chain(rows.iter().map(String::as_str)) {
+            let output = run_exec(&db, stmt);
+            assert!(
+                output.status.success(),
+                "setup {stmt:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    assert_matches_oracle(
+        &db,
+        "SELECT id, category FROM catalog \
+         WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "correlated_subquery_seek_on_unique_index_matches_oracle",
+    );
+}
+
+/// #434 regression: the rowid-seek fast path must compile to a
+/// `SeekRowid` against the subquery's own cursor, never a `Rewind` —
+/// same `-explain`-based shape as the #306/#314 opcode-presence tests
+/// above.
+#[test]
+fn correlated_subquery_seek_on_rowid_compiles_to_seek_not_scan() {
+    let db = high_cardinality_correlated_fixture_db("seek_rowid_explain");
+    let program = explain(
+        &db,
+        "SELECT id FROM catalog WHERE id > (SELECT val FROM lookup WHERE cat = catalog.category)",
+    );
+    // The outer query's own #314 memoization cache (a separate,
+    // unrelated `OpenEphemeral`/`Rewind` pair over its own cache
+    // cursor) may still appear here — this test is only about how the
+    // *inner* subquery itself scans `lookup`, not whether the outer
+    // WHERE clause's comparison against it gets cached.
+    assert!(
+        first_opcode_line(&program, "SeekRowid").is_some(),
+        "expected a SeekRowid opcode (the inner subquery's point lookup) in program:\n{program}"
+    );
+}

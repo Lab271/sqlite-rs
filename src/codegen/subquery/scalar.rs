@@ -4,7 +4,8 @@
 use super::from_clause::resolve_subquery_schema;
 use super::{select_id, HoistedSubquery};
 use crate::codegen::expr::{compile_cond, compile_value};
-use crate::codegen::index_maintenance::valid_table_root_page;
+use crate::codegen::index_maintenance::{valid_index_root_page, valid_table_root_page};
+use crate::codegen::select::join_access::{choose_join_access, JoinAccess};
 use crate::codegen::select::{
     compile_grouped_scan, select_has_aggregate, CodegenError, ScanCursors,
 };
@@ -160,6 +161,85 @@ pub(crate) fn compile_scalar_subquery(
         .with_outer(outer_scope.clone());
 
     let end_label = em.new_label();
+
+    // #434: a `WHERE` clause that's a single equality between this
+    // subquery's own table and a safe outer-query probe (the
+    // correlated case) compiles to a `SeekRowid`/`SeekIndexEq` point
+    // lookup — the same #243 join-level access strategy
+    // (`join_access::choose_join_access`) a `JOIN ... ON` condition
+    // gets — instead of an unconditional `Rewind`/`Next` scan. This is
+    // the actual technique the sqlite3 oracle uses for this exact
+    // query shape (confirmed via `EXPLAIN`: `cat = t.y` compiles to a
+    // single `SeekRowid`, never a table scan, and the subquery is
+    // simply re-run per outer row — no caching at all), and it makes
+    // #314's memoization cache unnecessary for this shape (that cache
+    // still helps a correlated subquery whose `WHERE` isn't a seekable
+    // equality).
+    let seek_access = subselect.where_clause.as_ref().and_then(|where_expr| {
+        let sub_binding = sub_scope.tables.first()?;
+        choose_join_access(sub_binding, where_expr, &outer_scope.tables)
+    });
+
+    if let Some(access) = seek_access {
+        let value_reg = match &access {
+            JoinAccess::Rowid(operand) | JoinAccess::UniqueIndex { operand, .. } => {
+                compile_value(em, reg, outer_scope, operand)?
+            }
+        };
+        // A NULL probe value can never equal anything (SQL's `NULL =
+        // x` is unknown, not true) — `SeekRowid`/`SeekIndexEq` require
+        // an actual key, so this must be checked explicitly rather
+        // than let it reach either opcode as a malformed target.
+        let null_addr = em.emit(Instruction::new(Opcode::IsNull, value_reg, 0, 0));
+        em.patch_p2(null_addr, end_label);
+        match access {
+            JoinAccess::Rowid(_) => {
+                let seek_addr = em.emit(Instruction::new(
+                    Opcode::SeekRowid,
+                    sub_cursor,
+                    0,
+                    value_reg,
+                ));
+                em.patch_p2(seek_addr, end_label);
+            }
+            JoinAccess::UniqueIndex { index, .. } => {
+                let index_cursor = reg.alloc_cursor();
+                let root_page = valid_index_root_page(&index)?;
+                let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+                open_instr.p5 = 1;
+                em.emit(open_instr);
+                let seek_instr = Instruction::with_p4(
+                    Opcode::SeekIndexEq,
+                    index_cursor,
+                    0,
+                    value_reg,
+                    P4::Int(1),
+                );
+                let seek_addr = em.emit(seek_instr);
+                em.patch_p2(seek_addr, end_label);
+                let rowid_reg = reg.alloc();
+                em.emit(Instruction::new(
+                    Opcode::IdxRowid,
+                    index_cursor,
+                    rowid_reg,
+                    0,
+                ));
+                let table_seek_addr = em.emit(Instruction::new(
+                    Opcode::SeekRowid,
+                    sub_cursor,
+                    0,
+                    rowid_reg,
+                ));
+                em.patch_p2(table_seek_addr, end_label);
+            }
+        }
+        let v = compile_value(em, reg, &sub_scope, col_expr)?;
+        em.emit(Instruction::new(Opcode::Copy, v, dest, 0));
+        em.goto(end_label);
+        em.place(end_label);
+        return Ok(dest);
+    }
+
     let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, sub_cursor, 0, 0));
     em.patch_p2(rewind_addr, end_label);
     let loop_start = em.new_label();

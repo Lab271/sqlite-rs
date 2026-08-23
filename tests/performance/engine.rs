@@ -103,14 +103,19 @@ const SCENARIOS: &[(&str, &str)] = &[
     // — `code = bench_data.bucket` instead of a fixed literal, so the
     // inner subquery references the outer row and is genuinely
     // correlated, making it ineligible for #306's uncorrelated-subquery
-    // hoist. This re-scans `bench_lookup` (~1000 rows) once per outer
-    // row rather than once total, which is exactly the "materialization
-    // only, no coroutines" cost ADR-0021 documents. Deliberately run
-    // only against `bench_1mb.db` (see `bench_fixture`'s skip below) —
-    // against `bench_50mb.db`'s larger outer row count this blows past
-    // the 50M-step VDBE guard rail before criterion can measure it,
-    // which is itself evidence of the unbounded cost this scenario
-    // exists to surface.
+    // hoist. Originally re-scanned `bench_lookup` (~1000 rows) once per
+    // outer row rather than once total (ADR-0021's "materialization
+    // only, no coroutines" cost) — 785x slower than the oracle (#434)
+    // and unmeasurable against `bench_50mb.db` (blew the 50M-step VDBE
+    // guard rail before criterion could even measure it). #434 fixed
+    // this the same way the oracle itself handles this exact shape
+    // (confirmed via its own `EXPLAIN`): `bench_lookup.code` is an
+    // `INTEGER PRIMARY KEY`, so `code = bench_data.bucket` compiles to
+    // a single `SeekRowid` point lookup
+    // (`join_access::choose_join_access`, reused from #243's join-level
+    // access strategy) instead of a per-outer-row full scan — no
+    // caching involved, so this now runs measurably fast against both
+    // fixtures.
     (
         "correlated_subquery",
         "SELECT id, x FROM bench_data \
@@ -231,12 +236,6 @@ fn bench_fixture(c: &mut Criterion, fixture_name: &str) {
     let theirs = open_theirs(&path);
 
     for (scenario, sql) in SCENARIOS {
-        // See `correlated_subquery`'s own comment above: unbounded on
-        // the larger fixture, would blow the VDBE step cap.
-        if *scenario == "correlated_subquery" && fixture_name == "bench_50mb.db" {
-            continue;
-        }
-
         let group_name = format!("{scenario}/{fixture_name}");
         let mut group = c.benchmark_group(group_name);
 
