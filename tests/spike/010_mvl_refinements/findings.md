@@ -17,7 +17,7 @@ This is an experiment in two things, not one: **does `rust-refine`
 work**, and **does adopting it make sense for `sqlite-rs`**. Evaluated
 against a real, `impl`-heavy, `Result`-returning parsing/validation
 function shaped like `sqlite-rs`'s actual `src/header.rs`
-(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`) — four
+(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`) — five
 rounds, each bumping the `mvl` pin to the latest fix and re-verifying
 concretely rather than trusting a closed-issue title.
 
@@ -148,66 +148,106 @@ avoid it; see "Open gaps" below.
 data point, `parse`'s real invariant still `runtime`-only, now for a
 third independently-confirmed reason.
 
-## Gaps filed upstream, not yet fixed
+## Round 5 — mvl-rust `d875d92` (v0.7.1)
 
-Everything below is reproducible directly in this crate — run
-`cargo mvl prove src/lib.rs` and compare against the `Expected:` line in
-each function's doc comment. All three are now filed against
-`mvl-lang/mvl-rust`, open as of this writing (round 4's issues #94/#95/
-#97 all closed same-day they were filed, so these are plausibly close
-behind):
+Filed #113/#114/#115 (round 4's three gaps) directly against
+`mvl-lang/mvl-rust`. All three fixed **in one PR**
+([mvl-lang/mvl-rust#116](https://github.com/mvl-lang/mvl-rust/pull/116),
+`fix: rust-refine solver follow-ups from sqlite-rs spike (#113, #114,
+#115)`), released as v0.7.1 the same day they were filed. Bumped the pin
+and reran the *same, unchanged* repro functions from round 4 — this is
+the biggest jump of any round:
 
-1. **Cast expressions block solver variable-binding** —
-   [mvl-lang/mvl-rust#113](https://github.com/mvl-lang/mvl-rust/issues/113).
-   `PageWithNarrowField::usable_page_size_with_cast` (`src/lib.rs:181`)
-   and `cast_on_bare_param_also_blocked` (`src/lib.rs:196`) both stay at
-   `runtime` despite sufficient, explicit bounds — an `as` cast around
-   either a field projection or a bare parameter isn't recognized as a
-   bindable variable by the interval/Fourier-Motzkin solver. Likely
-   fix shape: extend whatever identity-extraction logic #94/#95 added
-   (bare identifiers, then field projections) to also see through a
-   single `Expr::Cast` to the identifier/projection underneath, treating
-   the cast as a widening (`u8 -> u32`) that doesn't change the value's
-   provable bounds. This is the more actionable of the two gaps here —
-   real code casting a narrower unsigned field before combining it with
-   a wider one (exactly `header.rs`'s `reserved_space as u32`) is common.
-2. **`||` doesn't propagate a folded-true branch past an unprovable
-   one** —
-   [mvl-lang/mvl-rust#114](https://github.com/mvl-lang/mvl-rust/issues/114).
-   `known_shape_fold_not_propagated_through_or` (`src/lib.rs:224`)
-   shows `result.is_err() || <unprovable>` staying at `runtime` even
-   though `result.is_err()` alone (see
-   `known_shape_fold_in_isolation`, `src/lib.rs:210`) folds to `true` on
-   the exact same `Err(...)` shape. Likely fix shape: after folding a
-   `MethodCall` per #97, apply ordinary boolean short-circuit
-   simplification (`true || x => true`, `false && x => false`) at the
-   same L1 pass, rather than only folding the leaf and stopping. This
-   is the one that would actually make `DatabaseHeader::parse`-shaped
-   functions (the common case: validate-then-construct, with the
-   postcondition checking the successful case's fields) provable rather
-   than perpetually `runtime`.
-3. **`pub mod { ... }` hides return-site/`impl` scanning** —
-   [mvl-lang/mvl-rust#115](https://github.com/mvl-lang/mvl-rust/issues/115).
-   Not triggered by anything in `header.rs` (which is a flat file), but
-   hit while writing this spike's first draft: a free function's
-   declaration-site `requires`/`ensures` are found correctly through a
-   `mod`, but its return-site obligations are not generated at all, and
-   an `impl` block nested in a `mod` is invisible entirely — not even a
-   declaration-site obligation. Likely same root cause as #90's original
-   `impl`-invisibility bug (a `Visit` override or item-collection pass
-   that iterates `file.items` without recursing into `Item::Mod`'s own
-   `content`). Lower priority than 1-2 since it doesn't block anything
-   in this specific codebase, but worth fixing for any crate that
-   organizes real code into modules (i.e. most of them).
+- **#113 (cast expressions) confirmed fixed — for bare parameters only.**
+  `cast_on_bare_param_also_blocked` now closes at **L4** (`src/lib.rs`).
+  But `PageWithNarrowField::usable_page_size_with_cast` — the identical
+  cast on a **field projection**, exactly `header.rs`'s real
+  `self.reserved_space as u32` shape — is unchanged, still `runtime`.
+  #113 fixed casts on the bare-parameter path specifically, not the
+  general case. `DatabaseHeader::usable_page_size` still has to delegate
+  to the free `compute_usable_page_size` for this reason.
+- **#114 (`||` short-circuit propagation) confirmed fixed, and this is
+  the one that actually matters for `parse`.** Every early-`Err`-return
+  obligation in both `known_shape_fold_not_propagated_through_or` and
+  `DatabaseHeader::parse` itself now closes — `ensures#0` in the former
+  at **L2**, and **3 of `parse`'s 4** return-site obligations
+  (`ensures#0`, `#1`, `#2` — every early `return Err(...)`) now close at
+  **L1**. This is a real, direct improvement on the issue's original
+  target: three-quarters of `parse`'s obligations that were `runtime`
+  in round 4 are proven in round 5, with **zero code changes** — the fix
+  landed in the tool, not in the annotation.
+- **The 4th obligation — `parse`'s `Ok(...)` return, the actual
+  field-validation postcondition (`page_size.is_power_of_two()` etc.) —
+  is still `runtime`.** Isolated why with
+  `known_shape_fold_not_propagated_through_or`'s own `Ok(x)` obligation
+  (also still `runtime`, corrected during this round — the original
+  predicate here was accidentally false at `x = 0`, a bug in the spike's
+  own test, not a tool finding): #97/#114 fold the outer
+  `is_ok`/`is_err` call and propagate that fold through `||`, but
+  neither resolves `result.as_ref().unwrap()` on a known-shape `Ok(x)`
+  back to `x` itself for further reasoning. That's a distinct,
+  not-yet-addressed step — see "The bigger unlock" below.
+
+**Go/no-go: upgraded — the tool now proves most of what round 4 could
+only assert.** `parse`'s early-return obligations (the majority of its
+surface area) are genuine compile-time proofs as of v0.7.1. What's left
+runtime-only is now narrowed to exactly the field-validation success
+case, which is squarely `mvl-lang/mvl-rust#110`'s territory (see
+below) — not a new, separately-discovered gap.
+
+## Gaps fixed in v0.7.1 (round 5)
+
+All three of round 4's gaps, filed against `mvl-lang/mvl-rust`, fixed
+same-day in one PR
+([mvl-lang/mvl-rust#116](https://github.com/mvl-lang/mvl-rust/pull/116)):
+
+1. **[#113](https://github.com/mvl-lang/mvl-rust/issues/113) — cast
+   expressions block solver variable-binding.** Fixed for the
+   bare-parameter case (`cast_on_bare_param_also_blocked` now closes at
+   L4) — see the narrower residual gap below, this was not a complete
+   fix.
+2. **[#114](https://github.com/mvl-lang/mvl-rust/issues/114) — `||`
+   doesn't propagate a folded-true branch past an unprovable one.**
+   Fixed — this is the one that mattered most for `parse`: 3 of its 4
+   return-site obligations now close at L1, with no annotation changes.
+3. **[#115](https://github.com/mvl-lang/mvl-rust/issues/115) — `pub mod
+   { ... }` hides return-site/`impl` scanning.** Filed but not
+   independently re-verified this round (this crate's `src/lib.rs` stays
+   flat regardless, so nothing here depends on it) — worth confirming
+   directly if a future round revisits module-organized code.
+
+## Gaps remaining, narrower than round 4 found them
+
+1. **Cast on a field projection still blocks variable-binding — #113
+   was a partial fix.** `PageWithNarrowField::usable_page_size_with_cast`
+   (`src/lib.rs`, `self.reserved_space as u32`) stays `runtime` even
+   though the identical cast on a bare parameter
+   (`cast_on_bare_param_also_blocked`) now closes at L4. Not yet filed
+   as its own follow-up issue — `#113`'s fix evidently covers the
+   bare-identifier path but not the field-projection path #95 added
+   alongside it. This is exactly why `DatabaseHeader::usable_page_size`
+   still has to delegate to a free function.
+2. **`.unwrap()` on a known-shape `Ok(x)`/`Some(x)` doesn't resolve to
+   `x` for further reasoning.** `#97`'s fold and `#114`'s propagation
+   together prove `result.is_err()`/`result.is_ok()` themselves, but
+   neither unwraps a syntactically known `Ok(x)` to let `x`'s own
+   properties (branch-narrowed bounds, or in `parse`'s real case, struct
+   fields) enter the proof. This is `DatabaseHeader::parse`'s last
+   remaining obligation (the actual field-validation postcondition) and
+   `known_shape_fold_not_propagated_through_or`'s `Ok(x)` case — both
+   still `runtime`. Not a new discovery this round; it's the same
+   "method-call reasoning" limitation below, just now isolated as the
+   *only* thing left blocking `parse`.
 
 ## The bigger unlock: method-call reasoning (in progress upstream)
 
-None of 1-3 above touch the deepest limitation:
-`DatabaseHeader::parse`'s real postcondition needs `is_power_of_two()`
-and `.unwrap()` to participate in a proof, and the native L1-L4 solver
-treats arbitrary method calls as opaque by design (ADR-0001) — #97 only
-special-cased a handful of known `Result`/`Option` shapes, not general
-method calls. Independently of this spike,
+Both gaps above are the same root limitation, now narrowed to its
+essential case: `DatabaseHeader::parse`'s real postcondition needs
+`is_power_of_two()` and an unwrapped struct's fields to participate in a
+proof, and the native L1-L4 solver treats arbitrary method calls and
+value-carrying constructors as opaque by design (ADR-0001) — #97/#114
+proved that *shape-level* facts (is this `Ok` or `Err`?) can fold and
+propagate, but not the *payload*. Independently of this spike,
 [mvl-lang/mvl-rust#110](https://github.com/mvl-lang/mvl-rust/issues/110)
 (implementing
 [ADR-0011](https://github.com/mvl-lang/mvl-rust/blob/main/.openspec/adr/0011-resolved-pure-closure-licence.md),
@@ -223,7 +263,7 @@ next — see the README's "Next steps".
 Per the `spike/DDD_xxxxx` convention (`CLAUDE.md`), this is a disposable
 experiment: `sqlite-rs`'s actual `src/header.rs`, `Cargo.toml`,
 `deny.toml`, and `.github/workflows/ci.yml` carry **none** of the `mvl`
-dependency, annotations, or CI wiring explored across rounds 1-4 above —
+dependency, annotations, or CI wiring explored across rounds 1-5 above —
 those were mistakenly committed directly to production files in the
 original attempt (PRs #374, #393, #400, #401, #405) instead of being
 isolated here from the start, and have been reverted. This directory is
