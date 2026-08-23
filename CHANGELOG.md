@@ -6,6 +6,28 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-23 — V6.2 WAL Core
+
+Phase V6.2 of epic #354 (V6 Slim): the write half of the WAL format, the
+wal-index checkpoint-coordination pieces, PASSIVE checkpoint, and crash
+recovery / oracle-parity acceptance tests. Closes #383, #385, #386, #387.
+
+feat: WAL frame writer (`WalWriter`) and `WalHeader::new`/`serialize`,
+completing the write side of the WAL file format alongside the existing
+`WalHeader::parse`/`committed_pages` read path.
+
+feat: wal-index (`-shm`) checkpoint coordination — `WAL_CKPT_LOCK`, a
+probe for which reader-mark slots are actually held (bounding checkpoint
+progress), and `nBackfill` read/publish.
+
+feat: `checkpoint_passive` — copies committed WAL frames into the main
+database file up to the oldest active reader's mark, without blocking on
+readers (FULL/RESTART deferred to V7).
+
+test: WAL crash recovery (torn-frame tolerance, checkpoint-mid-write
+consistency) and write-path oracle parity — a `-wal` file written by
+sqlite-rs recovers correctly through a real, pinned `sqlite3`.
+
 ## [0.15.0] - 2026-08-23 — V6.1 SQL completeness
 
 Phase V6.1 of epic #354 (V6 Slim): non-recursive CTEs, `UNION`/`UNION ALL`
