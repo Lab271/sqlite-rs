@@ -6,6 +6,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: cache the WAL `-shm` fd across a connection's lifetime (#437) —
+`Vfs::open_wal_shm` returns a persistent handle `Pager` caches and reuses
+for every commit's write-lock claim/`mxFrame` publish, instead of
+reopening `-shm` fresh each time. Investigated via a profiling spike
+(#438, `tests/spike/011_wal_performance`); ~17.5% faster on a
+many-commits-per-connection workload (`concurrent_read_write` benchmark),
+though the original `insert_batch_wal_wal` benchmark stays flat since it
+opens one connection per commit and has nothing to cache across.
+
 docs: crate-level rustdoc polish (#428) — crate-level `//!` docs, Cargo.toml
 publication metadata (`description`, `repository`, `documentation`,
 `keywords`, `categories`), and doc comments on previously-undocumented
