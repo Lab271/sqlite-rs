@@ -6,6 +6,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-08-23
+
+perf: cache parsed row header for repeated `OP_Column` reads (#458) —
+table and index-read cursors now parse a row's header (serial types +
+byte offsets) once, via `record::parse_header_into`, and cache it
+(`RowHeaderCache`) on the cursor state, instead of `decode_column`
+re-walking the header from byte 0 on every `Column` opcode against the
+same row. The cache reuses its backing `Vec` allocation across rows
+(a first, simpler `Option<RowHeaderCache>`-per-row design measured as a
+regression on `full_scan` due to alloc/free churn) and is invalidated
+solely through `TableCursorState`/`IndexReadState::set_current`, so a
+stale cache can never survive a row change. `full_scan` bench ratio
+(ours/oracle) improved from 1.39×/2.10× (1MB/50MB fixtures) to
+1.25×/1.94×.
+
 ## [0.17.3] - 2026-08-23
 
 feat: no-stats query optimizations (#444) — two "always wins, no

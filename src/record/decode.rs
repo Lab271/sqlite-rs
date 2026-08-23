@@ -52,19 +52,28 @@ pub fn decode_record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<Value
     Ok(values)
 }
 
-/// Decodes only column `idx` of a record's payload — the header entries
-/// (serial types) for columns before `idx` are still walked to compute
-/// their body sizes (needed to find `idx`'s offset), but their bodies are
-/// never decoded/allocated, unlike [`decode_record`]. Used by the VDBE's
-/// `Column` opcode (#439) so a WHERE clause that rejects a row never pays
-/// to decode the row's other columns. Returns `Value::Null` for an
-/// out-of-range `idx`, matching `decode_record(..)[idx]`'s
-/// `unwrap_or(Value::Null)` convention at call sites.
-pub fn decode_column(
+/// Walks a record payload's header once, returning each column's serial
+/// type paired with the byte offset (into `payload`) of that column's
+/// body — never decodes any column body. This is the header-walk logic
+/// [`decode_column`] builds on; [`parse_header_into`] is the same walk
+/// for a caller (the row header cache, #458, in `src/vdbe/cursor.rs`)
+/// that wants to reuse an existing `Vec`'s allocation across rows rather
+/// than pay a fresh allocation per call.
+pub(crate) fn parse_header(payload: &[u8]) -> Result<Vec<(u64, usize)>, RecordError> {
+    let mut entries = Vec::new();
+    parse_header_into(payload, &mut entries)?;
+    Ok(entries)
+}
+
+/// Like [`parse_header`], but appends into a caller-supplied (cleared)
+/// `Vec` instead of allocating a new one — lets a per-cursor cache reuse
+/// its backing allocation across every row it's repositioned onto,
+/// rather than allocating and freeing a `Vec` per row.
+pub(crate) fn parse_header_into(
     payload: &[u8],
-    idx: usize,
-    encoding: TextEncoding,
-) -> Result<Value, RecordError> {
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<(), RecordError> {
+    entries.clear();
     let (header_len, n) = decode_varint_at(payload, 0)?;
     let header_len = header_len as usize;
     if header_len < n {
@@ -76,7 +85,6 @@ pub fn decode_column(
 
     let mut pos = n;
     let mut body_pos = header_len;
-    let mut col = 0;
     while pos < header_len {
         let (serial_type, len) = decode_varint_at(payload, pos)?;
         if pos.saturating_add(len) > header_len {
@@ -86,14 +94,33 @@ pub fn decode_column(
             });
         }
         pos = pos.saturating_add(len);
-        if col == idx {
-            let (value, _) = decode_serial_value(serial_type, payload, body_pos, encoding)?;
-            return Ok(value);
-        }
+        entries.push((serial_type, body_pos));
         body_pos = body_pos.saturating_add(serial_type_len(serial_type));
-        col = col.saturating_add(1);
     }
-    Ok(Value::Null)
+    Ok(())
+}
+
+/// Decodes only column `idx` of a record's payload — the header entries
+/// (serial types) for every column are walked to compute their body
+/// sizes/offsets, but only `idx`'s body is decoded/allocated, unlike
+/// [`decode_record`]. Used by the VDBE's `Column` opcode (#439) so a WHERE
+/// clause that rejects a row never pays to decode the row's other
+/// columns. Returns `Value::Null` for an out-of-range `idx`, matching
+/// `decode_record(..)[idx]`'s `unwrap_or(Value::Null)` convention at call
+/// sites.
+pub fn decode_column(
+    payload: &[u8],
+    idx: usize,
+    encoding: TextEncoding,
+) -> Result<Value, RecordError> {
+    let entries = parse_header(payload)?;
+    match entries.get(idx) {
+        Some(&(serial_type, offset)) => {
+            let (value, _) = decode_serial_value(serial_type, payload, offset, encoding)?;
+            Ok(value)
+        }
+        None => Ok(Value::Null),
+    }
 }
 
 /// Number of body bytes a serial type occupies, without decoding the
