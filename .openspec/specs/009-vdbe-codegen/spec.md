@@ -1118,6 +1118,77 @@ CTE already shadows a same-named real table. `DROP VIEW` is parsed
 
 **Tests:** `tests/corpus/view_test.rs::drop_view_fails_cleanly_not_wired_into_codegen`
 
+### Requirement 16: Covering-Index Scan and Index-Only COUNT(*) [MUST]
+
+Two "always wins, no ANALYZE/cost model needed" optimizations (#444).
+Real SQLite has no separate index-column-read opcode — it reuses plain
+`Column` against an index cursor's current entry exactly as it does
+against a table cursor, and this codebase follows suit rather than
+inventing a nonexistent opcode:
+
+- **Covering-index scan**: when a single-table `SELECT`'s `WHERE`
+  clause is a single top-level equality between a `UNIQUE` index's
+  leading column and a literal/bind-parameter operand, and every result
+  column the `SELECT` list needs (bare columns only) is itself carried
+  by that same index, `try_compile_covering_index_scan` emits
+  `SeekIndexEq` (the point probe) + one `Column` read per result
+  column straight off the index cursor, never opening/seeking the table
+  cursor at all.
+  `find_covering_index` is the shared detection function both this
+  codegen path and `EXPLAIN QUERY PLAN` (`SEARCH ... USING COVERING
+  INDEX ...`) call, so the two can never drift apart.
+- **Index-only `COUNT(*)`**: `try_compile_index_only_count` recognizes a
+  bare `SELECT count(*) FROM t` (no `GROUP BY`/`HAVING`/`DISTINCT`/
+  `ORDER BY`/`LIMIT`) and counts by walking any one index's b-tree
+  entry-for-entry (`IdxRewind`/`IdxNext`, one entry per table row
+  regardless of that index's own column values) when there's no
+  `WHERE` clause, or by a single `SeekIndexEq` probe against a `UNIQUE`
+  index's leading column (count is trivially 0 or 1) when `WHERE
+  indexed_col = <literal/param>` is present — either way, the table
+  cursor is never opened.
+
+Both fast paths are deliberately narrow, matching this module's
+existing rowid-seek/index-ordered-scan conventions: a non-equality or
+multi-column `WHERE`, `*`/`table.*`/a computed result-column
+expression, or (for `COUNT`) a non-unique-index equality `WHERE` all
+fall back to the ordinary `Rewind`/`Next` scan or `compile_grouped_scan`
+respectively, rather than risk misprojecting or miscounting duplicate
+index entries this MVP's `SeekIndexEq`-based probe can't walk past.
+LIMIT's own early-out (`emit_limit_guard`, already jumping to
+`end_label` the moment `LIMIT`'s budget hits zero — see
+`compile_direct_scan`/`try_compile_index_ordered_scan`) and the
+sorter's top-K bound (`compile_sorted_scan`'s `bound_reg`/`SorterOpen`
+`P5`, #129) already stop scanning as soon as enough rows are known, so
+#444's third example (`ORDER BY x LIMIT 10`) needed no further codegen
+change here — this requirement's `Tests:` links below only cover the
+two genuinely new fast paths.
+
+**Implementation:**
+`src/vdbe/cursor.rs::read_row_column` (index-cursor case),
+`src/codegen/select/limit_scan.rs::{find_covering_index, try_compile_covering_index_scan}`,
+`src/codegen/select/aggregate.rs::try_compile_index_only_count`,
+`src/codegen/select/eqp.rs::explain_query_plan`
+
+#### Scenario: A covering-index equality SELECT skips the table row entirely
+
+- GIVEN `CREATE UNIQUE INDEX idx_ab ON t(a, b)` and `SELECT a, b FROM t
+  WHERE a = 6`
+- THEN the compiled program contains `SeekIndexEq` but no `SeekRowid`,
+  and its output matches a full table scan of the same query
+
+**Tests:** `tests/corpus/no_stats_optimizations_test.rs::covering_index_equality_select_matches_oracle`, `tests/corpus/no_stats_optimizations_test.rs::covering_index_equality_select_miss_matches_oracle`
+
+#### Scenario: COUNT(*) over an indexed table never decodes a table row
+
+- GIVEN an indexed table `t` and `SELECT count(*) FROM t`, or `SELECT
+  count(*) FROM t WHERE indexed_col = <literal>` against a `UNIQUE`
+  index
+- THEN the compiled program walks/probes the index cursor
+  (`IdxRewind`/`SeekIndexEq`) and never opens a `Rewind` table scan,
+  yielding the same count as the oracle
+
+**Tests:** `tests/corpus/no_stats_optimizations_test.rs::index_only_count_star_no_where_matches_oracle`, `tests/corpus/no_stats_optimizations_test.rs::index_only_count_star_equality_where_matches_oracle`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made

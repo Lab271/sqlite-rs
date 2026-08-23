@@ -183,6 +183,196 @@ where
     Ok(true)
 }
 
+/// Resolves every `select`'s result column to a bare, unqualified
+/// column *name* — `None` if any result column is `*`/`table.*` or a
+/// non-bare-column expression. Used by [`try_compile_covering_index_scan`]
+/// to check "does this SELECT only ever need columns an index already
+/// carries" without pulling in the general projection machinery, which
+/// doesn't (yet) know how to read a computed expression off an index
+/// record.
+fn bare_result_column_names(select: &Select) -> Option<Vec<&str>> {
+    select
+        .columns
+        .iter()
+        .map(|col| match col {
+            ResultColumn::Expr {
+                expr:
+                    Expr {
+                        kind: ExprKind::Column { name, .. },
+                        ..
+                    },
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn where_col(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::Column { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// A [`find_covering_index`] match: which of `schema.indexes` was
+/// matched (by position, not reference — see that function's doc for
+/// why) plus a clone of the probe operand expression.
+pub(super) struct CoveringIndexMatch {
+    pub(super) index_position: usize,
+    pub(super) operand: Expr,
+}
+
+/// Finds a `UNIQUE` index of `schema` usable as a covering-index scan
+/// (#444) for `select`: `select.where_clause` must be a single
+/// top-level equality between the index's leading column and a
+/// literal/bind-parameter operand, and every `SELECT`-list column (bare
+/// columns only — see [`bare_result_column_names`]) must itself be
+/// carried by that index. Returns the matched index's position in
+/// `schema.indexes` plus the probe operand expression (owned, not
+/// borrowed: a function taking two independent `&` parameters can't
+/// return a value borrowing from either one without a named lifetime
+/// tying them together, which the qualified subset forbids — see
+/// `tools/mvl-limit`). Shared by [`try_compile_covering_index_scan`]
+/// (which actually emits the scan) and `eqp.rs` (which only reports it),
+/// so the two can never drift apart.
+pub(super) fn find_covering_index(
+    schema: &TableSchema,
+    select: &Select,
+) -> Option<CoveringIndexMatch> {
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        return None;
+    }
+    let where_expr = select.where_clause.as_ref()?;
+    let (lhs, rhs) = top_level_equality_operands(where_expr)?;
+    let (where_col_name, operand) = match (where_col(lhs), where_col(rhs)) {
+        (Some(name), _) => (name, rhs),
+        (_, Some(name)) => (name, lhs),
+        _ => return None,
+    };
+    let is_supported_operand = matches!(
+        &operand.kind,
+        ExprKind::Literal(Literal::Integer(_))
+            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+    );
+    if !is_supported_operand {
+        return None;
+    }
+    let index_position = schema.indexes.iter().position(|idx| {
+        idx.unique
+            && idx
+                .columns
+                .first()
+                .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
+    })?;
+    let index = schema.indexes.get(index_position)?;
+    let result_names = bare_result_column_names(select)?;
+    let covers = |name: &str| {
+        index
+            .columns
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(name))
+    };
+    if !result_names.iter().all(|n| covers(n)) {
+        return None;
+    }
+    Some(CoveringIndexMatch {
+        index_position,
+        operand: operand.clone(),
+    })
+}
+
+/// Emits an index-only ("covering index") scan (#444) in place of
+/// `SeekRowid` + full row decode, when [`find_covering_index`] finds a
+/// `UNIQUE` index that carries every column this `SELECT` needs —
+/// `SeekIndexEq` (the point probe) + `Column` reads straight out of
+/// the matched index entry, never touching the table cursor at all.
+///
+/// Returns `Ok(true)` when this fast path was taken; `Ok(false)` leaves
+/// `em`/`reg` untouched so the caller falls back to the ordinary scan
+/// (or [`try_compile_rowid_seek`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_covering_index_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let Some(CoveringIndexMatch {
+        index_position,
+        operand,
+    }) = find_covering_index(schema, select)
+    else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_position) else {
+        return Ok(false);
+    };
+    let operand = &operand;
+    // Re-derived rather than threaded through `find_covering_index`'s
+    // return value: `bare_result_column_names` is infallible once
+    // `find_covering_index` has already returned `Some`.
+    let result_names = bare_result_column_names(select).unwrap_or_default();
+
+    let index_cursor = cursors.sort;
+    let root_page = crate::codegen::index_maintenance::valid_index_root_page(index)?;
+    let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+    open_instr.p5 = 1;
+    em.emit(open_instr);
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+    let value_reg = compile_value(em, reg, &scope, operand)?;
+    let seek_addr = em.emit(Instruction::with_p4(
+        Opcode::SeekIndexEq,
+        index_cursor,
+        0,
+        value_reg,
+        P4::Int(1),
+    ));
+    em.patch_p2(seek_addr, end_label);
+
+    let row_skip = em.new_label();
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+
+    let mut regs = Vec::with_capacity(result_names.len());
+    for name in &result_names {
+        let col_idx = index
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+            .unwrap_or(0);
+        let r = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::Column,
+            index_cursor,
+            i32::try_from(col_idx).unwrap_or(0),
+            r,
+        ));
+        regs.push(r);
+    }
+    let (first, count) = match regs.first() {
+        Some(&first) => (first, i32::try_from(regs.len()).unwrap_or(0)),
+        None => (reg.alloc(), 0),
+    };
+    sink(em, reg, first, count)?;
+
+    em.place(row_skip);
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_direct_scan<F>(
     em: &mut Emitter,
@@ -198,6 +388,10 @@ where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     if try_compile_rowid_seek(em, reg, select, schema, cursors, end_label, catalog, sink)? {
+        return Ok(());
+    }
+    if try_compile_covering_index_scan(em, reg, select, schema, cursors, end_label, catalog, sink)?
+    {
         return Ok(());
     }
     if matches!(select.distinct, Some(Distinctness::Distinct)) {

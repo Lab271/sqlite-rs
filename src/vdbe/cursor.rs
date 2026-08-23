@@ -580,18 +580,37 @@ fn read_row_column(
             .get(idx)
             .cloned()
             .unwrap_or(Value::Null)),
+        CursorSlot::IndexRead(state) => {
+            let row = state
+                .current
+                .as_ref()
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                })?;
+            decode_column(&row.payload, idx, TextEncoding::Utf8).map_err(|e| {
+                ExecError::MalformedInstruction {
+                    opcode,
+                    reason: e.to_string(),
+                }
+            })
+        }
         other => Err(ExecError::CursorTypeMismatch {
             opcode,
             slot,
             found: other.type_name(),
-            expected: "table, pseudo, or ephemeral table cursor",
+            expected: "table, pseudo, ephemeral table, or index read cursor",
         }),
     }
 }
 
 /// `Column`: reads column `P2` of cursor `P1`'s current row into
 /// register `P3`. A `NullRow`-forced table cursor always reads as NULL,
-/// regardless of `P2`.
+/// regardless of `P2`. Works on index-read cursors too (#444): real
+/// SQLite reuses this same opcode against an index cursor's current
+/// entry rather than defining a separate index-column opcode, so
+/// covering-index scans and index-only aggregates decode straight out
+/// of the index's own record via this path.
 ///
 /// Known simplification: this does not substitute the rowid-alias
 /// column (`INTEGER PRIMARY KEY`, stored as NULL in the record — see

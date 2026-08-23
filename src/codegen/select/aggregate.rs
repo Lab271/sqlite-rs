@@ -15,6 +15,138 @@ pub(super) use accum::{
 };
 pub(crate) use join::compile_joined_grouped_scan;
 
+/// Emits an index-only `COUNT(*)` (#444): either a bare `SELECT
+/// count(*) FROM t` (no `WHERE`) counted by walking any one index's
+/// b-tree entry-for-entry (`IdxRewind`/`IdxNext`, one entry per table
+/// row regardless of the index's own column values), or `SELECT
+/// count(*) FROM t WHERE indexed_col = <literal/param>` against a
+/// `UNIQUE` index's leading column (`SeekIndexEq`, a single-entry
+/// probe — the count is trivially 0 or 1). Either way, the table cursor
+/// is never opened at all.
+///
+/// Returns `Ok(true)` when this fast path was taken (result row already
+/// emitted via `sink`); `Ok(false)` leaves `em`/`reg` untouched.
+/// Deliberately narrow: `GROUP BY`/`HAVING`/`DISTINCT`/`ORDER BY`/
+/// `LIMIT` all fall back to [`compile_grouped_scan`], as does any
+/// non-equality or multi-column `WHERE`, or a table with no index at
+/// all for the no-`WHERE` case.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_index_only_count<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if select.having.is_some() || select.limit.is_some() || !select.order_by.is_empty() {
+        return Ok(false);
+    }
+    let [ResultColumn::Expr { expr, .. }] = select.columns.as_slice() else {
+        return Ok(false);
+    };
+    let ExprKind::FunctionCall {
+        name,
+        args,
+        distinct,
+    } = &expr.kind
+    else {
+        return Ok(false);
+    };
+    if *distinct || !name.eq_ignore_ascii_case("count") || !matches!(args, FunctionArgs::Star) {
+        return Ok(false);
+    }
+
+    let index_cursor = cursors.sort;
+    let count_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, count_reg, 0));
+
+    match &select.where_clause {
+        None => {
+            let Some(index) = schema.indexes.first() else {
+                return Ok(false);
+            };
+            let root_page = valid_index_root_page(index)?;
+            let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+            open_instr.p5 = 1;
+            em.emit(open_instr);
+
+            let done_label = em.new_label();
+            let rewind_addr = em.emit(Instruction::new(Opcode::IdxRewind, index_cursor, 0, 0));
+            em.patch_p2(rewind_addr, done_label);
+            let loop_start = em.new_label();
+            em.place(loop_start);
+
+            let one_reg = reg.alloc();
+            em.emit(Instruction::new(Opcode::Integer, 1, one_reg, 0));
+            em.emit(Instruction::new(Opcode::Add, one_reg, count_reg, count_reg));
+
+            let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+            em.patch_p2(next_addr, loop_start);
+            em.place(done_label);
+        }
+        Some(where_expr) => {
+            let Some((lhs, rhs)) = super::limit_scan::top_level_equality_operands(where_expr)
+            else {
+                return Ok(false);
+            };
+            fn where_col(expr: &Expr) -> Option<&str> {
+                match &expr.kind {
+                    ExprKind::Column { name, .. } => Some(name.as_str()),
+                    _ => None,
+                }
+            }
+            let (where_col_name, operand) = match (where_col(lhs), where_col(rhs)) {
+                (Some(name), _) => (name, rhs),
+                (_, Some(name)) => (name, lhs),
+                _ => return Ok(false),
+            };
+            let is_supported_operand = matches!(
+                &operand.kind,
+                ExprKind::Literal(Literal::Integer(_))
+                    | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+            );
+            if !is_supported_operand {
+                return Ok(false);
+            }
+            let Some(index) = schema.indexes.iter().find(|idx| {
+                idx.unique
+                    && idx
+                        .columns
+                        .first()
+                        .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
+            }) else {
+                return Ok(false);
+            };
+            let root_page = valid_index_root_page(index)?;
+            let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+            open_instr.p5 = 1;
+            em.emit(open_instr);
+
+            let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+            let value_reg = compile_value(em, reg, &scope, operand)?;
+            let miss_label = em.new_label();
+            let seek_addr = em.emit(Instruction::with_p4(
+                Opcode::SeekIndexEq,
+                index_cursor,
+                0,
+                value_reg,
+                P4::Int(1),
+            ));
+            em.patch_p2(seek_addr, miss_label);
+            em.emit(Instruction::new(Opcode::Integer, 1, count_reg, 0));
+            em.place(miss_label);
+        }
+    }
+
+    sink(em, reg, count_reg, 1)?;
+    Ok(true)
+}
+
 /// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
 /// sort-then-group `select.c` shape rather than a hash table, since the
 /// `Sorter*` opcode family this compiler already has for `ORDER BY`

@@ -222,6 +222,11 @@ where
                     .to_string(),
             });
         }
+        if super::aggregate::try_compile_index_only_count(
+            em, reg, select, schema, cursors, catalog, sink,
+        )? {
+            return Ok(());
+        }
         return compile_grouped_scan(
             em, reg, select, schema, cursors, end_label, catalog, true, None, sink,
         );
