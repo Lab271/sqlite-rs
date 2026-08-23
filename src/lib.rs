@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 // Crate-wide, with no local override possible: `src/vfs/lock.rs` and
 // `src/vfs/shm.rs` used to need a scoped `#![allow(unsafe_code)]` for raw
 // `fcntl`/`mmap`/`fork` calls (#50); both are now safe `nix`/`std` APIs

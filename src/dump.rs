@@ -22,6 +22,7 @@ use crate::schema::{
 };
 use crate::vfs::{PageSource, Vfs, VfsError};
 
+/// Failure reading a database while producing a [`DumpResult`].
 #[derive(Debug, Error)]
 pub enum DumpError {
     #[error(transparent)]

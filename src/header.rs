@@ -9,10 +9,12 @@ use thiserror::Error;
 
 use crate::record::TextEncoding;
 
+/// Byte length of the SQLite database header (bytes 0-99 of page 1).
 pub const HEADER_LEN: usize = 100;
 
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
+/// Failure parsing or validating a [`DatabaseHeader`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum HeaderError {
     #[error("header is {len} bytes, need at least 100")]

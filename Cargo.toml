@@ -4,6 +4,11 @@ version = "0.17.0"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
+description = "A binary-compatible Rust replication of SQLite"
+repository = "https://github.com/iheitlager/sqlite-rs"
+documentation = "https://docs.rs/sqlite-rs"
+keywords = ["sqlite", "database", "sql", "embedded"]
+categories = ["database", "database-implementations"]
 
 [dependencies]
 nix = { version = "0.31.3", features = ["fs"] }
