@@ -6,6 +6,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-08-23
+
+fix: decode UTF-8/UTF-16 text straight into `Rc<str>` (#441) — text
+columns were decoded through an intermediate `String` before converting
+to the `Value::Text(Rc<str>)` representation, allocating and copying
+twice per text value. `decode_text` (`src/record/decode.rs`) now builds
+the `Rc<str>` directly from the decoded bytes, halving text-column
+decode allocations. Re-scoped from the ticket's original `Value<'a>`
+borrow-from-page-buffer proposal, found premature: the page cache that
+design needs is deferred (ADR-0022), and even once built is
+LRU-evicting/mutable in place, which is incompatible with a live
+borrow under `#![forbid(unsafe_code)]`.
+
 perf: lazy per-column record decoding for the VDBE `Column` opcode (#439)
 — `decode_column(payload, idx, encoding)` (`src/record/decode.rs`) walks
 the record header to find one column's offset and decodes only that

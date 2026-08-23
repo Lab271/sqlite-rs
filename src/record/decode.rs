@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use super::error::RecordError;
 use super::value::{TextEncoding, Value};
 use super::varint::decode_varint;
@@ -224,18 +226,22 @@ pub(crate) fn decode_serial_value(
             let len = (n.wrapping_sub(13) / 2) as usize;
             let bytes = take(buf, pos, len)?;
             let text = decode_text(bytes, encoding)?;
-            Ok((Value::Text(text.into()), len))
+            Ok((Value::Text(text), len))
         }
     }
 }
 
-fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<String, RecordError> {
+/// Decodes text bytes straight into `Rc<str>`. The UTF-8 case (by far the
+/// common one) builds the `Rc<str>` directly from the validated byte slice
+/// instead of routing through an intermediate `String`, avoiding a second
+/// allocation and copy per text column.
+fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<Rc<str>, RecordError> {
     match encoding {
         TextEncoding::Utf8 => std::str::from_utf8(bytes)
-            .map(str::to_owned)
+            .map(Rc::from)
             .map_err(|_| RecordError::InvalidUtf8),
-        TextEncoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes),
-        TextEncoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes),
+        TextEncoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes).map(Rc::from),
+        TextEncoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes).map(Rc::from),
     }
 }
 
