@@ -318,9 +318,10 @@ Six rounds, five real upstream defects found and fixed same-day, one
 **Decision: adopt now, for runtime enforcement, starting with two real
 files.** Waiting for full static proof of `header.rs`-shaped invariants
 is no longer the gate — the contract-enforcement value stands on its
-own and doesn't depend on the remaining solver gap closing. See the
-tracking issue linked from `README.md`'s "Next steps" for the production
-rollout. This spike is closed; the crate stays in place (not deleted,
+own and doesn't depend on the remaining solver gap closing. Production
+rollout: [sqlite-rs#418](https://github.com/iheitlager/sqlite-rs/issues/418)
+(`src/header.rs`, `src/record/varint.rs`). This spike is closed; the
+crate stays in place (not deleted,
 per the `spike/DDD_xxxxx` convention's normal disposition — the working
 `cargo mvl prove` repros are worth more as a live regression corpus than
 as a one-time write-up) as the reference point if the remaining solver
@@ -339,5 +340,6 @@ the sole trace of the spike; `.openspec/` carries no reference to it.
 Should `rust-refine` adopt the fixes suggested above and someone wants
 to re-evaluate broader adoption, this crate is the starting point — bump
 the `mvl` rev in `Cargo.toml` and rerun. Production adoption itself is
-tracked as its own feature ticket, not folded into this spike — see
-`README.md`.
+tracked as its own feature ticket
+([sqlite-rs#418](https://github.com/iheitlager/sqlite-rs/issues/418)),
+not folded into this spike.

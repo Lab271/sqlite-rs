@@ -4,8 +4,8 @@
 [#371](https://github.com/iheitlager/sqlite-rs/issues/371). Full
 narrative, round-by-round evidence, and tracked upstream issues are in
 [`findings.md`](./findings.md) — this file is the short version.
-Production rollout is now its own ticket (see "Next steps"); this crate
-stays in place as the reference point, not deleted.
+Production rollout is [sqlite-rs#418](https://github.com/iheitlager/sqlite-rs/issues/418);
+this crate stays in place as the reference point, not deleted.
 
 ## Hypothesis
 
@@ -127,14 +127,10 @@ incidentally cover it.
    prior rounds' issues were filed.
 2. **File the narrower cast-on-field-projection follow-up** to #113 —
    still open, not yet its own issue.
-3. **Once the return-site-closure gap is fixed and `parse`'s
-   postcondition is fully proven:** propose adopting
-   `#[mvl::requires]`/`#[mvl::ensures]` on real `src/header.rs` (or
-   wider) in the main `sqlite-rs` package as a proper feature ticket
-   with its own token-spend estimate — not as a spike. At that point the
-   answer to "does it make sense" moves from "yes, in principle, proven
-   on a recreation" to "yes, proven on the actual production code."
-4. **Independent of 1-3:** the runtime-enforcement value is available
-   now and doesn't need any of the above. If runtime-checked contracts
-   on `impl` methods are wanted sooner, that's a separate, smaller
-   proposal than "wait for full static proof."
+3. **Production rollout: [sqlite-rs#418](https://github.com/iheitlager/sqlite-rs/issues/418).**
+   Not gated on 1 landing or on full static proof — the decision was to
+   adopt the runtime-enforcement value now, unconditionally, starting
+   with two pilot files (`src/header.rs`, `src/record/varint.rs`).
+   That's the answer to "does it make sense" moving from "yes, in
+   principle, proven on a recreation" to "yes, proven on the actual
+   production code," without waiting on the last solver gap.
