@@ -38,16 +38,16 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mvl"
-version = "0.7.1"
-source = "git+https://github.com/mvl-lang/mvl-rust?rev=d875d929353d0fac19486b7724752f5b19c42019#d875d929353d0fac19486b7724752f5b19c42019"
+version = "0.8.0"
+source = "git+https://github.com/mvl-lang/mvl-rust?rev=3e3ade7056e5466970bd7e2a602338f133ce2fd9#3e3ade7056e5466970bd7e2a602338f133ce2fd9"
 dependencies = [
  "mvl-macros",
 ]
 
 [[package]]
 name = "mvl-macros"
-version = "0.7.1"
-source = "git+https://github.com/mvl-lang/mvl-rust?rev=d875d929353d0fac19486b7724752f5b19c42019#d875d929353d0fac19486b7724752f5b19c42019"
+version = "0.8.0"
+source = "git+https://github.com/mvl-lang/mvl-rust?rev=3e3ade7056e5466970bd7e2a602338f133ce2fd9#3e3ade7056e5466970bd7e2a602338f133ce2fd9"
 dependencies = [
  "mvl-rust-core",
  "proc-macro2",
@@ -57,8 +57,8 @@ dependencies = [
 
 [[package]]
 name = "mvl-rust-core"
-version = "0.7.1"
-source = "git+https://github.com/mvl-lang/mvl-rust?rev=d875d929353d0fac19486b7724752f5b19c42019#d875d929353d0fac19486b7724752f5b19c42019"
+version = "0.8.0"
+source = "git+https://github.com/mvl-lang/mvl-rust?rev=3e3ade7056e5466970bd7e2a602338f133ce2fd9#3e3ade7056e5466970bd7e2a602338f133ce2fd9"
 dependencies = [
  "annotate-snippets",
  "proc-macro2",

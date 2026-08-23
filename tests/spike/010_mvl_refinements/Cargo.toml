@@ -5,6 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "d875d929353d0fac19486b7724752f5b19c42019", version = "0.7.1" }
+mvl = { git = "https://github.com/mvl-lang/mvl-rust", rev = "3e3ade7056e5466970bd7e2a602338f133ce2fd9", version = "0.8.0" }
 
 [workspace]
