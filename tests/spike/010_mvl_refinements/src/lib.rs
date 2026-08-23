@@ -1,7 +1,7 @@
 //! Spike 010: `rust-refine` (mvl-lang/mvl-rust) proof-of-concept, standalone.
 //!
 //! Issue #371. See `findings.md` in this directory for the full narrative
-//! across five rounds of testing against successive `mvl-rust` releases.
+//! across six rounds of testing against successive `mvl-rust` releases.
 //! This crate is the self-contained evidence: every function below
 //! compiles against the pinned `mvl` dependency in `Cargo.toml` and can be
 //! run through `cargo mvl prove src/lib.rs` to reproduce the exact
@@ -246,8 +246,10 @@ pub fn known_shape_fold_in_isolation(x: i32) -> Result<i32, KnownShapeError> {
 /// only folds the outer `is_ok`/`is_err`/etc. call, it doesn't unwrap a
 /// known-shape `Ok(x)`/`Some(x)` to `x` itself. This is the same root
 /// limitation blocking `DatabaseHeader::parse`'s `Ok(...)` obligation
-/// (`ensures#3`) — both need what mvl-lang/mvl-rust#110 (the
-/// "resolved-pure closure" purity licence) is working toward. Expected:
+/// (`ensures#3`). NOT addressed by mvl-lang/mvl-rust#110 — see
+/// `adr0011_licence_scope_does_not_reach_return_site_closure` below for
+/// why that ticket, despite looking like the natural next step, turned
+/// out to be scoped to a different code path entirely. Expected:
 /// `ensures#0` at `layer: "L2"`, `ensures#1` still `layer: "runtime"`.
 #[allow(clippy::unwrap_used)]
 #[mvl::ensures(result.is_err() || *result.as_ref().unwrap() >= 0)]
@@ -256,4 +258,61 @@ pub fn known_shape_fold_not_propagated_through_or(x: i32) -> Result<i32, KnownSh
         return Err(KnownShapeError);
     }
     Ok(x)
+}
+
+// ---------------------------------------------------------------------
+// Part 3: mvl-lang/mvl-rust#110 (round 6, v0.8.0) — confirms empirically
+// why this ticket, despite looking like the natural next step for
+// `DatabaseHeader::parse`, doesn't move that obligation at all.
+// ---------------------------------------------------------------------
+
+/// The tool's own documented/tested shape for the licence (mirrors
+/// `mvl-rust`'s `a_resolved_pure_helper_licenses_reflexivity_over_two_
+/// identical_calls`): a same-file, explicitly `#[mvl::effect()]`,
+/// zero-unresolved-call, non-float-returning function called twice with
+/// identical arguments at ONE call site rewrites both calls to the same
+/// opaque symbol, so `lo <= hi` becomes `x <= x` — proven by reflexivity.
+/// Confirmed working exactly as documented. Expected:
+/// `adr0011_licensed_reflexivity_over_two_identical_calls::calls::span_for_licence_demo::requires#0`
+/// at `layer: "L1"`.
+#[mvl::effect()]
+pub fn gen_for_licence_demo() -> i64 {
+    42
+}
+
+#[mvl::requires(lo <= hi)]
+pub fn span_for_licence_demo(lo: i64, hi: i64) -> i64 {
+    hi - lo
+}
+
+pub fn adr0011_licensed_reflexivity_over_two_identical_calls() -> i64 {
+    span_for_licence_demo(gen_for_licence_demo(), gen_for_licence_demo())
+}
+
+/// Confirms the licence does NOT reach a function's own return-site
+/// closure — the code path `DatabaseHeader::parse`'s postcondition
+/// actually needs. `is_valid_page_size` is same-file and carries
+/// `#[mvl::effect()]`, but its body is a method call
+/// (`.is_power_of_two()`), which the tool's own test suite documents as
+/// denying the licence outright (`an_effect_pure_function_with_a_method_
+/// call_is_not_licensed` — a method-call body always counts as an
+/// "unresolved call"). Confirmed: `validate`'s `ensures` stays `runtime`
+/// even in the single most favorable case possible — the *exact same*
+/// call, `is_valid_page_size(page_size)`, in both `requires` and
+/// `ensures` of the same function, which would need `return_site_closure`
+/// to reuse `requires` as an established Γ fact, not the
+/// `obligations_for_call`/`propagate_postcondition` call-site machinery
+/// #110 actually touches (per mvl-lang/mvl-rust#118's own PR
+/// description). Expected: `validate::ensures#0` (declaration) and
+/// `validate::returns::ensures#0` (return-site) both at `layer:
+/// "runtime"`, unchanged by v0.8.0.
+#[mvl::effect()]
+pub fn is_valid_page_size(page_size: u32) -> bool {
+    page_size.is_power_of_two() && (512..=65536).contains(&page_size)
+}
+
+#[mvl::requires(is_valid_page_size(page_size))]
+#[mvl::ensures(is_valid_page_size(page_size))]
+pub fn validate(page_size: u32) -> u32 {
+    page_size
 }

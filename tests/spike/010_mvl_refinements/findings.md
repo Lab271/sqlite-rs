@@ -17,7 +17,7 @@ This is an experiment in two things, not one: **does `rust-refine`
 work**, and **does adopting it make sense for `sqlite-rs`**. Evaluated
 against a real, `impl`-heavy, `Result`-returning parsing/validation
 function shaped like `sqlite-rs`'s actual `src/header.rs`
-(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`) — five
+(`DatabaseHeader::parse`, `DatabaseHeader::usable_page_size`) — six
 rounds, each bumping the `mvl` pin to the latest fix and re-verifying
 concretely rather than trusting a closed-issue title.
 
@@ -192,8 +192,9 @@ the biggest jump of any round:
 only assert.** `parse`'s early-return obligations (the majority of its
 surface area) are genuine compile-time proofs as of v0.7.1. What's left
 runtime-only is now narrowed to exactly the field-validation success
-case, which is squarely `mvl-lang/mvl-rust#110`'s territory (see
-below) — not a new, separately-discovered gap.
+case. At the time this round was written, `mvl-lang/mvl-rust#110` looked
+like the natural next fix for that case — round 6 below tested that
+assumption directly and found it doesn't hold.
 
 ## Gaps fixed in v0.7.1 (round 5)
 
@@ -239,31 +240,68 @@ same-day in one PR
    "method-call reasoning" limitation below, just now isolated as the
    *only* thing left blocking `parse`.
 
-## The bigger unlock: method-call reasoning (in progress upstream)
+## Round 6 — mvl-rust `3e3ade7` (v0.8.0) — #110 tested, does not close it
 
-Both gaps above are the same root limitation, now narrowed to its
-essential case: `DatabaseHeader::parse`'s real postcondition needs
-`is_power_of_two()` and an unwrapped struct's fields to participate in a
-proof, and the native L1-L4 solver treats arbitrary method calls and
-value-carrying constructors as opaque by design (ADR-0001) — #97/#114
-proved that *shape-level* facts (is this `Ok` or `Err`?) can fold and
-propagate, but not the *payload*. Independently of this spike,
-[mvl-lang/mvl-rust#110](https://github.com/mvl-lang/mvl-rust/issues/110)
-(implementing
-[ADR-0011](https://github.com/mvl-lang/mvl-rust/blob/main/.openspec/adr/0011-resolved-pure-closure-licence.md),
-designed in
-[#103](https://github.com/mvl-lang/mvl-rust/issues/103)) is in progress:
-a sound purity licence letting a same-file, side-effect-free call
-participate in a proof instead of being opaque. If it lands, it's the
-thing to re-test `DatabaseHeader::parse`'s actual postcondition against
-next — see the README's "Next steps".
+Both remaining gaps are the same root limitation:
+`DatabaseHeader::parse`'s real postcondition needs `is_power_of_two()`
+and an unwrapped struct's fields to participate in a proof, and the
+native L1-L4 solver treats arbitrary method calls and value-carrying
+constructors as opaque by design (ADR-0001). `#110`
+([mvl-lang/mvl-rust#118](https://github.com/mvl-lang/mvl-rust/pull/118),
+implementing
+[ADR-0011](https://github.com/mvl-lang/mvl-rust/blob/main/.openspec/adr/0011-resolved-pure-closure-licence.md))
+looked, going into this round, like the natural fix — round 5 said so.
+**Tested that assumption directly rather than trusting it. It's wrong.**
+
+First, reran `parse` and every round-5 repro **completely unchanged**
+against v0.8.0: zero difference from round 5, exactly as expected if
+#110 doesn't touch this code path.
+
+Then built two new, minimal repros
+(`adr0011_licensed_reflexivity_over_two_identical_calls`, `validate`,
+both in `src/lib.rs`) to find out *why*, empirically, rather than infer
+it from the PR description alone:
+
+1. **The licence's own documented shape works exactly as advertised.**
+   `span_for_licence_demo(gen_for_licence_demo(), gen_for_licence_demo())`
+   — two identical same-file `#[mvl::effect()]` calls at one call site —
+   closes at **L1** (`x <= x` by reflexivity), matching `mvl-rust`'s own
+   test suite (`a_resolved_pure_helper_licenses_reflexivity_over_two_
+   identical_calls`) exactly.
+2. **But the licence is scoped to cross-function call-site obligations,
+   not a function's own return-site closure** — confirmed by
+   [mvl-lang/mvl-rust#118](https://github.com/mvl-lang/mvl-rust/pull/118)'s
+   own PR description ("fires at the two lookup sites ADR-0008 §5
+   names: `obligations_for_call` and `propagate_postcondition`") and by
+   the most favorable possible repro: `validate`'s `requires` and
+   `ensures` state the *exact same* call, `is_valid_page_size(page_size)`
+   — as reflexive a case as exists — and `ensures` still stays
+   `runtime`, both at the declaration site and the return site. The
+   licence never reaches `return_site_closure`, the code path
+   `DatabaseHeader::parse`'s own postcondition actually needs.
+3. **Separately, wrapping a method call in a same-file `#[mvl::effect()]`
+   function does not qualify for the licence at all** —
+   `is_valid_page_size`'s body is `.is_power_of_two()` plus comparisons,
+   and a method-call body always counts as an "unresolved call"
+   (confirmed by `mvl-rust`'s own
+   `an_effect_pure_function_with_a_method_call_is_not_licensed` test).
+   So even if the licence *did* reach return-site closure, this specific
+   workaround wouldn't have helped.
+
+**Go/no-go: unchanged from round 5 in substance, correcting an
+over-optimistic assumption.** `parse`'s field-validation obligation is
+still exactly where round 5 left it — `runtime` — and #110 is now known,
+not guessed, to not be the fix. The actual gap (method-call/struct-field
+reasoning inside a function's own return-site closure) is real,
+confirmed twice over (empirically and against the tool's own test
+suite), and not yet tracked as its own upstream issue.
 
 ## Disposition
 
 Per the `spike/DDD_xxxxx` convention (`CLAUDE.md`), this is a disposable
 experiment: `sqlite-rs`'s actual `src/header.rs`, `Cargo.toml`,
 `deny.toml`, and `.github/workflows/ci.yml` carry **none** of the `mvl`
-dependency, annotations, or CI wiring explored across rounds 1-5 above —
+dependency, annotations, or CI wiring explored across rounds 1-6 above —
 those were mistakenly committed directly to production files in the
 original attempt (PRs #374, #393, #400, #401, #405) instead of being
 isolated here from the start, and have been reverted. This directory is
