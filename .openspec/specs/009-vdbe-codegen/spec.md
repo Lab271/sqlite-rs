@@ -1120,19 +1120,20 @@ CTE already shadows a same-named real table. `DROP VIEW` is parsed
 
 ### Requirement 16: Covering-Index Scan and Index-Only COUNT(*) [MUST]
 
-Two "always wins, no ANALYZE/cost model needed" optimizations (#444),
-both built on the new `Opcode::IdxColumn` (reads key column `P2` of
-index-read cursor `P1`'s current entry into register `P3`, decoded
-straight from the index's own record — the index-cursor counterpart to
-`Column` on a table cursor):
+Two "always wins, no ANALYZE/cost model needed" optimizations (#444).
+Real SQLite has no separate index-column-read opcode — it reuses plain
+`Column` against an index cursor's current entry exactly as it does
+against a table cursor, and this codebase follows suit rather than
+inventing a nonexistent opcode:
 
 - **Covering-index scan**: when a single-table `SELECT`'s `WHERE`
   clause is a single top-level equality between a `UNIQUE` index's
   leading column and a literal/bind-parameter operand, and every result
   column the `SELECT` list needs (bare columns only) is itself carried
   by that same index, `try_compile_covering_index_scan` emits
-  `SeekIndexEq` (the point probe) + one `IdxColumn` read per result
-  column, never opening/seeking the table cursor at all.
+  `SeekIndexEq` (the point probe) + one `Column` read per result
+  column straight off the index cursor, never opening/seeking the table
+  cursor at all.
   `find_covering_index` is the shared detection function both this
   codegen path and `EXPLAIN QUERY PLAN` (`SEARCH ... USING COVERING
   INDEX ...`) call, so the two can never drift apart.
@@ -1163,7 +1164,7 @@ change here — this requirement's `Tests:` links below only cover the
 two genuinely new fast paths.
 
 **Implementation:**
-`src/vdbe/cursor.rs::idx_column`,
+`src/vdbe/cursor.rs::read_row_column` (index-cursor case),
 `src/codegen/select/limit_scan.rs::{find_covering_index, try_compile_covering_index_scan}`,
 `src/codegen/select/aggregate.rs::try_compile_index_only_count`,
 `src/codegen/select/eqp.rs::explain_query_plan`
@@ -1172,7 +1173,7 @@ two genuinely new fast paths.
 
 - GIVEN `CREATE UNIQUE INDEX idx_ab ON t(a, b)` and `SELECT a, b FROM t
   WHERE a = 6`
-- THEN the compiled program contains `IdxColumn` but no `SeekRowid`,
+- THEN the compiled program contains `SeekIndexEq` but no `SeekRowid`,
   and its output matches a full table scan of the same query
 
 **Tests:** `tests/corpus/no_stats_optimizations_test.rs::covering_index_equality_select_matches_oracle`, `tests/corpus/no_stats_optimizations_test.rs::covering_index_equality_select_miss_matches_oracle`

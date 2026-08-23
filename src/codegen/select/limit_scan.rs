@@ -269,7 +269,7 @@ pub(super) fn find_covering_index<'a>(
 /// Emits an index-only ("covering index") scan (#444) in place of
 /// `SeekRowid` + full row decode, when [`find_covering_index`] finds a
 /// `UNIQUE` index that carries every column this `SELECT` needs —
-/// `SeekIndexEq` (the point probe) + `IdxColumn` reads straight out of
+/// `SeekIndexEq` (the point probe) + `Column` reads straight out of
 /// the matched index entry, never touching the table cursor at all.
 ///
 /// Returns `Ok(true)` when this fast path was taken; `Ok(false)` leaves
@@ -332,7 +332,7 @@ where
             .unwrap_or(0);
         let r = reg.alloc();
         em.emit(Instruction::new(
-            Opcode::IdxColumn,
+            Opcode::Column,
             index_cursor,
             i32::try_from(col_idx).unwrap_or(0),
             r,

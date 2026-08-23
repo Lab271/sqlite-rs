@@ -1,5 +1,5 @@
 //! #444 acceptance: covering-index scan and index-only `COUNT(*)`
-//! compile to `IdxColumn`/`SeekIndexEq` reads that never seek/decode
+//! compile to `SeekIndexEq` + `Column` reads that never seek/decode
 //! the table row, and produce byte-for-byte the same output as the
 //! pinned oracle. Same scratch-db-plus-oracle pattern
 //! `index_ordered_scan_test.rs` uses.
@@ -117,14 +117,16 @@ fn compiled_opcodes(schema: &TableSchema, sql: &str) -> Vec<Opcode> {
     program.instructions.iter().map(|i| i.opcode).collect()
 }
 
-/// Confirms the covering-index-scan fast path was taken: `IdxColumn`
-/// reads present, `SeekRowid`/plain `Column` (on the table cursor)
-/// absent — i.e. the table row is never fetched at all.
+/// Confirms the covering-index-scan fast path was taken: a `SeekIndexEq`
+/// probe against the index cursor (with `Column` reads straight off it —
+/// real SQLite reuses the same `Column` opcode for index cursors, so its
+/// presence alone doesn't distinguish the fast path) but no `SeekRowid`
+/// — i.e. the table row is never fetched at all.
 fn assert_covering_index_scan(schema: &TableSchema, sql: &str) {
     let opcodes = compiled_opcodes(schema, sql);
     assert!(
-        opcodes.contains(&Opcode::IdxColumn),
-        "expected IdxColumn in the compiled program for {sql:?}, got: {opcodes:?}"
+        opcodes.contains(&Opcode::SeekIndexEq),
+        "expected SeekIndexEq in the compiled program for {sql:?}, got: {opcodes:?}"
     );
     assert!(
         !opcodes.contains(&Opcode::SeekRowid),
