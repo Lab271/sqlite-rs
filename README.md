@@ -76,3 +76,7 @@ All four V1 phases landed: format core (header, record decoder, VFS, pinned-orac
 All four V2 phases landed: tokenizer + SELECT-core parser, the value-semantics kernel (affinity, comparison, collation) and scalar function core, the VDBE interpreter with full control/cursor/compare/arithmetic/result/sorter opcode dispatch, and the `sqlite-rs query` CLI validated against a sqllogictest single-table slice. Epic #56 closed at 0.8.0.
 
 V3 phase 1 (the b-tree write path) landed at 0.9.0: pager write path + freelist, table and index b-tree insert/delete with page split/merge/collapse, overflow chain write/free, and statement-level rollback journaling. Every file this crate writes opens and `PRAGMA integrity_check`s cleanly in stock `sqlite3`. Next: V3 phase 2 — the write-path parser + schema layer.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test instructions, code style, and the PR process. Security issues should go through [SECURITY.md](SECURITY.md) rather than a public issue.
