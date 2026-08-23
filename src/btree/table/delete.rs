@@ -26,9 +26,9 @@
 //! scratch write path does either.
 
 use crate::btree::{
-    build_interior_cell, collect_interior_entries, collect_leaf_cells, decode_cell_head,
-    find_leaf_page, local_payload_size, page1_header_start, read_page_type, read_u32,
-    splice_delete_cell, write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE,
+    build_interior_cell, cell_bytes, collect_interior_entries, collect_leaf_cells,
+    decode_cell_head, find_leaf_page, local_payload_size, page1_header_start, read_page_type,
+    read_u32, splice_delete_cell, write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE,
     LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
@@ -71,7 +71,7 @@ pub fn delete_row(
     }
 
     cells.remove(pos);
-    let remaining: Vec<Vec<u8>> = cells.into_iter().map(|(_, c)| c).collect();
+    let remaining = cell_bytes(cells);
     let buf = pager.get_page_mut(leaf_page)?;
     write_leaf_page(buf, header_start, leaf_page, &remaining)?;
     pager.deallocate_page(leaf_page)?;
@@ -250,12 +250,7 @@ fn collapse_root(
         LEAF_TABLE => {
             let cells = collect_leaf_cells(&content, child_header_start, only_child, usable_size)?;
             let dest = pager.get_page_mut(root_page)?;
-            write_leaf_page(
-                dest,
-                root_header_start,
-                root_page,
-                &cells.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
-            )?;
+            write_leaf_page(dest, root_header_start, root_page, &cell_bytes(cells))?;
         }
         INTERIOR_TABLE => {
             let (entries, rightmost) =

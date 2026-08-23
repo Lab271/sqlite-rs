@@ -751,6 +751,14 @@ pub(super) fn put_u8(
 /// [`write_interior_page`]) rather than patching bytes incrementally — see
 /// `insert.rs`'s module doc's "fully rebuilds" simplification note. Shared
 /// by the insert and delete write paths.
+/// Drops each cell's sort key, keeping only its encoded bytes — the
+/// shape [`write_leaf_page`]/[`write_interior_page`] want. Shared by
+/// every leaf/interior rebuild and split site instead of each repeating
+/// its own `.into_iter().map(|(_, c)| c).collect()`.
+pub(super) fn cell_bytes<K>(cells: Vec<(K, Vec<u8>)>) -> Vec<Vec<u8>> {
+    cells.into_iter().map(|(_, c)| c).collect()
+}
+
 pub(super) fn write_leaf_page(
     buf: &mut [u8],
     header_start: usize,
