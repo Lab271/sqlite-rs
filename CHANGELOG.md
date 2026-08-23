@@ -6,6 +6,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-08-23
+
+fix: correlated scalar subquery equality seeks instead of scanning (#434)
+— a correlated scalar subquery's own `WHERE` clause always compiled to
+an unconditional `Rewind`/`Next` scan, even when it was a trivially
+seekable equality against the subquery table's rowid or a `UNIQUE`
+index. Comparing against the pinned sqlite3 oracle's own `EXPLAIN`
+output for the reported query showed it uses no caching for this shape
+at all — it compiles the equality to a single `SeekRowid` per row.
+`compile_scalar_subquery` (`src/codegen/subquery/scalar.rs`) now reuses
+`join_access::choose_join_access` (#243's join-level access-strategy
+classifier) to take the same fast path; no new VDBE opcode needed.
+`#314`'s memoization cache (ADR-0021) stays in place for correlated
+subqueries whose `WHERE` isn't a seekable equality. `correlated_subquery`
+benchmark: 785x oracle-relative and unmeasurable against `bench_50mb.db`
+(blew the 50M-step VDBE guard rail) down to ~14-15x on both fixtures.
+See ADR-0027.
+
 ## [0.17.1] - 2026-08-23
 
 fix: decode UTF-8/UTF-16 text straight into `Rc<str>` (#441) — text
