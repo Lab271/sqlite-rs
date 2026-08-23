@@ -140,6 +140,15 @@ pub struct Pager {
     /// number the kernel may already have reused for something else would
     /// be a real bug.
     lock: FileLock,
+    /// The lock level a `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` has already
+    /// escalated `lock` to for the current transaction (`Shared` — i.e.
+    /// no escalation yet — for a bare/DEFERRED `BEGIN`, #395). `flush`
+    /// consults this so its own transient EXCLUSIVE escalation
+    /// de-escalates back to plain `Shared` (the transaction is over,
+    /// commit succeeded) rather than assuming there was nothing to
+    /// release; `rollback` and a no-op `flush` (nothing dirty) use it to
+    /// release a BEGIN-time lock that was never touched by a write.
+    tx_lock_level: crate::vfs::LockLevel,
     /// Held only for its `Drop`, which releases the WAL `-shm`
     /// reader-mark lock claimed in `open` (#45) — `None` when there is no
     /// `-shm` file to coordinate through (no live WAL writer has ever
@@ -282,6 +291,7 @@ impl Pager {
         let source = WritablePageSource::from_file(db_file, page_size);
         Ok(Pager {
             lock,
+            tx_lock_level: crate::vfs::LockLevel::Shared,
             wal_lock,
             source,
             wal_pages,
@@ -324,6 +334,12 @@ impl Pager {
     /// drops them.
     pub fn flush(&mut self) -> Result<(), PagerError> {
         if self.dirty.is_empty() {
+            // Nothing to write, but a `BEGIN IMMEDIATE`/`EXCLUSIVE` may
+            // still be holding RESERVED/EXCLUSIVE from `begin_immediate`/
+            // `begin_exclusive` (#395) with no write ever happening before
+            // this `COMMIT` — release it now, since the transaction is
+            // ending either way.
+            self.release_tx_lock()?;
             return Ok(());
         }
         // Escalate the SHARED lock every `Pager` already holds up to
@@ -335,14 +351,61 @@ impl Pager {
         // (some other connection is already RESERVED-or-higher) surfaces as
         // `VfsError::Locked` here, before any byte of this transaction is
         // journaled or written — `self.dirty` is left intact so the caller
-        // can retry or roll back.
-        self.lock.escalate_to_exclusive()?;
+        // can retry or roll back. Already at RESERVED/EXCLUSIVE from
+        // `begin_immediate`/`begin_exclusive` just steps the remainder of
+        // the ladder, not a double-escalation.
+        self.lock.set_level(crate::vfs::LockLevel::Exclusive)?;
         let result = self.flush_locked();
         // Always attempt to release back to SHARED, even on failure, so a
         // mid-flush error doesn't leave this connection wedged at EXCLUSIVE
-        // for the rest of its lifetime.
-        self.lock.de_escalate_to_shared()?;
+        // for the rest of its lifetime. The transaction is over either way
+        // (commit succeeded, or the caller will roll back), so this always
+        // goes all the way to `Shared`, not back to `tx_lock_level`.
+        self.lock.set_level(crate::vfs::LockLevel::Shared)?;
+        self.tx_lock_level = crate::vfs::LockLevel::Shared;
         result
+    }
+
+    /// Escalates the held lock to RESERVED, as stock SQLite's `BEGIN
+    /// IMMEDIATE` does at `BEGIN` time rather than waiting for the first
+    /// write (#395) — a concurrent writer is blocked immediately. Fails
+    /// with [`VfsError::Locked`](crate::vfs::VfsError::Locked) if another
+    /// connection already holds RESERVED or higher.
+    pub fn begin_immediate(&mut self) -> Result<(), PagerError> {
+        self.lock.set_level(crate::vfs::LockLevel::Reserved)?;
+        self.tx_lock_level = crate::vfs::LockLevel::Reserved;
+        Ok(())
+    }
+
+    /// Escalates the held lock all the way to EXCLUSIVE at `BEGIN` time, as
+    /// stock SQLite's `BEGIN EXCLUSIVE` does (#395) — blocks every other
+    /// reader and writer immediately, not just at `COMMIT`.
+    pub fn begin_exclusive(&mut self) -> Result<(), PagerError> {
+        self.lock.set_level(crate::vfs::LockLevel::Exclusive)?;
+        self.tx_lock_level = crate::vfs::LockLevel::Exclusive;
+        Ok(())
+    }
+
+    /// The lock level escalated to by `begin_immediate`/`begin_exclusive`
+    /// for the current transaction, or `Shared` if neither has run since
+    /// the last commit/rollback (or since `open`). Test-only: nothing in
+    /// `src/` reads this — `flush`/`rollback` consult `self.tx_lock_level`
+    /// directly — but `src/vdbe/control.rs`'s tests assert on it to
+    /// verify `BEGIN IMMEDIATE`/`EXCLUSIVE` escalate correctly (#395).
+    #[cfg(test)]
+    pub(crate) fn tx_lock_level(&self) -> crate::vfs::LockLevel {
+        self.tx_lock_level
+    }
+
+    /// Releases a lock level escalated by `begin_immediate`/
+    /// `begin_exclusive` back to plain `Shared`, if one is held. A no-op
+    /// for a DEFERRED/bare `BEGIN`, which never escalates at `BEGIN` time.
+    fn release_tx_lock(&mut self) -> Result<(), PagerError> {
+        if self.tx_lock_level > crate::vfs::LockLevel::Shared {
+            self.lock.set_level(crate::vfs::LockLevel::Shared)?;
+            self.tx_lock_level = crate::vfs::LockLevel::Shared;
+        }
+        Ok(())
     }
 
     fn flush_locked(&mut self) -> Result<(), PagerError> {
@@ -396,9 +459,13 @@ impl Pager {
     /// in-progress transaction is just forgetting what
     /// [`Pager::get_page_mut`] buffered — nothing to journal, sync, or
     /// evict from `page_cache` (which never holds a dirty page's
-    /// content in the first place, per its own doc comment).
-    pub fn rollback(&mut self) {
+    /// content in the first place, per its own doc comment). Also
+    /// releases any RESERVED/EXCLUSIVE lock a `BEGIN IMMEDIATE`/
+    /// `EXCLUSIVE` escalated to at `BEGIN` time (#395), since the
+    /// transaction is ending here rather than at a later `flush`.
+    pub fn rollback(&mut self) -> Result<(), PagerError> {
         self.dirty.clear();
+        self.release_tx_lock()
     }
 
     /// Allocates a page: pops one off the freelist if it's non-empty,

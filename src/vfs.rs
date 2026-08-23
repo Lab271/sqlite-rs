@@ -259,6 +259,18 @@ impl FileLock {
     pub(crate) fn de_escalate_to_shared(&mut self) -> Result<()> {
         self.0.de_escalate_to_shared()
     }
+
+    /// Steps this held lock to exactly `level`, up or down the ladder as
+    /// needed (see [`crate::vfs::lock::FileLockState::set_level`]).
+    /// Generalizes [`FileLock::escalate_to_exclusive`]/
+    /// [`FileLock::de_escalate_to_shared`] for callers that need an
+    /// arbitrary target — `BEGIN IMMEDIATE`/`EXCLUSIVE` escalating to
+    /// RESERVED/EXCLUSIVE at `BEGIN` time (#395), and `Pager::flush`
+    /// releasing back to whatever level the transaction held before its
+    /// own transient EXCLUSIVE escalation.
+    pub(crate) fn set_level(&mut self, level: lock::LockLevel) -> Result<()> {
+        self.0.set_level(level)
+    }
 }
 
 /// Implemented next to each [`VfsFile`] backend (e.g. the Unix backend's
@@ -277,6 +289,13 @@ trait SharedLockGuard {
 
     /// See [`FileLock::de_escalate_to_shared`]. Default: no-op.
     fn de_escalate_to_shared(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// See [`FileLock::set_level`]. Default: no-op — backends with no real
+    /// concurrent process to coordinate with (e.g. [`MemoryVfs`]) have
+    /// nothing to step.
+    fn set_level(&mut self, _level: lock::LockLevel) -> Result<()> {
         Ok(())
     }
 }

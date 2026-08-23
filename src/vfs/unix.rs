@@ -165,6 +165,13 @@ impl SharedLockGuard for UnixLockGuard {
             .set_level(lock::LockLevel::Shared)
             .map_err(|source| to_lock_error(&self.path, source))
     }
+
+    fn set_level(&mut self, level: lock::LockLevel) -> Result<()> {
+        self.lock
+            .borrow_mut()
+            .set_level(level)
+            .map_err(|source| to_lock_error(&self.path, source))
+    }
 }
 
 impl Drop for UnixLockGuard {
