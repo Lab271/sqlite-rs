@@ -939,12 +939,12 @@ impl Parser {
                 break;
             }
             let union_start = self.advance().span;
-            if !self.eat_kw(Keyword::ALL) {
-                return self.unsupported(
-                    "compound SELECT (plain UNION, with dedup) not yet supported; use UNION ALL",
-                );
-            }
-            compound.push(self.parse_compound_select_arm(union_start)?);
+            let op = if self.eat_kw(Keyword::ALL) {
+                CompoundOp::UnionAll
+            } else {
+                CompoundOp::Union
+            };
+            compound.push(self.parse_compound_select_arm(union_start, op)?);
         }
 
         let mut order_by = Vec::new();
@@ -1037,12 +1037,17 @@ impl Parser {
         })
     }
 
-    /// One `UNION ALL SELECT ...` arm (#240): same core shape as
-    /// [`Self::parse_select_stmt`] minus ORDER BY/LIMIT, which bind to
-    /// the whole compound statement rather than any one arm.
-    fn parse_compound_select_arm(&mut self, union_start: Span) -> PResult<CompoundSelect> {
+    /// One `UNION [ALL] SELECT ...` arm (#240 for `UNION ALL`, #377 for
+    /// plain `UNION`): same core shape as [`Self::parse_select_stmt`]
+    /// minus ORDER BY/LIMIT, which bind to the whole compound statement
+    /// rather than any one arm.
+    fn parse_compound_select_arm(
+        &mut self,
+        union_start: Span,
+        op: CompoundOp,
+    ) -> PResult<CompoundSelect> {
         if self.at_kw(Keyword::VALUES) {
-            return self.unsupported("UNION ALL VALUES (...) not yet supported");
+            return self.unsupported("UNION [ALL] VALUES (...) not yet supported");
         }
         let start = self.expect_kw(Keyword::SELECT)?;
 
@@ -1095,7 +1100,7 @@ impl Parser {
             .get(self.pos.saturating_sub(1))
             .map_or(start, |t| t.span);
         Ok(CompoundSelect {
-            op: CompoundOp::UnionAll,
+            op,
             distinct,
             columns,
             from,

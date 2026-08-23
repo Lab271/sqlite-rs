@@ -398,6 +398,14 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 **Tests:** `tests/unit/parser.rs::test_with_clause_single_cte`, `tests/unit/parser.rs::test_with_clause_multiple_ctes`, `tests/unit/parser.rs::test_with_clause_cte_with_column_list`, `tests/unit/parser.rs::test_with_clause_cte_referenced_in_from`, `tests/unit/parser.rs::test_with_recursive_is_unsupported`, `tests/unit/parser.rs::test_with_clause_printer_roundtrip`
 
+#### Scenario: Accept compound SELECT (UNION / UNION ALL)
+
+- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2` and `SELECT a FROM t1 UNION ALL SELECT b FROM t2`, including chained (`A UNION B UNION C`) and mixed (`A UNION B UNION ALL C`) arms
+- WHEN parsed
+- THEN parse succeeds with each arm as a `CompoundSelect` (tagged `CompoundOp::Union`/`CompoundOp::UnionAll`) appended to `Select::compound`; `INTERSECT`/`EXCEPT` remain `Unsupported` (deferred to V7), both at the top level and inside an `EXISTS`/`IN (...)`/scalar subquery
+
+**Tests:** `tests/unit/parser.rs::test_accept_union_all`, `tests/unit/parser.rs::test_accept_multiple_union_all_arms`, `tests/unit/parser.rs::test_accept_union_all_with_trailing_order_by_limit`, `tests/unit/parser.rs::test_accept_union`, `tests/unit/parser.rs::test_accept_multiple_union_arms`, `tests/unit/parser.rs::test_accept_mixed_union_and_union_all_arms`, `tests/unit/parser.rs::test_union_inside_subquery_parses`, `tests/unit/parser.rs::test_unsupported_compound_select`, `tests/unit/parser.rs::test_compound_select_inside_subquery_is_unsupported_not_invalid`, `tests/unit/parser.rs::test_multi_column_in_rejects_compound_subquery`, `tests/corpus/parser_oracle_test.rs::parser_matches_oracle_three_way_outcome`
+
 #### Scenario: Accept window function
 
 - GIVEN `SELECT row_number() OVER (ORDER BY x) FROM t`

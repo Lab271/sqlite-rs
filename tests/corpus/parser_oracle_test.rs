@@ -51,8 +51,10 @@ const CASES: &[(&str, Outcome)] = &[
         "SELECT a, count(*) FROM t GROUP BY a HAVING count(*) > 1",
         Outcome::Accept,
     ),
+    // #377: plain UNION now parses (dedup wired up in codegen, #378).
+    ("SELECT a FROM t UNION SELECT b FROM t", Outcome::Accept),
     (
-        "SELECT a FROM t UNION SELECT b FROM t",
+        "SELECT a FROM t INTERSECT SELECT b FROM t",
         Outcome::Unsupported,
     ),
     ("SELECT (SELECT a FROM t) FROM t", Outcome::Accept),

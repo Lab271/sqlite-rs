@@ -592,9 +592,11 @@ fn test_unsupported_cross_join_with_on() {
     assert!(msg.contains("CROSS"), "message: {msg}");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported — only `UNION`/`UNION
+/// ALL` are implemented for V6.1.
 #[test]
 fn test_unsupported_compound_select() {
-    let msg = unsupported("SELECT a UNION SELECT b");
+    let msg = unsupported("SELECT a INTERSECT SELECT b");
     assert!(msg.contains("compound"), "message: {msg}");
 }
 
@@ -677,6 +679,36 @@ fn test_accept_union_all_with_trailing_order_by_limit() {
     assert_eq!(select.compound.len(), 1);
     assert_eq!(select.order_by.len(), 1);
     assert!(select.limit.is_some());
+}
+
+/// #377: plain `UNION` parses into `Select::compound` with
+/// `CompoundOp::Union`.
+#[test]
+fn test_accept_union() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u");
+    assert_eq!(select.compound.len(), 1);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert!(select.compound[0].from.is_some());
+}
+
+/// #377: multiple `UNION` arms chain into one `compound` vec, same as
+/// `UNION ALL` (#240).
+#[test]
+fn test_accept_multiple_union_arms() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u UNION SELECT c FROM v");
+    assert_eq!(select.compound.len(), 2);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert_eq!(select.compound[1].op, CompoundOp::Union);
+}
+
+/// #377: `UNION` and `UNION ALL` arms can be mixed in one compound
+/// statement — each arm carries its own `op`.
+#[test]
+fn test_accept_mixed_union_and_union_all_arms() {
+    let select = accept("SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT c FROM v");
+    assert_eq!(select.compound.len(), 2);
+    assert_eq!(select.compound[0].op, CompoundOp::Union);
+    assert_eq!(select.compound[1].op, CompoundOp::UnionAll);
 }
 
 #[test]
@@ -900,10 +932,21 @@ fn test_exists_requires_a_select() {
     unsupported("SELECT id FROM t WHERE EXISTS (1, 2)");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported inside a subquery too
+/// — plain `UNION` (unlike `UNION ALL` since #240) is now accepted
+/// here the same way it is at the top level.
 #[test]
 fn test_compound_select_inside_subquery_is_unsupported_not_invalid() {
-    let msg = unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
+    let msg =
+        unsupported("SELECT id FROM t WHERE id IN (SELECT a FROM u INTERSECT SELECT b FROM v)");
     assert!(msg.contains("compound"), "message: {msg}");
+}
+
+/// #377: plain `UNION` inside an `IN (...)` subquery parses like
+/// `UNION ALL` already did (#240) — no special-casing by op.
+#[test]
+fn test_union_inside_subquery_parses() {
+    accept("SELECT id FROM t WHERE id IN (SELECT a FROM u UNION SELECT b FROM v)");
 }
 
 #[test]
@@ -999,10 +1042,13 @@ fn test_bare_tuple_without_in_is_invalid() {
     invalid("SELECT (a, b) FROM t");
 }
 
+/// #377: `INTERSECT`/`EXCEPT` remain unsupported inside a multi-column
+/// `IN (...)` subquery too.
 #[test]
 fn test_multi_column_in_rejects_compound_subquery() {
-    let msg =
-        unsupported("SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u UNION SELECT 1, 2)");
+    let msg = unsupported(
+        "SELECT id FROM t WHERE (a, b) IN (SELECT x, y FROM u INTERSECT SELECT 1, 2)",
+    );
     assert!(msg.contains("compound"), "message: {msg}");
 }
 

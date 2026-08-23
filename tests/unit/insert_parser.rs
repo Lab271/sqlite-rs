@@ -153,10 +153,25 @@ fn test_invalid_insert_trailing_garbage() {
     invalid("INSERT INTO t VALUES (1) EXTRA");
 }
 
+/// #377 made plain `UNION` parse successfully wherever a `select-stmt`
+/// grammar production appears — `INSERT ... SELECT`'s source included
+/// — the same way `UNION ALL` already did (#240). Parsing accepts it;
+/// `compile_insert` rejects the compound source at codegen time
+/// instead (`tests/unit/insert_parser.rs` has no codegen access, so
+/// see `src/codegen/stmt/insert.rs`'s explicit `select.compound`
+/// guard).
 #[test]
-fn test_unsupported_insert_select_source_compound() {
-    // The inline SELECT source parses fine on its own, but the trailing
-    // UNION is only rejected once control returns to the top-level
-    // expect_end check (issue #224).
-    unsupported("INSERT INTO t SELECT a FROM other UNION SELECT a FROM other");
+fn test_insert_select_source_compound_now_parses() {
+    let insert = accept("INSERT INTO t SELECT a FROM other UNION SELECT a FROM other");
+    let InsertSource::Select(select) = &insert.source else {
+        panic!("expected a SELECT source");
+    };
+    assert_eq!(select.compound.len(), 1);
+}
+
+/// `INTERSECT`/`EXCEPT` remain unsupported everywhere, including as an
+/// `INSERT ... SELECT` source.
+#[test]
+fn test_unsupported_insert_select_source_intersect() {
+    unsupported("INSERT INTO t SELECT a FROM other INTERSECT SELECT a FROM other");
 }

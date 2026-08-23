@@ -102,6 +102,7 @@ impl fmt::Display for CompoundSelect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.op {
             CompoundOp::UnionAll => write!(f, "UNION ALL SELECT")?,
+            CompoundOp::Union => write!(f, "UNION SELECT")?,
         }
         match self.distinct {
             Some(Distinctness::Distinct) => write!(f, " DISTINCT")?,
