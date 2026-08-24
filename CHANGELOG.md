@@ -8,6 +8,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+perf: zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
+— follow-up to #467, which left `IndexRow::payload` (src/btree/index.rs)
+as an owned `Vec<u8>` out of scope. `IndexFrame.page` is now `Rc<[u8]>`
+(matching `PageSource::read_page`'s return type); `IndexRow::payload`
+reuses the `Payload` enum #467 introduced instead of `Vec<u8>`;
+`decode_leaf_entry`/`decode_interior_entry` pass `&frame.page` directly
+into `reassemble_payload` instead of wrapping it in a throwaway `Rc`
+and immediately copying the result back to a `Vec`. `decode_value_cell`
+(the Pager-only index insert/delete write path) is unchanged.
+
 feat: `ORDER BY`/`LIMIT` on a compound (`UNION`/`UNION ALL`) `SELECT`
 (#484) — `compile_select_compound` previously rejected any top-level
 `ORDER BY`/`LIMIT` trailing a compound statement. Every arm's projected
