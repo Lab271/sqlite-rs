@@ -223,6 +223,9 @@ bench: fixtures-bench ## Tier 1 (engine-to-engine): criterion bench, sqlite-rs v
 bench-v6: fixtures-bench ## V6 (epic #354, #391): WAL journal-vs-WAL/concurrent-read-write/checkpoint + CTE-reuse benches (tests/performance/v6.rs)
 	@bash -c '. ./tools/bench_env.sh && cargo bench --bench v6'
 
+bench-skip-scan: ## #485: skip-scan vs full-scan at a low-cardinality leading index column (tests/performance/skip_scan.rs, own fixture)
+	@bash -c '. ./tools/bench_env.sh && cargo bench --bench skip_scan'
+
 bench-cli: fixtures-bench ## Tier 2 (CLI-to-CLI): hyperfine, sqlite-rs dump/query vs sqlite3 (tools/bench_cli.sh)
 	./tools/bench_cli.sh
 
