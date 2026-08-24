@@ -36,6 +36,23 @@ pub struct CheckpointResult {
     pub checkpoint_complete: bool,
 }
 
+/// The main file's current page count, from its byte size — used to
+/// bound a checkpoint's write offsets (see [`checkpoint_passive`]'s call
+/// site). Fails closed: if `size` (in pages) doesn't fit in a `u32`,
+/// returns `0` rather than `u32::MAX` — the caller takes `max(db_size,
+/// this)`, so `0` just falls back to the WAL's own already-validated
+/// `db_size` bound instead of disabling the bound altogether.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "page_size.max(1) rules out division by zero"
+)]
+fn page_count_from_size(size: u64, page_size: u32) -> u32 {
+    u32::try_from(
+        size.saturating_add(u64::from(page_size).saturating_sub(1)) / u64::from(page_size).max(1),
+    )
+    .unwrap_or(0)
+}
+
 /// Runs one PASSIVE checkpoint pass on `db_path`'s WAL. A missing, empty,
 /// or sub-header `-wal` file is not an error — there is nothing to
 /// checkpoint, and the result reports zero frames, already complete.
@@ -146,18 +163,9 @@ pub fn checkpoint_passive(
     // size, by the main file's existing page count — either way, a
     // corrupted-but-checksum-valid WAL (a `page_num` near `u32::MAX`, say)
     // must never be allowed to drive `write_at` to an arbitrary offset far
-    // beyond the database's actual extent.
-    #[allow(
-        clippy::arithmetic_side_effects,
-        reason = "page_size.max(1) rules out division by zero"
-    )]
-    let current_pages = u32::try_from(
-        db_file
-            .size()?
-            .saturating_add(u64::from(header.page_size).saturating_sub(1))
-            / u64::from(header.page_size).max(1),
-    )
-    .unwrap_or(u32::MAX);
+    // beyond the database's actual extent. See `page_count_from_size`'s
+    // own doc for why it fails closed rather than open.
+    let current_pages = page_count_from_size(db_file.size()?, header.page_size);
     let max_page = db_size.max(current_pages);
     for (page_num, content) in &pages {
         if *page_num == 0 || *page_num > max_page {
@@ -190,6 +198,25 @@ mod tests {
         let db_path = Path::new("/test.db").to_path_buf();
         memory.insert(db_path.to_str().unwrap(), vec![0u8; page_size as usize]);
         (AnyVfs::new(memory), db_path)
+    }
+
+    #[test]
+    fn page_count_from_size_computes_the_real_page_count() {
+        assert_eq!(page_count_from_size(0, 512), 0);
+        assert_eq!(page_count_from_size(512, 512), 1);
+        assert_eq!(page_count_from_size(513, 512), 2);
+        assert_eq!(page_count_from_size(1024, 512), 2);
+    }
+
+    /// #421 review finding: a file size whose page count doesn't fit in
+    /// a `u32` must fail *closed* (`0`), not fall back to `u32::MAX` —
+    /// the caller takes `max(db_size, this)` to bound checkpoint write
+    /// offsets, so `u32::MAX` here would silently disable that bound
+    /// entirely for a corrupted-but-checksum-valid WAL frame, exactly
+    /// the attack this bound exists to stop.
+    #[test]
+    fn page_count_from_size_fails_closed_on_overflow() {
+        assert_eq!(page_count_from_size(u64::MAX, 512), 0);
     }
 
     #[test]

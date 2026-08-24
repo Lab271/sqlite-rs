@@ -8,6 +8,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+fix: fail closed, not open, when a checkpoint's page-count bound
+overflows `u32` — surfaced by a `make silent-swallow` robustness audit
+(unrelated to epic #421). `checkpoint_passive`'s own comment states the
+intent plainly: a corrupted-but-checksum-valid WAL frame with a
+`page_num` near `u32::MAX` must never drive `write_at` to an arbitrary
+offset beyond the database's actual extent — but the bound computing
+the main file's current page count fell back to `u32::MAX` on `u32::
+try_from` overflow, which made `max_page` effectively unbounded,
+defeating the exact check the comment describes. Extracted into a
+testable `page_count_from_size()` helper, now falling back to `0`
+(`max_page` then falls back to the WAL's own already-validated
+`db_size` bound) instead.
+
 fix: support `GROUP BY`/aggregate combined with `ORDER BY` and a JOIN
 (#502, found via the V07 parity suite #72) — `compile_joined_grouped_
 scan` previously rejected this combination outright. A third codegen
