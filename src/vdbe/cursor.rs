@@ -128,6 +128,16 @@ pub(crate) struct TableCursorState {
     /// downstream needs one anyway (only "is a row positioned" and the
     /// rowid itself ever survive across opcode dispatches).
     current_rowid: Option<i64>,
+    /// Memoizes the first `current_payload()` call for `current_rowid`'s
+    /// row — invalidated (never left stale) by [`Self::set_current`],
+    /// same lifecycle as `header_cache`. Without this, a multi-column
+    /// `Column` read (the common case) called `current_payload()` once
+    /// per column instead of once per row — for a 5-column `SELECT` that
+    /// meant 5x the `reassemble_payload` work per row, a measured
+    /// regression on the `full_scan` bench when #473 first made payload
+    /// fetching lazy (caught post-merge, fixed here rather than reverting
+    /// the laziness itself).
+    cached_payload: Option<btree::Payload>,
     forced_null: bool,
     /// The table b-tree's root page (#194) — recorded so `Insert`/
     /// `Delete`/`NewRowid` know which b-tree to write to without a
@@ -151,20 +161,40 @@ pub(crate) struct TableCursorState {
 
 impl TableCursorState {
     /// The sole setter for `current_rowid` — always paired with
-    /// invalidating `header_cache`, so a cache can never survive its row.
+    /// invalidating `header_cache` and `cached_payload`, so neither cache
+    /// can ever survive its row.
     fn set_current(&mut self, rowid: Option<i64>) {
         self.current_rowid = rowid;
         self.header_cache.invalidate();
+        self.cached_payload = None;
     }
 
-    /// Reassembles the payload of the row `current_rowid` refers to, or
-    /// `None` if the cursor isn't positioned on a row. Lazy (#473): does
-    /// the actual reassembly — including any overflow-chain walk — only
-    /// when called, not eagerly at position time.
-    fn current_payload(&self) -> Result<Option<btree::Payload>, btree::BtreeError> {
-        self.current_rowid
-            .map(|_| self.cursor.current_payload())
-            .transpose()
+    /// Ensures `cached_payload` holds the reassembled payload for
+    /// `current_rowid`'s row, returning whether a row is positioned at
+    /// all (`false` if the cursor is exhausted/never positioned). Lazy
+    /// (#473): the actual reassembly — including any overflow-chain
+    /// walk — happens only on the first call for a given row; every
+    /// later call for the *same* row is a no-op, reusing `cached_payload`
+    /// instead of redoing the walk (or, for the common local/non-overflow
+    /// case, redoing the cheap but still per-call `Rc` clone + range
+    /// bookkeeping) once per column read — a regression caught post-merge
+    /// (a 5-column `SELECT` was paying for 5x the reassembly work per row
+    /// instead of 1x) and fixed by this cache.
+    ///
+    /// Returns whether positioned rather than the payload itself (an
+    /// `Option<&Payload>` return would borrow all of `self` for as long
+    /// as the reference lives, conflicting with the caller's next need
+    /// for `&mut self.header_cache`) — callers read `self.cached_payload`
+    /// directly afterward, a disjoint field access the borrow checker
+    /// accepts.
+    fn ensure_current_payload(&mut self) -> Result<bool, btree::BtreeError> {
+        if self.current_rowid.is_none() {
+            return Ok(false);
+        }
+        if self.cached_payload.is_none() {
+            self.cached_payload = Some(self.cursor.current_payload()?);
+        }
+        Ok(true)
     }
 }
 
@@ -447,6 +477,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         CursorSlot::Table(TableCursorState {
             cursor,
             current_rowid: None,
+            cached_payload: None,
             forced_null: false,
             root_page,
             header_cache: RowHeaderCache::default(),
@@ -482,6 +513,7 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         CursorSlot::Table(TableCursorState {
             cursor,
             current_rowid: None,
+            cached_payload: None,
             forced_null: false,
             root_page,
             header_cache: RowHeaderCache::default(),
@@ -697,26 +729,35 @@ fn read_row_column(
             if state.forced_null {
                 return Ok(Value::Null);
             }
-            let payload = state
-                .current_payload()
-                .map_err(|e| ExecError::MalformedInstruction {
-                    opcode,
-                    reason: e.to_string(),
-                })?
-                .ok_or(ExecError::MalformedInstruction {
+            let positioned =
+                state
+                    .ensure_current_payload()
+                    .map_err(|e| ExecError::MalformedInstruction {
+                        opcode,
+                        reason: e.to_string(),
+                    })?;
+            if !positioned {
+                return Err(ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
-                })?;
+                });
+            }
+            let Some(payload) = state.cached_payload.as_ref() else {
+                return Err(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                });
+            };
             state
                 .header_cache
-                .ensure(&payload)
+                .ensure(payload)
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
                 })?;
             state
                 .header_cache
-                .column(&payload, idx, TextEncoding::Utf8)
+                .column(payload, idx, TextEncoding::Utf8)
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
