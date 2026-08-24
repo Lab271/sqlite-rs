@@ -36,7 +36,7 @@ use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db, Program};
-use sqlite_rs::vfs::{PageSource, UnixVfs};
+use sqlite_rs::vfs::{PageSource, UnixVfs, Vfs, VfsPageSource};
 
 pub const ORACLE_VERSION: &str = "3.53.4";
 
@@ -429,11 +429,60 @@ fn bench_transactions(c: &mut Criterion) {
     );
 }
 
+/// #469: micro-benchmark for the `Payload::Owned` overflow-chain
+/// reassembly path #467 introduced (multi-page-overflow rows can't
+/// borrow — there's no single page range to point into — so this is the
+/// one payload-decoding path that still allocates and copies), so a
+/// regression reintroducing extra allocation or a slower reassembly walk
+/// is measurable. Deliberately bypasses the full SQL/VDBE `SCENARIOS`
+/// pipeline above: none of its bench-scale fixtures (`tools/gen_fixtures.sh
+/// --bench`) have an overflow-forcing column, and adding one is a bigger
+/// change than this test-only ticket's scope — this instead drives
+/// `TableCursor` directly against the small, already-committed
+/// `overflow_multi_page.db` corpus fixture (`src/btree.rs`'s own
+/// `overflow_multi_page_payload_is_byte_identical_to_oracle` test uses the
+/// same file), timing exactly the `first_row` -> `reassemble_payload`
+/// walk across its 14-page overflow chain.
+fn bench_overflow_payload(c: &mut Criterion) {
+    let path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/fixtures/btrees/overflow_multi_page.db"
+    ));
+    let vfs = UnixVfs;
+    let file = vfs
+        .open_read(path)
+        .unwrap_or_else(|e| fail(format!("open {path:?}: {e}")));
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0)
+        .unwrap_or_else(|e| fail(format!("read header {path:?}: {e}")));
+    let header = DatabaseHeader::parse(&header_buf)
+        .unwrap_or_else(|e| fail(format!("parse header {path:?}: {e}")));
+
+    let mut group = c.benchmark_group("overflow_payload_reassembly");
+    group.bench_function("multi_page", |b| {
+        b.iter(|| {
+            let source = VfsPageSource::open(&vfs, path, header.page_size)
+                .unwrap_or_else(|e| fail(format!("open page source {path:?}: {e}")));
+            // Root page 2, matching `src/btree.rs`'s `open_cursor` test
+            // helper — these corpus fixtures are single-table synthetic
+            // b-trees, not full databases with a `sqlite_master` catalog.
+            let mut cursor = TableCursor::new(source, &header, 2);
+            let row = cursor
+                .first_row()
+                .unwrap_or_else(|e| fail(format!("first_row: {e}")))
+                .unwrap_or_else(|| fail("expected a row in overflow_multi_page.db"));
+            black_box(row);
+        });
+    });
+    group.finish();
+}
+
 fn bench_all(c: &mut Criterion) {
     for fixture_name in ["bench_1mb.db", "bench_50mb.db"] {
         bench_fixture(c, fixture_name);
     }
     bench_transactions(c);
+    bench_overflow_payload(c);
 }
 
 criterion_group!(benches, bench_all);
