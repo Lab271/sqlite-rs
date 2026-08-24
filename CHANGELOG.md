@@ -32,6 +32,13 @@ the nested submodules (`parser`, `vdbe`, `btree`, `pager`, `codegen`,
 `#![warn(missing_docs)]` in `src/lib.rs` so future regressions are
 caught by `cargo build`/`clippy`. No logic or behavior changes.
 
+perf: hand-rolled multiplicative hasher for the pager's page-cache
+`HashMap` (#457) — page numbers are plain sequential `u32`s, not
+adversarial input, so the default hasher's SipHash cost on
+`PageCache::entries`'s hot get/insert path was unneeded. No new
+dependency (ADR-0022 already ruled that out for this cache);
+`point_lookup` bench ~5% faster on both fixtures.
+
 ## [0.17.7] - 2026-08-24
 
 fix: cache reassembled payload per row position (#469, #475) —
