@@ -105,26 +105,32 @@ SQLite's `sqlite_stat1` shape (`sqlite3 src/analyze.c`).
 
 ### Requirement 3: Stats and PlanCost Data Model [MUST]
 
-A `Stats` type MUST load `sqlite_stat1` rows for a given table into an
-in-memory structure, and `PlanCost { estimated_rows: u64, estimated_io: u64
-}` MUST be produced by:
+A `Stats` type MUST decode a table's `sqlite_stat1` rows (spec 011/Req 2's
+`(idx, stat)` shape) into an in-memory structure scoped to that one table,
+and `PlanCost { estimated_rows: u64, estimated_io: u64 }` MUST be produced
+by:
 
-- `estimate_scan_cost(table, stats) -> PlanCost` — cost of a full table
-  scan (rows = table's row count from `Stats`; io = row count, since a
+- `estimate_scan_cost(stats) -> PlanCost` — cost of a full table scan
+  (rows = the table's row count from `Stats`; io = row count, since a
   scan touches one page-worth of I/O per row in this MVP's cost model).
-- `estimate_index_cost(index, predicate, stats) -> PlanCost` — cost of
-  probing `index` for an equality `predicate`, using the index's stored
-  `avg_eq` to estimate matched rows.
+- `estimate_index_cost(index_name, stats) -> PlanCost` — cost of an
+  equality probe against `index_name`, using that index's stored
+  `avg_eq` (`Stats` is already scoped to one table, so no separate
+  `table`/`predicate` parameter is needed — the caller has already
+  narrowed to a single-column equality candidate the same way
+  `choose_join_access` does today, before ever consulting the cost
+  model).
 
 When `Stats` has no data for a table (no `ANALYZE` has run, or the table
 was created after the last `ANALYZE`), both functions MUST return a
-default estimate (e.g. `estimated_rows = u64::MAX` for a scan, so an index
-probe is always preferred when one is available) rather than panicking or
-dividing by zero — this is what keeps Requirement 16's stats-free fast
-paths behaviorally unaffected by this spec.
+default estimate (`estimated_rows = u64::MAX` for a scan or an unknown
+index, so an index probe with real stats is always preferred over one
+without) rather than panicking or dividing by zero — this is what keeps
+Requirement 16's stats-free fast paths behaviorally unaffected by this
+spec.
 
-**Implementation:** `src/planner/stats.rs::{Stats, PlanCost,
-estimate_scan_cost, estimate_index_cost}`
+**Implementation:** `src/planner.rs::Stats`, `src/planner.rs::PlanCost`,
+`src/planner.rs::estimate_scan_cost`, `src/planner.rs::estimate_index_cost`
 
 #### Scenario: Missing stats fall back to a conservative default
 
@@ -133,7 +139,7 @@ estimate_scan_cost, estimate_index_cost}`
 - THEN it returns a `PlanCost` with `estimated_rows = u64::MAX`, not a
   panic or a division by zero
 
-**Tests:** `tests/unit/stats_test.rs::missing_stats_fall_back_to_max_cost`
+**Tests:** `src/planner.rs::missing_stats_fall_back_to_max_cost`
 
 #### Scenario: An indexed equality is cheaper than a scan once stats exist
 
@@ -144,7 +150,7 @@ estimate_scan_cost, estimate_index_cost}`
 - THEN `estimate_index_cost` reports fewer `estimated_rows` than
   `estimate_scan_cost`
 
-**Tests:** `tests/unit/stats_test.rs::indexed_equality_cheaper_than_scan_with_stats`
+**Tests:** `src/planner.rs::indexed_equality_cheaper_than_scan_with_stats`
 
 ### Requirement 4: Cost-Informed Join Access Selection [MUST]
 
