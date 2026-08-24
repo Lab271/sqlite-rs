@@ -41,18 +41,18 @@
 //!   the `-wal`/`-shm` files entirely — when the *last* connection to a
 //!   WAL database closes. A one-shot `sqlite3 db "PRAGMA
 //!   journal_mode=WAL; INSERT ...;"` invocation therefore leaves no
-//!   `-wal` file behind by the time the process exits, which both
-//!   breaks a same-process-reads-the-WAL-overlay assertion *and* (worse)
-//!   breaks a *subsequent* sqlite-rs commit: `Pager::flush_wal_locked`
-//!   calls `WalWriter::open_existing`, which errors (`PagerError::Wal`,
-//!   wrapping `VfsError::NotFound`) rather than starting a fresh WAL,
-//!   if the `-wal` file it expects to resume from has been deleted out
-//!   from under it by some other connection's checkpoint — even though
-//!   `Pager::journal_mode` still correctly says `Wal`. [`OracleSession`]
-//!   below (a genuinely live, still-open second process) sidesteps this
-//!   by construction rather than working around it: it's also the more
-//!   faithful reproduction of this ticket's "two terminals, both stay
-//!   running" acceptance sketch anyway.
+//!   `-wal` file behind by the time the process exits, which would have
+//!   broken a same-process-reads-the-WAL-overlay assertion. It no
+//!   longer breaks a *subsequent* sqlite-rs commit, though:
+//!   `Pager::flush_wal_locked` now recreates a fresh `-wal`/`-shm` pair
+//!   when `WalWriter::open_existing` reports the file missing rather
+//!   than propagating the error (#422, fixed —
+//!   `flush_in_wal_mode_recovers_when_wal_and_shm_vanish` in
+//!   `src/pager.rs`). [`OracleSession`] below (a genuinely live,
+//!   still-open second process) still sidesteps the same-process
+//!   overlay assertion issue by construction: it's the more faithful
+//!   reproduction of this ticket's "two terminals, both stay running"
+//!   acceptance sketch anyway.
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};

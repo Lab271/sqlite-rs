@@ -590,8 +590,20 @@ impl Pager {
             // checkpoint backfills them.
             let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
 
-            let mut writer = wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
-                .map_err(to_pager_error)?;
+            let mut writer = match wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
+            {
+                Ok(writer) => writer,
+                // The `-wal` this `Pager` believed was live has vanished —
+                // e.g. a concurrent `sqlite3` connection auto-checkpointed
+                // and deleted `-wal`/`-shm` on close (#422). `journal_mode`
+                // still says `Wal` (this closure only ever runs from that
+                // branch), so recover exactly as `switch_journal_to_wal`
+                // creates one from scratch, rather than failing the commit.
+                Err(wal::WalError::Vfs(VfsError::NotFound { .. })) => {
+                    self.recreate_wal_locked()?
+                }
+                Err(source) => return Err(to_pager_error(source)),
+            };
 
             let last_index = page_nums.len().saturating_sub(1);
             for (index, &page_num) in page_nums.iter().enumerate() {
@@ -694,6 +706,35 @@ impl Pager {
         self.source.sync()?;
         self.page_cache.borrow_mut().invalidate(1);
         Ok(())
+    }
+
+    /// Recovers [`Pager::flush_wal_locked`] from a `-wal` that vanished out
+    /// from under it (#422) — e.g. a concurrent `sqlite3` connection
+    /// auto-checkpointed and deleted `-wal`/`-shm` on close. Creates a
+    /// fresh, zero-frame `-wal`/`-shm` pair exactly like
+    /// [`Pager::switch_journal_to_wal`] does for a deliberate mode switch,
+    /// and re-opens [`Pager::wal_shm`] against the new file so the rest of
+    /// this flush's `publish_mx_frame` call targets it instead of the
+    /// stale (already-`None`) handle.
+    fn recreate_wal_locked(&mut self) -> Result<wal::WalWriter, PagerError> {
+        let wal_path = companion_path(&self.db_path, "-wal");
+        let shm_path = companion_path(&self.db_path, "-shm");
+        let to_pager_error = |source| PagerError::Wal {
+            path: wal_path.display().to_string(),
+            source,
+        };
+
+        let salt1 = random_nonce();
+        let salt2 = random_nonce() ^ 0x5A5A_5A5A;
+        let header = wal::WalHeader::new(true, self.page_size, salt1, salt2, 1);
+        let writer = wal::WalWriter::create(&self.vfs, &wal_path, header).map_err(to_pager_error)?;
+
+        let shm_file = self.vfs.create_or_open_write(&shm_path)?;
+        shm_file.write_at(&crate::vfs::shm::fresh_shm_bytes(), 0)?;
+        shm_file.sync()?;
+
+        self.wal_shm = self.vfs.open_wal_shm(&self.db_path)?;
+        Ok(writer)
     }
 
     /// Journal -> WAL half of [`Pager::set_journal_mode`]: creates a
@@ -1629,6 +1670,45 @@ mod tests {
         // The writer's own connection sees its just-committed write
         // immediately, without re-claiming a reader slot.
         assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
+    }
+
+    /// #422: a concurrent connection (e.g. a real `sqlite3` client)
+    /// auto-checkpointing and deleting `-wal`/`-shm` out from under this
+    /// `Pager` — while it still believes `journal_mode` is `Wal` — must
+    /// not fail the next commit. `flush_wal_locked` should transparently
+    /// recreate a fresh `-wal`/`-shm` pair and succeed, exactly as if this
+    /// were a first WAL write after a deliberate mode switch.
+    #[test]
+    fn flush_in_wal_mode_recovers_when_wal_and_shm_vanish() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        // A concurrent connection auto-checkpoints and removes both
+        // companion files, but this `Pager`'s in-memory `journal_mode`
+        // still (correctly) says `Wal`.
+        vfs.delete(Path::new("/test.db-wal")).unwrap();
+        vfs.delete(Path::new("/test.db-shm")).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        pager.flush().unwrap();
+
+        assert!(vfs.exists(Path::new("/test.db-wal")).unwrap());
+        assert!(vfs.exists(Path::new("/test.db-shm")).unwrap());
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
+
+        let wal_file = vfs.open_read(Path::new("/test.db-wal")).unwrap();
+        let size = wal_file.size().unwrap();
+        let mut wal_bytes = vec![0u8; size as usize];
+        wal_file.read_at(&mut wal_bytes, 0).unwrap();
+        let header = wal::WalHeader::parse(&wal_bytes).unwrap();
+        let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
+        assert_eq!(db_size, 2);
+        assert_eq!(pages.get(&2), Some(&vec![9u8; 512]));
     }
 
     /// #389's "readers don't block writers, writers don't block readers,
