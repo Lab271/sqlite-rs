@@ -6,6 +6,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-08-24
+
+perf: borrow table row payload from page buffer instead of copying
+(#467) — `PageSource::read_page` now returns `Rc<[u8]>` instead of
+`Vec<u8>`, so a `PageCache` hit is a refcount bump rather than a copy;
+`TableRow::payload` becomes a `Payload` enum that borrows a range of
+the shared page for the non-overflow case (zero-copy) and only owns
+bytes for the overflow-chain case.
+
 ## [0.17.5] - 2026-08-23
 
 perf: reuse row buffer and move registers in `ResultRow` (#465) —
