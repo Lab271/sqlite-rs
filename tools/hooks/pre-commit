@@ -1,0 +1,8 @@
+#!/bin/sh
+# Fast, cheap checks only — full clippy runs in the pre-push hook instead
+# (make lint compiles --lib --bins --tests --examples plus 4 more test
+# binaries under -D warnings; too slow to pay on every commit).
+set -e
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt -- --check
