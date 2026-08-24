@@ -330,6 +330,30 @@ fn run_our_session(pager: &Rc<RefCell<Pager>>, header: DatabaseHeader, stmts: &[
     }
 }
 
+/// #436: DELETE vs WAL journal mode, paralleling `v6.rs`'s own
+/// `WalMode`/`switch_to_wal` — kept as a separate copy here (rather than
+/// shared across the two bench binaries) since criterion benches don't
+/// share a support crate. Switching mode is a one-time setup cost, always
+/// excluded from the timed closure via `iter_batched`'s `setup`.
+#[derive(Clone, Copy)]
+enum JournalMode {
+    Delete,
+    Wal,
+}
+
+impl JournalMode {
+    fn suffix(self) -> &'static str {
+        match self {
+            JournalMode::Delete => "",
+            JournalMode::Wal => "_wal",
+        }
+    }
+}
+
+fn switch_to_wal(pager: &Rc<RefCell<Pager>>, header: DatabaseHeader) {
+    run_our_session(pager, header, &["PRAGMA journal_mode=WAL".to_string()]);
+}
+
 fn insert_stmts(n: usize) -> Vec<String> {
     let mut stmts = Vec::with_capacity(n.saturating_add(2));
     stmts.push("BEGIN".to_string());
@@ -368,8 +392,14 @@ fn oracle_script(stmts: &[String]) -> String {
 /// scenario — mirrors `bench_fixture`'s ours/oracle pairing above and
 /// `crud.rs`'s `bench_write`, but threading multiple statements through
 /// one session/transaction instead of one autocommit statement.
-fn bench_tx_scenario(c: &mut Criterion, label: &str, fixture: &Path, stmts: &[String]) {
-    let group_name = format!("{label}/bench_1mb.db");
+fn bench_tx_scenario(
+    c: &mut Criterion,
+    label: &str,
+    fixture: &Path,
+    stmts: &[String],
+    mode: JournalMode,
+) {
+    let group_name = format!("{label}{}/bench_1mb.db", mode.suffix());
     let mut group = c.benchmark_group(group_name);
 
     group.bench_function("ours", |b| {
@@ -381,6 +411,9 @@ fn bench_tx_scenario(c: &mut Criterion, label: &str, fixture: &Path, stmts: &[St
                     Pager::open(&UnixVfs, &path, header.page_size)
                         .unwrap_or_else(|e| fail(format!("open {path:?}: {e}"))),
                 ));
+                if matches!(mode, JournalMode::Wal) {
+                    switch_to_wal(&pager, header);
+                }
                 (path, header, pager)
             },
             |(path, header, pager)| {
@@ -400,6 +433,10 @@ fn bench_tx_scenario(c: &mut Criterion, label: &str, fixture: &Path, stmts: &[St
             || {
                 let path = scratch_copy(fixture);
                 let conn = open_theirs(&path);
+                if matches!(mode, JournalMode::Wal) {
+                    conn.execute_batch("PRAGMA journal_mode=WAL;")
+                        .unwrap_or_else(|e| fail(format!("oracle PRAGMA journal_mode=WAL: {e}")));
+                }
                 (path, conn)
             },
             |(path, conn)| {
@@ -419,19 +456,23 @@ fn bench_tx_scenario(c: &mut Criterion, label: &str, fixture: &Path, stmts: &[St
 
 fn bench_transactions(c: &mut Criterion) {
     let fixture = fixture_path("bench_1mb.db");
-    bench_tx_scenario(c, "insert_single_tx", &fixture, &insert_stmts(1));
-    bench_tx_scenario(c, "insert_batch_tx_100", &fixture, &insert_stmts(100));
-    bench_tx_scenario(c, "insert_batch_tx_1000", &fixture, &insert_stmts(1000));
-    bench_tx_scenario(
-        c,
-        "update_batch_tx",
-        &fixture,
-        &[
-            "BEGIN".to_string(),
-            "UPDATE bench_data SET x = x + 1 WHERE bucket = 5".to_string(),
-            "COMMIT".to_string(),
-        ],
-    );
+    let update_stmts = [
+        "BEGIN".to_string(),
+        "UPDATE bench_data SET x = x + 1 WHERE bucket = 5".to_string(),
+        "COMMIT".to_string(),
+    ];
+    for mode in [JournalMode::Delete, JournalMode::Wal] {
+        bench_tx_scenario(c, "insert_single_tx", &fixture, &insert_stmts(1), mode);
+        bench_tx_scenario(c, "insert_batch_tx_100", &fixture, &insert_stmts(100), mode);
+        bench_tx_scenario(
+            c,
+            "insert_batch_tx_1000",
+            &fixture,
+            &insert_stmts(1000),
+            mode,
+        );
+        bench_tx_scenario(c, "update_batch_tx", &fixture, &update_stmts, mode);
+    }
 }
 
 /// #469: micro-benchmark for the `Payload::Owned` overflow-chain
