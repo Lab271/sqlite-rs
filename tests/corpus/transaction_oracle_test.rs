@@ -68,7 +68,7 @@ fn our_select_a(vfs: &UnixVfs, db: &Path, page_size: u32) -> String {
     let schema = schemas.iter().find(|s| s.name == "t").unwrap();
     let mut cursor = TableCursor::new(&pager, &header, schema.root_page);
     let mut values = Vec::new();
-    let mut row = cursor.first().unwrap();
+    let mut row = cursor.first_row().unwrap();
     while let Some(r) = row {
         let cols = decode_record(&r.payload, header.text_encoding).unwrap();
         let a = match &cols[0] {
@@ -76,7 +76,7 @@ fn our_select_a(vfs: &UnixVfs, db: &Path, page_size: u32) -> String {
             other => panic!("expected column a to be an integer, got {other:?}"),
         };
         values.push(a);
-        row = cursor.next().unwrap();
+        row = cursor.next_row().unwrap();
     }
     values.join("\n")
 }

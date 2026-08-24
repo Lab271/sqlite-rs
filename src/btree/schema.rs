@@ -54,7 +54,7 @@ pub fn populate_index_from_table(
     let mut keys: Vec<Vec<Value>> = Vec::new();
     {
         let mut cursor = crate::btree::TableCursor::new(&*pager, header, table_root_page);
-        let mut row = cursor.first()?;
+        let mut row = cursor.first_row()?;
         while let Some(r) = row {
             let values = decode_record(&r.payload, encoding)?;
             let mut key: Vec<Value> = Vec::with_capacity(column_indices.len().saturating_add(1));
@@ -63,7 +63,7 @@ pub fn populate_index_from_table(
             }
             key.push(Value::Integer(r.rowid));
             keys.push(key);
-            row = cursor.next()?;
+            row = cursor.next_row()?;
         }
     }
     for key in &keys {

@@ -83,11 +83,14 @@ fn max_rowid(
     header: &DatabaseHeader,
     root_page: u32,
 ) -> Result<Option<i64>, BtreeError> {
+    // Rowid-only scan: never touches column payloads, so it uses the
+    // lean, position-only `first`/`next` directly (#473) instead of
+    // `first_row`/`next_row` — no payload reassembly happens per row.
     let mut cursor = crate::btree::TableCursor::new(&*pager, header, root_page);
     let mut max = None;
     let mut row = cursor.first()?;
-    while let Some(r) = row {
-        max = Some(max.map_or(r.rowid, |m: i64| m.max(r.rowid)));
+    while let Some(rowid) = row {
+        max = Some(max.map_or(rowid, |m: i64| m.max(rowid)));
         row = cursor.next()?;
     }
     Ok(max)
@@ -105,7 +108,7 @@ fn find_rowid_by_text_column(
     encoding: TextEncoding,
 ) -> Result<Option<i64>, BtreeError> {
     let mut cursor = crate::btree::TableCursor::new(&*pager, header, root_page);
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if let Some(Value::Text(s)) = values.get(key_column) {
@@ -113,7 +116,7 @@ fn find_rowid_by_text_column(
                 return Ok(Some(r.rowid));
             }
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     Ok(None)
 }
@@ -209,7 +212,7 @@ fn find_master_rootpage(
     name: &str,
 ) -> Result<Option<u32>, BtreeError> {
     let mut cursor = crate::btree::TableCursor::new(&*pager, header, SQLITE_MASTER_ROOT_PAGE);
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(rp))) = (values.get(1), values.get(3)) {
@@ -227,7 +230,7 @@ fn find_master_rootpage(
                 return Ok(Some(rootpage));
             }
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     Ok(None)
 }
@@ -249,7 +252,7 @@ pub fn update_sequence(
 
     let mut cursor = crate::btree::TableCursor::new(&*pager, header, seq_root);
     let mut existing: Option<(i64, i64)> = None; // (row rowid, current seq)
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let (Some(Value::Text(n)), Some(Value::Integer(seq))) = (values.first(), values.get(1)) {
@@ -258,7 +261,7 @@ pub fn update_sequence(
                 break;
             }
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
 
     match existing {
@@ -352,14 +355,14 @@ mod tests {
         .unwrap();
 
         let mut cursor = crate::btree::TableCursor::new(&pager, &header, SQLITE_MASTER_ROOT_PAGE);
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, header.text_encoding).unwrap();
         assert_eq!(values[1], Value::Text("t".to_string().into()));
         assert_eq!(values[3], Value::Integer(2));
 
         delete_master_row(&mut pager, &header, "t").unwrap();
         let mut cursor2 = crate::btree::TableCursor::new(&pager, &header, SQLITE_MASTER_ROOT_PAGE);
-        assert!(cursor2.first().unwrap().is_none());
+        assert!(cursor2.first_row().unwrap().is_none());
     }
 
     #[test]
@@ -384,7 +387,7 @@ mod tests {
             .unwrap()
             .expect("sqlite_sequence registered in sqlite_master");
         let mut cursor = crate::btree::TableCursor::new(&pager, &header, seq_root);
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, header.text_encoding).unwrap();
         assert_eq!(values[0], Value::Text("t".to_string().into()));
         assert_eq!(values[1], Value::Integer(5));
@@ -403,13 +406,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut cursor = crate::btree::TableCursor::new(&pager, &header, seq_root);
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, header.text_encoding).unwrap();
         assert_eq!(values[1], Value::Integer(5));
 
         update_sequence(&mut pager, &header, "t", 9).unwrap();
         let mut cursor2 = crate::btree::TableCursor::new(&pager, &header, seq_root);
-        let row2 = cursor2.first().unwrap().unwrap();
+        let row2 = cursor2.first_row().unwrap().unwrap();
         let values2 = decode_record(&row2.payload, header.text_encoding).unwrap();
         assert_eq!(values2[1], Value::Integer(9));
     }

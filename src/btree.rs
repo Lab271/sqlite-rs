@@ -102,6 +102,20 @@ struct Frame {
     page: Rc<[u8]>,
 }
 
+/// Everything needed to reassemble the payload of the row the cursor is
+/// currently positioned at, captured cheaply (an `Rc` clone, not a copy)
+/// at position time so [`TableCursor::current_payload`] can defer the
+/// actual reassembly — including any overflow-chain page reads — until
+/// something asks for it (#473). Mirrors real SQLite's `BtCursor`, which
+/// holds a pointer into a pager-pinned page and re-fetches payload bytes
+/// live off the still-positioned cursor rather than pre-decoding a row.
+struct CurrentCell {
+    page: Rc<[u8]>,
+    page_num: u32,
+    tail_start: usize,
+    payload_len: u64,
+}
+
 /// Depth-first, read-only cursor over a table b-tree, yielding rows in
 /// ascending rowid order.
 pub struct TableCursor<P: PageSource> {
@@ -111,6 +125,7 @@ pub struct TableCursor<P: PageSource> {
     stack: Vec<Frame>,
     pages_visited: usize,
     positioned_reverse: bool,
+    current: Option<CurrentCell>,
 }
 
 impl<P: PageSource> TableCursor<P> {
@@ -122,12 +137,17 @@ impl<P: PageSource> TableCursor<P> {
             stack: Vec::new(),
             pages_visited: 0,
             positioned_reverse: false,
+            current: None,
         }
     }
 
-    /// Positions the cursor at the first row and returns it, or `None` if
-    /// the table is empty. Resets any prior traversal position.
-    pub fn first(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    /// Positions the cursor at the first row and returns its rowid, or
+    /// `None` if the table is empty. Resets any prior traversal position.
+    /// Call [`Self::current_payload`] to fetch the row's payload —
+    /// reassembled lazily, only when actually needed (#473) — or use
+    /// [`Self::first_row`] for the old eager (rowid + payload together)
+    /// behavior.
+    pub fn first(&mut self) -> Result<Option<i64>, BtreeError> {
         self.stack.clear();
         self.pages_visited = 0;
         self.positioned_reverse = false;
@@ -135,19 +155,44 @@ impl<P: PageSource> TableCursor<P> {
         self.advance()
     }
 
-    /// Advances to the next row and returns it, or `None` once exhausted.
-    /// Call [`Self::first`] first; calling `next` before `first` behaves
-    /// as an empty cursor.
+    /// Convenience wrapper over [`Self::first`] that also eagerly fetches
+    /// the payload via [`Self::current_payload`], for callers that always
+    /// want both together (the common case outside the VDBE's per-column
+    /// `Column` opcode, which wants to defer payload reassembly).
+    pub fn first_row(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.first()?.map_or(Ok(None), |rowid| {
+            Ok(Some(TableRow {
+                rowid,
+                payload: self.current_payload()?,
+            }))
+        })
+    }
+
+    /// Advances to the next row and returns its rowid, or `None` once
+    /// exhausted. Call [`Self::first`] first; calling `next` before
+    /// `first` behaves as an empty cursor. See [`Self::first`]'s doc for
+    /// how to fetch the payload.
     #[allow(clippy::should_implement_trait)] // deliberate cursor API (first/next/seek), not std::iter::Iterator
-    pub fn next(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    pub fn next(&mut self) -> Result<Option<i64>, BtreeError> {
         self.advance()
     }
 
+    /// Convenience wrapper over [`Self::next`] — see [`Self::first_row`].
+    pub fn next_row(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.next()?.map_or(Ok(None), |rowid| {
+            Ok(Some(TableRow {
+                rowid,
+                payload: self.current_payload()?,
+            }))
+        })
+    }
+
     /// Positions the cursor at the last row (highest rowid) and returns
-    /// it, or `None` if the table is empty. Resets any prior traversal
-    /// position. Descends the rightmost child at each interior page
-    /// (highest-key subtree), then the highest-index cell of the leaf.
-    pub fn last(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    /// its rowid, or `None` if the table is empty. Resets any prior
+    /// traversal position. Descends the rightmost child at each interior
+    /// page (highest-key subtree), then the highest-index cell of the
+    /// leaf. See [`Self::first`]'s doc for how to fetch the payload.
+    pub fn last(&mut self) -> Result<Option<i64>, BtreeError> {
         self.stack.clear();
         self.pages_visited = 0;
         self.positioned_reverse = true;
@@ -155,10 +200,22 @@ impl<P: PageSource> TableCursor<P> {
         self.advance_rev()
     }
 
+    /// Convenience wrapper over [`Self::last`] — see [`Self::first_row`].
+    pub fn last_row(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.last()?.map_or(Ok(None), |rowid| {
+            Ok(Some(TableRow {
+                rowid,
+                payload: self.current_payload()?,
+            }))
+        })
+    }
+
     /// Steps backward to the previous row (in descending rowid order),
-    /// or `None` once exhausted. Call [`Self::last`] first; a cursor
-    /// positioned via `first`/`next` cannot be walked backward with
-    /// `prev` — the two directions maintain independent stack state.
+    /// returning its rowid, or `None` once exhausted. Call [`Self::last`]
+    /// first; a cursor positioned via `first`/`next` cannot be walked
+    /// backward with `prev` — the two directions maintain independent
+    /// stack state. See [`Self::first`]'s doc for how to fetch the
+    /// payload.
     ///
     /// Calling `prev()` before any `last()` is a usage error, reported as
     /// [`BtreeError::CursorNotPositioned`] rather than silently returning
@@ -166,7 +223,7 @@ impl<P: PageSource> TableCursor<P> {
     /// exhausted." Checked in every build, not just debug ones — a
     /// misuse that only surfaces under `debug_assert` is a misuse that
     /// reaches release.
-    pub fn prev(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    pub fn prev(&mut self) -> Result<Option<i64>, BtreeError> {
         if !self.positioned_reverse {
             return Err(BtreeError::CursorNotPositioned {
                 operation: "TableCursor::prev()",
@@ -176,10 +233,48 @@ impl<P: PageSource> TableCursor<P> {
         self.advance_rev()
     }
 
+    /// Convenience wrapper over [`Self::prev`] — see [`Self::first_row`].
+    pub fn prev_row(&mut self) -> Result<Option<TableRow>, BtreeError> {
+        self.prev()?.map_or(Ok(None), |rowid| {
+            Ok(Some(TableRow {
+                rowid,
+                payload: self.current_payload()?,
+            }))
+        })
+    }
+
+    /// Returns the payload of the row the cursor is currently positioned
+    /// at — i.e. the row whose rowid was last returned by
+    /// [`Self::first`]/[`Self::next`]/[`Self::last`]/[`Self::prev`]/
+    /// [`Self::seek`] as `Some(_)`. Reassembles lazily (including walking
+    /// any overflow chain) on every call rather than caching — cheap for
+    /// the common local-payload case (an `Rc` clone), real work only for
+    /// the rare overflow case, and only paid by callers that actually
+    /// need the bytes (#473).
+    pub fn current_payload(&self) -> Result<Payload, BtreeError> {
+        let cur = self
+            .current
+            .as_ref()
+            .ok_or(BtreeError::CursorNotPositioned {
+                operation: "TableCursor::current_payload()",
+                required: "first()/next()/last()/prev()/seek() returning Some(rowid)",
+            })?;
+        reassemble_payload(
+            &self.source,
+            self.usable_size,
+            cur.page_num,
+            &cur.page,
+            cur.tail_start,
+            cur.payload_len,
+        )
+    }
+
     /// Looks up the row with exactly `target_rowid`, independent of the
-    /// `first`/`next` traversal position. Returns `None` if no such row
-    /// exists.
-    pub fn seek(&mut self, target_rowid: i64) -> Result<Option<TableRow>, BtreeError> {
+    /// `first`/`next` traversal position, and returns its rowid (i.e.
+    /// `target_rowid` itself) if found. See [`Self::first`]'s doc for how
+    /// to fetch the payload, or use [`Self::seek_row`].
+    pub fn seek(&mut self, target_rowid: i64) -> Result<Option<i64>, BtreeError> {
+        self.current = None;
         let mut page_num = self.root_page;
         // A local budget, independent of `self.pages_visited` — `seek` is a
         // standalone point lookup, not part of the `first`/`next` traversal,
@@ -214,15 +309,13 @@ impl<P: PageSource> TableCursor<P> {
                         let (rowid, payload_len, tail_start) =
                             decode_cell_head(&page, cell_start, page_num)?;
                         if rowid == target_rowid {
-                            let payload = reassemble_payload(
-                                &self.source,
-                                self.usable_size,
+                            self.current = Some(CurrentCell {
+                                page: Rc::clone(&page),
                                 page_num,
-                                &page,
                                 tail_start,
                                 payload_len,
-                            )?;
-                            return Ok(Some(TableRow { rowid, payload }));
+                            });
+                            return Ok(Some(rowid));
                         }
                     }
                     return Ok(None);
@@ -260,6 +353,16 @@ impl<P: PageSource> TableCursor<P> {
                 }
             }
         }
+    }
+
+    /// Convenience wrapper over [`Self::seek`] — see [`Self::first_row`].
+    pub fn seek_row(&mut self, target_rowid: i64) -> Result<Option<TableRow>, BtreeError> {
+        self.seek(target_rowid)?.map_or(Ok(None), |rowid| {
+            Ok(Some(TableRow {
+                rowid,
+                payload: self.current_payload()?,
+            }))
+        })
     }
 
     fn read_page(&mut self, page_num: u32) -> Result<Rc<[u8]>, BtreeError> {
@@ -323,10 +426,13 @@ impl<P: PageSource> TableCursor<P> {
         clippy::indexing_slicing,
         reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
     )]
-    fn advance(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    fn advance(&mut self) -> Result<Option<i64>, BtreeError> {
         loop {
             let top = match self.stack.len() {
-                0 => return Ok(None),
+                0 => {
+                    self.current = None;
+                    return Ok(None);
+                }
                 n => n.saturating_sub(1),
             };
             let (is_interior, next_cell, num_cells, rightmost, rightmost_done) = {
@@ -378,10 +484,13 @@ impl<P: PageSource> TableCursor<P> {
         clippy::indexing_slicing,
         reason = "top = stack.len() - 1, computed just above from a non-empty check; always in bounds"
     )]
-    fn advance_rev(&mut self) -> Result<Option<TableRow>, BtreeError> {
+    fn advance_rev(&mut self) -> Result<Option<i64>, BtreeError> {
         loop {
             let top = match self.stack.len() {
-                0 => return Ok(None),
+                0 => {
+                    self.current = None;
+                    return Ok(None);
+                }
                 n => n.saturating_sub(1),
             };
             let (is_interior, next_cell, rightmost, rightmost_done) = {
@@ -433,24 +542,27 @@ impl<P: PageSource> TableCursor<P> {
         reason = "frame_index is always `top` from advance(), always in bounds"
     )]
     fn decode_leaf_cell(
-        &self,
+        &mut self,
         frame_index: usize,
         cell_index: usize,
-    ) -> Result<TableRow, BtreeError> {
-        let frame = &self.stack[frame_index];
-        let page_num = frame.page_num;
-        let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
-        let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
-        let (rowid, payload_len, tail_start) = decode_cell_head(&frame.page, cell_start, page_num)?;
-        let payload = reassemble_payload(
-            &self.source,
-            self.usable_size,
+    ) -> Result<i64, BtreeError> {
+        let (page, page_num, ptr_off) = {
+            let frame = &self.stack[frame_index];
+            (
+                Rc::clone(&frame.page),
+                frame.page_num,
+                cell_ptr_offset(frame.cell_ptr_base, cell_index),
+            )
+        };
+        let cell_start = read_cell_pointer(&page, ptr_off, page_num, cell_index)?;
+        let (rowid, payload_len, tail_start) = decode_cell_head(&page, cell_start, page_num)?;
+        self.current = Some(CurrentCell {
+            page,
             page_num,
-            &frame.page,
             tail_start,
             payload_len,
-        )?;
-        Ok(TableRow { rowid, payload })
+        });
+        Ok(rowid)
     }
 }
 
@@ -1387,22 +1499,22 @@ mod tests {
     #[test]
     fn table_single_page_full_scan() {
         let mut cursor = open_cursor("table_single_page.db");
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         assert_eq!(row.rowid, 1);
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&values[0]), 1);
         assert_eq!(text(&values[1]), "a single leaf page");
-        assert!(cursor.next().unwrap().is_none());
+        assert!(cursor.next_row().unwrap().is_none());
     }
 
     #[test]
     fn table_multipage_full_scan_matches_oracle() {
         let mut cursor = open_cursor("table_multipage.db");
         let mut rows = Vec::new();
-        let mut row = cursor.first().unwrap();
+        let mut row = cursor.first_row().unwrap();
         while let Some(r) = row {
             rows.push(r);
-            row = cursor.next().unwrap();
+            row = cursor.next_row().unwrap();
         }
         assert_eq!(rows.len(), 3000);
 
@@ -1428,7 +1540,7 @@ mod tests {
         // cursor, which is the confusing outcome the check exists to prevent.
         let mut cursor = open_cursor("table_multipage.db");
         assert!(matches!(
-            cursor.prev(),
+            cursor.prev_row(),
             Err(BtreeError::CursorNotPositioned { .. })
         ));
     }
@@ -1436,19 +1548,19 @@ mod tests {
     #[test]
     fn table_single_page_last_returns_the_only_row() {
         let mut cursor = open_cursor("table_single_page.db");
-        let row = cursor.last().unwrap().unwrap();
+        let row = cursor.last_row().unwrap().unwrap();
         assert_eq!(row.rowid, 1);
-        assert!(cursor.prev().unwrap().is_none());
+        assert!(cursor.prev_row().unwrap().is_none());
     }
 
     #[test]
     fn table_multipage_last_and_prev_walk_descending_rowid_order() {
         let mut cursor = open_cursor("table_multipage.db");
         let mut rows = Vec::new();
-        let mut row = cursor.last().unwrap();
+        let mut row = cursor.last_row().unwrap();
         while let Some(r) = row {
             rows.push(r);
-            row = cursor.prev().unwrap();
+            row = cursor.prev_row().unwrap();
         }
         assert_eq!(rows.len(), 3000);
 
@@ -1473,15 +1585,15 @@ mod tests {
         // traversal lands on the same rightmost leaf cell forward
         // traversal reaches last.
         let mut forward = open_cursor("table_multipage.db");
-        let mut row = forward.first().unwrap();
+        let mut row = forward.first_row().unwrap();
         let mut final_forward_row = None;
         while let Some(r) = row {
             final_forward_row = Some(r.clone());
-            row = forward.next().unwrap();
+            row = forward.next_row().unwrap();
         }
 
         let mut backward = open_cursor("table_multipage.db");
-        let last_row = backward.last().unwrap().unwrap();
+        let last_row = backward.last_row().unwrap().unwrap();
 
         assert_eq!(Some(last_row), final_forward_row);
     }
@@ -1501,32 +1613,32 @@ mod tests {
         let source = VfsPageSource::open(&vfs, path, header.page_size).unwrap();
         let mut cursor = TableCursor::new(source, &header, 1);
 
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(text(&values[0]), "table");
         assert_eq!(text(&values[1]), "t");
         assert_eq!(text(&values[2]), "t");
         assert_eq!(int(&values[3]), 2);
         assert_eq!(text(&values[4]), "CREATE TABLE t(a INTEGER, b TEXT)");
-        assert!(cursor.next().unwrap().is_none());
+        assert!(cursor.next_row().unwrap().is_none());
     }
 
     #[test]
     fn table_multipage_seek_matches_oracle() {
         let mut cursor = open_cursor("table_multipage.db");
 
-        let row = cursor.seek(1500).unwrap().unwrap();
+        let row = cursor.seek_row(1500).unwrap().unwrap();
         assert_eq!(row.rowid, 1500);
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(text(&values[1]), "row number 1500");
 
-        let first = cursor.seek(1).unwrap().unwrap();
+        let first = cursor.seek_row(1).unwrap().unwrap();
         assert_eq!(first.rowid, 1);
-        let last = cursor.seek(3000).unwrap().unwrap();
+        let last = cursor.seek_row(3000).unwrap().unwrap();
         assert_eq!(last.rowid, 3000);
 
-        assert!(cursor.seek(0).unwrap().is_none());
-        assert!(cursor.seek(3001).unwrap().is_none());
+        assert!(cursor.seek_row(0).unwrap().is_none());
+        assert!(cursor.seek_row(3001).unwrap().is_none());
     }
 
     #[test]
@@ -1538,7 +1650,7 @@ mod tests {
         // MAX_PAGES_VISITED.
         let mut cursor = open_cursor("table_multipage.db");
         for _ in 0..50 {
-            cursor.seek(1500).unwrap();
+            cursor.seek_row(1500).unwrap();
         }
         assert_eq!(cursor.pages_visited, 0);
     }
@@ -1546,7 +1658,7 @@ mod tests {
     #[test]
     fn overflow_single_page_payload_is_byte_identical_to_oracle() {
         let mut cursor = open_cursor("overflow_single_page.db");
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&values[0]), 1);
         let b = blob(&values[1]);
@@ -1555,13 +1667,13 @@ mod tests {
             sha256_of(b),
             "a6bedce1e512d6531cd02fe7a0b72bb64f229cdb254ec48d63308877004e620a"
         );
-        assert!(cursor.next().unwrap().is_none());
+        assert!(cursor.next_row().unwrap().is_none());
     }
 
     #[test]
     fn overflow_multi_page_payload_is_byte_identical_to_oracle() {
         let mut cursor = open_cursor("overflow_multi_page.db");
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&values[0]), 1);
         let b = blob(&values[1]);
@@ -1570,7 +1682,7 @@ mod tests {
             sha256_of(b),
             "0946e2eb0fb9ea7ddd935efd1922bc7d1f27101c69ce6d2f5145c7ee28f1b6ba"
         );
-        assert!(cursor.next().unwrap().is_none());
+        assert!(cursor.next_row().unwrap().is_none());
     }
 
     /// SHA-256, implemented locally (no new dependency) purely to verify
@@ -1691,7 +1803,7 @@ mod tests {
         let source = FakePageSource { pages };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let err = cursor.first().unwrap_err();
+        let err = cursor.first_row().unwrap_err();
         assert!(matches!(
             err,
             BtreeError::UnexpectedPageType {
@@ -1708,7 +1820,7 @@ mod tests {
         let source = FakePageSource { pages };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let err = cursor.first().unwrap_err();
+        let err = cursor.first_row().unwrap_err();
         assert!(matches!(err, BtreeError::PageTooShort { page_num: 2, .. }));
     }
 
@@ -1719,7 +1831,7 @@ mod tests {
         };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let err = cursor.first().unwrap_err();
+        let err = cursor.first_row().unwrap_err();
         assert!(matches!(err, BtreeError::PageSource { page_num: 2, .. }));
     }
 
@@ -1751,7 +1863,7 @@ mod tests {
         let source = FakePageSource { pages };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let err = cursor.first().unwrap_err();
+        let err = cursor.first_row().unwrap_err();
         assert!(matches!(
             err,
             BtreeError::OverflowChainTruncated { page_num: 2 }
@@ -1790,7 +1902,7 @@ mod tests {
         let source = FakePageSource { pages };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let err = cursor.first().unwrap_err();
+        let err = cursor.first_row().unwrap_err();
         assert!(matches!(
             err,
             BtreeError::OverflowChainCycle {
@@ -1848,6 +1960,49 @@ mod tests {
         assert!(!matches!(err, BtreeError::PayloadTooLarge { .. }));
     }
 
+    /// #473: `first`/`next`/etc. must position the cursor and return the
+    /// rowid WITHOUT reassembling the payload — including the expensive
+    /// overflow-chain case. Proven here by declaring an overflow pointer
+    /// to a page that doesn't exist in the fake source: `first()` (the
+    /// lean, rowid-only API) must still succeed, because it never walks
+    /// the overflow chain; only `current_payload()`, called explicitly
+    /// afterward, actually attempts the walk and hits the missing page.
+    #[test]
+    fn first_does_not_reassemble_overflow_payload_until_asked() {
+        let mut page = vec![0u8; 512];
+        page[0] = 0x0d; // leaf table
+        page[3..5].copy_from_slice(&1u16.to_be_bytes()); // num_cells = 1
+        let cell_ptr_off = 8usize;
+        let cell_start = 16usize;
+        page[cell_ptr_off..cell_ptr_off + 2].copy_from_slice(&(cell_start as u16).to_be_bytes());
+
+        // payload_len varint = 5000 (forces overflow for a 512-byte usable
+        // page), rowid varint = 1, then local bytes + a 4-byte overflow
+        // pointer to page 99 — deliberately never inserted into `pages`.
+        let mut cell = Vec::new();
+        cell.extend_from_slice(&encode_varint_for_test(5000));
+        cell.extend_from_slice(&encode_varint_for_test(1));
+        let local_size = local_payload_size(512, 5000) as usize;
+        cell.extend(std::iter::repeat_n(0u8, local_size));
+        cell.extend_from_slice(&99u32.to_be_bytes());
+        page[cell_start..cell_start.saturating_add(cell.len())].copy_from_slice(&cell);
+
+        let mut pages = HashMap::new();
+        pages.insert(2u32, page);
+        let source = FakePageSource { pages };
+        let mut cursor = TableCursor::new(source, &fake_header(), 2);
+
+        assert_eq!(cursor.first().unwrap(), Some(1));
+        let err = cursor.current_payload().unwrap_err();
+        assert!(matches!(
+            err,
+            BtreeError::PageSource {
+                page_num: 99,
+                source: PageError::InvalidPageNumber
+            }
+        ));
+    }
+
     /// #467: a row whose payload fits entirely in the local cell (no
     /// overflow) must borrow from the page's `Rc<[u8]>` rather than
     /// allocating a fresh `Vec<u8>` copy. Asserted two ways: the returned
@@ -1864,7 +2019,7 @@ mod tests {
         let source = FakePageSource { pages };
         let mut cursor = TableCursor::new(source, &fake_header(), 2);
 
-        let row = cursor.first().unwrap().unwrap();
+        let row = cursor.first_row().unwrap().unwrap();
         assert_eq!(&*row.payload, b"hello world");
         match &row.payload {
             Payload::Local { page, .. } => {
