@@ -82,7 +82,9 @@ impl Stats {
 /// model) I/O treated as one page-worth of work per row — spec 011/Req 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanCost {
+    /// Estimated number of rows the plan would touch.
     pub estimated_rows: u64,
+    /// Estimated I/O cost, in page-worth-of-work units (one per row).
     pub estimated_io: u64,
 }
 

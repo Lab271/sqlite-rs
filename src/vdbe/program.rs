@@ -628,6 +628,7 @@ pub enum P4 {
     /// `DropTable` bake theirs, so the exec-time handler never needs to
     /// re-resolve names against `sqlite_master`.
     Analyze {
+        /// Every table (and its indexes) `ANALYZE` should populate stats for.
         targets: Vec<AnalyzeTarget>,
     },
 }
@@ -637,15 +638,20 @@ pub enum P4 {
 /// walk for index-level stats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzeTarget {
+    /// The table's name.
     pub table_name: String,
+    /// The table b-tree's root page.
     pub table_root_page: u32,
+    /// The table's indexes, each walked for index-level stats.
     pub indexes: Vec<AnalyzeIndexTarget>,
 }
 
 /// One index `ANALYZE` (#461) walks to compute `avg_eq` for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzeIndexTarget {
+    /// The index's name.
     pub index_name: String,
+    /// The index b-tree's root page.
     pub root_page: u32,
 }
 
