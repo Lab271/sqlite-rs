@@ -33,13 +33,12 @@
 //! file above `MAX_SHM_LEN`, so an oversized `-shm` (sparse or otherwise) is
 //! rejected before any offset into it is trusted.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use nix::libc::{self, off_t};
 
@@ -101,7 +100,7 @@ const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
 /// `mxFrame` publish. Same shape as [`WalCheckpointLock`] just below.
 #[derive(Debug)]
 pub struct WalWriteLock {
-    file: Rc<File>,
+    file: Arc<File>,
 }
 
 impl SharedLockGuard for WalWriteLock {}
@@ -129,7 +128,7 @@ pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> 
 /// explicitly, once per commit, instead of the lock's lifetime being
 /// tied to a value's `Drop`.
 pub(crate) struct UnixWalShm {
-    file: Rc<File>,
+    file: Arc<File>,
     path: PathBuf,
 }
 
@@ -180,29 +179,36 @@ pub(crate) fn open_wal_shm(shm_path: &Path) -> io::Result<UnixWalShm> {
     })
 }
 
-thread_local! {
-    /// Every live `-shm` fd this process holds, keyed by path (#491).
-    /// POSIX `fcntl` record locks are scoped to `(process, inode)`, not to
-    /// a file descriptor: closing *any* fd this process holds to a file
-    /// releases *every* lock the process holds on that inode, even ones
-    /// taken through a different fd on the same path. Before this
-    /// registry, each guard/helper below opened its own independent
-    /// `File` — so two guards alive at once on the same `-shm` path (e.g.
-    /// a `Pager`'s own long-lived `WalReadLock` plus its lazily-opened
-    /// `UnixWalShm`, or a second `Pager`/a free-standing
-    /// `checkpoint_passive` call in the same process) could have one's
-    /// `Drop`-triggered `close()` silently release the other's
-    /// still-needed lock. `open_shm_shared` makes every caller in this
-    /// module reuse the one fd already open for a path instead, via a
-    /// `Weak` entry that's only ever upgraded — it actually closes only
-    /// once the last `Rc<File>` referencing it drops, at which point (by
-    /// construction) nothing in this process needs a lock on that inode
-    /// anymore. A `thread_local` rather than a global/`Mutex`-guarded map
-    /// matches this crate's existing single-threaded `Rc`/`RefCell`
-    /// convention (e.g. `UnixVfsFile`'s own per-path fd sharing in
-    /// `unix.rs`) rather than introducing thread-safety this crate
-    /// doesn't otherwise need.
-    static SHM_FILES: RefCell<HashMap<PathBuf, Weak<File>>> = RefCell::new(HashMap::new());
+/// Every live `-shm` fd this process holds, keyed by path (#491). POSIX
+/// `fcntl` record locks are scoped to `(process, inode)`, not to a file
+/// descriptor: closing *any* fd this process holds to a file releases
+/// *every* lock the process holds on that inode, even ones taken through a
+/// different fd on the same path. Before [`open_shm_shared`], each
+/// guard/helper below opened its own independent `File` — so two guards
+/// alive at once on the same `-shm` path (e.g. a `Pager`'s own long-lived
+/// `WalReadLock` plus its lazily-opened `UnixWalShm`, or a second
+/// `Pager`/a free-standing `checkpoint_passive` call in the same process)
+/// could have one's `Drop`-triggered `close()` silently release the
+/// other's still-needed lock. `open_shm_shared` makes every caller in
+/// this module reuse the one fd already open for a path instead, via a
+/// `Weak` entry that's only ever upgraded — it actually closes only once
+/// the last `Arc<File>` referencing it drops, at which point (by
+/// construction) nothing in this process needs a lock on that inode
+/// anymore.
+///
+/// `Arc`/`Mutex` rather than this crate's more common single-threaded
+/// `Rc`/`RefCell` (e.g. `UnixVfsFile`'s own per-path fd sharing in
+/// `unix.rs`): a plain module-level `static` must be `Sync`, which an
+/// `Rc`-based type never is regardless of contents — `thread_local!` would
+/// avoid that, but its macro invocation falls outside `src/vfs/shm.rs`'s
+/// qualified-subset allowlist (`make mvl-limit`, issue #23), so a real
+/// `static` it is. Real cross-thread contention never happens in
+/// practice (this crate has no threads), so the `Mutex` here is `Sync`-
+/// satisfying scaffolding, not a concurrency mechanism in active use.
+static SHM_FILES: OnceLock<Mutex<HashMap<PathBuf, Weak<File>>>> = OnceLock::new();
+
+fn shm_files() -> &'static Mutex<HashMap<PathBuf, Weak<File>>> {
+    SHM_FILES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Returns the one shared `-shm` fd this process holds open for
@@ -212,23 +218,21 @@ thread_local! {
 /// redirect a lock claim or a raw `nBackfill` write onto an arbitrary file
 /// this process happens to have write access to. Every `-shm` open in
 /// this module goes through here rather than a bare `OpenOptions::open`.
-fn open_shm_shared(shm_path: &Path) -> io::Result<Rc<File>> {
-    if let Some(file) = SHM_FILES.with(|files| files.borrow().get(shm_path).and_then(Weak::upgrade))
-    {
+fn open_shm_shared(shm_path: &Path) -> io::Result<Arc<File>> {
+    let mut files = shm_files()
+        .lock()
+        .map_err(|_| io::Error::other("poisoned -shm fd registry"))?;
+    if let Some(file) = files.get(shm_path).and_then(Weak::upgrade) {
         return Ok(file);
     }
-    let file = Rc::new(
+    let file = Arc::new(
         OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(shm_path)?,
     );
-    SHM_FILES.with(|files| {
-        files
-            .borrow_mut()
-            .insert(shm_path.to_path_buf(), Rc::downgrade(&file));
-    });
+    files.insert(shm_path.to_path_buf(), Arc::downgrade(&file));
     Ok(file)
 }
 
@@ -270,7 +274,7 @@ const N_BACKFILL_OFFSET: u64 = 96;
 /// state.
 #[derive(Debug)]
 pub struct WalCheckpointLock {
-    file: Rc<File>,
+    file: Arc<File>,
 }
 
 impl SharedLockGuard for WalCheckpointLock {}
@@ -399,7 +403,7 @@ fn validate_shm_len(file: &File) -> io::Result<()> {
 /// under it — POSIX drops all `fcntl` record locks on `close()`.
 #[derive(Debug)]
 pub struct WalReadLock {
-    file: Rc<File>,
+    file: Arc<File>,
     slot: usize,
 }
 
