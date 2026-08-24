@@ -132,6 +132,9 @@ WITH RECURSIVE seq(i) AS (
 )
 INSERT INTO bench_lookup(code, label)
 SELECT i, 'lookup-' || i FROM seq;
+
+-- #506: Run ANALYZE so cost-model optimizations (#461, #464, #470) use stats
+ANALYZE;
 SQL
     echo "wrote $fixture_out ($fixture_rows rows, $(du -h "$fixture_out" | cut -f1))"
   }
