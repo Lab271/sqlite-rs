@@ -889,34 +889,26 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// planner's join equality-index-selection fast path chains
 /// `SeekIndexEq` + `IdxRowid` + `SeekRowid` (on the table cursor) in
 /// place of an unconditional `Rewind`/`Next` full scan.
+///
+/// Seeks the slot's own persisted traversal cursor (`state.cursor`, the
+/// same one `IdxRewind`/`IdxNext`/etc. (#296) drive) rather than a
+/// throwaway one, so a following `IdxNext` resumes right after the
+/// matched entry — a non-unique index's duplicate-key matches (#450) are
+/// then just `SeekIndexEq` + a walk-while-still-equal `IdxNext` loop,
+/// same as a UNIQUE index's single match falling straight through.
 pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = p4_count(instr, "SeekIndexEq")?;
     let probe = read_register_range(vm, instr.p3, count, "SeekIndexEq")?;
-    let root_page = match vm.cursor(instr.p1)? {
-        CursorSlot::IndexRead(state) => state.root_page,
-        other => {
-            return Err(ExecError::CursorTypeMismatch {
+    let encoding = vm.db()?.header.text_encoding;
+    let state = index_read_state_mut(vm, instr.p1, "SeekIndexEq")?;
+    let found =
+        state
+            .cursor
+            .seek(&probe, encoding)
+            .map_err(|e| ExecError::MalformedInstruction {
                 opcode: "SeekIndexEq",
-                slot: instr.p1,
-                found: other.type_name(),
-                expected: "index read cursor",
-            })
-        }
-    };
-    let db = vm.db()?;
-    let encoding = db.header.text_encoding;
-    let usable_size = db.header.usable_page_size();
-    // A fresh, one-shot `IndexCursor` rather than the slot's own
-    // persisted traversal cursor: `SeekIndexEq` is a point lookup (#243),
-    // unrelated to the sequential position `IdxRewind`/`IdxNext`/etc.
-    // (#296) maintain in `state.cursor` for an index-ordered scan.
-    let mut cursor = IndexCursor::new(Rc::clone(&db.source), usable_size, root_page);
-    let found = cursor
-        .seek(&probe, encoding)
-        .map_err(|e| ExecError::MalformedInstruction {
-            opcode: "SeekIndexEq",
-            reason: e.to_string(),
-        })?;
+                reason: e.to_string(),
+            })?;
     let matched = match &found {
         Some(row) => {
             let key = decode_record(&row.payload, encoding).map_err(|e| {
@@ -934,17 +926,7 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
         None => false,
     };
     let current = if matched { found } else { None };
-    match vm.cursor_mut(instr.p1)? {
-        CursorSlot::IndexRead(state) => state.set_current(current.clone()),
-        other => {
-            return Err(ExecError::CursorTypeMismatch {
-                opcode: "SeekIndexEq",
-                slot: instr.p1,
-                found: other.type_name(),
-                expected: "index read cursor",
-            })
-        }
-    }
+    state.set_current(current.clone());
     Ok(if current.is_none() {
         Step::Jump(to_pc(instr.p2))
     } else {

@@ -18,6 +18,20 @@ into `reassemble_payload` instead of wrapping it in a throwaway `Rc`
 and immediately copying the result back to a `Vec`. `decode_value_cell`
 (the Pager-only index insert/delete write path) is unchanged.
 
+perf: non-`UNIQUE`-index duplicate-key matches for the covering-index
+scan and index-only `COUNT(*)` fast paths (#450, follow-up from #444)
+— both fast paths previously required a `UNIQUE` index because
+`SeekIndexEq`'s one-shot probe couldn't walk forward past duplicate
+keys. `SeekIndexEq` now seeks the index-read cursor's own persisted
+traversal position (`state.cursor`) instead of a throwaway one, so a
+following `IdxNext` resumes right after the matched entry; both fast
+paths add an `IdxNext` + leading-column-still-equal recheck loop that
+walks and emits/counts every duplicate-key sibling, falling out the
+first time the leading column no longer matches (a `UNIQUE` index's
+single match still falls out on its very first `IdxNext`, so this
+subsumes #444's original single-probe behavior without a separate
+branch). Refs: #450, 009/Req-16.
+
 feat: `ORDER BY`/`LIMIT` on a compound (`UNION`/`UNION ALL`) `SELECT`
 (#484) — `compile_select_compound` previously rejected any top-level
 `ORDER BY`/`LIMIT` trailing a compound statement. Every arm's projected

@@ -113,12 +113,14 @@ where
             if !is_supported_operand {
                 return Ok(false);
             }
+            // Uniqueness is no longer required (#450): a non-`UNIQUE`
+            // index's leading-column match may have duplicate-key
+            // siblings, walked below via `IdxNext` + a leading-column
+            // recheck instead of assuming a single hit means count 1.
             let Some(index) = schema.indexes.iter().find(|idx| {
-                idx.unique
-                    && idx
-                        .columns
-                        .first()
-                        .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
+                idx.columns
+                    .first()
+                    .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
             }) else {
                 return Ok(false);
             };
@@ -138,7 +140,29 @@ where
                 P4::Int(1),
             ));
             em.patch_p2(seek_addr, miss_label);
-            em.emit(Instruction::new(Opcode::Integer, 1, count_reg, 0));
+
+            let loop_start = em.new_label();
+            em.place(loop_start);
+            let one_reg = reg.alloc();
+            em.emit(Instruction::new(Opcode::Integer, 1, one_reg, 0));
+            em.emit(Instruction::new(Opcode::Add, one_reg, count_reg, count_reg));
+
+            // A `UNIQUE` index's single match falls straight through
+            // here on the very first `IdxNext` (nothing shares its
+            // key); a non-`UNIQUE` index's duplicate-key siblings loop
+            // back to `loop_start`, incrementing once per match.
+            let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+            let recheck = em.new_label();
+            em.patch_p2(next_addr, recheck);
+            let exhausted = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+            em.patch_p2(exhausted, miss_label);
+
+            em.place(recheck);
+            let leading = reg.alloc();
+            em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
+            let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
+            em.patch_p2(eq_addr, loop_start);
+
             em.place(miss_label);
         }
     }

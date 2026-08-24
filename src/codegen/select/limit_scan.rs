@@ -223,8 +223,9 @@ pub(super) struct CoveringIndexMatch {
     pub(super) operand: Expr,
 }
 
-/// Finds a `UNIQUE` index of `schema` usable as a covering-index scan
-/// (#444) for `select`: `select.where_clause` must be a single
+/// Finds an index of `schema` usable as a covering-index scan (#444,
+/// non-`UNIQUE` indexes per #450) for `select`: `select.where_clause`
+/// must be a single
 /// top-level equality between the index's leading column and a
 /// literal/bind-parameter operand, and every `SELECT`-list column (bare
 /// columns only — see [`bare_result_column_names`]) must itself be
@@ -258,12 +259,14 @@ pub(super) fn find_covering_index(
     if !is_supported_operand {
         return None;
     }
+    // A non-`UNIQUE` index's leading column can match more than one row
+    // (#450) — `try_compile_covering_index_scan` walks every duplicate
+    // via `IdxNext` after the initial `SeekIndexEq`, so uniqueness is no
+    // longer a precondition here, just the leading-column match.
     let index_position = schema.indexes.iter().position(|idx| {
-        idx.unique
-            && idx
-                .columns
-                .first()
-                .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
+        idx.columns
+            .first()
+            .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
     })?;
     let index = schema.indexes.get(index_position)?;
     let result_names = bare_result_column_names(select)?;
@@ -283,10 +286,17 @@ pub(super) fn find_covering_index(
 }
 
 /// Emits an index-only ("covering index") scan (#444) in place of
-/// `SeekRowid` + full row decode, when [`find_covering_index`] finds a
-/// `UNIQUE` index that carries every column this `SELECT` needs —
-/// `SeekIndexEq` (the point probe) + `Column` reads straight out of
-/// the matched index entry, never touching the table cursor at all.
+/// `SeekRowid` + full row decode, when [`find_covering_index`] finds an
+/// index that carries every column this `SELECT` needs — `SeekIndexEq`
+/// (the point probe) + `Column` reads straight out of the matched index
+/// entry, never touching the table cursor at all. When the index isn't
+/// `UNIQUE` (#450), the initial match may have duplicate-key siblings:
+/// an `IdxNext` + leading-column-still-equal recheck loop walks and
+/// emits each one, falling out (to `end_label`) the first time the
+/// leading column no longer matches the probe (or the index is
+/// exhausted) — a `UNIQUE` index's single match still falls out the same
+/// way on its very first `IdxNext`, so this subsumes #444's original
+/// single-probe behavior rather than branching around it.
 ///
 /// Returns `Ok(true)` when this fast path was taken; `Ok(false)` leaves
 /// `em`/`reg` untouched so the caller falls back to the ordinary scan
@@ -339,6 +349,9 @@ where
     ));
     em.patch_p2(seek_addr, end_label);
 
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
     let row_skip = em.new_label();
     if let Some(limit) = &limit {
         emit_offset_guard(em, limit, row_skip);
@@ -369,7 +382,23 @@ where
     };
     sink(em, reg, first, count)?;
 
+    // A `UNIQUE` index's single match falls straight out here on the
+    // very first `IdxNext` (nothing shares its key); a non-`UNIQUE`
+    // index's duplicate-key siblings loop back to `loop_start` for as
+    // long as the leading column keeps matching the probe (#450).
     em.place(row_skip);
+    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+    let recheck = em.new_label();
+    em.patch_p2(next_addr, recheck);
+    let exhausted = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(exhausted, end_label);
+
+    em.place(recheck);
+    let leading = reg.alloc();
+    em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
+    let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
+    em.patch_p2(eq_addr, loop_start);
+
     Ok(true)
 }
 
