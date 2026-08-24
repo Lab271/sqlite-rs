@@ -25,7 +25,7 @@ use std::rc::Rc;
 use super::{
     cell_ptr_offset, local_payload_size, page1_header_start, read_cell_pointer, read_num_cells,
     read_page_type, read_u32, reassemble_payload, require_interior_header, write_page_common,
-    BtreeError, MAX_PAGES_VISITED,
+    BtreeError, Payload, MAX_PAGES_VISITED,
 };
 use crate::pager::Pager;
 use crate::record::{decode_record, decode_varint, TextEncoding, Value};
@@ -55,7 +55,7 @@ pub(super) type IndexInteriorEntry = (u32, Vec<Value>, Vec<u8>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRow {
     /// The decoded key-record's raw payload bytes.
-    pub payload: Vec<u8>,
+    pub payload: Payload,
 }
 
 struct IndexFrame {
@@ -70,7 +70,7 @@ struct IndexFrame {
     /// yields cell `i`'s own key, and the final step `2*num_cells`
     /// descends into the rightmost child.
     step: usize,
-    page: Vec<u8>,
+    page: Rc<[u8]>,
 }
 
 /// Depth-first, read-only cursor over an index b-tree, yielding entries
@@ -151,7 +151,7 @@ impl<P: PageSource> IndexCursor<P> {
         Ok(None)
     }
 
-    fn read_page(&mut self, page_num: u32) -> Result<Vec<u8>, BtreeError> {
+    fn read_page(&mut self, page_num: u32) -> Result<Rc<[u8]>, BtreeError> {
         self.pages_visited = self.pages_visited.saturating_add(1);
         if self.pages_visited > MAX_PAGES_VISITED {
             return Err(BtreeError::TraversalTooLong {
@@ -160,7 +160,6 @@ impl<P: PageSource> IndexCursor<P> {
         }
         self.source
             .read_page(page_num)
-            .map(|page| page.to_vec())
             .map_err(|source| BtreeError::PageSource { page_num, source })
     }
 
@@ -352,16 +351,14 @@ impl<P: PageSource> IndexCursor<P> {
         let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         let (payload_len, tail_start) = decode_payload_len(&frame.page, cell_start, page_num)?;
-        let page: Rc<[u8]> = Rc::from(frame.page.as_slice());
         let payload = reassemble_payload(
             &self.source,
             self.usable_size,
             page_num,
-            &page,
+            &frame.page,
             tail_start,
             payload_len,
-        )?
-        .to_vec();
+        )?;
         Ok(IndexRow { payload })
     }
 
@@ -382,16 +379,14 @@ impl<P: PageSource> IndexCursor<P> {
         // payload-length-varint + payload shape as a leaf cell.
         let (payload_len, tail_start) =
             decode_payload_len(&frame.page, cell_start.saturating_add(4), page_num)?;
-        let page: Rc<[u8]> = Rc::from(frame.page.as_slice());
         let payload = reassemble_payload(
             &self.source,
             self.usable_size,
             page_num,
-            &page,
+            &frame.page,
             tail_start,
             payload_len,
-        )?
-        .to_vec();
+        )?;
         Ok(IndexRow { payload })
     }
 }
@@ -876,6 +871,25 @@ mod tests {
             let prev = decode_record(&rows[i - 1].payload, TextEncoding::Utf8).unwrap();
             let cur = decode_record(&rows[i].payload, TextEncoding::Utf8).unwrap();
             assert_ne!(compare_keys(&prev, &cur), Ordering::Greater);
+        }
+    }
+
+    /// #471: mirrors #467's `local_payload_borrows_from_the_page_instead_of_copying`
+    /// for the index-btree read path — a leaf row whose payload fits
+    /// entirely in the local cell (no overflow) must borrow from the
+    /// page's `Rc<[u8]>` rather than allocating a fresh `Vec<u8>` copy.
+    #[test]
+    fn index_local_payload_borrows_from_the_page_instead_of_copying() {
+        let mut cursor = open_cursor("index.db", 3);
+        let row = cursor.first().unwrap().unwrap();
+        match &row.payload {
+            Payload::Local { page, .. } => {
+                assert!(
+                    Rc::strong_count(page) >= 2,
+                    "expected the row to share the page's Rc, not hold the only reference"
+                );
+            }
+            Payload::Owned(_) => panic!("expected a borrowed Local payload, got an Owned copy"),
         }
     }
 
