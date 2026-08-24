@@ -41,6 +41,25 @@ fn exec_ok(db: &Path, sql: &str) {
     );
 }
 
+/// The `-explain` bytecode listing for `db`/`sql` -- used below to
+/// check for `FilterAdd`/`Filter` opcodes (#464), which `EXPLAIN QUERY
+/// PLAN`'s human-readable summary doesn't surface.
+fn explain(db: &Path, sql: &str) -> String {
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg("-explain")
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running {CLI} query -explain {}: {e}", db.display()));
+    assert!(
+        output.status.success(),
+        "explain {sql:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn run_query(db: &Path, sql: &str) -> String {
     let output = Command::new(CLI)
         .arg("query")
@@ -216,4 +235,126 @@ fn cost_model_can_veto_expensive_index_seek() {
         !plan_after.contains("USING INDEX idx_x"),
         "got: {plan_after}"
     );
+}
+
+/// #470 (spec 011): without `ANALYZE`, a plain `INNER JOIN` between two
+/// full-scan tables still compiles FROM-clause order unchanged (t1
+/// outermost) -- the #461 "stats-free behavior is unaffected" guarantee
+/// extended to join order.
+#[test]
+fn join_order_unchanged_without_analyze() {
+    let Some(db) = seed_db("join-order-no-stats") else {
+        return skip_no_oracle("join_order_unchanged_without_analyze");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3), (4), (5)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1)");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t1.a = t2.x",
+    );
+    assert_eq!(plan, "0|0|0|SCAN t1\n1|0|0|SCAN t2\n", "got: {plan}");
+}
+
+/// #470/#462 (spec 011): once `ANALYZE` has recorded that `t1` has far
+/// more rows than `t2`, a plain `INNER JOIN` between the two full-scan
+/// tables is reordered to scan the smaller table (`t2`) outermost,
+/// instead of always compiling FROM-clause order -- and the join still
+/// returns the same rows as the un-reordered plan (oracle-equivalent
+/// result set, only the scan order changes).
+#[test]
+fn join_order_reorders_by_analyze_row_counts() {
+    let Some(db) = seed_db("join-order-analyze") else {
+        return skip_no_oracle("join_order_reorders_by_analyze_row_counts");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3), (4), (5)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t1.a = t2.x",
+    );
+    assert_eq!(plan, "0|0|0|SCAN t2\n1|0|0|SCAN t1\n", "got: {plan}");
+
+    let rows = run_query(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a",
+    );
+    assert_eq!(rows, "1|1\n", "got: {rows}");
+}
+
+/// #464 (spec 011): once `ANALYZE` shows a join level's table has
+/// enough rows and no rowid/unique-index seek is structurally
+/// available, the compiled program prefaces that level's nested-loop
+/// scan with a one-time `FilterAdd` pre-pass and a per-outer-row
+/// `Filter` check -- and the join still returns the same rows as the
+/// oracle.
+#[test]
+fn bloom_filter_prefaces_unindexed_join_level_once_analyzed() {
+    let Some(db) = seed_db("bloom-filter") else {
+        return skip_no_oracle("bloom_filter_prefaces_unindexed_join_level_once_analyzed");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    let values: Vec<String> = (1..=40).map(|n| format!("({n})")).collect();
+    exec_ok(&db, &format!("INSERT INTO t1 VALUES {}", values.join(", ")));
+    exec_ok(&db, "INSERT INTO t2 VALUES (5), (37)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan = explain(&db, "SELECT * FROM t1 JOIN t2 ON t1.a = t2.x");
+    assert!(plan.contains("FilterAdd"), "got: {plan}");
+    assert!(plan.contains("Filter|"), "got: {plan}");
+
+    let rows = run_query(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a",
+    );
+    assert_eq!(rows, "5|5\n37|37\n", "got: {rows}");
+    assert_matches_analyze_oracle(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a",
+    );
+}
+
+/// #464 (spec 011): below [`join_access::MIN_ROWS_TO_BLOOM`]'s
+/// threshold (or without `ANALYZE` at all), no `FilterAdd`/`Filter`
+/// opcode is emitted -- the pre-pass's overhead isn't worth it for a
+/// small table, and a stats-free database is byte-for-byte unaffected.
+#[test]
+fn bloom_filter_is_skipped_below_row_threshold() {
+    let Some(db) = seed_db("bloom-filter-small") else {
+        return skip_no_oracle("bloom_filter_is_skipped_below_row_threshold");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (2)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan = explain(&db, "SELECT * FROM t1 JOIN t2 ON t1.a = t2.x");
+    assert!(!plan.contains("FilterAdd"), "got: {plan}");
+}
+
+/// Verifies `sql`'s rows against the pinned oracle after `ANALYZE` has
+/// run against `db` -- same shape as `join_test.rs`'s
+/// `assert_matches_oracle`, but reusable here without pulling in that
+/// module's own fixture-building helpers.
+fn assert_matches_analyze_oracle(db: &Path, sql: &str) {
+    let Some(oracle) = pinned_oracle() else {
+        return;
+    };
+    let oracle_output = Command::new(&oracle)
+        .arg(db)
+        .arg(sql)
+        .output()
+        .unwrap_or_else(|e| panic!("running oracle {} {sql:?}: {e}", db.display()));
+    assert!(oracle_output.status.success());
+    let expected = String::from_utf8_lossy(&oracle_output.stdout).into_owned();
+    let actual = run_query(db, sql);
+    assert_eq!(actual, expected, "sqlite-rs vs oracle for {sql:?}");
 }

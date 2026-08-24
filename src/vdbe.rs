@@ -14,6 +14,7 @@ mod control;
 mod cursor;
 mod exec;
 pub mod explain;
+mod filter;
 mod functions;
 mod pragma;
 mod program;

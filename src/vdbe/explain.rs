@@ -197,6 +197,8 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::SorterNext => "SorterNext",
         Opcode::SorterData => "SorterData",
         Opcode::Sort => "Sort",
+        Opcode::FilterAdd => "FilterAdd",
+        Opcode::Filter => "Filter",
     }
 }
 
@@ -254,6 +256,8 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::NewRowid => format!("r[{p2}] = cursor {p1} new rowid"),
         Opcode::Delete => format!("cursor {p1} delete current row"),
         Opcode::Copy => format!("r[{p2}] = r[{p1}]"),
+        Opcode::FilterAdd => format!("filter {p1} add r[{p3}]"),
+        Opcode::Filter => format!("filter {p1} test r[{p3}], jump {p2} if absent"),
         _ => String::new(),
     }
 }

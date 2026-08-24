@@ -230,6 +230,10 @@ pub struct Vm {
     /// `None` until the first `AggStep` for that slot runs (spec 009
     /// Requirement 12, #241).
     agg_contexts: Vec<Option<AggState>>,
+    /// Bloom-filter slot storage (#464): a disjoint address space from
+    /// both `cursors` and `agg_contexts`, addressed by
+    /// `FilterAdd`/`Filter`'s `P1` — see `crate::vdbe::filter`'s doc.
+    filters: Vec<Option<crate::vdbe::filter::BloomFilterState>>,
     pub(crate) db: Option<VmDb>,
     rows: Vec<Vec<Value>>,
     pub(crate) once_fired: HashSet<usize>,
@@ -262,6 +266,7 @@ impl Default for Vm {
             registers: Vec::new(),
             cursors: Vec::new(),
             agg_contexts: Vec::new(),
+            filters: Vec::new(),
             db: None,
             rows: Vec::new(),
             once_fired: HashSet::new(),
@@ -506,6 +511,42 @@ impl Vm {
         Ok(())
     }
 
+    /// Inserts `value` into bloom-filter slot `slot`, lazily creating
+    /// it (sized by `expected_items`, ignored once the slot already
+    /// exists) — `FilterAdd`'s handler. See `crate::vdbe::filter`'s
+    /// no-false-negative contract for why a non-integer `value` is
+    /// still accepted (it just poisons the slot rather than erroring).
+    pub(crate) fn filter_add(
+        &mut self,
+        slot: i32,
+        expected_items: u64,
+        value: &Value,
+    ) -> Result<(), ExecError> {
+        let idx = Self::index("filter add", slot)?;
+        if idx >= self.filters.len() {
+            self.filters.resize_with(idx.saturating_add(1), || None);
+        }
+        let Some(cell) = self.filters.get_mut(idx) else {
+            return Ok(());
+        };
+        cell.get_or_insert_with(|| crate::vdbe::filter::BloomFilterState::new(expected_items))
+            .insert(value);
+        Ok(())
+    }
+
+    /// Reads bloom-filter slot `slot`'s membership test for `value` —
+    /// `Filter`'s handler. An unopened slot (no `FilterAdd` has run for
+    /// it yet) reports `true` ("maybe present"), same as the slot's own
+    /// safe default.
+    pub(crate) fn filter_might_contain(&self, slot: i32, value: &Value) -> Result<bool, ExecError> {
+        let idx = Self::index("filter check", slot)?;
+        Ok(self
+            .filters
+            .get(idx)
+            .and_then(Option::as_ref)
+            .is_none_or(|f| f.might_contain(value)))
+    }
+
     /// Appends `row` to the set of rows produced so far (`ResultRow`).
     pub fn emit_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
@@ -596,14 +637,14 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
     use Opcode::{
         Add, AggFinal, AggStep, Analyze, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob,
         Cast, Column, Concat, Copy, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete,
-        Divide, DropIndex, DropTable, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete,
-        IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos,
-        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
-        NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
-        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
-        Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft, ShiftRight, Sort,
-        SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
-        Transaction, Variable,
+        Divide, DropIndex, DropTable, Eq, Filter, FilterAdd, Found, Function, Ge, Goto, Gt, Halt,
+        IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot,
+        IfNotZero, IfPos, Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply,
+        MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once,
+        OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow,
+        Return, Rewind, Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft,
+        ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
+        Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -698,6 +739,34 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         Function => function(vm, instr),
         AggStep => agg_step(vm, instr),
         AggFinal => agg_final(vm, instr),
+
+        FilterAdd => filter_add(vm, instr),
+        Filter => filter_check(vm, instr),
+    }
+}
+
+/// `FilterAdd` (#464): inserts register `P3`'s value into bloom-filter
+/// slot `P1`, sized (on first use for this slot) by `P4::Int`'s
+/// expected-item-count hint.
+fn filter_add(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let expected_items = match &instr.p4 {
+        P4::Int(n) => u64::try_from(*n).unwrap_or(0),
+        _ => 0,
+    };
+    let value = vm.register(instr.p3)?.clone();
+    vm.filter_add(instr.p1, expected_items, &value)?;
+    Ok(Step::Next)
+}
+
+/// `Filter` (#464): jumps to `P2` when register `P3`'s value is
+/// definitely absent from bloom-filter slot `P1`, otherwise falls
+/// through — see `crate::vdbe::filter`'s no-false-negative contract.
+fn filter_check(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let value = vm.register(instr.p3)?.clone();
+    if vm.filter_might_contain(instr.p1, &value)? {
+        Ok(Step::Next)
+    } else {
+        Ok(Step::Jump(to_pc(instr.p2)))
     }
 }
 

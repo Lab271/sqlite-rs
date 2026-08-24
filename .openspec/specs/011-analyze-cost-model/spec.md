@@ -165,7 +165,7 @@ full scan, unchanged) when they are not — so a database that has never run
   changes *which* of the already-safe candidate accesses is preferred,
   never whether an access is safe to emit.
 - This requirement does not add join *reordering* — join order stays
-  FROM-clause order; that is #470's scope.
+  FROM-clause order; see Requirement 5 (#470) for cost-informed reordering.
 
 **Implementation:** `src/codegen/select/join_access.rs::choose_join_access`
 
@@ -189,3 +189,83 @@ full scan, unchanged) when they are not — so a database that has never run
 - THEN the full-scan fallback is chosen instead of the index seek
 
 **Tests:** `tests/corpus/analyze_test.rs::cost_model_can_veto_expensive_index_seek`
+
+### Requirement 5: Cost-Informed Inner/Cross Join Reordering [MUST]
+
+`compile_select_joined_scan` (`src/codegen/select/joins.rs`) MUST reorder a
+`FROM`-clause chain made entirely of `INNER`/`CROSS` joins (including
+already-resolved `NATURAL`/`USING`) by ascending `estimate_scan_cost`
+(`crate::planner`), scanning the smallest estimated table outermost — and
+MUST leave the chain in original FROM-clause order whenever any join in it
+is `LEFT`/`RIGHT`/`FULL` (reordering either side of an outer join changes
+its result set) or whenever no table has an `ANALYZE`-derived cost (every
+stats-free estimate is `u64::MAX`, so the cost-sort is a stable no-op and
+execution order matches pre-#470 behavior byte-for-byte). A join's `ON`
+constraint MUST be checked at the first execution level where every table
+it references is bound, not assumed adjacent to its original FROM-clause
+position. `EXPLAIN QUERY PLAN` (`src/codegen/select/eqp.rs`) MUST report
+rows in the same reordered execution order this produces.
+
+**Implementation:** `src/codegen/select/join_order.rs::plan_join_order`,
+`src/codegen/select/joins.rs::compile_select_joined_scan`,
+`src/codegen/select/eqp.rs::explain_query_plan`
+
+#### Scenario: Join order is unchanged without ANALYZE
+
+- GIVEN a fresh database with no `ANALYZE` ever run, and a plain `INNER
+  JOIN` between two tables
+- WHEN the join is compiled
+- THEN the execution order matches original FROM-clause order, reported
+  identically by `EXPLAIN QUERY PLAN`
+
+**Tests:** `tests/corpus/analyze_test.rs::join_order_unchanged_without_analyze`
+
+#### Scenario: Smaller table is scanned outermost once ANALYZE has run
+
+- GIVEN `ANALYZE` stats recording table `t1` with far more rows than `t2`
+- WHEN a plain `INNER JOIN` between `t1` and `t2` is compiled
+- THEN `t2` (the smaller table) is scanned outermost, `EXPLAIN QUERY PLAN`
+  reports that order, and the query still returns the same rows as the
+  un-reordered plan
+
+**Tests:** `tests/corpus/analyze_test.rs::join_order_reorders_by_analyze_row_counts`
+
+### Requirement 6: Bloom-Filter Pre-Check for Unindexed Join Levels [MUST]
+
+When a join level's single `ON` equality has no structural rowid/unique-
+index seek available (`choose_join_access` returns `None`) and `ANALYZE`
+records at least `join_access::MIN_ROWS_TO_BLOOM` rows for that level's
+table, `compile_join_level_traverse` (`src/codegen/select/joins/level.rs`)
+MUST preface that level's `Rewind`/`Next` scan with a one-time (`Once`-
+guarded) `FilterAdd` pre-pass over the table's join-key column and a
+per-outer-row `Filter` check that skips the scan entirely on a definite
+miss. The underlying `FilterAdd`/`Filter` opcodes (`crate::vdbe::filter`)
+MUST NOT produce a false negative for any `Value`: only an exact-match
+`Value::Integer` key is ever hashed, and any other type (or a filter that
+has ever seen one) always reports "maybe present" rather than risk
+excluding a value real join semantics would still match. A database with
+no `ANALYZE` history, or a table below the row threshold, MUST compile
+with no `FilterAdd`/`Filter` opcode at all — byte-for-byte the pre-#464
+program.
+
+**Implementation:** `src/vdbe/filter.rs::BloomFilterState`,
+`src/codegen/select/join_access.rs::choose_bloom_probe`,
+`src/codegen/select/joins/level.rs::compile_join_level_traverse`
+
+#### Scenario: Unindexed join level gets a Bloom pre-check once ANALYZE has run
+
+- GIVEN `ANALYZE` stats recording a table with more rows than
+  `MIN_ROWS_TO_BLOOM`, joined on a plain (non-indexed) equality
+- WHEN that join is compiled
+- THEN the program contains a `FilterAdd` and a `Filter` opcode for that
+  level, and the join still returns the same rows as the oracle
+
+**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_prefaces_unindexed_join_level_once_analyzed`
+
+#### Scenario: Small or stats-free tables never get a Bloom pre-check
+
+- GIVEN a table below `MIN_ROWS_TO_BLOOM` rows (with or without `ANALYZE`)
+- WHEN a plain-equality join against it is compiled
+- THEN the program contains no `FilterAdd`/`Filter` opcode
+
+**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_is_skipped_below_row_threshold`
