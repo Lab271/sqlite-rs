@@ -43,7 +43,7 @@ impl Stats {
     /// corrupt `sqlite_stat1` degrades to "no stats for that entry",
     /// which [`estimate_scan_cost`]/[`estimate_index_cost`] already
     /// handle safely.
-    pub fn from_stat1_rows<'a>(rows: impl IntoIterator<Item = (Option<&'a str>, &'a str)>) -> Self {
+    pub fn from_stat1_rows(rows: impl IntoIterator<Item = (Option<String>, String)>) -> Self {
         let mut table_rows = None;
         let mut index_stats = HashMap::new();
         for (idx, stat) in rows {
@@ -54,7 +54,7 @@ impl Stats {
                     let rows = parts.next().and_then(|s| s.parse().ok());
                     let avg_eq = parts.next().and_then(|s| s.parse().ok());
                     if let (Some(rows), Some(avg_eq)) = (rows, avg_eq) {
-                        index_stats.insert(name.to_string(), (rows, avg_eq));
+                        index_stats.insert(name, (rows, avg_eq));
                     }
                 }
             }
@@ -181,13 +181,7 @@ pub fn load_stats<P: PageSource>(
 
     rows_by_table
         .into_iter()
-        .map(|(tbl, rows)| {
-            let refs: Vec<(Option<&str>, &str)> = rows
-                .iter()
-                .map(|(i, s)| (i.as_deref(), s.as_str()))
-                .collect();
-            (tbl, Stats::from_stat1_rows(refs))
-        })
+        .map(|(tbl, rows)| (tbl, Stats::from_stat1_rows(rows)))
         .collect()
 }
 
@@ -258,7 +252,10 @@ mod tests {
     /// scan once stats exist".
     #[test]
     fn indexed_equality_cheaper_than_scan_with_stats() {
-        let stats = Stats::from_stat1_rows(vec![(None, "10000"), (Some("idx_a"), "10000 10")]);
+        let stats = Stats::from_stat1_rows(vec![
+            (None, "10000".to_string()),
+            (Some("idx_a".to_string()), "10000 10".to_string()),
+        ]);
 
         let scan = estimate_scan_cost(&stats);
         let indexed = estimate_index_cost("idx_a", &stats);
@@ -270,14 +267,14 @@ mod tests {
 
     #[test]
     fn unknown_index_name_falls_back_to_unknown() {
-        let stats = Stats::from_stat1_rows(vec![(None, "5")]);
+        let stats = Stats::from_stat1_rows(vec![(None, "5".to_string())]);
         let cost = estimate_index_cost("no_such_index", &stats);
         assert_eq!(cost.estimated_rows, u64::MAX);
     }
 
     #[test]
     fn malformed_stat_text_is_skipped_not_a_hard_error() {
-        let stats = Stats::from_stat1_rows(vec![(None, "not-a-number")]);
+        let stats = Stats::from_stat1_rows(vec![(None, "not-a-number".to_string())]);
         assert_eq!(stats.table_rows(), None);
     }
 }
