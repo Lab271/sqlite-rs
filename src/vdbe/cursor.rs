@@ -46,6 +46,7 @@
 //! - `Delete(p1=cursor)` — deletes the entry `Found`/`IdxInsert` most
 //!   recently probed/inserted on this cursor.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -327,6 +328,9 @@ pub(crate) struct EphemeralState {
     last_key: Option<Vec<u8>>,
 }
 
+/// One materialized row: its rowid, plus its decoded column values.
+type EphemeralRow = (i64, Vec<Value>);
+
 /// Backing store for [`CursorSlot::EphemeralTable`] (#257): rows appended
 /// in insertion order, each tagged with the rowid `Insert`'s caller
 /// computed (codegen assigns sequential rowids starting at 1 — see
@@ -336,23 +340,74 @@ pub(crate) struct EphemeralState {
 /// `TableCursorState::current`.
 #[derive(Debug)]
 pub(crate) struct EphemeralTableState {
-    rows: Vec<(i64, Vec<Value>)>,
+    /// `Rc<RefCell<..>>` rather than a plain owned `Vec` (#425): a CTE
+    /// referenced more than once in one statement materializes into one
+    /// cursor via `OpenEphemeral`+`Insert`, then every later reference
+    /// `OpenDup`s a second (third, ...) cursor sharing this same `rows`
+    /// — each with its own independent `pos` (scan position), but all
+    /// reading the one populated row set. By the time any `OpenDup`
+    /// executes, the source cursor's own materialization has already
+    /// fully run (codegen always finishes one materialization's
+    /// `OpenEphemeral..Insert*` region, reaching its own end label,
+    /// before compiling a later reference that might duplicate it), so
+    /// there is never a concurrent writer while a dup exists to race —
+    /// the `RefCell` is borrow-checked scaffolding for that invariant,
+    /// not a signal that concurrent mutation is expected.
+    rows: Rc<RefCell<Vec<EphemeralRow>>>,
     pos: Option<usize>,
     /// Monotonic counter `Sequence` hands out (#257) — codegen uses it to
     /// assign each materialized row a fresh rowid before `Insert`,
     /// mirroring how the index-mode [`EphemeralState::sequence`] is used
     /// for DISTINCT. Starts at `1` (rather than `0`, unlike
     /// `EphemeralState::sequence`) to match a real table's first rowid.
+    /// Meaningless on an `OpenDup`-ed cursor, which never inserts.
     sequence: i64,
 }
 
 impl Default for EphemeralTableState {
     fn default() -> Self {
         Self {
-            rows: Vec::new(),
+            rows: Rc::new(RefCell::new(Vec::new())),
             pos: None,
             sequence: 1,
         }
+    }
+}
+
+impl EphemeralTableState {
+    /// Borrows the (possibly shared, #425) row set for reading. Only
+    /// ever fails if some other in-progress borrow on this exact `Rc`
+    /// is somehow still live — never expected given this crate's
+    /// single-threaded, non-reentrant opcode dispatch (see the field
+    /// doc above), but a structured `Err` rather than the panic
+    /// `RefCell::borrow()` itself would give, matching this crate's
+    /// no-panic-on-a-production-path convention.
+    fn try_rows(
+        &self,
+        opcode: &'static str,
+    ) -> Result<std::cell::Ref<'_, Vec<EphemeralRow>>, ExecError> {
+        self.rows
+            .try_borrow()
+            .map_err(|_| ExecError::MalformedInstruction {
+                opcode,
+                reason: "ephemeral table rows already borrowed".to_string(),
+            })
+    }
+
+    /// [`Self::try_rows`], mutably — only ever called by `Insert` on the
+    /// one cursor still materializing (an `OpenDup`-ed cursor never
+    /// inserts, so this never contends with a `try_rows` read borrow in
+    /// practice).
+    fn try_rows_mut(
+        &self,
+        opcode: &'static str,
+    ) -> Result<std::cell::RefMut<'_, Vec<EphemeralRow>>, ExecError> {
+        self.rows
+            .try_borrow_mut()
+            .map_err(|_| ExecError::MalformedInstruction {
+                opcode,
+                reason: "ephemeral table rows already borrowed".to_string(),
+            })
     }
 }
 
@@ -539,6 +594,37 @@ pub fn open_ephemeral(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecErro
     Ok(Step::Next)
 }
 
+/// `OpenDup`: opens cursor `P1` as a second, independently-scanning view
+/// onto the same materialized row set cursor `P2` (an ephemeral *table*
+/// cursor, i.e. opened by `OpenEphemeral` with `P5` nonzero) already
+/// holds (#425) — used when a `WITH`-clause CTE is referenced more than
+/// once in one statement, so only the first reference pays to
+/// materialize it. `P1` starts unpositioned (`pos: None`), same as a
+/// fresh `OpenEphemeral`; only the row data (`rows`) is shared, via the
+/// `Rc` clone.
+pub fn open_dup(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let rows = match vm.cursor(instr.p2)? {
+        CursorSlot::EphemeralTable(state) => Rc::clone(&state.rows),
+        other => {
+            return Err(ExecError::CursorTypeMismatch {
+                opcode: "OpenDup",
+                slot: instr.p2,
+                found: other.type_name(),
+                expected: "ephemeral table cursor",
+            })
+        }
+    };
+    vm.set_cursor(
+        instr.p1,
+        CursorSlot::EphemeralTable(EphemeralTableState {
+            rows,
+            pos: None,
+            sequence: 1,
+        }),
+    )?;
+    Ok(Step::Next)
+}
+
 /// `OpenPseudo`: opens a single-row pseudo-cursor into slot `P1` that
 /// re-presents register `P2`'s record blob as a cursor row, so `Column`
 /// needs no special case for sorter-sourced (or otherwise
@@ -567,7 +653,8 @@ pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             state.current_rowid.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
-            state.pos = if state.rows.is_empty() { None } else { Some(0) };
+            let len = state.try_rows("Rewind")?.len();
+            state.pos = if len == 0 { None } else { Some(0) };
             state.pos.is_some()
         }
         other => {
@@ -605,7 +692,8 @@ pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             state.current_rowid.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
-            state.pos = state.rows.len().checked_sub(1);
+            let len = state.try_rows("Last")?.len();
+            state.pos = len.checked_sub(1);
             state.pos.is_some()
         }
         other => {
@@ -644,11 +732,8 @@ pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         }
         CursorSlot::EphemeralTable(state) => {
             let next_pos = state.pos.map(|p| p.saturating_add(1)).unwrap_or(0);
-            state.pos = if next_pos < state.rows.len() {
-                Some(next_pos)
-            } else {
-                None
-            };
+            let len = state.try_rows("Next")?.len();
+            state.pos = if next_pos < len { Some(next_pos) } else { None };
             state.pos.is_some()
         }
         other => {
@@ -701,9 +786,10 @@ fn read_row_column(
             };
         }
         CursorSlot::EphemeralTable(state) => {
+            let rows = state.try_rows(opcode)?;
             return Ok(state
                 .pos
-                .and_then(|p| state.rows.get(p))
+                .and_then(|p| rows.get(p))
                 .ok_or(ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
@@ -847,12 +933,15 @@ pub fn rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             }
         }
         CursorSlot::EphemeralTable(state) => {
-            let (rowid, _) = state.pos.and_then(|p| state.rows.get(p)).ok_or(
-                ExecError::MalformedInstruction {
-                    opcode: "Rowid",
-                    reason: "cursor has no current row".to_string(),
-                },
-            )?;
+            let rows = state.try_rows("Rowid")?;
+            let (rowid, _) =
+                state
+                    .pos
+                    .and_then(|p| rows.get(p))
+                    .ok_or(ExecError::MalformedInstruction {
+                        opcode: "Rowid",
+                        reason: "cursor has no current row".to_string(),
+                    })?;
             Value::Integer(*rowid)
         }
         other => {
@@ -1494,13 +1583,14 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 })?;
             let state = vm.ephemeral_table_mut(instr.p1, "Insert")?;
-            if state.rows.len() >= MAX_EPHEMERAL_ROWS {
+            let mut rows = state.try_rows_mut("Insert")?;
+            if rows.len() >= MAX_EPHEMERAL_ROWS {
                 return Err(ExecError::EphemeralRowLimitExceeded {
                     opcode: "Insert",
                     limit: MAX_EPHEMERAL_ROWS,
                 });
             }
-            state.rows.push((rowid, values));
+            rows.push((rowid, values));
             Ok(Step::Next)
         }
         _ => {
@@ -3187,6 +3277,61 @@ mod tests {
                 (Value::Integer(3), Value::Integer(30)),
             ]
         );
+    }
+
+    /// #425: `OpenDup` onto an already-materialized ephemeral table
+    /// cursor scans the same rows without a second `Insert` pass, and
+    /// each cursor's position is independent — rewinding the dup
+    /// doesn't disturb the source cursor's own position.
+    #[test]
+    fn open_dup_shares_rows_with_independent_positions() {
+        let mut vm = Vm::new();
+        open_ephemeral_table(&mut vm, 0);
+        insert_ephemeral_row(&mut vm, 0, 1, &[Value::Integer(10)]);
+        insert_ephemeral_row(&mut vm, 0, 2, &[Value::Integer(20)]);
+
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 0, 99, 0)).unwrap();
+        next(&mut vm, &Instruction::new(Opcode::Next, 0, 1, 0)).unwrap();
+        // Cursor 0 is now positioned on its second row (rowid 2).
+
+        open_dup(&mut vm, &Instruction::new(Opcode::OpenDup, 1, 0, 0)).unwrap();
+        // The dup starts unpositioned, independent of cursor 0's own position.
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap();
+        assert_eq!(vm.register(10).unwrap().clone(), Value::Integer(2));
+
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 1, 11, 0)).unwrap();
+        assert_eq!(vm.register(11).unwrap().clone(), Value::Integer(1));
+
+        // Cursor 0's position is unaffected by the dup's rewind.
+        rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 12, 0)).unwrap();
+        assert_eq!(vm.register(12).unwrap().clone(), Value::Integer(2));
+
+        // The dup sees the full row set, not just what existed at dup time.
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        let mut seen = Vec::new();
+        loop {
+            rowid(&mut vm, &Instruction::new(Opcode::Rowid, 1, 10, 0)).unwrap();
+            seen.push(vm.register(10).unwrap().clone());
+            match next(&mut vm, &Instruction::new(Opcode::Next, 1, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(seen, vec![Value::Integer(1), Value::Integer(2)]);
+    }
+
+    /// `OpenDup` onto a non-ephemeral-table cursor (e.g. a real table
+    /// cursor) must error cleanly rather than panic.
+    #[test]
+    fn open_dup_on_a_non_ephemeral_table_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let result = open_dup(&mut vm, &Instruction::new(Opcode::OpenDup, 1, 0, 0));
+        assert!(matches!(result, Err(ExecError::CursorTypeMismatch { .. })));
     }
 
     /// A `with_db` `Vm` whose header reports `encoding` — the source is

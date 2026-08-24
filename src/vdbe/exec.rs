@@ -641,10 +641,10 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot,
         IfNotZero, IfPos, Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply,
         MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once,
-        OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow,
-        Return, Rewind, Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft,
-        ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8,
-        Subtract, Transaction, Variable,
+        OpenDup, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder,
+        ResultRow, Return, Rewind, Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode,
+        ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort,
+        String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -700,6 +700,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         OpenRead => cursor::open_read(vm, instr),
         OpenWrite => cursor::open_write(vm, instr),
         OpenEphemeral => cursor::open_ephemeral(vm, instr),
+        OpenDup => cursor::open_dup(vm, instr),
         OpenPseudo => cursor::open_pseudo(vm, instr),
         Rewind => cursor::rewind(vm, instr),
         Last => cursor::last(vm, instr),

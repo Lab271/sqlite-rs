@@ -231,6 +231,21 @@ pub(crate) struct RegAlloc {
     /// single monotonically-increasing counter suffices without needing
     /// to reason about lifetimes across subqueries.
     next_cursor: i32,
+    /// Every `FROM`-subquery already materialized earlier in this same
+    /// statement's compile, keyed by structural equality of its
+    /// `Select` — the cursor it was materialized into, plus its
+    /// synthetic output schema (#425). A `WITH`-clause CTE referenced N
+    /// times rewrites into N independent but byte-for-byte identical
+    /// `TableRefKind::Subquery` clones (preserving self-join
+    /// correctness — `subquery/cte.rs`'s module doc); the first one to
+    /// materialize (`OpenEphemeral`+populate) gets cached here, and
+    /// every later structurally-identical reference just `OpenDup`s
+    /// onto that cursor instead of re-running the query. A `Vec` with a
+    /// linear scan rather than a `HashMap` (`Select` has no cheap
+    /// hash) — bounded by the number of distinct FROM-subqueries in
+    /// one statement, always small. Scoped to one `RegAlloc` (one
+    /// top-level statement compile).
+    materialized_ctes: Vec<(crate::parser::ast::Select, i32, crate::schema::TableSchema)>,
 }
 
 impl Default for RegAlloc {
@@ -239,6 +254,7 @@ impl Default for RegAlloc {
             next: 0,
             next_param: 0,
             next_cursor: 1000,
+            materialized_ctes: Vec::new(),
         }
     }
 }
@@ -254,6 +270,33 @@ impl RegAlloc {
         let c = self.next_cursor;
         self.next_cursor = self.next_cursor.saturating_add(1);
         c
+    }
+
+    /// The cursor/schema a structurally-identical `FROM`-subquery was
+    /// already materialized into earlier in this same statement's
+    /// compile, if any (#425).
+    pub(crate) fn cached_cte(
+        &self,
+        subquery: &crate::parser::ast::Select,
+    ) -> Option<(i32, crate::schema::TableSchema)> {
+        self.materialized_ctes
+            .iter()
+            .find(|(cached, _, _)| cached == subquery)
+            .map(|(_, cursor, schema)| (*cursor, schema.clone()))
+    }
+
+    /// Records that `subquery` has now been materialized into `cursor`,
+    /// with the given synthetic output schema, so a later structurally-
+    /// identical reference reuses it instead of materializing again
+    /// (#425).
+    pub(crate) fn cache_cte(
+        &mut self,
+        subquery: &crate::parser::ast::Select,
+        cursor: i32,
+        schema: crate::schema::TableSchema,
+    ) {
+        self.materialized_ctes
+            .push((subquery.clone(), cursor, schema));
     }
 
     pub(crate) fn alloc(&mut self) -> i32 {

@@ -8,6 +8,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+feat: share one materialization across repeated `FROM`-subquery
+references (#425, epic #354's V6.1 "10x on repeated subqueries"
+target) — `expand_with_clause` rewrote every reference to a
+`WITH`-clause CTE into its own independent `TableRefKind::Subquery`,
+so a CTE referenced N times re-ran and re-materialized its body N
+times, same cost as inlining it N times. A new VDBE opcode,
+`OpenDup(p1=new_cursor, p2=source_cursor)`, opens a second,
+independently-scanning cursor sharing an already-materialized
+ephemeral table's row data instead of a fresh `OpenEphemeral`+
+populate; `RegAlloc` caches materializations per statement compile,
+keyed by structural equality of the `Select` being materialized (not
+an AST identity field — that approach grew `Select`'s inline size
+enough to trip an unrelated pre-existing depth-guard test sitting at
+the edge of a real stack overflow in debug builds). `cte_reuse_10x`
+bench: `cte` 1.34ms vs `inline` 11.1ms (was statistically identical
+before this fix) — roughly 8x.
+
 chore: add WAL-mode variants to `engine.rs`'s transaction benchmarks
 (#436) — `insert_single_tx_wal`, `insert_batch_tx_100_wal`,
 `insert_batch_tx_1000_wal`, `update_batch_tx_wal` now run each
