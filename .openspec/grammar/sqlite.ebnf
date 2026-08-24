@@ -43,6 +43,7 @@ sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
                   | create-view-stmt   (* V6 *)
                   | drop-view-stmt     (* V6 *)
                   | pragma-stmt        (* V6 *)
+                  | analyze-stmt       (* V7 *)
                   | explain-stmt       (* V4 *)
                   | begin-stmt         (* V5 *)
                   | commit-stmt        (* V5 *)
@@ -54,9 +55,10 @@ sql-stmt        ::= select-stmt        (* V2/V6 -- select-stmt now carries an
                      #243 pulled EXPLAIN [QUERY PLAN] forward from its original
                      V7 slot -- see explain-stmt below -- because the planner's
                      index-selection work needs EQP output to be observable now;
-                     PRAGMA/ANALYZE remain V7, except the narrow
-                     journal_mode=WAL|DELETE carve-out -- see pragma-stmt below,
-                     #388 *)
+                     general PRAGMA remains V7 (only the narrow
+                     journal_mode=WAL|DELETE carve-out landed -- see pragma-stmt
+                     below, #388); ANALYZE's bare-name/no-argument forms landed
+                     at V7 (#461) -- see analyze-stmt below *)
 
 explain-stmt    ::= "EXPLAIN" [ "QUERY" "PLAN" ] sql-stmt ;
                      (* V4 [parse.y:173 explain] *)
@@ -358,6 +360,18 @@ view-name       ::= identifier ;                                         (* V6 *
 pragma-stmt     ::= "PRAGMA" "journal_mode" "=" ( "WAL" | "DELETE" ) ;
                      (* V6 [parse.y:1715 cmd] -- #388 *)
 
+(* ===================== ANALYZE (V7 carve-out) =====================
+ * [parse.y:1875 cmd ::= ANALYZE, :1876 cmd ::= ANALYZE nm dbnm] --
+ * `dbnm` (an optional `.`-qualified schema-name prefix on the table
+ * name) is a stock-SQLite production this MVP carve-out doesn't
+ * implement: `table-name` below is a single bare identifier only, and
+ * the parser reports `Unsupported` (not a hard parse error) if a `.`
+ * follows it -- #461, spec 011.
+ *)
+
+analyze-stmt    ::= "ANALYZE" [ table-name ] ;
+                     (* V7 [parse.y:1875 cmd] -- #461 *)
+
 (* ===================== Transaction control (V5 slice) =====================
  * [parse.y:181 cmd ::= BEGIN transtype trans_opt, :186 transtype,
  *  :190 cmd ::= COMMIT|END trans_opt, :191 cmd ::= ROLLBACK trans_opt]
@@ -412,9 +426,12 @@ identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -
  *      above; view storage + FROM-clause expansion is #380)
  * V7:  PRAGMA (general form -- every pragma name/value other than the
  *      narrow `journal_mode = WAL|DELETE` carve-out that landed under
- *      V6 -- see pragma-stmt above, #388), ANALYZE (EXPLAIN [QUERY
- *      PLAN] pulled forward to V4 -- #243), `INTERSECT`/`EXCEPT`
- *      compound-select ops (see compound-op above)
+ *      V6 -- see pragma-stmt above, #388); ANALYZE's bare/single-table-
+ *      name forms landed -- see analyze-stmt above, #461 -- but
+ *      `ANALYZE schema-name.table-name` and `ANALYZE index-name` stay a
+ *      future-block stub (EXPLAIN [QUERY PLAN] pulled forward to V4 --
+ *      #243), `INTERSECT`/`EXCEPT` compound-select ops (see compound-op
+ *      above)
  * V8:  FOREIGN KEY refs + actions, CREATE TRIGGER (BEFORE/AFTER/INSTEAD OF, RAISE),
  *      ALTER TABLE (RENAME / ADD|DROP|RENAME COLUMN)
  * V9:  UPSERT (ON CONFLICT DO ...), RETURNING, window functions (OVER/PARTITION/frames),

@@ -4,6 +4,7 @@
 //! sorter/ephemeral opcodes). Expressions compile to jump-based control
 //! flow, never an intermediate boolean register (Requirement 11).
 
+pub mod analyze;
 pub mod ddl;
 pub mod dispatch;
 pub mod expr;
@@ -14,6 +15,7 @@ pub mod stmt;
 pub(crate) mod subquery;
 pub mod transaction;
 
+pub use analyze::compile_analyze;
 pub use ddl::{
     compile_create_index, compile_create_table, compile_create_view, compile_drop_index,
     compile_drop_table,

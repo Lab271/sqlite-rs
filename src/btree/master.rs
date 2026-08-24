@@ -285,6 +285,95 @@ pub fn update_sequence(
     Ok(())
 }
 
+/// Canonical `sqlite_stat1` DDL text, matching stock SQLite's own
+/// definition (`sqlite3 src/analyze.c`) verbatim so the `sql` column
+/// round-trips identically when read back by stock `sqlite3`.
+const SQLITE_STAT1_SQL: &str = "CREATE TABLE sqlite_stat1(tbl,idx,stat)";
+
+/// Returns `sqlite_stat1`'s root page, creating the table (allocating a
+/// page, initializing it as an empty leaf, and registering it in
+/// `sqlite_master`, bumping the schema cookie) on first use — mirrors
+/// [`ensure_sqlite_sequence_table`]'s "auto-created on first use"
+/// pattern; `ANALYZE` (#461) is `sqlite_stat1`'s equivalent trigger.
+pub fn ensure_sqlite_stat1_table(
+    pager: &mut Pager,
+    header: &DatabaseHeader,
+) -> Result<u32, BtreeError> {
+    if let Some(existing) = find_master_rootpage(pager, header, "sqlite_stat1")? {
+        return Ok(existing);
+    }
+
+    let root_page = pager.allocate_page()?;
+    let header_start = page1_header_start(root_page);
+    let buf = pager.get_page_mut(root_page)?;
+    write_leaf_page(buf, header_start, root_page, &[])?;
+
+    insert_master_row(
+        pager,
+        header,
+        &MasterEntry {
+            kind: "table".to_string(),
+            name: "sqlite_stat1".to_string(),
+            tbl_name: "sqlite_stat1".to_string(),
+            rootpage: root_page,
+            sql: SQLITE_STAT1_SQL.to_string(),
+        },
+    )?;
+    bump_schema_cookie(pager)?;
+
+    Ok(root_page)
+}
+
+/// Deletes every `sqlite_stat1` row whose `tbl` column equals
+/// `table_name` — `ANALYZE table-name` (#461) calls this before
+/// re-inserting fresh rows, so a re-run replaces rather than appends to
+/// that table's stats (spec 011/Req 2).
+pub fn delete_stat1_rows_for_table(
+    pager: &mut Pager,
+    header: &DatabaseHeader,
+    stat1_root: u32,
+    table_name: &str,
+) -> Result<(), BtreeError> {
+    let mut cursor = crate::btree::TableCursor::new(&*pager, header, stat1_root);
+    let mut stale_rowids = Vec::new();
+    let mut row = cursor.first()?;
+    while let Some(r) = row {
+        let values = decode_record(&r.payload, header.text_encoding)?;
+        if let Some(Value::Text(tbl)) = values.first() {
+            if tbl.as_ref() == table_name {
+                stale_rowids.push(r.rowid);
+            }
+        }
+        row = cursor.next()?;
+    }
+    for rowid in stale_rowids {
+        super::delete_row(pager, header, stat1_root, rowid)?;
+    }
+    Ok(())
+}
+
+/// Inserts one `sqlite_stat1` row: `idx = None` for a table's own
+/// row-count row, `idx = Some(name)` for one of its indexes.
+pub fn insert_stat1_row(
+    pager: &mut Pager,
+    header: &DatabaseHeader,
+    stat1_root: u32,
+    tbl: &str,
+    idx: Option<&str>,
+    stat: &str,
+) -> Result<(), BtreeError> {
+    let next_rowid = max_rowid(pager, header, stat1_root)?
+        .unwrap_or(0)
+        .saturating_add(1);
+    let idx_value = match idx {
+        Some(name) => Value::Text(name.into()),
+        None => Value::Null,
+    };
+    let values = [Value::Text(tbl.into()), idx_value, Value::Text(stat.into())];
+    let payload = encode_record(&values, header.text_encoding);
+    super::insert_row(pager, header, stat1_root, next_rowid, &payload)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::expect_used)]
 mod tests {

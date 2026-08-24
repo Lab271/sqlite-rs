@@ -103,6 +103,12 @@ pub enum Opcode {
     /// own) — otherwise identical to `CreateTable`'s single-instruction
     /// shape, carrying its own `P4::CreateView` payload.
     CreateView,
+    /// `ANALYZE` (#461, spec 011): populates `sqlite_stat1` for the
+    /// table(s) named by its `P4::Analyze` payload, creating that table
+    /// first if this is the first `ANALYZE` ever run — same procedural,
+    /// single-instruction shape as `CreateTable`/`CreateIndex` rather
+    /// than a decomposed cursor-driven scan.
+    Analyze,
     // compare
     Eq,
     Ge,
@@ -300,6 +306,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::DropTable
         | Opcode::CreateIndex
         | Opcode::DropIndex
+        | Opcode::Analyze
         | Opcode::Eq
         | Opcode::Ge
         | Opcode::Gt
@@ -436,6 +443,31 @@ pub enum P4 {
         name: String,
         root_page: u32,
     },
+    /// `Analyze` (#461, spec 011): every table `ANALYZE` should populate
+    /// stats for — baked at codegen time from the schema catalog (root
+    /// pages, index names/root pages) the same way `CreateIndex`/
+    /// `DropTable` bake theirs, so the exec-time handler never needs to
+    /// re-resolve names against `sqlite_master`.
+    Analyze {
+        targets: Vec<AnalyzeTarget>,
+    },
+}
+
+/// One table `ANALYZE` (#461) populates `sqlite_stat1` for: its name and
+/// table-b-tree root page, plus every index on it (name + root page) to
+/// walk for index-level stats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalyzeTarget {
+    pub table_name: String,
+    pub table_root_page: u32,
+    pub indexes: Vec<AnalyzeIndexTarget>,
+}
+
+/// One index `ANALYZE` (#461) walks to compute `avg_eq` for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalyzeIndexTarget {
+    pub index_name: String,
+    pub root_page: u32,
 }
 
 /// A single fixed-shape bytecode instruction: an opcode tag, three
