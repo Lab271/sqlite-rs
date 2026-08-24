@@ -8,6 +8,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+fix: support `GROUP BY`/aggregate combined with `ORDER BY` and a JOIN
+(#502, found via the V07 parity suite #72) — `compile_joined_grouped_
+scan` previously rejected this combination outright. A third codegen
+pass now inserts each finalized group row into a second sorter keyed
+by the resolved `ORDER BY` targets instead of sinking it directly;
+`LIMIT`/`OFFSET` move from per-group-flush time to after that final
+sort, since which rows a `LIMIT` keeps isn't known until the `ORDER
+BY` order is resolved. `ORDER BY` terms resolve against a whole
+aggregate call (matched structurally, not by `Expr` equality, since an
+`ORDER BY` term is a separately-parsed AST node from its SELECT-list
+twin), an ordinal, a result-column alias, or a bare joined column.
+`DISTINCT` + JOIN + `GROUP BY` stays unsupported (split out of this
+ticket's scope).
+
 feat: share one materialization across repeated `FROM`-subquery
 references (#425, epic #354's V6.1 "10x on repeated subqueries"
 target) — `expand_with_clause` rewrote every reference to a

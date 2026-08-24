@@ -937,6 +937,50 @@ fn group_by_count_matches_oracle_across_a_three_way_join() {
     );
 }
 
+/// #502: `GROUP BY` + aggregate combined with a JOIN *and* `ORDER BY`
+/// on the group column — previously rejected outright
+/// (`CodegenError::Unsupported`). `b.a_id` groups into `1` (rows 10,
+/// 11) and `99` (row 12); `ORDER BY b.a_id DESC` reverses the natural
+/// ascending grouping order.
+#[test]
+fn group_by_order_by_group_column_matches_oracle_across_a_join() {
+    let db = join_fixture_db("group_by_order_by_group_column");
+    assert_matches_oracle(
+        &db,
+        "SELECT b.a_id, sum(b.id) FROM a JOIN b ON a.id = b.a_id GROUP BY b.a_id ORDER BY b.a_id DESC",
+        "group_by_order_by_group_column_matches_oracle_across_a_join",
+    );
+}
+
+/// #502: `ORDER BY` on the aggregate result itself (not a `GROUP BY`
+/// column) combined with a JOIN — `sum(b.id)` is `21` for `a_id=1`
+/// (10+11) and `12` for `a_id=99`, distinct values so the sort order
+/// is unambiguous.
+#[test]
+fn group_by_order_by_aggregate_result_matches_oracle_across_a_join() {
+    let db = join_fixture_db("group_by_order_by_aggregate_result");
+    assert_matches_oracle(
+        &db,
+        "SELECT b.a_id, sum(b.id) FROM a JOIN b ON a.id = b.a_id GROUP BY b.a_id ORDER BY sum(b.id) DESC",
+        "group_by_order_by_aggregate_result_matches_oracle_across_a_join",
+    );
+}
+
+/// #502: `ORDER BY` a result-column alias for the aggregate, combined
+/// with `LIMIT` — the `LIMIT` must apply after the final sort (keeping
+/// the highest-`total` group), not at group-flush time (which would
+/// keep whichever group happened to flush first).
+#[test]
+fn group_by_order_by_alias_with_limit_matches_oracle_across_a_join() {
+    let db = join_fixture_db("group_by_order_by_alias_with_limit");
+    assert_matches_oracle(
+        &db,
+        "SELECT b.a_id, sum(b.id) AS total FROM a JOIN b ON a.id = b.a_id GROUP BY b.a_id \
+         ORDER BY total DESC LIMIT 1",
+        "group_by_order_by_alias_with_limit_matches_oracle_across_a_join",
+    );
+}
+
 /// #333: `INSERT ... SELECT` with a `GROUP BY`/aggregate on the
 /// `SELECT` side of a JOIN — the write path that originally surfaced
 /// the cursor-collision bug in the fix (`FLUSH_CURSOR` colliding with
