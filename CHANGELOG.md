@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-08-24
+
+fix: cache reassembled payload per row position (#469, #475) —
+`TableCursorState::current_payload()` was being called once per
+`Column` opcode instead of once per row (a regression introduced by
+the lazy-payload change), so an N-column `SELECT` paid for N payload
+reassembly passes per row instead of 1. Fixed with the same
+once-per-row caching `header_cache` already uses, restoring `full_scan`
+to its expected ~1.06x ratio vs the oracle. Also adds regression tests
+for the `Payload::Owned` overflow-chain case and page-cache-hit `Rc`
+sharing, plus an overflow-payload reassembly benchmark.
+
 ## [0.17.6] - 2026-08-24
 
 perf: borrow table row payload from page buffer instead of copying
