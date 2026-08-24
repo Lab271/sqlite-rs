@@ -225,6 +225,36 @@ fn with_clause_cte_body_is_union_is_rejected_cleanly() {
     );
 }
 
+/// A CTE referenced from more than one arm of a `UNION ALL`/`UNION`
+/// compound `SELECT` (#424) — `compile_select_compound`'s per-arm
+/// `compile_arm` used to unconditionally `OpenRead` a resolved-table
+/// root page, ignoring `TableRefKind::Subquery` entirely, so a CTE
+/// reference in *any* arm hit "table cte has an invalid root page (0)"
+/// instead of being materialized like the single-`SELECT` path does.
+#[test]
+fn with_clause_cte_referenced_from_union_all_arms_matches_oracle() {
+    let db = cte_fixture_db("union_all_arms");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t) \
+         SELECT * FROM cte UNION ALL SELECT * FROM cte",
+        "with_clause_cte_referenced_from_union_all_arms_matches_oracle",
+    );
+}
+
+/// Same shape as above but with a plain `UNION` (dedup) and three arms,
+/// exercising the dedup ephemeral index alongside per-arm materialization.
+#[test]
+fn with_clause_cte_referenced_from_three_union_arms_matches_oracle() {
+    let db = cte_fixture_db("union_three_arms");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t) \
+         SELECT * FROM cte UNION SELECT * FROM cte UNION SELECT * FROM cte",
+        "with_clause_cte_referenced_from_three_union_arms_matches_oracle",
+    );
+}
+
 /// A CTE referenced from inside an inline derived table's own `FROM`
 /// (`FROM (SELECT ... FROM cte) sub`), not just directly under the main
 /// query's `FROM` — `substitute_table_ref` must recurse into

@@ -366,8 +366,11 @@ pub(super) fn arm_as_select(arm: &CompoundSelect) -> Select {
 /// than SQLite's pairwise left-to-right operator semantics — a known,
 /// documented narrowing rather than the general case.
 ///
-/// Joins/subqueries within any arm are out of scope for this ticket —
-/// every arm's `from` must be a single table with no joins.
+/// Joins within any arm are out of scope for this ticket — every arm's
+/// `from` must have no joins. A subquery-in-`FROM` arm (including a
+/// CTE reference, #424) is materialized per-arm via
+/// [`crate::codegen::subquery::materialize_from_subquery`], the same
+/// as the single-`SELECT` path.
 pub fn compile_select_compound(
     first: &Select,
     first_schema: &TableSchema,
@@ -449,13 +452,26 @@ pub fn compile_select_compound(
                            schema: &TableSchema|
      -> Result<(), CodegenError> {
         let cursors = ScanCursors::for_arm(arm_index);
-        let root_page = valid_table_root_page(schema)?;
-        em.emit(Instruction::new(
-            Opcode::OpenRead,
-            cursors.table,
-            root_page,
-            0,
-        ));
+        match select.from.as_ref().map(|from| &from.first.kind) {
+            Some(TableRefKind::Subquery(subquery)) => {
+                crate::codegen::subquery::materialize_from_subquery(
+                    em,
+                    reg,
+                    subquery,
+                    catalog,
+                    cursors.table,
+                )?;
+            }
+            _ => {
+                let root_page = valid_table_root_page(schema)?;
+                em.emit(Instruction::new(
+                    Opcode::OpenRead,
+                    cursors.table,
+                    root_page,
+                    0,
+                ));
+            }
+        }
         let arm_end = em.new_label();
         compile_select_scan(
             em, reg, select, schema, cursors, arm_end, catalog, &mut sink,
