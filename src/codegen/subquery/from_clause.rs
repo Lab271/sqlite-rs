@@ -198,11 +198,26 @@ pub fn resolve_from_table_schema(
 /// self-join correctness, but every clone is byte-for-byte the same
 /// query), this call reuses that materialization (`OpenDup`) instead
 /// of paying to re-run and re-populate the identical query again. Safe
-/// for any subquery-in-FROM, not just CTEs: this materialization path
-/// only ever runs against the read-only, unchanging state of one
-/// `SELECT` compile (no correlated variables — see the module doc), so
-/// two textually-identical subqueries are always guaranteed to produce
-/// the same rows.
+/// for any subquery-in-FROM, not just CTEs, given what this crate can
+/// express today: no correlated variables reach this materialization
+/// path (see the module doc), and no volatile/non-deterministic
+/// expression exists yet either (`random()` and
+/// `CURRENT_TIME`/`CURRENT_DATE`/`CURRENT_TIMESTAMP` are all still
+/// `unsupported(..)` in the parser — checked as of #425/#421's V7.2
+/// review), so two textually-identical subqueries are currently
+/// guaranteed to produce the same rows.
+///
+/// **This stops being true the day a volatile function is added.**
+/// `SELECT * FROM (SELECT random() r FROM t) a JOIN (SELECT random() r
+/// FROM t) b` — two independent, unrelated derived tables that happen
+/// to be textually identical — would then incorrectly share one
+/// evaluation instead of drawing independently, unlike real `sqlite3`.
+/// Whichever ticket adds the first such function must revisit this
+/// cache: either exclude a `Select` containing one from
+/// `RegAlloc::cached_cte`/`cache_cte`, or narrow the cache key from raw
+/// structural equality to genuine CTE identity (tracked back to
+/// `expand_with_clause`'s substitution) so it never activates for two
+/// merely-coincidental derived tables in the first place.
 pub(crate) fn materialize_from_subquery(
     em: &mut Emitter,
     reg: &mut RegAlloc,

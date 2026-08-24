@@ -8,6 +8,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+docs: address V7.2 review warnings from epic #421 (#501) — verified and
+documented, rather than patched, three warning-level findings that
+were already structurally safe or a pre-existing crate-wide gap: (1)
+`take_register` reuse in `ResultRow` is safe because `RegAlloc` never
+reuses a register number and `GROUP BY`'s `prev_key` bookkeeping
+registers are kept separate from anything `ResultRow` projects; (2)
+`SeekIndexEq`'s duplicate-key recheck hardcodes `Collation::Binary`
+consistently with the seek it walks past — no column-declared
+`COLLATE` exists anywhere in `TableSchema` yet, so patching just the
+recheck would have been inconsistent (tracked as the real fix in
+#500); (3) CTE materialization cache reuse is safe today because no
+volatile expression (`random()`, `CURRENT_TIME`, etc.) exists in the
+parser yet — corrected an overstated "always guaranteed" doc comment
+and spelled out what the first volatile function must account for.
+
 fix: fail closed, not open, when a checkpoint's page-count bound
 overflows `u32` — surfaced by a `make silent-swallow` robustness audit
 (unrelated to epic #421). `checkpoint_passive`'s own comment states the

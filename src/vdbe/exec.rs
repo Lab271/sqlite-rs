@@ -419,7 +419,25 @@ impl Vm {
     /// Takes ownership of register `reg`'s value, leaving `Value::Null`
     /// behind, without cloning. For opcodes that read-modify-write a
     /// single register (e.g. in-place affinity coercion) where the old
-    /// value is discarded anyway.
+    /// value is discarded anyway, or (`ResultRow`, #465/#466) hand a
+    /// register range off to the caller as an output row.
+    ///
+    /// `ResultRow`'s use of this is only safe because `RegAlloc` (#218)
+    /// is a monotonic bump allocator: every register number a program
+    /// hands out is permanently dedicated to one purpose for that
+    /// program's whole lifetime, never reused for something else later
+    /// in the same compile. So a register `ResultRow` nulls can only
+    /// ever be read again by the *same* fixed instruction sequence that
+    /// originally wrote it — i.e. the next iteration of whichever scan
+    /// loop this row came from, which always re-emits a fresh `Column`/
+    /// `Rowid`/literal-load into that exact register before the next
+    /// `ResultRow` (structurally verified for the GROUP BY path, whose
+    /// own group-key bookkeeping deliberately uses *separate* `prev_key`
+    /// registers, updated via an explicit `Copy`, rather than re-reading
+    /// a projected/`ResultRow`'d register — see
+    /// `codegen::select::aggregate::compile_grouped_scan`). No codegen
+    /// path emits anything that reads a `ResultRow`-projected register
+    /// again before that loop's next iteration reloads it.
     pub(crate) fn take_register(&mut self, reg: i32) -> Result<Value, ExecError> {
         let idx = Self::index("register read", reg)?;
         Ok(match self.registers.get_mut(idx) {
