@@ -10,7 +10,9 @@
 //! once V5's transaction control (#356/#360) needed a session to be
 //! observable in at all — `.import` and full dot-command parity with
 //! the stock `sqlite3` shell remain non-goals (see `repl.rs`'s module
-//! doc for exactly what's in/out of scope).
+//! doc for exactly what's in/out of scope). #478 makes it the *default*
+//! mode too: `sqlite-rs <file>` with no recognized subcommand enters the
+//! REPL directly, matching `sqlite3 <file>`.
 
 mod common;
 mod dump;
@@ -54,6 +56,12 @@ fn main() -> ExitCode {
             Some(path) => repl::run_repl(Path::new(&path)),
             None => usage_error("repl <file>"),
         },
+        // No recognized subcommand: treat a single bare argument as a
+        // database file and enter the REPL directly, matching
+        // `sqlite3 <file>` — but a second stray argument (not a real
+        // invocation shape) still reports the usage error rather than
+        // silently discarding it.
+        Some(path) if args.next().is_none() => repl::run_repl(Path::new(&path)),
         _ => usage_error("[--version] <dump|export|query|tables|exec|repl> <file>"),
     }
 }

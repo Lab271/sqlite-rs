@@ -2,6 +2,10 @@
 //! minimal read-eval-print loop, driven here by piping a script into
 //! its stdin — exactly the acceptance transcript from the issue body
 //! (`BEGIN; INSERT ...; SELECT ...; ROLLBACK; SELECT ...; .quit`).
+//!
+//! #478 adds the `.tables` dot-command, `sqlite3`-style dot-command
+//! prefix matching, and bare `sqlite-rs <file>` (no subcommand) entering
+//! the REPL directly.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -238,15 +242,83 @@ fn opening_a_bad_path_reports_an_error_and_fails() {
 }
 
 /// An unrecognized dot-command reports an error but the session
-/// continues (the REPL's own explicit scope-down: no dot-command
-/// beyond `.quit`/`.exit`).
+/// continues (the REPL's own explicit scope-down: only `.quit`/`.exit`/
+/// `.tables`, per #478).
 #[test]
 fn unknown_dot_command_reports_error_and_session_continues() {
     let db = seed_db("unknown_dot_command");
-    let output = run_repl(&db, &[".tables", "SELECT 1;", ".quit"]);
+    let output = run_repl(&db, &[".bogus", "SELECT 1;", ".quit"]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown command"), "stderr: {stderr}");
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "1\n");
+}
+
+/// `.tables` lists the database's tables (#478).
+#[test]
+fn dot_tables_lists_tables() {
+    let db = seed_db("dot_tables");
+    let output = run_repl(&db, &[".tables", ".quit"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(stdout, "t\n");
+}
+
+/// `sqlite3`-style prefix matching resolves `.t`/`.ta`/`.tab`/`.tabl`/
+/// `.table` to `.tables`, and `.q`/`.qu`/`.qui` to `.quit` (#478).
+#[test]
+fn dot_command_prefix_matching() {
+    let db = seed_db("dot_prefix");
+    for prefix in [".t", ".ta", ".tab", ".tabl", ".table", ".tables"] {
+        let output = run_repl(&db, &[prefix, ".quit"]);
+        assert!(
+            output.status.success(),
+            "prefix {prefix:?} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "t\n", "prefix {prefix:?}");
+    }
+    for prefix in [".q", ".qu", ".qui", ".quit"] {
+        let output = run_repl(&db, &["SELECT 1;", prefix]);
+        assert!(
+            output.status.success(),
+            "prefix {prefix:?} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stdout, "1\n", "prefix {prefix:?}");
+    }
+}
+
+/// Running `sqlite-rs <file>` with no subcommand enters the REPL
+/// directly (#478), same as `sqlite3 <file>`.
+#[test]
+fn bare_invocation_with_no_subcommand_enters_repl() {
+    let db = seed_db("bare_invocation");
+    let mut child = Command::new(CLI)
+        .arg(&db)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "SELECT 1;").unwrap();
+        writeln!(stdin, ".quit").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = strip_prompts(&String::from_utf8_lossy(&output.stdout));
     assert_eq!(stdout, "1\n");
 }

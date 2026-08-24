@@ -8,6 +8,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+feat(cli): REPL mode with `.tables` and `.quit`/`.exit` prefix matching
+(#478) — bare `sqlite-rs <file>` (no subcommand) now enters the REPL
+directly, matching `sqlite3`'s shell; adds a `.tables` dot-command
+(reusing the `tables` subcommand's listing/columnizing logic) and
+`sqlite3`-style prefix matching for `.tables`/`.quit` (`.t`, `.ta`, ...
+and `.q`, `.qu`, ...); `.exit` remains an exact-only alias for `.quit`.
+
 feat: `ANALYZE` command and cost model for the query planner (#461,
 spec 011) — `ANALYZE`/`ANALYZE table-name` populates `sqlite_stat1`
 (row counts + per-index `avg_eq`); `Stats`/`PlanCost` (`src/planner.rs`)
