@@ -11,7 +11,9 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::dump;
+use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::schema::read_table_and_view_names;
+use sqlite_rs::schema::DdlError;
 use sqlite_rs::vdbe::like_match;
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
@@ -24,22 +26,34 @@ pub fn run_tables(path: &Path, pattern: Option<&str>) -> ExitCode {
     };
     let source: Rc<dyn PageSource> = Rc::new(pager);
 
-    let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
-    let names = match read_table_and_view_names(&mut schema_cursor, header.text_encoding) {
+    let names = match list_table_and_view_names(Rc::clone(&source), &header, pattern) {
         Ok(n) => n,
         Err(e) => return fatal(path, &e),
     };
 
-    let mut names: Vec<&str> = names
-        .iter()
-        .map(String::as_str)
+    print_columnized(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    ExitCode::SUCCESS
+}
+
+/// The names `.tables [PATTERN]` lists: `sqlite_master` table/view names,
+/// `sqlite_%` internals excluded, optionally LIKE-filtered, sorted
+/// alphabetically. Shared by the `tables` subcommand and the `repl`'s
+/// `.tables` dot-command.
+pub(crate) fn list_table_and_view_names(
+    source: Rc<dyn PageSource>,
+    header: &DatabaseHeader,
+    pattern: Option<&str>,
+) -> Result<Vec<String>, DdlError> {
+    let mut schema_cursor = TableCursor::new(source, header, 1);
+    let names = read_table_and_view_names(&mut schema_cursor, header.text_encoding)?;
+
+    let mut names: Vec<String> = names
+        .into_iter()
         .filter(|name| !name.starts_with("sqlite_"))
         .filter(|name| pattern.is_none_or(|p| like_match(name, p, None)))
         .collect();
     names.sort_unstable();
-
-    print_columnized(&names);
-    ExitCode::SUCCESS
+    Ok(names)
 }
 
 /// The shell's assumed terminal width for `.tables`' column-fitting search.
@@ -84,6 +98,13 @@ fn row_width(names: &[&str], num_cols: usize, num_rows: usize) -> usize {
         }
     }
     total
+}
+
+/// Prints `names` (e.g. from [`list_table_and_view_names`]) in `.tables`'
+/// column-major layout — the `repl`'s `.tables` dot-command shares this
+/// with the `tables` subcommand rather than re-deriving the layout.
+pub(crate) fn print_table_names(names: &[String]) {
+    print_columnized(&names.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Renders `names` the way `sqlite3`'s shell prints `.tables` output:

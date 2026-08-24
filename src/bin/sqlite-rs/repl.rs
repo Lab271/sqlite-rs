@@ -10,9 +10,11 @@
 //! (`SELECT` here reads through the *same* shared `Pager`, not a fresh
 //! read-only one, precisely so that's true).
 //!
-//! Deliberately minimal, per the issue's explicit scope-down: no dot-
-//! command beyond `.quit`/`.exit`, no readline/history, no `-csv`/
-//! `-explain`/`EXPLAIN QUERY PLAN` (those stay `query`-only). A `;`
+//! Deliberately minimal, per the issue's explicit scope-down: only
+//! `.quit`/`.exit`/`.tables` as dot-commands (#478 adds `.tables` and
+//! `sqlite3`-style prefix matching — `.t`..`.tables`, `.q`..`.quit` — to
+//! the `.quit`/`.exit` this module started with), no readline/history, no
+//! `-csv`/`-explain`/`EXPLAIN QUERY PLAN` (those stay `query`-only). A `;`
 //! inside a string/blob literal never ends a statement early —
 //! `ends_with_semicolon` goes through the real tokenizer, not a
 //! newline-oblivious `str::ends_with(';')`.
@@ -33,6 +35,7 @@ use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 use crate::query::{compile_select_program, write_list_row, SelectOutcome};
+use crate::tables::{list_table_and_view_names, print_table_names};
 
 pub fn run_repl(path: &Path) -> ExitCode {
     let (header, pager) = match dump::open(&UnixVfs, path) {
@@ -64,10 +67,24 @@ pub fn run_repl(path: &Path) -> ExitCode {
 
         if buffer.is_empty() {
             let trimmed = line.trim();
-            if trimmed == ".quit" || trimmed == ".exit" {
-                break;
-            }
-            if trimmed.starts_with('.') {
+            if let Some(rest) = trimmed.strip_prefix('.') {
+                // sqlite3-style prefix matching: `.t`/`.ta`/.../`.tables`
+                // all resolve to `.tables`, `.q`/`.qu`/.../`.quit` to
+                // `.quit`; `.exit` stays its own exact alias.
+                if trimmed == ".exit" || (!rest.is_empty() && "quit".starts_with(rest)) {
+                    break;
+                }
+                if !rest.is_empty() && "tables".starts_with(rest) {
+                    match list_table_and_view_names(
+                        Rc::clone(&pager) as Rc<dyn PageSource>,
+                        &header,
+                        None,
+                    ) {
+                        Ok(names) => print_table_names(&names),
+                        Err(e) => eprintln!("Error: {e}"),
+                    }
+                    continue;
+                }
                 eprintln!("Error: unknown command {trimmed:?}");
                 continue;
             }
