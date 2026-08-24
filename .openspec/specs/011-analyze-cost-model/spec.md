@@ -177,7 +177,7 @@ full scan, unchanged) when they are not — so a database that has never run
 - THEN the emitted access strategy is identical (opcode-for-opcode) to
   the pre-#461 behavior
 
-**Tests:** `tests/corpus/no_stats_optimizations_test.rs::join_access_unchanged_without_analyze`
+**Tests:** `tests/corpus/analyze_test.rs::join_access_unchanged_without_analyze`
 
 #### Scenario: Cost model can veto a unique-index seek stats show is not worth it
 

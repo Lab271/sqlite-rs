@@ -57,6 +57,7 @@ pub(super) fn table_binding_name(table_ref: &TableRef) -> String {
 pub fn explain_query_plan(
     select: &Select,
     schemas: &[TableSchema],
+    stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
 ) -> Result<Vec<EqpRow>, CodegenError> {
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
@@ -84,6 +85,10 @@ pub fn explain_query_plan(
             schema: schema.clone(),
             cursor: i32::try_from(i).unwrap_or(0),
             forced_null: false,
+            stats: stats_by_table
+                .get(&schema.name)
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect();
 

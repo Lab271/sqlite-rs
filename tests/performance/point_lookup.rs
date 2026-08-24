@@ -240,7 +240,7 @@ fn compile_join_select(select: &Select, catalog: &[TableSchema]) -> Program {
     };
     let mut schemas = vec![resolve(&from.first)];
     schemas.extend(from.joins.iter().map(|j| resolve(&j.table)));
-    compile_select_joined(select, &schemas, catalog)
+    compile_select_joined(select, &schemas, catalog, &std::collections::HashMap::new())
         .unwrap_or_else(|e| panic!("compile {select:?}: {e}"))
 }
 

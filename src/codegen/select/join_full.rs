@@ -48,6 +48,7 @@ pub(super) fn compile_full_join_two_table(
     select: &Select,
     schemas: &[TableSchema],
     from: &FromClause,
+    stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
 ) -> Result<Program, CodegenError> {
     let table_refs: Vec<&TableRef> = std::iter::once(&from.first)
         .chain(from.joins.iter().map(|j| &j.table))
@@ -71,6 +72,10 @@ pub(super) fn compile_full_join_two_table(
             schema: schema.clone(),
             cursor,
             forced_null: false,
+            stats: stats_by_table
+                .get(&schema.name)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
     let Some(join) = from.joins.first() else {

@@ -1,10 +1,12 @@
 //! Cost model (#461, spec 011/Req 3): [`Stats`] decodes `sqlite_stat1`
 //! rows for one table into an in-memory shape, and [`estimate_scan_cost`]/
-//! [`estimate_index_cost`] turn those stats into a [`PlanCost`]. Standalone
-//! from the planner integration (spec 011/Req 4, #461 Phase 3) — nothing
-//! here is wired into `codegen::select::join_access` yet, so this module
-//! has no effect on any compiled query until that follow-up phase reads
-//! it.
+//! [`estimate_index_cost`] turn those stats into a [`PlanCost`].
+//! [`load_stats`] reads every table's `sqlite_stat1` rows in one pass —
+//! the CLI (`query`/`repl`) calls it once per statement, alongside its
+//! existing `read_schema` call, and threads the result into
+//! `codegen::select::join_access::choose_join_access` (spec 011/Req 4,
+//! #461 Phase 3) so a table with no `ANALYZE` history behaves exactly
+//! as it did before this module existed.
 //!
 //! Missing stats (no `ANALYZE` has ever run) deliberately produce a
 //! conservative worst-case estimate rather than panicking or dividing by
@@ -13,6 +15,12 @@
 //! module's mere existence.
 
 use std::collections::HashMap;
+
+use crate::btree::TableCursor;
+use crate::header::DatabaseHeader;
+use crate::record::{decode_record, Value};
+use crate::schema::TableSchema;
+use crate::vfs::PageSource;
 
 /// Row-count and per-index `avg_eq` statistics for one table, decoded
 /// from its `sqlite_stat1` rows (spec 011/Req 2's `"<rows>"` table-row
@@ -122,10 +130,116 @@ pub fn estimate_index_cost(index_name: &str, stats: &Stats) -> PlanCost {
     }
 }
 
+/// Reads every table's `sqlite_stat1` rows in one pass and returns a
+/// `table name -> Stats` map — empty if `sqlite_stat1` isn't in
+/// `schemas` at all (no `ANALYZE` has ever run against this database),
+/// which is exactly the "behave as before this module existed" case
+/// [`estimate_scan_cost`]/[`estimate_index_cost`] already handle safely.
+/// Malformed rows are skipped the same way [`Stats::from_stat1_rows`]
+/// skips malformed `stat` text — a corrupt `sqlite_stat1` degrades to
+/// "no stats for that entry", never a hard error.
+pub fn load_stats<P: PageSource>(
+    source: P,
+    header: &DatabaseHeader,
+    schemas: &[TableSchema],
+) -> HashMap<String, Stats> {
+    let Some(stat1) = schemas
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case("sqlite_stat1"))
+    else {
+        return HashMap::new();
+    };
+
+    let mut rows_by_table: HashMap<String, Vec<(Option<String>, String)>> = HashMap::new();
+    let mut cursor = TableCursor::new(source, header, stat1.root_page);
+    let Ok(mut row) = cursor.first() else {
+        return HashMap::new();
+    };
+    while let Some(r) = row {
+        if let Ok(values) = decode_record(&r.payload, header.text_encoding) {
+            let tbl = match values.first() {
+                Some(Value::Text(s)) => Some(s.to_string()),
+                _ => None,
+            };
+            if let Some(tbl) = tbl {
+                let idx = match values.get(1) {
+                    Some(Value::Text(s)) => Some(s.to_string()),
+                    _ => None,
+                };
+                let stat = match values.get(2) {
+                    Some(Value::Text(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                rows_by_table.entry(tbl).or_default().push((idx, stat));
+            }
+        }
+        row = match cursor.next() {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+    }
+
+    rows_by_table
+        .into_iter()
+        .map(|(tbl, rows)| {
+            let refs: Vec<(Option<&str>, &str)> = rows
+                .iter()
+                .map(|(i, s)| (i.as_deref(), s.as_str()))
+                .collect();
+            (tbl, Stats::from_stat1_rows(refs))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_stats_is_empty_when_sqlite_stat1_does_not_exist() {
+        let (vfs, header) = crate::btree::test_minimal_db(512);
+        let pager = crate::pager::Pager::open(&vfs, std::path::Path::new("/test.db"), 512).unwrap();
+        let schemas: Vec<TableSchema> = Vec::new();
+        let stats = load_stats(&pager, &header, &schemas);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn load_stats_decodes_rows_for_every_table() {
+        let (vfs, header) = crate::btree::test_minimal_db(512);
+        let mut pager =
+            crate::pager::Pager::open(&vfs, std::path::Path::new("/test.db"), 512).unwrap();
+        let stat1_root = crate::btree::ensure_sqlite_stat1_table(&mut pager, &header).unwrap();
+        crate::btree::insert_stat1_row(&mut pager, &header, stat1_root, "t", None, "10000")
+            .unwrap();
+        crate::btree::insert_stat1_row(
+            &mut pager,
+            &header,
+            stat1_root,
+            "t",
+            Some("idx_a"),
+            "10000 10",
+        )
+        .unwrap();
+
+        let schemas = vec![TableSchema {
+            name: "sqlite_stat1".to_string(),
+            root_page: stat1_root,
+            columns: vec!["tbl".to_string(), "idx".to_string(), "stat".to_string()],
+            column_types: vec![String::new(), String::new(), String::new()],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: "CREATE TABLE sqlite_stat1(tbl,idx,stat)".to_string(),
+            indexes: vec![],
+        }];
+
+        let all_stats = load_stats(&pager, &header, &schemas);
+        let stats = all_stats.get("t").unwrap();
+        assert_eq!(stats.table_rows(), Some(10000));
+        assert_eq!(stats.index_stats("idx_a"), Some((10000, 10)));
+    }
 
     /// spec 011/Req 3 scenario "Missing stats fall back to a conservative
     /// default".

@@ -149,3 +149,71 @@ fn re_analyze_replaces_stale_stats() {
         "expected refreshed count of 3, got: {rows}"
     );
 }
+
+/// spec 011/Req 4 scenario "Cost model does not change behavior without
+/// stats": a join whose `ON` clause structurally matches a `UNIQUE`
+/// index still compiles to a `SEARCH ... USING INDEX` access, exactly
+/// as it did before #461, when `ANALYZE` has never run.
+#[test]
+fn join_access_unchanged_without_analyze() {
+    let Some(db) = seed_db("join-no-stats") else {
+        return skip_no_oracle("join_access_unchanged_without_analyze");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "CREATE UNIQUE INDEX idx_x ON t2(x)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1), (2), (3)");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t2.x = t1.a",
+    );
+    assert!(plan.contains("SEARCH t2 USING INDEX idx_x"), "got: {plan}");
+}
+
+/// spec 011/Req 4 scenario "Cost model can veto a unique-index seek
+/// stats show is not worth it": once `ANALYZE` stats for `idx_x` are
+/// skewed so the cost model estimates the index probe as more
+/// expensive than a full scan, the join falls back to `SCAN` instead
+/// of `SEARCH ... USING INDEX`.
+#[test]
+fn cost_model_can_veto_expensive_index_seek() {
+    let Some(db) = seed_db("join-veto") else {
+        return skip_no_oracle("cost_model_can_veto_expensive_index_seek");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "CREATE UNIQUE INDEX idx_x ON t2(x)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1), (2), (3)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan_before = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t2.x = t1.a",
+    );
+    assert!(
+        plan_before.contains("SEARCH t2 USING INDEX idx_x"),
+        "got: {plan_before}"
+    );
+
+    // Skew idx_x's avg_eq far above t2's own row count -- a
+    // pathological "this index is not selective" case ANALYZE could
+    // in principle record for real (e.g. mostly-duplicate data), here
+    // just hand-written to exercise the veto deterministically.
+    exec_ok(
+        &db,
+        "UPDATE sqlite_stat1 SET stat = '3 50000' WHERE tbl = 't2' AND idx = 'idx_x'",
+    );
+
+    let plan_after = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t2.x = t1.a",
+    );
+    assert!(plan_after.contains("SCAN t2"), "got: {plan_after}");
+    assert!(
+        !plan_after.contains("USING INDEX idx_x"),
+        "got: {plan_after}"
+    );
+}

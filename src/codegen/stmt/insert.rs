@@ -437,6 +437,7 @@ pub fn compile_insert(
                     select_schemas,
                     select_table_cursor,
                     end_label,
+                    &std::collections::HashMap::new(),
                     &mut sink,
                 )?;
             } else {

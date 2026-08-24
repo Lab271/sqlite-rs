@@ -319,6 +319,15 @@ pub(crate) struct TableBinding {
     /// by the join codegen's "no match found" branch; always `false`
     /// for [`Scope::single`] and for an INNER/CROSS-joined table.
     pub(crate) forced_null: bool,
+    /// This table's `ANALYZE` statistics (#461, spec 011/Req 4), empty
+    /// (the `Default`) when no caller has threaded real
+    /// `planner::load_stats` output through — `join_access::
+    /// choose_join_access` only ever *vetoes* a structurally-available
+    /// index seek using this, never invents one, so an empty `Stats`
+    /// (no `ANALYZE` has run, or the caller hasn't wired stats through
+    /// this particular codegen path yet) reproduces this ticket's
+    /// pre-#461 behavior exactly.
+    pub(crate) stats: crate::planner::Stats,
 }
 
 impl TableBinding {
@@ -413,6 +422,7 @@ impl Scope {
                 schema: schema.clone(),
                 cursor,
                 forced_null: false,
+                stats: crate::planner::Stats::default(),
             }],
             catalog: Vec::new(),
             outer: None,
