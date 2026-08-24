@@ -247,10 +247,14 @@ impl Drop for UnixLockGuard {
         // can't propagate failure, and there is nothing more to do about
         // one anyway. The fd stays open via `UnixVfsFile`'s own `Rc`
         // clone — only the lock level this guard represents is released.
-        self.lock
-            .borrow_mut()
-            .set_level(lock::LockLevel::Unlocked)
-            .ok();
+        // Not silent, though (#412): an unlock failure here would
+        // otherwise leave a lock looking held with no trace of why.
+        if let Err(e) = self.lock.borrow_mut().set_level(lock::LockLevel::Unlocked) {
+            eprintln!(
+                "sqlite-rs: failed to release lock on {} on drop: {e}",
+                self.path.display()
+            );
+        }
     }
 }
 

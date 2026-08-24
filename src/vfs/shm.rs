@@ -105,7 +105,13 @@ impl SharedLockGuard for WalWriteLock {}
 
 impl Drop for WalWriteLock {
     fn drop(&mut self) {
-        fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1).ok();
+        // Best-effort (a `drop` can't propagate failure), but not silent
+        // (#412): an unlock failure here would otherwise leave
+        // WAL_WRITE_LOCK looking held with no trace of why, surfacing
+        // later as a confusing "concurrent writer refused" symptom.
+        if let Err(e) = fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1) {
+            eprintln!("sqlite-rs: failed to release WAL_WRITE_LOCK on drop: {e}");
+        }
     }
 }
 
@@ -236,7 +242,14 @@ impl SharedLockGuard for WalCheckpointLock {}
 
 impl Drop for WalCheckpointLock {
     fn drop(&mut self) {
-        fcntl_lock(&self.file, libc::F_UNLCK, WAL_CKPT_LOCK_BYTE, 1).ok();
+        // Best-effort (a `drop` can't propagate failure), but not silent
+        // (#412): flagged by the security-reviewer during PR #410's
+        // review — an unlock failure here would otherwise leave
+        // WAL_CKPT_LOCK looking held with no trace of why, surfacing
+        // later as a confusing "checkpoint refused"/stuck-lock symptom.
+        if let Err(e) = fcntl_lock(&self.file, libc::F_UNLCK, WAL_CKPT_LOCK_BYTE, 1) {
+            eprintln!("sqlite-rs: failed to release WAL_CKPT_LOCK on drop: {e}");
+        }
     }
 }
 
@@ -367,8 +380,15 @@ impl SharedLockGuard for WalReadLock {}
 impl Drop for WalReadLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
-        // nothing more this crate can do about one anyway.
-        fcntl_lock(&self.file, libc::F_UNLCK, wal_read_lock_byte(self.slot), 1).ok();
+        // nothing more this crate can do about one anyway — but not
+        // silent (#412): a stuck reader-mark slot is otherwise
+        // undiagnosable later.
+        if let Err(e) = fcntl_lock(&self.file, libc::F_UNLCK, wal_read_lock_byte(self.slot), 1) {
+            eprintln!(
+                "sqlite-rs: failed to release WAL reader-mark slot {} on drop: {e}",
+                self.slot
+            );
+        }
     }
 }
 
