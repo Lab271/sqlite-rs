@@ -189,6 +189,8 @@ harness = false
 version = "3.53.4"
 
 [profile.bench]
+lto = "thin"
+codegen-units = 1
 debug = true
 
 [lints.clippy]
