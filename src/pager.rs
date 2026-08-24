@@ -590,20 +590,20 @@ impl Pager {
             // checkpoint backfills them.
             let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
 
-            let mut writer = match wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size)
-            {
-                Ok(writer) => writer,
-                // The `-wal` this `Pager` believed was live has vanished —
-                // e.g. a concurrent `sqlite3` connection auto-checkpointed
-                // and deleted `-wal`/`-shm` on close (#422). `journal_mode`
-                // still says `Wal` (this closure only ever runs from that
-                // branch), so recover exactly as `switch_journal_to_wal`
-                // creates one from scratch, rather than failing the commit.
-                Err(wal::WalError::Vfs(VfsError::NotFound { .. })) => {
-                    self.recreate_wal_locked()?
-                }
-                Err(source) => return Err(to_pager_error(source)),
-            };
+            let mut writer =
+                match wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size) {
+                    Ok(writer) => writer,
+                    // The `-wal` this `Pager` believed was live has vanished —
+                    // e.g. a concurrent `sqlite3` connection auto-checkpointed
+                    // and deleted `-wal`/`-shm` on close (#422). `journal_mode`
+                    // still says `Wal` (this closure only ever runs from that
+                    // branch), so recover exactly as `switch_journal_to_wal`
+                    // creates one from scratch, rather than failing the commit.
+                    Err(wal::WalError::Vfs(VfsError::NotFound { .. })) => {
+                        self.recreate_wal_locked()?
+                    }
+                    Err(source) => return Err(to_pager_error(source)),
+                };
 
             let last_index = page_nums.len().saturating_sub(1);
             for (index, &page_num) in page_nums.iter().enumerate() {
@@ -727,7 +727,8 @@ impl Pager {
         let salt1 = random_nonce();
         let salt2 = random_nonce() ^ 0x5A5A_5A5A;
         let header = wal::WalHeader::new(true, self.page_size, salt1, salt2, 1);
-        let writer = wal::WalWriter::create(&self.vfs, &wal_path, header).map_err(to_pager_error)?;
+        let writer =
+            wal::WalWriter::create(&self.vfs, &wal_path, header).map_err(to_pager_error)?;
 
         let shm_file = self.vfs.create_or_open_write(&shm_path)?;
         shm_file.write_at(&crate::vfs::shm::fresh_shm_bytes(), 0)?;
