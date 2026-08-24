@@ -79,6 +79,15 @@ pub enum Opcode {
     /// Opens cursor `P1` on a new, empty temporary b-tree (used for
     /// scratch/ephemeral storage, e.g. `DISTINCT`/subquery materialization).
     OpenEphemeral,
+    /// Opens cursor `P1` as a second view onto the *same* already-
+    /// materialized ephemeral table cursor `P2` is open on (#425) —
+    /// mirrors the oracle's own `OP_OpenDup`. Used when a `WITH`-clause
+    /// CTE is referenced more than once in one statement: the first
+    /// reference materializes it via `OpenEphemeral`+`Insert`, every
+    /// later reference `OpenDup`s onto that cursor instead of
+    /// re-materializing from scratch. `P1` and `P2` scan independently
+    /// (separate positions) but share the same underlying row data.
+    OpenDup,
     /// Opens cursor `P1` as a pseudo-cursor over a single in-memory
     /// record buffer rather than a real b-tree.
     OpenPseudo,
@@ -445,6 +454,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::OpenRead
         | Opcode::OpenWrite
         | Opcode::OpenEphemeral
+        | Opcode::OpenDup
         | Opcode::OpenPseudo
         | Opcode::Rewind
         | Opcode::Last

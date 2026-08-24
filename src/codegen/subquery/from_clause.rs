@@ -189,6 +189,20 @@ pub fn resolve_from_table_schema(
 /// materialized table's columns, for the caller to bind into `Scope`.
 /// A subquery nested inside another subquery's `FROM` is not yet
 /// supported (this pass materializes one level).
+///
+/// #425: if an earlier call in this same statement's compile already
+/// materialized a *structurally identical* `subquery` (checked via
+/// `Select`'s derived `PartialEq` — this is how `expand_with_clause`
+/// rewrites a CTE referenced N times: N independent `TableRefKind::
+/// Subquery` AST clones, one per `FROM`/`JOIN` site, preserving
+/// self-join correctness, but every clone is byte-for-byte the same
+/// query), this call reuses that materialization (`OpenDup`) instead
+/// of paying to re-run and re-populate the identical query again. Safe
+/// for any subquery-in-FROM, not just CTEs: this materialization path
+/// only ever runs against the read-only, unchanging state of one
+/// `SELECT` compile (no correlated variables — see the module doc), so
+/// two textually-identical subqueries are always guaranteed to produce
+/// the same rows.
 pub(crate) fn materialize_from_subquery(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -196,6 +210,16 @@ pub(crate) fn materialize_from_subquery(
     catalog: &[TableSchema],
     dest_cursor: i32,
 ) -> Result<TableSchema, CodegenError> {
+    if let Some((source_cursor, schema)) = reg.cached_cte(subquery) {
+        em.emit(Instruction::new(
+            Opcode::OpenDup,
+            dest_cursor,
+            source_cursor,
+            0,
+        ));
+        return Ok(schema);
+    }
+
     // #382: a compound (`UNION`/`UNION ALL`) body isn't handled by this
     // materialization path yet — only `subquery`'s own `first` arm would
     // be scanned into `dest_cursor`, silently dropping every other
@@ -321,6 +345,8 @@ pub(crate) fn materialize_from_subquery(
         )?;
     }
     em.place(end_label);
+
+    reg.cache_cte(subquery, dest_cursor, synthetic_schema.clone());
 
     Ok(synthetic_schema)
 }
