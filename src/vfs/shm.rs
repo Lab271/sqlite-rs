@@ -33,10 +33,12 @@
 //! file above `MAX_SHM_LEN`, so an oversized `-shm` (sparse or otherwise) is
 //! rejected before any offset into it is trusted.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use nix::libc::{self, off_t};
 
@@ -98,7 +100,7 @@ const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
 /// `mxFrame` publish. Same shape as [`WalCheckpointLock`] just below.
 #[derive(Debug)]
 pub struct WalWriteLock {
-    file: File,
+    file: Arc<File>,
 }
 
 impl SharedLockGuard for WalWriteLock {}
@@ -110,7 +112,7 @@ impl Drop for WalWriteLock {
 }
 
 pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
     fcntl_lock(&file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
     Ok(WalWriteLock { file })
@@ -126,8 +128,8 @@ pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> 
 /// explicitly, once per commit, instead of the lock's lifetime being
 /// tied to a value's `Drop`.
 pub(crate) struct UnixWalShm {
-    file: File,
-    path: std::path::PathBuf,
+    file: Arc<File>,
+    path: PathBuf,
 }
 
 fn to_shm_vfs_error(path: &Path, source: io::Error) -> VfsError {
@@ -169,7 +171,7 @@ impl super::WalShm for UnixWalShm {
 }
 
 pub(crate) fn open_wal_shm(shm_path: &Path) -> io::Result<UnixWalShm> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
     Ok(UnixWalShm {
         file,
@@ -177,18 +179,61 @@ pub(crate) fn open_wal_shm(shm_path: &Path) -> io::Result<UnixWalShm> {
     })
 }
 
-/// Opens `-shm` at `shm_path` with `O_NOFOLLOW`, so a symlink planted at
-/// that path (e.g. in a shared or world-writable directory) can't redirect
-/// a lock claim or a raw `nBackfill` write onto an arbitrary file this
-/// process happens to have write access to. Every `-shm` open in this
-/// module goes through here rather than a bare `OpenOptions::open`.
-fn open_shm(shm_path: &Path, write: bool) -> io::Result<File> {
-    let mut opts = OpenOptions::new();
-    opts.read(true).custom_flags(libc::O_NOFOLLOW);
-    if write {
-        opts.write(true);
+/// Every live `-shm` fd this process holds, keyed by path (#491). POSIX
+/// `fcntl` record locks are scoped to `(process, inode)`, not to a file
+/// descriptor: closing *any* fd this process holds to a file releases
+/// *every* lock the process holds on that inode, even ones taken through a
+/// different fd on the same path. Before [`open_shm_shared`], each
+/// guard/helper below opened its own independent `File` — so two guards
+/// alive at once on the same `-shm` path (e.g. a `Pager`'s own long-lived
+/// `WalReadLock` plus its lazily-opened `UnixWalShm`, or a second
+/// `Pager`/a free-standing `checkpoint_passive` call in the same process)
+/// could have one's `Drop`-triggered `close()` silently release the
+/// other's still-needed lock. `open_shm_shared` makes every caller in
+/// this module reuse the one fd already open for a path instead, via a
+/// `Weak` entry that's only ever upgraded — it actually closes only once
+/// the last `Arc<File>` referencing it drops, at which point (by
+/// construction) nothing in this process needs a lock on that inode
+/// anymore.
+///
+/// `Arc`/`Mutex` rather than this crate's more common single-threaded
+/// `Rc`/`RefCell` (e.g. `UnixVfsFile`'s own per-path fd sharing in
+/// `unix.rs`): a plain module-level `static` must be `Sync`, which an
+/// `Rc`-based type never is regardless of contents — `thread_local!` would
+/// avoid that, but its macro invocation falls outside `src/vfs/shm.rs`'s
+/// qualified-subset allowlist (`make mvl-limit`, issue #23), so a real
+/// `static` it is. Real cross-thread contention never happens in
+/// practice (this crate has no threads), so the `Mutex` here is `Sync`-
+/// satisfying scaffolding, not a concurrency mechanism in active use.
+static SHM_FILES: OnceLock<Mutex<HashMap<PathBuf, Weak<File>>>> = OnceLock::new();
+
+fn shm_files() -> &'static Mutex<HashMap<PathBuf, Weak<File>>> {
+    SHM_FILES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Returns the one shared `-shm` fd this process holds open for
+/// `shm_path`, opening a fresh one only if none is currently live (#491).
+/// Always opened read+write with `O_NOFOLLOW`, so a symlink planted at
+/// that path (e.g. in a shared or world-writable directory) can't
+/// redirect a lock claim or a raw `nBackfill` write onto an arbitrary file
+/// this process happens to have write access to. Every `-shm` open in
+/// this module goes through here rather than a bare `OpenOptions::open`.
+fn open_shm_shared(shm_path: &Path) -> io::Result<Arc<File>> {
+    let mut files = shm_files()
+        .lock()
+        .map_err(|_| io::Error::other("poisoned -shm fd registry"))?;
+    if let Some(file) = files.get(shm_path).and_then(Weak::upgrade) {
+        return Ok(file);
     }
-    opts.open(shm_path)
+    let file = Arc::new(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(shm_path)?,
+    );
+    files.insert(shm_path.to_path_buf(), Arc::downgrade(&file));
+    Ok(file)
 }
 
 /// The byte layout of a fresh, valid `-shm` file for a brand-new WAL
@@ -229,7 +274,7 @@ const N_BACKFILL_OFFSET: u64 = 96;
 /// state.
 #[derive(Debug)]
 pub struct WalCheckpointLock {
-    file: File,
+    file: Arc<File>,
 }
 
 impl SharedLockGuard for WalCheckpointLock {}
@@ -241,7 +286,7 @@ impl Drop for WalCheckpointLock {
 }
 
 pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckpointLock> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
     fcntl_lock(&file, libc::F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
     Ok(WalCheckpointLock { file })
@@ -256,7 +301,7 @@ pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckp
 /// `claim_wal_read_lock`'s "the lock decides occupancy, not the mark
 /// value" rule.
 pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
 
     let mut marks = Vec::new();
@@ -278,14 +323,14 @@ pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
 /// Reads `nBackfill`: how many leading frames the last checkpoint already
 /// copied to the main file.
 pub(crate) fn read_backfill(shm_path: &Path) -> io::Result<u32> {
-    let file = open_shm(shm_path, false)?;
+    let file = open_shm_shared(shm_path)?;
     read_u32_at(&file, N_BACKFILL_OFFSET)
 }
 
 /// Publishes a new `nBackfill` after a PASSIVE checkpoint (#386) copies
 /// frames `1..=nBackfill` into the main database file.
 pub(crate) fn publish_backfill(shm_path: &Path, n_backfill: u32) -> io::Result<()> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     write_u32_at(&file, N_BACKFILL_OFFSET, n_backfill)
 }
 
@@ -295,7 +340,7 @@ pub(crate) fn publish_backfill(shm_path: &Path, n_backfill: u32) -> io::Result<(
 /// ([`claim_wal_read_lock`]'s `mx_frame(&file)` read) sees the up-to-date
 /// value rather than whatever the WAL generation started at.
 pub(crate) fn publish_mx_frame(shm_path: &Path, mx_frame: u32) -> io::Result<()> {
-    let file = open_shm(shm_path, true)?;
+    let file = open_shm_shared(shm_path)?;
     write_u32_at(&file, MX_FRAME_OFFSET, mx_frame)
 }
 
@@ -358,7 +403,7 @@ fn validate_shm_len(file: &File) -> io::Result<()> {
 /// under it — POSIX drops all `fcntl` record locks on `close()`.
 #[derive(Debug)]
 pub struct WalReadLock {
-    file: File,
+    file: Arc<File>,
     slot: usize,
 }
 
@@ -393,7 +438,7 @@ impl Drop for WalReadLock {
 /// mark. `Err` on the first non-contention `fcntl` failure, or if every
 /// slot is genuinely contended (`EAGAIN`/`EACCES`).
 pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadLock>> {
-    let file = match open_shm(shm_path, true) {
+    let file = match open_shm_shared(shm_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -669,6 +714,49 @@ mod tests {
 
         let guard = claim_wal_checkpoint_lock(&path).unwrap();
         drop(guard);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// #491: two different lock guards on the same `-shm` path, held
+    /// concurrently *within this one process*, must not interfere via the
+    /// fd each opens. Before `open_shm_shared`, each guard opened its own
+    /// independent `File` — dropping one closed its own fd, and per
+    /// POSIX, closing *any* fd this process holds to a file releases
+    /// *every* `fcntl` lock the process holds on that inode, including a
+    /// still-live sibling guard's lock taken through a different fd. A
+    /// real second process (`slot_is_free_test_only`, matching this
+    /// module's other lock-contention tests) is required to observe this:
+    /// POSIX locks never conflict with a further request from the same
+    /// process, so only an external probe can tell "genuinely still
+    /// locked" from "silently released".
+    #[test]
+    fn dropping_one_guard_does_not_release_a_different_guards_lock() {
+        let path = temp_shm(0);
+
+        let read_guard = claim_wal_read_lock(&path).unwrap().unwrap();
+        let slot = read_guard.slot;
+        let ckpt_guard = claim_wal_checkpoint_lock(&path).unwrap();
+
+        assert!(
+            !slot_is_free_test_only(&path, slot),
+            "the read lock must be held right after both guards are claimed"
+        );
+
+        // Dropping the *other* guard must not touch the read lock's byte
+        // range, even though (pre-#491) it shared the same underlying
+        // `-shm` inode via an independent fd.
+        drop(ckpt_guard);
+        assert!(
+            !slot_is_free_test_only(&path, slot),
+            "dropping a different guard on the same -shm file must not release this one's lock"
+        );
+
+        drop(read_guard);
+        assert!(
+            slot_is_free_test_only(&path, slot),
+            "the read lock must actually release once its own guard drops"
+        );
+
         std::fs::remove_file(&path).unwrap();
     }
 
