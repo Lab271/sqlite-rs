@@ -6,7 +6,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-V7 phase 1 in progress (targets 0.18.0 on close):
+## [0.18.0] - 2026-08-25 — V7 Performance & Planner
+
+Epic #421's V7.2 phase (Performance & Planner), now complete: the query
+planner (`ANALYZE` + cost model, join ordering, Bloom-filter join
+elimination, skip-scan), a run of targeted VDBE/pager performance work
+(row-header cache, zero-copy payload, page-cache hashing, correlated-
+subquery memoization, CTE materialization sharing), and the `/review`
+follow-up that closed out its warning-level findings. V7.3 (PRAGMAs &
+Introspection) is next.
 
 docs: address V7.2 review warnings from epic #421 (#501) — verified and
 documented, rather than patched, three warning-level findings that
