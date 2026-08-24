@@ -29,21 +29,28 @@ use super::{
 /// per-statement parser/codegen error types individually.
 #[derive(Debug, Error)]
 pub enum DispatchError {
+    /// The statement referenced a table not present in the schema catalog.
     #[error("no such table: {0}")]
     NoSuchTable(String),
 
+    /// The statement referenced an index not present in the schema catalog.
     #[error("no such index: {0}")]
     NoSuchIndex(String),
 
+    /// The leading keyword(s) didn't match any statement kind this
+    /// dispatcher knows how to parse/compile.
     #[error("unsupported or unrecognized statement: {0:?} ...")]
     Unrecognized(String),
 
+    /// A `SELECT` (or an embedding statement) had no `FROM` clause.
     #[error("SELECT has no FROM clause")]
     NoFromClause,
 
+    /// Compilation of the parsed statement failed.
     #[error(transparent)]
     Codegen(#[from] CodegenError),
 
+    /// Parsing the statement failed.
     #[error("{0}")]
     ParseFailed(String),
 }

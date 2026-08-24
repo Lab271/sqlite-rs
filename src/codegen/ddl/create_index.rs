@@ -18,6 +18,10 @@ use crate::parser::ast::CreateIndex;
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, Program, P4};
 
+/// Compiles `CREATE INDEX` into a single `Opcode::CreateIndex` instruction
+/// that allocates the index's root page, populates it from the target
+/// table's existing rows, registers it in `sqlite_master`, and bumps the
+/// schema cookie at exec time.
 pub fn compile_create_index(
     ci: &CreateIndex,
     schema: &TableSchema,

@@ -15,6 +15,9 @@ use crate::codegen::Emitter;
 use crate::parser::ast::CreateView;
 use crate::vdbe::{Instruction, Opcode, Program, P4};
 
+/// Compiles `CREATE VIEW` into a single `Opcode::CreateView` instruction
+/// that writes the verbatim source text into `sqlite_master.sql` with
+/// `rootpage` `0` (views have no b-tree of their own).
 pub fn compile_create_view(create: &CreateView, source: &str) -> Result<Program, CodegenError> {
     let start = create.span.offset as usize;
     let end = start.saturating_add(create.span.len as usize);

@@ -54,6 +54,7 @@ pub(super) type IndexInteriorEntry = (u32, Vec<Value>, Vec<u8>);
 /// WITHOUT ROWID table's own storage the decoded record IS the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRow {
+    /// The decoded key-record's raw payload bytes.
     pub payload: Vec<u8>,
 }
 
@@ -83,6 +84,8 @@ pub struct IndexCursor<P: PageSource> {
 }
 
 impl<P: PageSource> IndexCursor<P> {
+    /// Creates a cursor over the index b-tree rooted at `root_page`,
+    /// unpositioned until traversal begins.
     pub fn new(source: P, usable_size: u32, root_page: u32) -> Self {
         IndexCursor {
             source,

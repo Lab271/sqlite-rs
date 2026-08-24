@@ -12,6 +12,7 @@
 // `fcntl`/`mmap`/`fork` calls (#50); both are now safe `nix`/`std` APIs
 // (#66), so nothing in this crate needs `unsafe` anymore.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod btree;
 pub mod codegen;

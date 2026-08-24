@@ -67,10 +67,15 @@ pub fn bump_schema_cookie(pager: &mut Pager) -> Result<u32, BtreeError> {
 /// schema's fixed column order: `type, name, tbl_name, rootpage, sql`.
 #[derive(Debug, Clone)]
 pub struct MasterEntry {
+    /// The schema object's type: `"table"`, `"index"`, `"view"`, or `"trigger"`.
     pub kind: String,
+    /// The schema object's own name.
     pub name: String,
+    /// The table this object applies to (equal to `name` for a table itself).
     pub tbl_name: String,
+    /// Root page number of the object's b-tree, or 0 when it has none.
     pub rootpage: u32,
+    /// The `CREATE ...` SQL text that defines the object.
     pub sql: String,
 }
 

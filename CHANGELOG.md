@@ -18,6 +18,13 @@ the CLI's `query`/`repl` path. A database with no `ANALYZE` history
 compiles byte-for-byte as before this change. Filed #470 (join
 ordering heuristics) as the real follow-up enabled by this ticket.
 
+docs: close remaining missing_docs gap for docs.rs (#430) — adds `///`
+doc comments to the ~890 previously-undocumented public items across
+the nested submodules (`parser`, `vdbe`, `btree`, `pager`, `codegen`,
+`vfs`, `record`, `schema`) that #428 left out of scope, and enables
+`#![warn(missing_docs)]` in `src/lib.rs` so future regressions are
+caught by `cargo build`/`clippy`. No logic or behavior changes.
+
 ## [0.17.7] - 2026-08-24
 
 fix: cache reassembled payload per row position (#469, #475) —

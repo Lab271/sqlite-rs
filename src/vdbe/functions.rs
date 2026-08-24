@@ -28,14 +28,27 @@ use crate::record::Value;
 use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 
+/// The ways a scalar/aggregate function call can fail to evaluate.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FunctionError {
+    /// No registered function matches `name` at the given `arity`.
     #[error("unknown function {name} with {arity} argument(s)")]
-    Unknown { name: String, arity: usize },
+    Unknown {
+        /// The unrecognized function name.
+        name: String,
+        /// The argument count it was called with.
+        arity: usize,
+    },
 
+    /// `name` is a known function but was not called with a supported
+    /// argument count.
     #[error("wrong number of arguments to function {name}()")]
-    WrongArity { name: String },
+    WrongArity {
+        /// The function name.
+        name: String,
+    },
 
+    /// An arithmetic result overflowed `i64`.
     #[error("integer overflow")]
     IntegerOverflow,
 }
@@ -461,6 +474,9 @@ fn iif(args: &[Value]) -> Result<Value, FunctionError> {
     })
 }
 
+/// Matches `text` against a SQL `LIKE` `pattern` (`%`/`_` wildcards,
+/// optional `ESCAPE` character), case-insensitively per SQLite's default
+/// `LIKE` behavior.
 pub fn like_match(text: &str, pattern: &str, escape: Option<char>) -> bool {
     let t: Vec<char> = text.chars().collect();
     let p: Vec<char> = pattern.chars().collect();

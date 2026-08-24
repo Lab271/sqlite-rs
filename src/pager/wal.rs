@@ -38,6 +38,8 @@ use thiserror::Error;
 
 use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
+/// Fixed size, in bytes, of the WAL header (see the module doc's byte
+/// layout).
 pub const HEADER_LEN: usize = 32;
 pub(crate) const FRAME_HEADER_LEN: usize = 24;
 
@@ -46,25 +48,43 @@ pub(crate) const FRAME_HEADER_LEN: usize = 24;
 /// [`WalHeader::new`], not currently validated on parse.
 const FORMAT_VERSION: u32 = 3_007_000;
 
+/// Errors from parsing or validating a WAL header.
 #[derive(Debug, Error)]
 pub enum WalError {
+    /// The buffer was shorter than [`HEADER_LEN`].
     #[error("WAL header is {len} bytes, need at least {HEADER_LEN}")]
-    HeaderTooShort { len: usize },
+    HeaderTooShort {
+        /// Actual length of the buffer.
+        len: usize,
+    },
 
+    /// The header's magic number was neither valid WAL magic value.
     #[error("invalid WAL magic {magic:#010x} (must be 0x377f0682 or 0x377f0683)")]
-    InvalidMagic { magic: u32 },
+    InvalidMagic {
+        /// The magic value actually read.
+        magic: u32,
+    },
 
+    /// The header's page size wasn't a power of two in `512..=65536`.
     #[error("invalid WAL page size {page_size} (must be a power of two from 512 to 65536)")]
-    InvalidPageSize { page_size: u32 },
+    InvalidPageSize {
+        /// The page size actually read.
+        page_size: u32,
+    },
 
+    /// The header's stored checksum didn't match the checksum computed over
+    /// its bytes — the WAL header is corrupt.
     #[error(
         "WAL header checksum mismatch: stored {stored:?}, computed {computed:?} — corrupt WAL"
     )]
     HeaderChecksumMismatch {
+        /// Checksum stored in the header.
         stored: (u32, u32),
+        /// Checksum computed from the header's own bytes.
         computed: (u32, u32),
     },
 
+    /// A VFS-level I/O error.
     #[error(transparent)]
     Vfs(#[from] VfsError),
 }
@@ -76,8 +96,12 @@ pub struct WalHeader {
     /// (magic `0x377f0682`, the common case); `false` if always
     /// big-endian (magic `0x377f0683`).
     pub native_checksum: bool,
+    /// Page size of the database this WAL belongs to.
     pub page_size: u32,
+    /// First salt value, copied into every frame header to detect stale
+    /// frames from an earlier checkpoint cycle.
     pub salt1: u32,
+    /// Second salt value, copied into every frame header alongside `salt1`.
     pub salt2: u32,
     format_version: u32,
     checkpoint_seq: u32,

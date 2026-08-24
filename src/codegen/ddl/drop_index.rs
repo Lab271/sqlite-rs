@@ -7,6 +7,9 @@ use crate::codegen::Emitter;
 use crate::parser::ast::DropIndex;
 use crate::vdbe::{Instruction, Opcode, Program, P4};
 
+/// Compiles `DROP INDEX` into a single `Opcode::DropIndex` instruction that
+/// frees the index's pages, removes its `sqlite_master` row, and bumps the
+/// schema cookie at exec time.
 pub fn compile_drop_index(di: &DropIndex, root_page: u32) -> Result<Program, CodegenError> {
     let mut em = Emitter::new();
     let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));

@@ -49,7 +49,7 @@ use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{TextEncoding, Value};
 
-/// Deletes the entry with exactly `key` (via [`compare_keys`]) from the
+/// Deletes the entry with exactly `key` (via `compare_keys`) from the
 /// index b-tree rooted at `root_page`. Returns `Err(BtreeError::KeyNotFound)`
 /// if no such entry exists, leaving the tree unchanged. See the module
 /// doc for how a target found at interior level (not just in a leaf) is

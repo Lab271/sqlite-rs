@@ -32,28 +32,48 @@ use crate::vdbe::{
     comparison_affinity, Collation, Instruction, Opcode, Program, SortKeyColumn, P4,
 };
 
+/// Errors raised while compiling a `SELECT` (or a statement that embeds one,
+/// e.g. `INSERT ... SELECT`) into a `Program`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CodegenError {
+    /// The statement has no `FROM` clause, which this compiler doesn't
+    /// support.
     #[error("SELECT has no FROM clause — not supported by this V2-scope compiler")]
     NoFromClause,
 
+    /// A referenced column name doesn't resolve against any table in scope.
     #[error("unknown column {name:?}")]
-    UnknownColumn { name: String },
+    UnknownColumn {
+        /// The column name that failed to resolve.
+        name: String,
+    },
 
     /// #237: an unqualified column name in a multi-table `FROM` matched
     /// more than one joined table's schema.
     #[error("ambiguous column name: {name:?}")]
-    AmbiguousColumn { name: String },
+    AmbiguousColumn {
+        /// The unqualified column name that matched more than one joined
+        /// table's schema.
+        name: String,
+    },
 
+    /// A construct recognized by the parser but not (yet) handled by this
+    /// compiler.
     #[error("unsupported: {reason}")]
-    Unsupported { reason: String },
+    Unsupported {
+        /// Human-readable description of the unsupported construct.
+        reason: String,
+    },
 
     /// #195: an `INSERT` row supplied a different number of values than
     /// the target column list names.
     #[error("{table} has {expected} columns but {found} values were supplied")]
     RowShapeMismatch {
+        /// Name of the target table.
         table: String,
+        /// Number of columns the target table (or column list) expects.
         expected: usize,
+        /// Number of values actually supplied by the row.
         found: usize,
     },
 
@@ -64,14 +84,22 @@ pub enum CodegenError {
         "SELECTs to the left and right of UNION ALL do not have the same number of result \
          columns: expected {expected}, found {found}"
     )]
-    CompoundColumnMismatch { expected: usize, found: usize },
+    CompoundColumnMismatch {
+        /// Number of result columns projected by the first compound arm.
+        expected: usize,
+        /// Number of result columns projected by the mismatched arm.
+        found: usize,
+    },
 
     /// #380 follow-up: a view (directly or transitively, via other
     /// views) references itself in its own `FROM`/`JOIN` clause. Message
     /// matches stock SQLite's own wording (`view {name} is circularly
     /// defined`) for oracle-diff parity.
     #[error("view {name} is circularly defined")]
-    CircularView { name: String },
+    CircularView {
+        /// Name of the view that references itself.
+        name: String,
+    },
 }
 
 const TABLE_CURSOR: i32 = 0;

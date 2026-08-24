@@ -17,6 +17,11 @@ use crate::codegen::Emitter;
 use crate::schema::TableSchema;
 use crate::vdbe::{AnalyzeIndexTarget, AnalyzeTarget, Instruction, Opcode, Program, P4};
 
+/// Compiles `ANALYZE` (or `ANALYZE table-name`) into a single-instruction
+/// `Program` that replaces `sqlite_stat1` rows for every table in
+/// `targets` (and their indexes) at exec time. See the module doc for why
+/// this bakes root pages/names in at codegen time instead of a
+/// cursor-driven sequence.
 pub fn compile_analyze(targets: &[&TableSchema]) -> Result<Program, CodegenError> {
     let targets: Vec<AnalyzeTarget> = targets
         .iter()

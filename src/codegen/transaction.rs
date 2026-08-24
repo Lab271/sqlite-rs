@@ -14,6 +14,9 @@ use crate::vdbe::{
     TRANSACTION_MODE_IMMEDIATE,
 };
 
+/// Compiles `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE]` into an
+/// `Init -> Transaction -> Halt` program, carrying the transaction mode
+/// through `Transaction`'s `P1`.
 pub fn compile_begin(begin: &Begin) -> Program {
     let mode = match begin.mode {
         None | Some(TransactionMode::Deferred) => TRANSACTION_MODE_DEFERRED,
@@ -32,10 +35,14 @@ pub fn compile_begin(begin: &Begin) -> Program {
     em.finish()
 }
 
+/// Compiles `COMMIT` into an `Init -> AutoCommit -> Halt` program with
+/// `AutoCommit`'s `P2` set to 1.
 pub fn compile_commit(_commit: &Commit) -> Program {
     compile_auto_commit(1)
 }
 
+/// Compiles `ROLLBACK` into an `Init -> AutoCommit -> Halt` program with
+/// `AutoCommit`'s `P2` set to 0.
 pub fn compile_rollback(_rollback: &Rollback) -> Program {
     compile_auto_commit(0)
 }

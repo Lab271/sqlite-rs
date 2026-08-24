@@ -17,38 +17,67 @@ const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 /// Failure parsing or validating a [`DatabaseHeader`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum HeaderError {
+    /// `buf` is shorter than [`HEADER_LEN`].
     #[error("header is {len} bytes, need at least 100")]
-    TooShort { len: usize },
+    TooShort {
+        /// Actual length of the buffer that was passed in.
+        len: usize,
+    },
 
+    /// Bytes 0-15 don't match the SQLite magic string.
     #[error("missing or invalid SQLite magic string")]
     InvalidMagic,
 
+    /// Bytes 16-17 don't encode a valid page size.
     #[error(
         "invalid page size encoding {raw} (must be a power of two from 512 to 32768, or 1 for 65536)"
     )]
-    InvalidPageSize { raw: u16 },
+    InvalidPageSize {
+        /// The raw, unresolved 16-bit page-size field.
+        raw: u16,
+    },
 
+    /// Byte 18 or 19 (write/read version) is neither 1 nor 2.
     #[error("invalid {field:?} version byte {value} (must be 1 or 2)")]
-    InvalidFileFormatVersion { field: VersionField, value: u8 },
+    InvalidFileFormatVersion {
+        /// Which of the two version bytes was invalid.
+        field: VersionField,
+        /// The invalid byte value.
+        value: u8,
+    },
 
+    /// Byte 20 (reserved space) leaves no usable bytes in the page.
     #[error("reserved space {reserved_space} leaves no usable bytes in a {page_size}-byte page")]
-    InvalidReservedSpace { reserved_space: u8, page_size: u32 },
+    InvalidReservedSpace {
+        /// The invalid reserved-space byte.
+        reserved_space: u8,
+        /// The page size it was checked against.
+        page_size: u32,
+    },
 
+    /// Bytes 56-59 don't encode a recognized text encoding.
     #[error("invalid text encoding {raw} (must be 1, 2, or 3)")]
-    InvalidTextEncoding { raw: u32 },
+    InvalidTextEncoding {
+        /// The raw, unrecognized text-encoding value.
+        raw: u32,
+    },
 }
 
 /// Which header byte an [`HeaderError::InvalidFileFormatVersion`] refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionField {
+    /// Byte 18, the file format write version.
     Write,
+    /// Byte 19, the file format read version.
     Read,
 }
 
 /// The journal mode declared by the write/read version bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
+    /// The rollback journal (write/read version bytes not both 2).
     Legacy,
+    /// Write-ahead logging (write/read version bytes both 2).
     Wal,
 }
 

@@ -24,20 +24,29 @@ use thiserror::Error;
 
 use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
+/// Fixed size, in bytes, of the rollback-journal header (see the module
+/// doc's byte layout table).
 pub const JOURNAL_HEADER_LEN: usize = 28;
 
+/// Errors from parsing a rollback journal's header or page records.
 #[derive(Debug, Error)]
 pub enum JournalError {
+    /// The buffer was shorter than [`JOURNAL_HEADER_LEN`].
     #[error("journal header too short: expected at least {JOURNAL_HEADER_LEN} bytes, got {0}")]
     HeaderTooShort(usize),
 
+    /// A page record ran past the end of the available journal bytes.
     #[error("journal record {index} truncated: expected {expected} bytes, got {got}")]
     RecordTruncated {
+        /// Zero-based index of the truncated record.
         index: u32,
+        /// Expected record length in bytes.
         expected: usize,
+        /// Bytes actually available.
         got: usize,
     },
 
+    /// A VFS-level I/O error.
     #[error(transparent)]
     Vfs(#[from] VfsError),
 }
@@ -52,10 +61,15 @@ fn record_len(page_size: u32) -> usize {
 /// byte layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JournalHeader {
+    /// Number of page records that follow the header.
     pub n_rec: u32,
+    /// Checksum salt (`cksumInit`) used by [`page_checksum`].
     pub nonce: u32,
+    /// Database size, in pages, before this transaction started.
     pub initial_page_count: u32,
+    /// Sector size the header's zero padding is aligned to.
     pub sector_size: u32,
+    /// Page size of the database this journal belongs to.
     pub page_size: u32,
 }
 
@@ -216,7 +230,9 @@ impl JournalWriter {
 /// What [`recover`] restored — [`crate::pager::recover_hot_journal`] uses
 /// this to truncate the main file back to its pre-transaction size.
 pub struct RecoveredJournal {
+    /// Database size, in pages, before the rolled-back transaction started.
     pub initial_page_count: u32,
+    /// Page size of the database this journal belongs to.
     pub page_size: u32,
 }
 

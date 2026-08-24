@@ -25,8 +25,11 @@ use super::cte::{apply_column_aliases, expand_with_clause};
 /// A view's catalog entry, pre-parsed once per query by the caller
 /// (`bin/sqlite-rs/query.rs`) from `schema::ViewSchema::sql`.
 pub struct ResolvedView {
+    /// The view's name, as it appears in `sqlite_master`.
     pub name: String,
+    /// Optional explicit column name list from `CREATE VIEW name(cols)`.
     pub columns: Option<Vec<String>>,
+    /// The view's underlying, already-parsed `SELECT`.
     pub query: Box<Select>,
 }
 

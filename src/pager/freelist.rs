@@ -14,10 +14,17 @@
 
 use thiserror::Error;
 
+/// Errors from parsing or writing a freelist trunk page.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FreelistError {
+    /// The page buffer was too short to hold a field at the given offset.
     #[error("freelist trunk page is {len} bytes, too short to read a field at offset {offset}")]
-    PageTooShort { offset: usize, len: usize },
+    PageTooShort {
+        /// Byte offset of the field that could not be read/written.
+        offset: usize,
+        /// Actual length of the page buffer.
+        len: usize,
+    },
 }
 
 /// Reads a big-endian `u32` at `offset` in `buf`, never panicking on a
@@ -60,7 +67,9 @@ pub fn max_leaves_per_trunk(page_size: u32) -> u32 {
 /// A parsed freelist trunk page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrunkPage {
+    /// Page number of the next trunk page, or 0 if this is the last trunk.
     pub next_trunk: u32,
+    /// Free page numbers listed in this trunk.
     pub leaves: Vec<u32>,
 }
 

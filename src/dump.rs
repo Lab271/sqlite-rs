@@ -25,15 +25,19 @@ use crate::vfs::{PageSource, Vfs, VfsError};
 /// Failure reading a database while producing a [`DumpResult`].
 #[derive(Debug, Error)]
 pub enum DumpError {
+    /// Failure opening or reading the database file through the VFS.
     #[error(transparent)]
     Vfs(#[from] VfsError),
 
+    /// The 100-byte database header failed to parse.
     #[error("parsing database header: {0}")]
     Header(#[from] HeaderError),
 
+    /// Failure opening the pager over the database file.
     #[error("opening pager: {0}")]
     Pager(#[from] PagerError),
 
+    /// Failure reading `sqlite_master` into a schema.
     #[error("reading schema: {0}")]
     Schema(#[from] DdlError),
 }
@@ -43,16 +47,22 @@ pub enum DumpError {
 /// is never actually stored in the record — see spike 003 finding 1)
 /// has already been substituted with the row's real rowid.
 pub struct TableDump {
+    /// The table's name.
     pub name: String,
+    /// The verbatim `CREATE TABLE` statement from `sqlite_master`.
     pub sql: String,
+    /// Column names, in declared order.
     pub columns: Vec<String>,
+    /// Decoded rows, each position-for-position with `columns`.
     pub rows: Vec<Vec<Value>>,
 }
 
 /// Every readable table in a database, plus warnings for anything
 /// skipped. `tables` preserves `sqlite_master` order.
 pub struct DumpResult {
+    /// Every successfully-read table, in `sqlite_master` order.
     pub tables: Vec<TableDump>,
+    /// One message per table skipped or that failed to decode.
     pub warnings: Vec<String>,
 }
 
