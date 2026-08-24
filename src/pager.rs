@@ -36,6 +36,7 @@ pub use freelist::TrunkPage;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -79,9 +80,37 @@ const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
 /// Eviction (an `O(capacity)` scan for the smallest tick) only runs on
 /// a miss that pushes the cache over capacity, which is rare once the
 /// working set is warm.
+/// Multiplicative `u32` hasher (FxHash's mixing constant) for
+/// [`PageCache::entries`] (#457) — page numbers are plain sequential
+/// integers, not attacker-controlled input, so the DoS-resistance
+/// `HashMap`'s default `SipHash` provides is wasted cost on the
+/// cache's hot get/insert path. Hand-rolled rather than pulling in
+/// `rustc-hash`/`ahash`/`fxhash`: ADR-0022 already rejected adding a
+/// dependency for this cache (`hashlink`'s `LruCache`) on the grounds
+/// that the logic involved is too small to justify `cargo vet`ing a
+/// new crate, and the same reasoning applies here.
+#[derive(Default)]
+struct PageNumHasher(u64);
+
+impl Hasher for PageNumHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (i as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 struct PageCache {
     capacity: usize,
-    entries: HashMap<u32, (Rc<[u8]>, u64)>,
+    entries: HashMap<u32, (Rc<[u8]>, u64), BuildHasherDefault<PageNumHasher>>,
     tick: u64,
 }
 
@@ -89,7 +118,7 @@ impl PageCache {
     fn new(capacity: usize) -> Self {
         PageCache {
             capacity,
-            entries: HashMap::new(),
+            entries: HashMap::default(),
             tick: 0,
         }
     }
