@@ -8,6 +8,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+fix: share one `-shm` fd per path per process across all WAL lock
+guards (#491, follow-up from #412's investigation) —
+`WalWriteLock`/`WalCheckpointLock`/`WalReadLock`/`UnixWalShm`
+(`src/vfs/shm.rs`) each opened an independent `File`, but POSIX
+`fcntl` record locks are scoped to `(process, inode)`, not to a file
+descriptor: closing any fd this process holds to a file releases every
+lock the process holds on that inode, even ones taken through a
+different, still-live fd. Two such guards held concurrently in one
+process (e.g. `checkpoint::checkpoint_passive` called directly while a
+separate `Pager` holds its own long-lived `WalReadLock` on the same
+file) could have one guard's `Drop` silently release the other's still-
+needed lock. A new `open_shm_shared` registry (`Arc`/`Weak`-backed,
+keyed by path) makes every guard/helper reuse the one fd already open
+for a path — it only actually closes once nothing in the process needs
+a lock on that inode anymore. Derived from stock sqlite3's own
+`os_unix.c`, whose `unixClose` defers closing for exactly this reason.
+
 perf: zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
 — follow-up to #467, which left `IndexRow::payload` (src/btree/index.rs)
 as an owned `Vec<u8>` out of scope. `IndexFrame.page` is now `Rc<[u8]>`
