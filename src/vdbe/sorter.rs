@@ -60,7 +60,7 @@ use crate::vdbe::program::{Instruction, SortKeyColumn, P4};
 #[derive(Debug)]
 pub(crate) struct SorterState {
     keys: Vec<SortKeyColumn>,
-    buffer: Vec<(Vec<u8>, Vec<Value>)>,
+    buffer: Vec<SorterRow>,
     sorted: bool,
     pos: usize,
     bound: Option<usize>,
@@ -177,14 +177,14 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             });
             if is_better {
                 if let Some(slot) = state.buffer.first_mut() {
-                    *slot = (blob.to_vec(), new_values);
+                    *slot = (blob, new_values);
                 }
                 heap_sift_down(&mut state.buffer, 0, &state.keys);
             }
         }
         _ => {
             let values = decode_bytes("SorterInsert", &blob)?;
-            state.buffer.push((blob.to_vec(), values));
+            state.buffer.push((blob, values));
             if state.bound.is_some() {
                 let last = state.buffer.len().saturating_sub(1);
                 heap_sift_up(&mut state.buffer, last, &state.keys);
@@ -194,7 +194,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     Ok(Step::Next)
 }
 
-type SorterRow = (Vec<u8>, Vec<Value>);
+type SorterRow = (std::rc::Rc<[u8]>, Vec<Value>);
 
 /// Restores the max-heap property (root = worst row, per `compare_rows`)
 /// after appending a new element at `buf`'s end — bubbles it up while
@@ -355,7 +355,7 @@ pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             .0
             .clone()
     };
-    vm.set_register(instr.p2, Value::Blob(bytes.into()))?;
+    vm.set_register(instr.p2, Value::Blob(bytes))?;
     Ok(Step::Next)
 }
 

@@ -3,7 +3,6 @@ mod join;
 
 use super::limit_scan::compile_limit_setup;
 use super::order_by::{order_by_target_for_expr, OrderByPlan, OrderByTarget};
-use super::projection::{compile_row_values, ResultColumnPlan};
 use super::*;
 use crate::codegen::index_maintenance::valid_index_root_page;
 
@@ -177,6 +176,189 @@ where
     Ok(true)
 }
 
+/// #506: which of `schema`'s columns [`compile_grouped_scan`]'s pass 1
+/// actually needs to serialize into the sort record — the `GROUP BY`
+/// key, every aggregate argument, and every plain column `select.columns`/
+/// `select.having` reads (via the pass-2 pseudo cursor's "arbitrary row"
+/// snapshot, see `read_row_columns_into`). A schema column that's part
+/// of neither is dead weight through the sort pipeline: read off the
+/// real cursor, `MakeRecord`-encoded, `SorterInsert`-decoded, and
+/// `read_row_columns_into`-decoded again, without ever being asked for.
+///
+/// Conservative by construction: any `*`/`table.*` result column, or a
+/// column reference this walk can't fully account for (namely, a
+/// subquery-bearing expression — mirroring
+/// `correlation::subquery_is_correlated`'s same "correlated=true is
+/// always the safe default" stance), returns every column rather than
+/// guessing wrong. Returning "every column" here is exactly
+/// [`compile_grouped_scan`]'s pre-#506 behavior, so this never makes a
+/// query behave differently from before — only cheaper.
+fn columns_needed_for_projection(
+    select: &Select,
+    schema: &TableSchema,
+) -> std::collections::HashSet<usize> {
+    let all_columns = || (0..schema.columns.len()).collect();
+
+    let mut names = std::collections::HashSet::new();
+    let mut bail = false;
+    for expr in &select.group_by {
+        walk_expr_for_column_refs(expr, &mut names, &mut bail);
+    }
+    for col in &select.columns {
+        match col {
+            ResultColumn::Expr { expr, .. } => {
+                walk_expr_for_column_refs(expr, &mut names, &mut bail)
+            }
+            ResultColumn::Star | ResultColumn::TableStar { .. } => bail = true,
+        }
+    }
+    if let Some(having) = &select.having {
+        walk_expr_for_column_refs(having, &mut names, &mut bail);
+    }
+    if bail {
+        return all_columns();
+    }
+
+    let mut indices = std::collections::HashSet::with_capacity(names.len());
+    for name in &names {
+        match schema
+            .columns
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(name))
+        {
+            Some(idx) => {
+                indices.insert(idx);
+            }
+            // Should always resolve at this point in codegen — an
+            // unknown column would already have failed earlier
+            // validation. Fall back to "every column" rather than
+            // silently dropping one we can't place, on the off chance
+            // this is reached some other way.
+            None => return all_columns(),
+        }
+    }
+    indices
+}
+
+/// #506: pass 1's `MakeRecord` source registers, one per `schema`
+/// column in declared order — but only a real `Column`/`Rowid` read for
+/// an index in `needed`; every other column becomes a cheap `Null`
+/// placeholder instead of a real per-row read off `cursor`. Keeping one
+/// register per schema column (rather than compacting to just the
+/// needed ones) means every downstream reader of the pass-2 pseudo
+/// cursor — `read_pseudo_column`'s rowid-alias check, `flush_group`'s
+/// synthetic schema, arbitrary `compile_value` column resolution — still
+/// sees the exact same column-index-to-position mapping it did before
+/// this ticket, so none of that code needs to change at all. A `Null`
+/// placeholder is never actually read back (by construction: `needed`
+/// already covers every column any compiled expression touches), so
+/// its only costs are one `MakeRecord` NULL serial-type byte per row and
+/// nothing on decode — versus the real column's full read/encode/decode
+/// path skipped entirely. Returns the first allocated register (mirrors
+/// `compile_row_values`'s return).
+fn compile_row_values_pruned(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    needed: &std::collections::HashSet<usize>,
+    cursor: i32,
+) -> Result<i32, CodegenError> {
+    let mut first = None;
+    for idx in 0..schema.columns.len() {
+        let r = reg.alloc();
+        first.get_or_insert(r);
+        if needed.contains(&idx) {
+            emit_column_read(em, schema, cursor, idx, r)?;
+        } else {
+            em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+        }
+    }
+    Ok(first.unwrap_or_else(|| reg.alloc()))
+}
+
+/// Same exhaustive `ExprKind` traversal shape as
+/// `subquery::correlation::walk_expr_for_correlation` — see that
+/// function's doc for why a subquery-bearing expression bails
+/// conservatively rather than being reasoned through.
+fn walk_expr_for_column_refs(
+    expr: &Expr,
+    names: &mut std::collections::HashSet<String>,
+    bail: &mut bool,
+) {
+    if *bail {
+        return;
+    }
+    match &expr.kind {
+        ExprKind::Column { name, .. } => {
+            names.insert(name.to_ascii_lowercase());
+        }
+        ExprKind::Literal(_) | ExprKind::Param(_) => {}
+        ExprKind::FunctionCall { args, .. } => {
+            if let FunctionArgs::List(list) = args {
+                for a in list {
+                    walk_expr_for_column_refs(a, names, bail);
+                }
+            }
+        }
+        ExprKind::Unary { expr: e, .. }
+        | ExprKind::IsNull { expr: e, .. }
+        | ExprKind::Cast { expr: e, .. }
+        | ExprKind::Collate { expr: e, .. }
+        | ExprKind::Paren(e) => walk_expr_for_column_refs(e, names, bail),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Is { lhs, rhs, .. } => {
+            walk_expr_for_column_refs(lhs, names, bail);
+            walk_expr_for_column_refs(rhs, names, bail);
+        }
+        ExprKind::Between {
+            expr: e, lo, hi, ..
+        } => {
+            walk_expr_for_column_refs(e, names, bail);
+            walk_expr_for_column_refs(lo, names, bail);
+            walk_expr_for_column_refs(hi, names, bail);
+        }
+        ExprKind::In { expr: e, list, .. } => {
+            walk_expr_for_column_refs(e, names, bail);
+            for item in list {
+                walk_expr_for_column_refs(item, names, bail);
+            }
+        }
+        ExprKind::Like {
+            expr: e,
+            pattern,
+            escape,
+            ..
+        } => {
+            walk_expr_for_column_refs(e, names, bail);
+            walk_expr_for_column_refs(pattern, names, bail);
+            if let Some(esc) = escape {
+                walk_expr_for_column_refs(esc, names, bail);
+            }
+        }
+        ExprKind::Case {
+            operand,
+            whens,
+            else_,
+        } => {
+            if let Some(o) = operand {
+                walk_expr_for_column_refs(o, names, bail);
+            }
+            for (w, t) in whens {
+                walk_expr_for_column_refs(w, names, bail);
+                walk_expr_for_column_refs(t, names, bail);
+            }
+            if let Some(e) = else_ {
+                walk_expr_for_column_refs(e, names, bail);
+            }
+        }
+        ExprKind::Subquery(_)
+        | ExprKind::Exists { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::InSubqueryMulti { .. } => {
+            *bail = true;
+        }
+    }
+}
+
 /// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
 /// sort-then-group `select.c` shape rather than a hash table, since the
 /// `Sorter*` opcode family this compiler already has for `ORDER BY`
@@ -260,6 +442,7 @@ where
         .iter()
         .map(|expr| order_by_target_for_expr(expr, schema))
         .collect::<Result<_, _>>()?;
+    let needed_columns = columns_needed_for_projection(select, schema);
 
     // Pass 1: buffer every WHERE-matching row's full column tuple, plus
     // a trailing register per computed (non-bare-column) GROUP BY
@@ -289,19 +472,7 @@ where
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
         )?;
     }
-    let (first, _schema_count) = compile_row_values(
-        em,
-        reg,
-        schema,
-        &schema
-            .columns
-            .iter()
-            .map(|c| ResultColumnPlan::Column(c.clone()))
-            .collect::<Vec<_>>(),
-        cursors.table,
-        false,
-        catalog,
-    )?;
+    let first = compile_row_values_pruned(em, reg, schema, &needed_columns, cursors.table)?;
 
     let mut sort_keys = Vec::with_capacity(group_targets.len());
     for (expr, target) in select.group_by.iter().zip(&group_targets) {
@@ -397,18 +568,23 @@ where
         })
         .collect();
 
-    let sorted_loop = em.new_label();
-    em.place(sorted_loop);
+    // `OpenPseudo` only records `cursors.pseudo -> sorter_data_reg` (the
+    // register index, not a snapshot of its value, per
+    // `CursorSlot::Pseudo`) — so it only needs to run once, before the
+    // loop, not on every row. `SorterData` still runs per-row to refresh
+    // the register's contents.
     let sorter_data_reg = reg.alloc();
-    em.emit(Instruction::new(
-        Opcode::SorterData,
-        cursors.sort,
-        sorter_data_reg,
-        0,
-    ));
     em.emit(Instruction::new(
         Opcode::OpenPseudo,
         cursors.pseudo,
+        sorter_data_reg,
+        0,
+    ));
+    let sorted_loop = em.new_label();
+    em.place(sorted_loop);
+    em.emit(Instruction::new(
+        Opcode::SorterData,
+        cursors.sort,
         sorter_data_reg,
         0,
     ));
