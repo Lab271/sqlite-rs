@@ -17,6 +17,16 @@ page (0)` instead of being materialized. Each arm now branches the
 same way the single-`SELECT` path already does, calling
 `materialize_from_subquery` per arm on its own cursor. Refs: #424.
 
+fix: recreate a vanished `-wal`/`-shm` during flush instead of failing
+(#422) — `Pager::flush_wal_locked` unconditionally called
+`wal::WalWriter::open_existing`, which errored if a concurrent
+connection (e.g. a real `sqlite3` client auto-checkpointing on close)
+had deleted `-wal`/`-shm` out from under this `Pager`, even though its
+own `journal_mode` still correctly said `Wal`. Now recreates a fresh
+`-wal`/`-shm` pair on that specific `NotFound` case, mirroring
+`switch_journal_to_wal`'s from-scratch creation — matches stock
+`sqlite3`'s own observed behavior in the same scenario.
+
 feat(cli): REPL mode with `.tables` and `.quit`/`.exit` prefix matching
 (#478) — bare `sqlite-rs <file>` (no subcommand) now enters the REPL
 directly, matching `sqlite3`'s shell; adds a `.tables` dot-command
