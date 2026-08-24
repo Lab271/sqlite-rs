@@ -8,6 +8,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+fix: CTE referenced from more than one arm of a compound `SELECT` (#424)
+— `compile_select_compound`'s per-arm codegen unconditionally
+`OpenRead`'d a resolved-table root page, ignoring
+`TableRefKind::Subquery` entirely, so any arm referencing a CTE (or
+other `FROM`-subquery) hit `unsupported: table X has an invalid root
+page (0)` instead of being materialized. Each arm now branches the
+same way the single-`SELECT` path already does, calling
+`materialize_from_subquery` per arm on its own cursor. Refs: #424.
+
 feat(cli): REPL mode with `.tables` and `.quit`/`.exit` prefix matching
 (#478) — bare `sqlite-rs <file>` (no subcommand) now enters the REPL
 directly, matching `sqlite3`'s shell; adds a `.tables` dot-command
