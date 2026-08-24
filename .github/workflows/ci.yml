@@ -7,12 +7,16 @@ on:
       - "**.md"
       - ".github/**"
       - "!.github/workflows/**"
+      - "tools/hooks/**"
+      - ".claude/**"
   pull_request:
     branches: [main]
     paths-ignore:
       - "**.md"
       - ".github/**"
       - "!.github/workflows/**"
+      - "tools/hooks/**"
+      - ".claude/**"
 
 env:
   # Must match Cargo.toml's [package.metadata.oracle] version — the single
