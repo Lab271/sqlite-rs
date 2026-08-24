@@ -13,21 +13,6 @@ use crate::parser::ast::{Expr, ExprKind, FunctionArgs, ResultColumn, Select};
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, P4};
 
-/// Caps how many distinct probe values #314's memoization cache holds
-/// before it stops growing (see [`compile_memoized_scalar_subquery`]).
-/// The cache is scanned linearly per outer row, so its cost is
-/// `O(cap)` per row regardless of the outer table's size — chosen
-/// small enough that even the largest tier-1 bench fixture (830k rows,
-/// `tests/performance/engine.rs`) stays comfortably under the VDBE's
-/// 50M-step guard rail even on a cache-cardinality-heavy query
-/// (`830_000 * MAX_MEMO_CACHE_ENTRIES * ~4 instructions/entry`, with
-/// margin for the rest of the query's own per-row cost). A
-/// low-cardinality correlated column (this cache's actual target —
-/// bucket/category/FK) fits comfortably under this cap; a
-/// higher-cardinality one just falls back to always-recomputing once
-/// the cap is hit, same as never caching at all.
-const MAX_MEMO_CACHE_ENTRIES: i32 = 8;
-
 /// Walks `expr` collecting the single outer column `subselect` (whose
 /// own schema is `own_schema`) is correlated against, mirroring
 /// `correlation::walk_expr_for_correlation`'s traversal shape but
@@ -326,7 +311,7 @@ fn subquery_memoizable(
 
 /// Recognizes one memoizable conjunct: a top-level comparison with a
 /// correlated (single-outer-column) scalar-subquery operand. Emits the
-/// subquery's cache table (`OpenEphemeral`, table mode, empty at this
+/// subquery's cache index (`OpenEphemeral`, index mode, empty at this
 /// point — populated lazily, per distinct probe value, by
 /// [`compile_memoized_scalar_subquery`]) and returns its
 /// [`select_id`] plus the [`MemoizedSubquery`] handle, or `None` if
@@ -354,7 +339,7 @@ fn try_memoize_conjunct(
                     p2: 0,
                     p3: 0,
                     p4: P4::None,
-                    p5: 1,
+                    p5: 0,
                 });
                 return Some((
                     select_id(subquery),
@@ -403,22 +388,31 @@ pub(crate) fn memoize_correlated_where_subqueries(
     out
 }
 
-/// Compiles a memoized correlated scalar subquery (#314): reads the
-/// current outer row's `memo.probe_column` value, linearly scans
-/// `memo.cache_cursor` (a small table of `(probe_value, result)` rows —
-/// one per *distinct* probe value seen so far, not one per outer row)
-/// for a match, and on a hit copies the cached result straight out —
-/// skipping [`compile_scalar_subquery`]'s whole inner scan entirely. On
-/// a miss (including every NULL probe value, which never caches — SQL's
+/// Compiles a memoized correlated scalar subquery (#314, index-mode
+/// cache per #494): reads the current outer row's `memo.probe_column`
+/// value, probes `memo.cache_cursor` — an ephemeral index keyed on the
+/// probe value alone (`Found`, O(log n) via the ephemeral cursor's
+/// `BTreeMap`, not a per-row linear scan) — and on a hit reads the
+/// cached result straight back out (`Column`), skipping
+/// [`compile_scalar_subquery`]'s whole inner scan entirely. On a miss
+/// (including every NULL probe value, which never caches — SQL's
 /// `NULL = NULL` is unknown, not true), runs the subquery normally and,
-/// for a non-NULL probe, appends the result to the cache for the next
-/// outer row with the same value to hit.
+/// for a non-NULL probe, inserts `(probe, result)` into the cache
+/// (`IdxInsert`, keyed on just the probe register via `P4`, with the
+/// result register as `P5`'s extra payload — see `idx_insert`'s doc) for
+/// the next outer row with the same value to hit.
 ///
-/// The cache-hit comparison is a plain, uncollated `Eq` — never a false
-/// positive (an actual SQL-distinct pair of values is never judged
-/// equal by a *stricter* byte-exact comparison), so correctness is
-/// preserved even for a `NOCASE`-collated probe column; the only cost
-/// is a few avoidable cache misses in that case.
+/// No entry-count cap: an ephemeral cursor's own `MAX_EPHEMERAL_ROWS`
+/// ceiling (`src/vdbe/cursor.rs`) is the only limit, since a lookup's
+/// cost no longer grows with the cache's size the way the old
+/// linear-scan table cache's did.
+///
+/// The cache-hit comparison is a plain, uncollated `Eq` (byte-exact
+/// record encoding) — never a false positive (an actual SQL-distinct
+/// pair of values is never judged equal by a *stricter* byte-exact
+/// comparison), so correctness is preserved even for a `NOCASE`-collated
+/// probe column; the only cost is a few avoidable cache misses in that
+/// case.
 pub(crate) fn compile_memoized_scalar_subquery(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -457,21 +451,14 @@ pub(crate) fn compile_memoized_scalar_subquery(
     let null_addr = em.emit(Instruction::new(Opcode::IsNull, probe_reg, 0, 0));
     em.patch_p2(null_addr, null_probe_label);
 
-    let cmp_reg = reg.alloc();
-    let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, memo.cache_cursor, 0, 0));
-    em.patch_p2(rewind_addr, miss_label);
-    let loop_start = em.new_label();
-    em.place(loop_start);
-    em.emit(Instruction::new(
-        Opcode::Column,
+    let found_addr = em.emit(Instruction::with_p4(
+        Opcode::Found,
         memo.cache_cursor,
         0,
-        cmp_reg,
+        probe_reg,
+        P4::Int(1),
     ));
-    let eq_addr = em.emit(Instruction::new(Opcode::Eq, cmp_reg, 0, probe_reg));
-    em.patch_p2(eq_addr, hit_label);
-    let next_addr = em.emit(Instruction::new(Opcode::Next, memo.cache_cursor, 0, 0));
-    em.patch_p2(next_addr, loop_start);
+    em.patch_p2(found_addr, hit_label);
     em.goto(miss_label);
 
     em.place(hit_label);
@@ -481,42 +468,18 @@ pub(crate) fn compile_memoized_scalar_subquery(
     em.place(miss_label);
     let fresh = compile_scalar_subquery(em, reg, outer_scope, subselect)?;
     em.emit(Instruction::new(Opcode::Copy, fresh, dest, 0));
-    let rowid_reg = reg.alloc();
-    em.emit(Instruction::new(
-        Opcode::Sequence,
-        memo.cache_cursor,
-        rowid_reg,
-        0,
-    ));
-    // `Sequence` returns this row's 1-based ordinal — once it exceeds
-    // MAX_MEMO_CACHE_ENTRIES, stop growing the cache rather than let the
-    // per-row linear scan above grow unbounded with it. A high-
-    // cardinality correlated column (one a cache can't meaningfully help
-    // anyway) then falls back to exactly today's always-recompute
-    // behavior for every value past the cap — the "no regression"
-    // guarantee — while a low-cardinality one (this cache's actual
-    // target: a bucket/category/FK column) still gets fully cached.
-    let cap_reg = reg.alloc();
-    em.emit(Instruction::new(
-        Opcode::Integer,
-        MAX_MEMO_CACHE_ENTRIES,
-        cap_reg,
-        0,
-    ));
-    let over_cap_addr = em.emit(Instruction::new(Opcode::Gt, rowid_reg, 0, cap_reg));
-    em.patch_p2(over_cap_addr, end_label);
     let key_reg = reg.alloc();
     em.emit(Instruction::new(Opcode::Copy, probe_reg, key_reg, 0));
     let val_reg = reg.alloc();
     em.emit(Instruction::new(Opcode::Copy, dest, val_reg, 0));
-    let record_reg = reg.alloc();
-    em.emit(Instruction::new(Opcode::MakeRecord, key_reg, 2, record_reg));
-    em.emit(Instruction::new(
-        Opcode::Insert,
-        memo.cache_cursor,
-        rowid_reg,
-        record_reg,
-    ));
+    em.emit(Instruction {
+        opcode: Opcode::IdxInsert,
+        p1: memo.cache_cursor,
+        p2: key_reg,
+        p3: 0,
+        p4: P4::Int(1),
+        p5: 1,
+    });
     em.goto(end_label);
 
     em.place(null_probe_label);

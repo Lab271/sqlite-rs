@@ -713,13 +713,29 @@ fn read_row_column(
                 .cloned()
                 .unwrap_or(Value::Null));
         }
+        // #494: reads back the payload `Found` last matched (or
+        // `IdxInsert` just wrote) — see `idx_insert`'s doc for how a
+        // stored entry's value can hold more registers than its key.
+        CursorSlot::Ephemeral(state) => {
+            return Ok(state
+                .last_key
+                .as_ref()
+                .and_then(|key| state.entries.get(key))
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode,
+                    reason: "cursor has no current row".to_string(),
+                })?
+                .get(idx)
+                .cloned()
+                .unwrap_or(Value::Null));
+        }
         CursorSlot::Table(_) | CursorSlot::IndexRead(_) => {}
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode,
                 slot,
                 found: other.type_name(),
-                expected: "table, pseudo, ephemeral table, or index read cursor",
+                expected: "table, pseudo, ephemeral table, ephemeral, or index read cursor",
             })
         }
     }
@@ -1154,12 +1170,24 @@ pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// [`btree::insert_entry`] — `Err(BtreeError::DuplicateKey)` surfaces as
 /// a `MalformedInstruction` (this opcode does not model `OR IGNORE`/`OR
 /// REPLACE` conflict resolution).
+///
+/// `P5` (#494, ephemeral cursor only — an [`CursorSlot::IndexWrite`]
+/// insert ignores it): count of extra *payload-only* registers
+/// immediately following the `P4`-sized key range. The stored entry
+/// keys the `BTreeMap` on the key columns alone (`P4` count, unchanged
+/// byte-encoding, so [`found`]'s lookup with a matching `P4` count still
+/// hits) but the record VALUE holds all `P4 + P5` registers — letting a
+/// caller (e.g. `codegen::subquery::memoize`'s correlated-subquery
+/// cache) probe by key alone via `Found` and then read back an
+/// associated payload via `Column`, instead of every stored register
+/// having to double as part of the key. Defaults to `0`, which is
+/// exactly today's behavior (key == whole stored record).
 pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let count = p4_count(instr, "IdxInsert")?;
-    let values = read_register_range(vm, instr.p2, count, "IdxInsert")?;
+    let key_count = p4_count(instr, "IdxInsert")?;
     match vm.cursor(instr.p1)? {
         CursorSlot::IndexWrite { root_page } => {
             let root_page = *root_page;
+            let values = read_register_range(vm, instr.p2, key_count, "IdxInsert")?;
             let pager = vm.writer("IdxInsert")?;
             let db = vm.db()?;
             let encoding = db.header.text_encoding;
@@ -1174,7 +1202,21 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             Ok(Step::Next)
         }
         CursorSlot::Ephemeral(_) => {
-            let key = encode_record(&values, TextEncoding::Utf8);
+            let extra = usize::from(instr.p5);
+            let total = key_count
+                .checked_add(extra)
+                .ok_or(ExecError::RegisterRangeTooLarge {
+                    opcode: "IdxInsert",
+                    count: instr.p5.into(),
+                })?;
+            let values = read_register_range(vm, instr.p2, total, "IdxInsert")?;
+            let key_values = values
+                .get(..key_count)
+                .ok_or(ExecError::MalformedInstruction {
+                    opcode: "IdxInsert",
+                    reason: "key column count exceeds the values read".to_string(),
+                })?;
+            let key = encode_record(key_values, TextEncoding::Utf8);
             let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
             if !state.entries.contains_key(&key) && state.entries.len() >= MAX_EPHEMERAL_ROWS {
                 return Err(ExecError::EphemeralRowLimitExceeded {
@@ -2634,11 +2676,58 @@ mod tests {
     }
 
     #[test]
-    fn column_on_ephemeral_cursor_is_a_type_mismatch() {
+    fn column_on_an_ephemeral_cursor_with_no_current_entry_errors() {
         let mut vm = Vm::new();
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
         let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
-        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn idx_insert_ephemeral_cursor_stores_extra_p5_payload_readable_via_column_after_found() {
+        // #494: key = 1 register (P4::Int(1)), plus 1 extra payload
+        // register (P5) that isn't part of the lookup key.
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        vm.set_register(1, Value::Integer(42)).unwrap();
+        vm.set_register(2, Value::Text("result".to_string().into()))
+            .unwrap();
+        idx_insert(
+            &mut vm,
+            &Instruction {
+                opcode: Opcode::IdxInsert,
+                p1: 0,
+                p2: 1,
+                p3: 0,
+                p4: P4::Int(1),
+                p5: 1,
+            },
+        )
+        .unwrap();
+
+        vm.set_register(3, Value::Integer(42)).unwrap();
+        let step = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 3, P4::Int(1)),
+        )
+        .unwrap();
+        assert!(matches!(step, Step::Jump(pc) if pc == to_pc(99)));
+
+        let mut out = column(&mut vm, &Instruction::new(Opcode::Column, 0, 1, 10)).unwrap();
+        assert!(matches!(out, Step::Next));
+        assert_eq!(
+            vm.register(10).unwrap().clone(),
+            Value::Text("result".to_string().into())
+        );
+
+        // A miss for a probe value never inserted stays a miss.
+        vm.set_register(4, Value::Integer(7)).unwrap();
+        out = found(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Found, 0, 99, 4, P4::Int(1)),
+        )
+        .unwrap();
+        assert!(matches!(out, Step::Next));
     }
 
     #[test]

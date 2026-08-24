@@ -25,6 +25,22 @@ for a path — it only actually closes once nothing in the process needs
 a lock on that inode anymore. Derived from stock sqlite3's own
 `os_unix.c`, whose `unixClose` defers closing for exactly this reason.
 
+perf: index-mode memoization cache for correlated scalar subqueries
+(#494, follow-up from #434/#435) — #314's per-probe-value cache
+(`src/codegen/subquery/memoize.rs`) previously used a table-mode
+`OpenEphemeral` cursor with a linear `Rewind`/`Eq`/`Next` scan per
+lookup, capped at `MAX_MEMO_CACHE_ENTRIES = 8` distinct probe values to
+bound worst-case VDBE step counts — any higher-cardinality correlated
+column fell back to recomputing every row. The cache now uses an
+index-mode `OpenEphemeral` cursor (`Found`/`IdxInsert`), backed by a
+`BTreeMap` for an O(log n) lookup regardless of cache size, so the cap
+is removed entirely (bounded only by the ephemeral cursor's existing
+`MAX_EPHEMERAL_ROWS` ceiling). `IdxInsert` gains a `P5` operand (extra
+payload-only registers beyond the `P4` key count) and `Column` gains
+read support for index-mode ephemeral cursors, so a cache entry's key
+(the probe value) and its cached result no longer have to be the same
+registers (`src/vdbe/cursor.rs`).
+
 perf: zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
 — follow-up to #467, which left `IndexRow::payload` (src/btree/index.rs)
 as an owned `Vec<u8>` out of scope. `IndexFrame.page` is now `Rc<[u8]>`
