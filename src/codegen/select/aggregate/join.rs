@@ -53,6 +53,12 @@ pub(crate) fn compile_joined_grouped_scan<F>(
     sort_cursor: i32,
     pseudo_cursor: i32,
     flush_cursor: i32,
+    // #502: `Some((order_sort_cursor, order_pseudo_cursor))` when
+    // `select.order_by` is non-empty — a second sorter pass that
+    // re-orders every finalized group row (raw columns + finalized
+    // aggregates) before it reaches `sink`, instead of `sink` being
+    // called directly as each group is flushed.
+    order_cursors: Option<(i32, i32)>,
     end_label: Label,
     implicit_group: bool,
     sink: &mut F,
@@ -78,9 +84,14 @@ where
             joined_bare_column_offset(full_scope, expr)?;
         }
     }
-    // DISTINCT-aggregate ephemeral dedup cursors start right after
-    // `flush_cursor`, the highest cursor number this scan already uses.
-    let eph_base = flush_cursor.saturating_add(1);
+    // DISTINCT-aggregate ephemeral dedup cursors start right after the
+    // highest cursor number this scan already uses — `flush_cursor`
+    // normally, or past the two extra `ORDER BY` sorter cursors
+    // (#502) when `order_cursors` is `Some`.
+    let eph_base = match order_cursors {
+        Some((_, order_pseudo_cursor)) => order_pseudo_cursor.saturating_add(1),
+        None => flush_cursor.saturating_add(1),
+    };
     let agg_slots: Vec<AggSlot> = aggs
         .into_iter()
         .enumerate()
@@ -95,6 +106,45 @@ where
     validate_joined_group_projection(select, &agg_slots)?;
 
     let total_width = joined_column_offset(full_scope, full_scope.tables.len());
+
+    // #502: a trailing `ORDER BY` sorts the *finalized* group rows —
+    // `total_width` raw joined columns followed by `agg_slots.len()`
+    // finalized aggregate values, exactly what `flush_joined_group`
+    // already assembles into `dests` for every group. Resolved and
+    // opened up front so `SorterInsert` calls inside the boundary/tail
+    // flushes below have a P4 sort-key layout already in place.
+    if let Some((order_sort_cursor, _)) = order_cursors {
+        let order_sort_keys: Vec<SortKeyColumn> = select
+            .order_by
+            .iter()
+            .map(|term| {
+                let offset = resolve_group_order_target(
+                    select,
+                    full_scope,
+                    &agg_slots,
+                    total_width,
+                    &term.expr,
+                )?;
+                let descending = term.desc.unwrap_or(false);
+                let nulls_first = term
+                    .nulls_last
+                    .map_or(!descending, |nulls_last| !nulls_last);
+                Ok(SortKeyColumn {
+                    index: offset,
+                    descending,
+                    collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
+                    nulls_first,
+                })
+            })
+            .collect::<Result<_, CodegenError>>()?;
+        em.emit(Instruction::with_p4(
+            Opcode::SorterOpen,
+            order_sort_cursor,
+            0,
+            0,
+            P4::SortKey(order_sort_keys),
+        ));
+    }
 
     let order_by_plans: Vec<JoinOrderPlan> = select
         .group_by
@@ -235,6 +285,7 @@ where
         &agg_slots,
         limit.as_ref(),
         end_label,
+        order_cursors.map(|(order_sort_cursor, _)| order_sort_cursor),
         sink,
     )?;
     em.place(skip_flush);
@@ -287,9 +338,70 @@ where
         &agg_slots,
         limit.as_ref(),
         end_label,
+        order_cursors.map(|(order_sort_cursor, _)| order_sort_cursor),
         sink,
     )?;
     em.place(skip_tail_flush);
+
+    // Pass 3 (#502): every finalized group row is now buffered in
+    // `order_sort_cursor`, keyed by the `ORDER BY` targets resolved
+    // above. Drain it sorted, applying `LIMIT`/`OFFSET` here — not at
+    // group-flush time — since the final order (and therefore which
+    // rows a `LIMIT` keeps) isn't known until this sort completes.
+    // Mirrors `compile_joined_sorted_scan`'s plain-`ORDER BY` pass 2.
+    if let Some((order_sort_cursor, order_pseudo_cursor)) = order_cursors {
+        let order_sort_addr = em.emit(Instruction::new(
+            Opcode::SorterSort,
+            order_sort_cursor,
+            0,
+            0,
+        ));
+        em.patch_p2(order_sort_addr, end_label);
+
+        let order_loop = em.new_label();
+        em.place(order_loop);
+        let order_data_reg = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::SorterData,
+            order_sort_cursor,
+            order_data_reg,
+            0,
+        ));
+        em.emit(Instruction::new(
+            Opcode::OpenPseudo,
+            order_pseudo_cursor,
+            order_data_reg,
+            0,
+        ));
+
+        let order_row_skip = em.new_label();
+        if let Some(limit) = &limit {
+            emit_offset_guard(em, limit, order_row_skip);
+        }
+        if let Some(limit) = &limit {
+            emit_limit_guard(em, limit, end_label);
+        }
+        let (first, count) = project_grouped_result_columns(
+            em,
+            reg,
+            select,
+            full_scope,
+            dedup_star,
+            total_width,
+            &agg_slots,
+            order_pseudo_cursor,
+        )?;
+        sink(em, reg, first, i32::try_from(count).unwrap_or(0))?;
+
+        em.place(order_row_skip);
+        let order_next = em.emit(Instruction::new(
+            Opcode::SorterNext,
+            order_sort_cursor,
+            0,
+            0,
+        ));
+        em.patch_p2(order_next, order_loop);
+    }
     Ok(())
 }
 
@@ -396,11 +508,19 @@ fn validate_joined_group_projection(
     Ok(())
 }
 
-/// [`super::accum::flush_group`]'s joined counterpart: finalizes and
-/// emits one grouped output row via `sink`, reprojecting `select`'s
-/// result columns from `snapshot_regs` (the group's last-seen flat row)
-/// plus each aggregate's finalized value, per
-/// [`validate_joined_group_projection`]'s restriction.
+/// [`super::accum::flush_group`]'s joined counterpart: finalizes one
+/// group's row — `snapshot_regs` (the group's last-seen flat joined
+/// row) plus each aggregate's finalized value — into a fresh
+/// `total_width + agg_slots.len()`-wide record.
+///
+/// When `order_sort_cursor` is `None` (no `ORDER BY`), that record is
+/// reprojected into `select`'s result columns and handed to `sink`
+/// directly, applying `limit`/`end_label` per group exactly as before
+/// #502. When `order_sort_cursor` is `Some` (#502), `limit` is ignored
+/// here — the record is inserted as-is into that second sorter
+/// instead, and [`compile_joined_grouped_scan`]'s pass 3 reprojects and
+/// applies `LIMIT`/`OFFSET` once the final `ORDER BY` order is known,
+/// same as [`compile_joined_sorted_scan`]'s plain-`ORDER BY` pass 2.
 #[allow(clippy::too_many_arguments)]
 fn flush_joined_group<F>(
     em: &mut Emitter,
@@ -414,6 +534,7 @@ fn flush_joined_group<F>(
     agg_slots: &[AggSlot],
     limit: Option<&LimitState>,
     end_label: Label,
+    order_sort_cursor: Option<i32>,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -443,6 +564,17 @@ where
         i32::try_from(synthetic_count).unwrap_or(0),
         record_reg,
     ));
+
+    if let Some(order_sort_cursor) = order_sort_cursor {
+        em.emit(Instruction::new(
+            Opcode::SorterInsert,
+            order_sort_cursor,
+            record_reg,
+            0,
+        ));
+        return Ok(());
+    }
+
     em.emit(Instruction::new(
         Opcode::OpenPseudo,
         flush_cursor,
@@ -458,12 +590,46 @@ where
         emit_limit_guard(em, limit, end_label);
     }
 
+    let (first, count) = project_grouped_result_columns(
+        em,
+        reg,
+        select,
+        full_scope,
+        dedup_star,
+        total_width,
+        agg_slots,
+        flush_cursor,
+    )?;
+    sink(em, reg, first, i32::try_from(count).unwrap_or(0))?;
+    em.place(skip_label);
+    Ok(())
+}
+
+/// Reprojects `select`'s result columns from `cursor` — a pseudo
+/// cursor over a `total_width + agg_slots.len()`-wide record (raw
+/// joined columns followed by finalized aggregate values, the same
+/// layout [`flush_joined_group`] assembles) — per
+/// [`validate_joined_group_projection`]'s `*`/`table.*`/bare-column/
+/// whole-aggregate-call restriction. Shared by `flush_joined_group`'s
+/// no-`ORDER BY` path and [`compile_joined_grouped_scan`]'s pass 3
+/// (#502), since both read back the identical row shape.
+#[allow(clippy::too_many_arguments)]
+fn project_grouped_result_columns(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    full_scope: &Scope,
+    dedup_star: &[std::collections::HashSet<String>],
+    total_width: usize,
+    agg_slots: &[AggSlot],
+    cursor: i32,
+) -> Result<(i32, usize), CodegenError> {
     let mut regs = Vec::new();
     let read_offset = |em: &mut Emitter, reg: &mut RegAlloc, abs: usize| -> i32 {
         let r = reg.alloc();
         em.emit(Instruction::new(
             Opcode::Column,
-            flush_cursor,
+            cursor,
             i32::try_from(abs).unwrap_or(0),
             r,
         ));
@@ -526,9 +692,7 @@ where
     }
     let Some(&first) = regs.first() else {
         let r = reg.alloc();
-        sink(em, reg, r, 0)?;
-        em.place(skip_label);
-        return Ok(());
+        return Ok((r, 0));
     };
     for (i, r) in regs.iter().enumerate() {
         let want = first.saturating_add(i32::try_from(i).unwrap_or(i32::MAX));
@@ -541,7 +705,111 @@ where
             });
         }
     }
-    sink(em, reg, first, i32::try_from(regs.len()).unwrap_or(0))?;
-    em.place(skip_label);
-    Ok(())
+    Ok((first, regs.len()))
+}
+
+/// Structural (span-independent) match between an `ORDER BY` term and
+/// one already-collected `agg_slots` entry: same function name, same
+/// `DISTINCT`-ness, and — since every aggregate argument is restricted
+/// to a bare column (or absent, for `count(*)`) — the same resolved
+/// column offset. See [`resolve_group_order_target`]'s doc for why
+/// plain `Expr` equality doesn't work here.
+fn matches_agg_slot(
+    full_scope: &Scope,
+    stripped: &Expr,
+    slot: &AggSlot,
+) -> Result<bool, CodegenError> {
+    let ExprKind::FunctionCall {
+        name,
+        distinct,
+        args,
+    } = &stripped.kind
+    else {
+        return Ok(false);
+    };
+    if !name.eq_ignore_ascii_case(&slot.name) || *distinct != slot.eph_cursor.is_some() {
+        return Ok(false);
+    }
+    match (args, &slot.arg) {
+        (FunctionArgs::Star, None) => Ok(true),
+        (FunctionArgs::List(list), None) => Ok(list.is_empty()),
+        (FunctionArgs::List(list), Some(slot_arg)) => {
+            let [arg_expr] = list.as_slice() else {
+                return Ok(false);
+            };
+            let a = joined_bare_column_offset(full_scope, arg_expr)?;
+            let b = joined_bare_column_offset(full_scope, slot_arg)?;
+            Ok(a == b)
+        }
+        (FunctionArgs::Star, Some(_)) => Ok(false),
+    }
+}
+
+/// Resolves one `ORDER BY` term to its absolute offset within a
+/// finalized group row (`total_width` raw joined columns followed by
+/// `agg_slots.len()` finalized aggregate values) — #502's counterpart
+/// to [`joined_bare_column_offset`] for the post-`GROUP BY` sort key.
+/// An ordinal or alias recurses into the referenced/aliased result
+/// column's own expression; per
+/// [`validate_joined_group_projection`]'s restriction, every legal
+/// result column expression is itself either a bare column or a whole
+/// aggregate call, so this always bottoms out in one of those two
+/// cases (or a clean `Unsupported` for anything else, e.g. an `ORDER
+/// BY` expression that isn't a bare column or a bare aggregate call).
+fn resolve_group_order_target(
+    select: &Select,
+    full_scope: &Scope,
+    agg_slots: &[AggSlot],
+    total_width: usize,
+    expr: &Expr,
+) -> Result<usize, CodegenError> {
+    let stripped = strip_paren(strip_collate(expr));
+    // Unlike `validate_joined_group_projection`/`project_grouped_result_
+    // columns` (which only ever compare a `select.columns` expr against
+    // `agg_slots` built from that very same list, so plain `Expr`
+    // equality — spans included — always matches by construction), an
+    // `ORDER BY` term is a separately parsed `Expr` even when it's the
+    // exact same aggregate call textually (different `Span`), so it
+    // needs a structural match instead of `==`.
+    for (pos, slot) in agg_slots.iter().enumerate() {
+        if matches_agg_slot(full_scope, stripped, slot)? {
+            return Ok(total_width.saturating_add(pos));
+        }
+    }
+    if let ExprKind::Literal(Literal::Integer(n)) = &stripped.kind {
+        let ordinal = usize::try_from(*n)
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|idx| select.columns.get(idx));
+        let Some(ResultColumn::Expr { expr: target, .. }) = ordinal else {
+            return Err(CodegenError::Unsupported {
+                reason: format!(
+                    "ORDER BY position {n} is out of range for a {}-column result set",
+                    select.columns.len()
+                ),
+            });
+        };
+        return resolve_group_order_target(select, full_scope, agg_slots, total_width, target);
+    }
+    if let ExprKind::Column {
+        table: None, name, ..
+    } = &stripped.kind
+    {
+        if let Some(ResultColumn::Expr {
+            expr: aliased_expr, ..
+        }) = select
+            .columns
+            .iter()
+            .find(|c| matches!(c, ResultColumn::Expr { alias: Some(a), .. } if a == name))
+        {
+            return resolve_group_order_target(
+                select,
+                full_scope,
+                agg_slots,
+                total_width,
+                aliased_expr,
+            );
+        }
+    }
+    joined_bare_column_offset(full_scope, stripped)
 }

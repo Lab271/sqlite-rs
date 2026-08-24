@@ -25,13 +25,13 @@ pub(super) use level::{
 /// one row with that table's (and anything joined off of it)
 /// columns forced to NULL — see [`compile_join_level`].
 ///
-/// TODO(#237 follow-up): `ORDER BY`/`DISTINCT` combined with a JOIN
-/// are rejected outright (`Unsupported`) rather than silently
-/// mis-compiled — `compile_sorted_scan`/the ephemeral-index DISTINCT
-/// guard are both hard-wired to a single `TableSchema`, and
-/// generalizing them to a multi-table `Scope` was out of this
-/// ticket's bounded scope. `WHERE`/`LIMIT`/`OFFSET`/projections
-/// (including `*`/`table.*`) all work across the join.
+/// TODO(#237 follow-up): `DISTINCT` combined with a JOIN is rejected
+/// outright (`Unsupported`) rather than silently mis-compiled — the
+/// ephemeral-index DISTINCT guard is hard-wired to a single
+/// `TableSchema`, and generalizing it to a multi-table `Scope` was out
+/// of this ticket's bounded scope. `WHERE`/`ORDER BY`/`LIMIT`/`OFFSET`/
+/// projections (including `*`/`table.*`) all work across the join,
+/// including combined with `GROUP BY`/aggregates (#502).
 ///
 /// `full_catalog` (#257) is only consulted when a `FROM` slot is a
 /// subquery — to resolve *its own* `FROM` table(s), which need not be
@@ -451,13 +451,6 @@ where
     let table_cursor_count = i32::try_from(n).unwrap_or(0);
 
     if !select.group_by.is_empty() || select_has_aggregate(select) {
-        if !select.order_by.is_empty() {
-            return Err(CodegenError::Unsupported {
-                reason: "GROUP BY/aggregate combined with ORDER BY and a JOIN is not yet \
-                         supported"
-                    .to_string(),
-            });
-        }
         if select.distinct.is_some() {
             return Err(CodegenError::Unsupported {
                 reason: "GROUP BY/aggregate combined with DISTINCT and a JOIN is not yet \
@@ -469,6 +462,19 @@ where
         let sort_cursor = cursor_base.saturating_add(table_cursor_count);
         let pseudo_cursor = sort_cursor.saturating_add(1);
         let flush_cursor = pseudo_cursor.saturating_add(1);
+        // #502: a trailing `ORDER BY` re-sort needs its own sorter +
+        // pseudo cursor, allocated right after `flush_cursor` so
+        // `eph_base` (DISTINCT-aggregate dedup cursors, computed inside
+        // `compile_joined_grouped_scan`) shifts up by two to avoid
+        // colliding with them.
+        let order_cursors = if select.order_by.is_empty() {
+            None
+        } else {
+            Some((
+                flush_cursor.saturating_add(1),
+                flush_cursor.saturating_add(2),
+            ))
+        };
         return compile_joined_grouped_scan(
             em,
             reg,
@@ -483,6 +489,7 @@ where
             sort_cursor,
             pseudo_cursor,
             flush_cursor,
+            order_cursors,
             end_label,
             implicit_group,
             sink,
