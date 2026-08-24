@@ -244,7 +244,10 @@ pub(crate) struct RegAlloc {
     /// linear scan rather than a `HashMap` (`Select` has no cheap
     /// hash) — bounded by the number of distinct FROM-subqueries in
     /// one statement, always small. Scoped to one `RegAlloc` (one
-    /// top-level statement compile).
+    /// top-level statement compile). **Safe only as long as no volatile/
+    /// non-deterministic expression exists in this crate** — see
+    /// `subquery::from_clause::materialize_from_subquery`'s doc for the
+    /// full caveat and what must change the day one is added.
     materialized_ctes: Vec<(crate::parser::ast::Select, i32, crate::schema::TableSchema)>,
 }
 

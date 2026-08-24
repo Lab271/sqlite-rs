@@ -397,6 +397,17 @@ where
     em.place(recheck);
     let leading = reg.alloc();
     em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
+    // Plain `Eq`, no `P4::CollSeq` — defaults to `Collation::Binary`, same
+    // as `SeekIndexEq`'s own probe comparison (`src/vdbe/cursor.rs`'s
+    // `seek_index_eq`, `compare(k, p, Collation::Binary)`). Consistent
+    // with the seek this recheck walks past, not a regression introduced
+    // here: no `COLLATE`d index column is specially handled anywhere in
+    // this codebase yet — `ColumnConstraint::Collate` is parsed but never
+    // stored into `TableSchema`/consulted by any comparison site, a
+    // crate-wide gap tracked separately (see the tracking issue this
+    // comment's git blame links to) rather than something to patch here
+    // in isolation, which would just make this one recheck inconsistent
+    // with the seek that feeds it.
     let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
     em.patch_p2(eq_addr, loop_start);
 

@@ -160,6 +160,12 @@ where
             em.place(recheck);
             let leading = reg.alloc();
             em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
+            // Plain `Eq` (Binary collation), matching `SeekIndexEq`'s own
+            // probe comparison — see `limit_scan.rs`'s identical recheck
+            // for the full rationale (no `COLLATE`d index column is
+            // specially handled anywhere in this codebase yet; this stays
+            // consistent with the seek it walks past rather than
+            // introducing a new inconsistency).
             let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
             em.patch_p2(eq_addr, loop_start);
 
