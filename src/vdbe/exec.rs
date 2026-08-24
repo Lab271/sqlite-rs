@@ -508,15 +508,16 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, AggFinal, AggStep, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
-        Concat, Copy, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete, Divide,
-        DropIndex, DropTable, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete, IdxInsert, IdxLE,
-        IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos, Init, Insert,
-        Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt, NewRowid, Next,
-        NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral, OpenPseudo,
-        OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid,
-        SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft, ShiftRight, Sort, SorterData,
-        SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        Add, AggFinal, AggStep, Analyze, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob,
+        Cast, Column, Concat, Copy, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete,
+        Divide, DropIndex, DropTable, Eq, Found, Function, Ge, Goto, Gt, Halt, IdxDelete,
+        IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos,
+        Init, Insert, Int64, Integer, IsNull, Last, Le, Lt, MakeRecord, Multiply, MustBeInt,
+        NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once, OpenEphemeral,
+        OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder, ResultRow, Return, Rewind,
+        Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode, ShiftLeft, ShiftRight, Sort,
+        SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort, String8, Subtract,
+        Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -600,6 +601,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         DropTable => cursor::drop_table(vm, instr),
         CreateIndex => cursor::create_index(vm, instr),
         DropIndex => cursor::drop_index(vm, instr),
+        Analyze => cursor::analyze(vm, instr),
 
         SorterOpen => sorter::sorter_open(vm, instr),
         SorterInsert => sorter::sorter_insert(vm, instr),

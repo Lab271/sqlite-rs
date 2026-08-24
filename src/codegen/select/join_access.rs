@@ -5,6 +5,7 @@ use super::limit_scan::{
 };
 use super::order_by::strip_collate;
 use super::*;
+use crate::planner::{estimate_index_cost, estimate_scan_cost};
 /// The access strategy #243's join-level planner picked for a table
 /// binding, in place of an unconditional `Rewind`/`Next` full scan --
 /// see [`choose_join_access`].
@@ -65,6 +66,21 @@ pub(super) fn expr_is_safe_join_probe(expr: &Expr, prior_bindings: &[TableBindin
 /// considered -- a non-unique index could match more than one row, which
 /// this seek-once codegen shape can't express (see the module doc's
 /// LEFT JOIN "matched" flag: it assumes at most one inner-side match).
+///
+/// #461/spec 011/Req 4: a structurally-available `UniqueIndex` pick is
+/// additionally vetoed back to `None` (full scan) when `binding.stats`
+/// (`ANALYZE` data, #461) says that index's `avg_eq` is no cheaper than
+/// a full scan -- e.g. a `UNIQUE` index over mostly-NULL/skewed data.
+/// `binding.stats` is empty whenever no caller has threaded real
+/// `planner::load_stats` output through this codegen path (including
+/// every call before #461), and an empty `Stats`' cost estimates are
+/// both `u64::MAX` for scan and index alike, so the veto condition
+/// (`index cost > scan cost`) is never true and the structural pick
+/// survives unchanged -- this is what keeps every pre-#461 caller (and
+/// any caller that hasn't wired live stats through yet) byte-for-byte
+/// unaffected. A `Rowid` pick is never vetoed: a rowid seek is O(1)
+/// regardless of statistics, matching real SQLite's own unconditional
+/// preference for it.
 pub(in crate::codegen) fn choose_join_access(
     binding: &TableBinding,
     on_expr: &Expr,
@@ -97,6 +113,11 @@ pub(in crate::codegen) fn choose_join_access(
                 .first()
                 .is_some_and(|c| c.name.eq_ignore_ascii_case(name))
     })?;
+    let index_cost = estimate_index_cost(&index.name, &binding.stats);
+    let scan_cost = estimate_scan_cost(&binding.stats);
+    if index_cost.estimated_rows > scan_cost.estimated_rows {
+        return None;
+    }
     Some(JoinAccess::UniqueIndex {
         index: index.clone(),
         operand: other_side.clone(),

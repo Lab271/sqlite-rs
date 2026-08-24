@@ -1834,6 +1834,145 @@ pub fn drop_index(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     Ok(Step::Next)
 }
 
+/// Counts the rows in the table b-tree rooted at `root_page` — a full
+/// scan, no sampling (#461's MVP scope; see spec 011).
+fn count_table_rows(
+    pager: &mut crate::pager::Pager,
+    header: &crate::header::DatabaseHeader,
+    root_page: u32,
+) -> Result<u64, ExecError> {
+    let mut cursor = TableCursor::new(&*pager, header, root_page);
+    let mut count = 0u64;
+    let mut row = cursor
+        .first()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        })?;
+    while row.is_some() {
+        count = count.saturating_add(1);
+        row = cursor.next().map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        })?;
+    }
+    Ok(count)
+}
+
+/// Walks the index b-tree rooted at `root_page` and returns `(total
+/// entries, avg_eq)`, where `avg_eq` is the average number of entries
+/// sharing the same leading-column value — real SQLite's `sqlite_stat1`
+/// semantics for a single-column index, computed here by an exact
+/// full-scan pass (no sampling) counting distinct-value transitions
+/// between consecutive entries in key order, rather than stock SQLite's
+/// sampled estimate. `avg_eq` is `0` for an empty index.
+fn count_index_entries_and_avg_eq(
+    pager: &mut crate::pager::Pager,
+    header: &crate::header::DatabaseHeader,
+    root_page: u32,
+) -> Result<(u64, u64), ExecError> {
+    let usable_size = header.usable_page_size();
+    let mut cursor = IndexCursor::new(&*pager, usable_size, root_page);
+    let mut total = 0u64;
+    let mut distinct_groups = 0u64;
+    let mut prev_leading: Option<Value> = None;
+    let mut row = cursor
+        .first()
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        })?;
+    while let Some(r) = row {
+        let values = decode_record(&r.payload, header.text_encoding).map_err(|e| {
+            ExecError::MalformedInstruction {
+                opcode: "Analyze",
+                reason: e.to_string(),
+            }
+        })?;
+        let leading = values.first().cloned();
+        if prev_leading.as_ref() != leading.as_ref() {
+            distinct_groups = distinct_groups.saturating_add(1);
+            prev_leading = leading;
+        }
+        total = total.saturating_add(1);
+        row = cursor.next().map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        })?;
+    }
+    let avg_eq = total.checked_div(distinct_groups).unwrap_or(0);
+    Ok((total, avg_eq))
+}
+
+/// `ANALYZE` (#461, spec 011): populates `sqlite_stat1` for every target
+/// table baked into `instr.p4` at codegen time — creating `sqlite_stat1`
+/// itself on first use, replacing (not appending to) each target's prior
+/// rows, matching stock SQLite's `type = table` row-count row plus one
+/// `idx = <index-name>` row per index on that table.
+pub fn analyze(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let targets = match &instr.p4 {
+        P4::Analyze { targets } => targets.clone(),
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "Analyze",
+                reason: format!("expected P4::Analyze, got {other:?}"),
+            })
+        }
+    };
+    let pager = vm.writer("Analyze")?;
+    let db = vm.db()?;
+    let header = db.header;
+    let mut pager = pager.borrow_mut();
+
+    let stat1_root = btree::ensure_sqlite_stat1_table(&mut pager, &header).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        }
+    })?;
+
+    for target in &targets {
+        btree::delete_stat1_rows_for_table(&mut pager, &header, stat1_root, &target.table_name)
+            .map_err(|e| ExecError::MalformedInstruction {
+                opcode: "Analyze",
+                reason: e.to_string(),
+            })?;
+
+        let row_count = count_table_rows(&mut pager, &header, target.table_root_page)?;
+        btree::insert_stat1_row(
+            &mut pager,
+            &header,
+            stat1_root,
+            &target.table_name,
+            None,
+            &row_count.to_string(),
+        )
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "Analyze",
+            reason: e.to_string(),
+        })?;
+
+        for index in &target.indexes {
+            let (idx_rows, avg_eq) =
+                count_index_entries_and_avg_eq(&mut pager, &header, index.root_page)?;
+            btree::insert_stat1_row(
+                &mut pager,
+                &header,
+                stat1_root,
+                &target.table_name,
+                Some(&index.index_name),
+                &format!("{idx_rows} {avg_eq}"),
+            )
+            .map_err(|e| ExecError::MalformedInstruction {
+                opcode: "Analyze",
+                reason: e.to_string(),
+            })?;
+        }
+    }
+
+    Ok(Step::Next)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {

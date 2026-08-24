@@ -46,6 +46,7 @@ pub fn compile_select_joined(
     select: &Select,
     schemas: &[TableSchema],
     full_catalog: &[TableSchema],
+    stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
 ) -> Result<Program, CodegenError> {
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
@@ -88,7 +89,7 @@ pub fn compile_select_joined(
                     .to_string(),
             });
         }
-        return compile_full_join_two_table(select, schemas, from);
+        return compile_full_join_two_table(select, schemas, from, stats_by_table);
     }
     if from.joins.iter().any(|j| j.op == JoinOp::Full) {
         return Err(CodegenError::Unsupported {
@@ -137,6 +138,7 @@ pub fn compile_select_joined(
         full_catalog,
         0,
         end_label,
+        stats_by_table,
         &mut sink,
     )?;
 
@@ -176,6 +178,7 @@ pub(crate) fn compile_select_joined_scan<F>(
     full_catalog: &[TableSchema],
     cursor_base: i32,
     end_label: Label,
+    stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -230,6 +233,10 @@ where
             schema: schema.clone(),
             cursor: 0,
             forced_null: false,
+            stats: stats_by_table
+                .get(&schema.name)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
 
@@ -531,6 +538,7 @@ pub(super) fn join_scope(
                     schema: b.schema.clone(),
                     cursor: b.cursor,
                     forced_null,
+                    stats: b.stats.clone(),
                 }
             })
             .collect(),

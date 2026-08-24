@@ -6,8 +6,8 @@
 //! feature reads identically to a typo.
 
 use super::ast::{
-    Begin, Commit, CreateIndex, CreateTable, CreateView, Delete, DropIndex, DropTable, DropView,
-    Explain, Insert, Pragma, Rollback, Select, Update,
+    Analyze, Begin, Commit, CreateIndex, CreateTable, CreateView, Delete, DropIndex, DropTable,
+    DropView, Explain, Insert, Pragma, Rollback, Select, Update,
 };
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
@@ -342,6 +342,28 @@ pub fn parse_pragma(src: &str) -> ParseOutcome<Pragma> {
     let tokens = Tokenizer::tokenize(src);
     let mut parser = Parser::new(tokens);
     match parser.parse_pragma_stmt() {
+        Ok(stmt) => match parser.expect_end() {
+            Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
+            Err(ParseFail::Unsupported { message, span }) => {
+                ParseOutcome::Unsupported { message, span }
+            }
+            Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+        },
+        Err(ParseFail::Unsupported { message, span }) => {
+            ParseOutcome::Unsupported { message, span }
+        }
+        Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
+    }
+}
+
+/// Parses a single ANALYZE statement (grammar
+/// `.openspec/grammar/sqlite.ebnf` V7 carve-out, #461): `ANALYZE` or
+/// `ANALYZE table-name`. Never panics — any input produces one of the
+/// three [`ParseOutcome`] variants.
+pub fn parse_analyze(src: &str) -> ParseOutcome<Analyze> {
+    let tokens = Tokenizer::tokenize(src);
+    let mut parser = Parser::new(tokens);
+    match parser.parse_analyze_stmt() {
         Ok(stmt) => match parser.expect_end() {
             Ok(()) => ParseOutcome::Accepted(Box::new(stmt)),
             Err(ParseFail::Unsupported { message, span }) => {

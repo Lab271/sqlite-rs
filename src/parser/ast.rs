@@ -554,6 +554,17 @@ pub struct Pragma {
     pub span: Span,
 }
 
+/// `ANALYZE` / `ANALYZE table-name` (#461, grammar V7 carve-out): `target
+/// = None` analyzes every user table; `Some(name)` scopes to one table.
+/// A qualified `schema-name.table-name` form, or an index name, is out
+/// of this MVP's scope and rejected by the parser as `Unsupported`
+/// before this struct is ever built.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Analyze {
+    pub target: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Or,

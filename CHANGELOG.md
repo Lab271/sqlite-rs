@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+V7 phase 1 in progress (targets 0.18.0 on close):
+
+feat: `ANALYZE` command and cost model for the query planner (#461,
+spec 011) — `ANALYZE`/`ANALYZE table-name` populates `sqlite_stat1`
+(row counts + per-index `avg_eq`); `Stats`/`PlanCost` (`src/planner.rs`)
+estimate scan/index-probe cost from those stats; `choose_join_access`
+vetoes a structurally-picked `UNIQUE`-index seek back to a full scan
+when the cost model says it isn't actually cheaper, wired live into
+the CLI's `query`/`repl` path. A database with no `ANALYZE` history
+compiles byte-for-byte as before this change. Filed #470 (join
+ordering heuristics) as the real follow-up enabled by this ticket.
+
 ## [0.17.7] - 2026-08-24
 
 fix: cache reassembled payload per row position (#469, #475) —

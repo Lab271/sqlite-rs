@@ -32,7 +32,8 @@ fn accepted_select(src: &str) -> sqlite_rs::parser::ast::Select {
 #[test]
 fn explain_query_plan_rejects_missing_from_clause() {
     let select = accepted_select("SELECT 1");
-    let err = explain_query_plan(&select, &[]).expect_err("expected NoFromClause");
+    let err = explain_query_plan(&select, &[], &std::collections::HashMap::new())
+        .expect_err("expected NoFromClause");
     assert!(matches!(err, CodegenError::NoFromClause));
 }
 
@@ -42,7 +43,8 @@ fn explain_query_plan_rejects_missing_from_clause() {
 #[test]
 fn explain_query_plan_rejects_schema_count_mismatch() {
     let select = accepted_select("SELECT * FROM a");
-    let err = explain_query_plan(&select, &[]).expect_err("expected a schema-count mismatch");
+    let err = explain_query_plan(&select, &[], &std::collections::HashMap::new())
+        .expect_err("expected a schema-count mismatch");
     assert!(
         matches!(err, CodegenError::Unsupported { .. }),
         "got {err:?}"

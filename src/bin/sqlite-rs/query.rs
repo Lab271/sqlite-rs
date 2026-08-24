@@ -49,6 +49,7 @@ pub(crate) fn compile_select_program(
     eqp_mode: bool,
     schemas: &[TableSchema],
     views: &[ViewSchema],
+    stats_by_table: &std::collections::HashMap<String, sqlite_rs::planner::Stats>,
 ) -> Result<SelectOutcome, String> {
     // #376: a `WITH` clause is rewritten away before any table
     // resolution happens — every CTE reference in `FROM`/`JOIN` becomes
@@ -101,7 +102,8 @@ pub(crate) fn compile_select_program(
         for join in &from.joins {
             joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
         }
-        let rows = explain_query_plan(select, &joined_schemas).map_err(|e| e.to_string())?;
+        let rows = explain_query_plan(select, &joined_schemas, stats_by_table)
+            .map_err(|e| e.to_string())?;
         return Ok(SelectOutcome::Eqp(rows));
     }
 
@@ -122,7 +124,8 @@ pub(crate) fn compile_select_program(
         for join in &from.joins {
             joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
         }
-        compile_select_joined(select, &joined_schemas, schemas).map_err(|e| e.to_string())?
+        compile_select_joined(select, &joined_schemas, schemas, stats_by_table)
+            .map_err(|e| e.to_string())?
     };
     Ok(SelectOutcome::Program(program))
 }
@@ -213,8 +216,9 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
         Ok(v) => v,
         Err(e) => return fatal(path, &e),
     };
+    let stats_by_table = sqlite_rs::planner::load_stats(Rc::clone(&source), &header, &schemas);
 
-    match compile_select_program(&select, eqp_mode, &schemas, &views) {
+    match compile_select_program(&select, eqp_mode, &schemas, &views, &stats_by_table) {
         Ok(SelectOutcome::Eqp(rows)) => {
             for row in rows {
                 println!("{}|{}|{}|{}", row.id, row.parent, row.notused, row.detail);

@@ -66,6 +66,11 @@ fn render_p4(p4: &P4) -> String {
         P4::DropTable { name, .. } => name.clone(),
         P4::CreateIndex { name, sql, .. } => format!("{name}: {sql}"),
         P4::DropIndex { name, .. } => name.clone(),
+        P4::Analyze { targets } => targets
+            .iter()
+            .map(|t| t.table_name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
     }
 }
 
@@ -145,6 +150,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::DropTable => "DropTable",
         Opcode::CreateIndex => "CreateIndex",
         Opcode::DropIndex => "DropIndex",
+        Opcode::Analyze => "Analyze",
         Opcode::Eq => "Eq",
         Opcode::Ge => "Ge",
         Opcode::Gt => "Gt",
@@ -322,6 +328,7 @@ mod tests {
             (Opcode::DropTable, "DropTable"),
             (Opcode::CreateIndex, "CreateIndex"),
             (Opcode::DropIndex, "DropIndex"),
+            (Opcode::Analyze, "Analyze"),
             (Opcode::Eq, "Eq"),
             (Opcode::Ge, "Ge"),
             (Opcode::Gt, "Gt"),

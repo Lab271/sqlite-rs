@@ -9,17 +9,17 @@ use thiserror::Error;
 use crate::parser::ast::{InsertSource, TableRefKind};
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
-    parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
-    parse_delete, parse_drop_index, parse_drop_table, parse_insert, parse_pragma, parse_rollback,
-    parse_update,
+    parse_analyze, parse_begin, parse_commit, parse_create_index, parse_create_table,
+    parse_create_view, parse_delete, parse_drop_index, parse_drop_table, parse_insert,
+    parse_pragma, parse_rollback, parse_update,
 };
 use crate::schema::{TableSchema, ViewSchema};
 use crate::vdbe::Program;
 
 use super::{
-    compile_begin, compile_commit, compile_create_index, compile_create_table, compile_create_view,
-    compile_delete_with_catalog, compile_drop_index, compile_drop_table, compile_insert,
-    compile_pragma, compile_rollback, compile_update_with_catalog, expand_views,
+    compile_analyze, compile_begin, compile_commit, compile_create_index, compile_create_table,
+    compile_create_view, compile_delete_with_catalog, compile_drop_index, compile_drop_table,
+    compile_insert, compile_pragma, compile_rollback, compile_update_with_catalog, expand_views,
     expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError,
 };
 
@@ -107,6 +107,41 @@ pub fn compile_statement(
         },
         "PRAGMA" => match parse_pragma(sql) {
             ParseOutcome::Accepted(pragma) => Ok(compile_pragma(&pragma)),
+            other => Err(parse_error(other)),
+        },
+        "ANALYZE" => match parse_analyze(sql) {
+            ParseOutcome::Accepted(analyze) => {
+                let targets: Vec<&TableSchema> = match &analyze.target {
+                    None => schemas.iter().collect(),
+                    Some(name) => {
+                        if let Some(schema) =
+                            schemas.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+                        {
+                            vec![schema]
+                        } else if schemas
+                            .iter()
+                            .flat_map(|s| &s.indexes)
+                            .any(|idx| idx.name.eq_ignore_ascii_case(name))
+                        {
+                            // Real SQLite also accepts `ANALYZE index-name`
+                            // (analyzing just that index's owning table) —
+                            // syntactically valid, but out of this MVP's
+                            // scope (spec 011/Req 1), so `Unsupported`
+                            // rather than the `NoSuchTable` a genuinely
+                            // unknown name gets below.
+                            return Err(CodegenError::Unsupported {
+                                reason: format!(
+                                    "ANALYZE of a single index ({name:?}) is not yet supported"
+                                ),
+                            }
+                            .into());
+                        } else {
+                            return Err(DispatchError::NoSuchTable(name.clone()));
+                        }
+                    }
+                };
+                Ok(compile_analyze(&targets)?)
+            }
             other => Err(parse_error(other)),
         },
         "INSERT" => match parse_insert(sql) {

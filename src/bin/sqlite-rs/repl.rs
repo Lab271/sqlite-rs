@@ -133,6 +133,10 @@ fn run_one_statement(
             }
         }
     };
+    let stats_by_table = {
+        let borrowed = pager.borrow();
+        sqlite_rs::planner::load_stats(&*borrowed, &header, &schemas)
+    };
 
     let keywords = leading_keywords(stmt);
     let is_select = keywords.first().is_some_and(|kw| kw.as_str() == "SELECT");
@@ -155,15 +159,16 @@ fn run_one_statement(
                 return;
             }
         };
-        let program = match compile_select_program(&select, false, &schemas, &views) {
-            Ok(SelectOutcome::Program(p)) => p,
-            // `eqp_mode` is always `false` above, so `Eqp` never comes back.
-            Ok(SelectOutcome::Eqp(_)) => unreachable!("eqp_mode was false"),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                return;
-            }
-        };
+        let program =
+            match compile_select_program(&select, false, &schemas, &views, &stats_by_table) {
+                Ok(SelectOutcome::Program(p)) => p,
+                // `eqp_mode` is always `false` above, so `Eqp` never comes back.
+                Ok(SelectOutcome::Eqp(_)) => unreachable!("eqp_mode was false"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return;
+                }
+            };
         // Reads through the same shared `Pager` the write path uses
         // (`Rc<RefCell<Pager>>` implements `PageSource`, per
         // `src/pager.rs`) — an uncommitted write earlier in this same

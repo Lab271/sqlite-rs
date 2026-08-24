@@ -308,6 +308,7 @@ pub(crate) fn materialize_from_subquery(
             catalog,
             cursor_base,
             end_label,
+            &std::collections::HashMap::new(),
             &mut sink,
         )?;
     }

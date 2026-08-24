@@ -944,6 +944,34 @@ impl Parser {
         }
     }
 
+    /// `analyze-stmt` (#461, grammar V7 carve-out): `ANALYZE` or `ANALYZE
+    /// table-name`. Only a single bare identifier (a table name) is
+    /// accepted; a qualified `schema-name.table-name` form parses far
+    /// enough to report a clean `Unsupported` rather than a hard parse
+    /// error, mirroring `parse_pragma_stmt`'s precedent (#388) for a
+    /// narrow MVP carve-out of otherwise-valid SQL. Whether a bare name
+    /// names a table or an index is a catalog question, not a grammar
+    /// one, so it's resolved later by the codegen dispatch layer, not
+    /// here.
+    pub(super) fn parse_analyze_stmt(&mut self) -> PResult<Analyze> {
+        let start = self.expect_kw(Keyword::ANALYZE)?;
+        let mut end = start;
+        let target = if matches!(self.peek().kind, TokenKind::Identifier(_)) {
+            let (name, span) = self.identifier()?;
+            end = span;
+            if self.eat_punct(&TokenKind::Dot) {
+                return self.unsupported("ANALYZE schema-name.table-name not yet supported");
+            }
+            Some(name)
+        } else {
+            None
+        };
+        Ok(Analyze {
+            target,
+            span: join_span(start, end),
+        })
+    }
+
     /// `explain-stmt` (#243, grammar V4): `EXPLAIN [QUERY PLAN]
     /// select-stmt`. Only a `SELECT` body is supported — wrapping any
     /// other statement kind (or bare `EXPLAIN` with no `QUERY PLAN`, the
