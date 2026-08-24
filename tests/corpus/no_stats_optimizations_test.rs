@@ -202,6 +202,71 @@ fn covering_index_equality_select_miss_matches_oracle() {
     );
 }
 
+/// #450: a non-`UNIQUE` index's leading-column match can have duplicate
+/// rows — the covering-index scan must walk and emit every one, not
+/// just the first `SeekIndexEq` hit.
+#[test]
+fn covering_index_equality_select_non_unique_duplicates_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("covering-non-unique");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER); \
+         CREATE INDEX idx_ab ON t(a, b); \
+         INSERT INTO t(a, b) VALUES (5, 10), (6, 11), (6, 12), (6, 13), (7, 14);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert_eq!(schema.indexes.len(), 1);
+    assert!(!schema.indexes[0].unique);
+
+    let sql = "SELECT a, b FROM t WHERE a = 6";
+    assert_covering_index_scan(&schema, sql);
+    assert_eq!(
+        our_rows(&db, &header, &schema, sql),
+        oracle_rows(&oracle, &db, sql)
+    );
+}
+
+/// Same as above, plus a trailing key one greater than the duplicate
+/// group's — confirms the walk-while-equal recheck actually stops
+/// instead of running off into the next distinct key's rows.
+#[test]
+fn covering_index_equality_select_non_unique_duplicates_stop_at_boundary_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("covering-non-unique-boundary");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER); \
+         CREATE INDEX idx_ab ON t(a, b); \
+         INSERT INTO t(a, b) VALUES (5, 10), (6, 11), (6, 12), (7, 13), (7, 14);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    for sql in [
+        "SELECT a, b FROM t WHERE a = 6",
+        "SELECT a, b FROM t WHERE a = 7",
+    ] {
+        assert_covering_index_scan(&schema, sql);
+        assert_eq!(
+            our_rows(&db, &header, &schema, sql),
+            oracle_rows(&oracle, &db, sql),
+            "mismatch for {sql:?}"
+        );
+    }
+}
+
 #[test]
 fn index_only_count_star_no_where_matches_oracle() {
     let Some(oracle) = pinned_oracle() else {
@@ -248,6 +313,42 @@ fn index_only_count_star_equality_where_matches_oracle() {
 
     for sql in [
         "SELECT count(*) FROM t WHERE a = 2",
+        "SELECT count(*) FROM t WHERE a = 999",
+    ] {
+        assert_index_only_count(&schema, sql);
+        assert_eq!(
+            our_rows(&db, &header, &schema, sql),
+            oracle_rows(&oracle, &db, sql),
+            "mismatch for {sql:?}"
+        );
+    }
+}
+
+/// #450: a non-`UNIQUE` index's equality match must count every
+/// duplicate-key row, not assume 0/1 the way the `UNIQUE`-only fast
+/// path used to.
+#[test]
+fn index_only_count_star_equality_where_non_unique_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("count-eq-non-unique");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER); \
+         CREATE INDEX idx_a ON t(a); \
+         INSERT INTO t(a) VALUES (1), (2), (2), (2), (3);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(!schema.indexes[0].unique);
+
+    for sql in [
+        "SELECT count(*) FROM t WHERE a = 2",
+        "SELECT count(*) FROM t WHERE a = 1",
         "SELECT count(*) FROM t WHERE a = 999",
     ] {
         assert_index_only_count(&schema, sql);
