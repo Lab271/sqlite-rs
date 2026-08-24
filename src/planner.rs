@@ -152,7 +152,7 @@ pub fn load_stats<P: PageSource>(
 
     let mut rows_by_table: HashMap<String, Vec<(Option<String>, String)>> = HashMap::new();
     let mut cursor = TableCursor::new(source, header, stat1.root_page);
-    let Ok(mut row) = cursor.first() else {
+    let Ok(mut row) = cursor.first_row() else {
         return HashMap::new();
     };
     while let Some(r) = row {
@@ -173,7 +173,7 @@ pub fn load_stats<P: PageSource>(
                 rows_by_table.entry(tbl).or_default().push((idx, stat));
             }
         }
-        row = match cursor.next() {
+        row = match cursor.next_row() {
             Ok(r) => r,
             Err(_) => break,
         };

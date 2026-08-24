@@ -336,7 +336,7 @@ pub fn delete_stat1_rows_for_table(
 ) -> Result<(), BtreeError> {
     let mut cursor = crate::btree::TableCursor::new(&*pager, header, stat1_root);
     let mut stale_rowids = Vec::new();
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, header.text_encoding)?;
         if let Some(Value::Text(tbl)) = values.first() {
@@ -344,7 +344,7 @@ pub fn delete_stat1_rows_for_table(
                 stale_rowids.push(r.rowid);
             }
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     for rowid in stale_rowids {
         super::delete_row(pager, header, stat1_root, rowid)?;
