@@ -8,10 +8,18 @@ use crate::record::Value;
 /// A column's storage-class preference, derived from its declared type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Affinity {
+    /// Values are stored/compared as text; only well-formed numeric text
+    /// is coerced when compared against a numeric value.
     Text,
+    /// Non-integer numeric preference: coerces well-formed numeric text
+    /// but never forces integers into floating point.
     Numeric,
+    /// Numeric preference favoring integral storage.
     Integer,
+    /// Numeric preference that additionally forces integer values into
+    /// floating point.
     Real,
+    /// No coercion is applied; values are stored/compared as given.
     Blob,
 }
 

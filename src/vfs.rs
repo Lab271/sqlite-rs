@@ -34,16 +34,24 @@ use thiserror::Error;
 pub enum VfsError {
     /// No file exists at the given path.
     #[error("file not found: {path}")]
-    NotFound { path: String },
+    NotFound {
+        /// The path that had no file behind it.
+        path: String,
+    },
 
     /// The database is held by another connection's lock.
     #[error("database is locked: {path}")]
-    Locked { path: String },
+    Locked {
+        /// The path of the locked database file.
+        path: String,
+    },
 
     /// The underlying OS file operation failed.
     #[error("I/O error on {path}: {source}")]
     Io {
+        /// The path the failing operation targeted.
         path: String,
+        /// The underlying OS error.
         #[source]
         source: std::io::Error,
     },
@@ -219,22 +227,28 @@ impl From<Box<dyn VfsFile>> for AnyVfsFile {
 }
 
 impl AnyVfsFile {
+    /// Reads into `buf` starting at `offset` — see [`VfsFile::read_at`].
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         self.0.read_at(buf, offset)
     }
 
+    /// The file's total size in bytes — see [`VfsFile::size`].
     pub fn size(&self) -> Result<u64> {
         self.0.size()
     }
 
+    /// Writes `buf` at `offset` — see [`VfsFile::write_at`].
     pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<()> {
         self.0.write_at(buf, offset)
     }
 
+    /// Truncates or extends the file to `len` bytes — see
+    /// [`VfsFile::truncate`].
     pub fn truncate(&self, len: u64) -> Result<()> {
         self.0.truncate(len)
     }
 
+    /// Flushes buffered writes — see [`VfsFile::sync`].
     pub fn sync(&self) -> Result<()> {
         self.0.sync()
     }
@@ -264,54 +278,74 @@ impl AnyVfsFile {
 pub struct AnyVfs(Box<dyn Vfs>);
 
 impl AnyVfs {
+    /// Boxes `vfs`, erasing its concrete type.
     pub fn new<V: Vfs + 'static>(vfs: V) -> Self {
         AnyVfs(Box::new(vfs))
     }
 
+    /// Whether `path` exists — see [`Vfs::exists`].
     pub fn exists(&self, path: &Path) -> Result<bool> {
         self.0.exists(path)
     }
 
+    /// Opens `path` for reading — see [`Vfs::open_read`].
     pub fn open_read(&self, path: &Path) -> Result<AnyVfsFile> {
         self.0.open_read(path).map(AnyVfsFile::from)
     }
 
+    /// Opens `path` for reading and writing — see [`Vfs::open_write`].
     pub fn open_write(&self, path: &Path) -> Result<AnyVfsFile> {
         self.0.open_write(path).map(AnyVfsFile::from)
     }
 
+    /// Opens `path` for reading and writing, creating it if needed — see
+    /// [`Vfs::create_or_open_write`].
     pub fn create_or_open_write(&self, path: &Path) -> Result<AnyVfsFile> {
         self.0.create_or_open_write(path).map(AnyVfsFile::from)
     }
 
+    /// Removes `path` if it exists — see [`Vfs::delete`].
     pub fn delete(&self, path: &Path) -> Result<()> {
         self.0.delete(path)
     }
 
+    /// Claims the WAL checkpoint lock on `path` — see
+    /// [`Vfs::claim_wal_checkpoint_lock`].
     pub fn claim_wal_checkpoint_lock(&self, path: &Path) -> Result<Option<FileLock>> {
         self.0.claim_wal_checkpoint_lock(path)
     }
 
+    /// The frame marks of readers pinned to `path`'s WAL generation — see
+    /// [`Vfs::active_wal_reader_marks`].
     pub fn active_wal_reader_marks(&self, path: &Path) -> Result<Vec<u32>> {
         self.0.active_wal_reader_marks(path)
     }
 
+    /// Publishes `n_backfill` for `path` — see [`Vfs::publish_wal_backfill`].
     pub fn publish_wal_backfill(&self, path: &Path, n_backfill: u32) -> Result<()> {
         self.0.publish_wal_backfill(path, n_backfill)
     }
 
+    /// Reads back the last published `nBackfill` for `path` — see
+    /// [`Vfs::read_wal_backfill`].
     pub fn read_wal_backfill(&self, path: &Path) -> Result<u32> {
         self.0.read_wal_backfill(path)
     }
 
+    /// Claims the WAL write lock on `path` — see
+    /// [`Vfs::claim_wal_write_lock`].
     pub fn claim_wal_write_lock(&self, path: &Path) -> Result<Option<FileLock>> {
         self.0.claim_wal_write_lock(path)
     }
 
+    /// Publishes a new `mxFrame` for `path` — see
+    /// [`Vfs::publish_wal_mx_frame`].
     pub fn publish_wal_mx_frame(&self, path: &Path, mx_frame: u32) -> Result<()> {
         self.0.publish_wal_mx_frame(path, mx_frame)
     }
 
+    /// Opens a persistent `-shm` handle for `path` — see
+    /// [`Vfs::open_wal_shm`].
     pub fn open_wal_shm(&self, path: &Path) -> Result<Option<AnyWalShm>> {
         self.0.open_wal_shm(path)
     }

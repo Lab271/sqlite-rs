@@ -10,6 +10,9 @@ use crate::parser::ast::DropTable;
 use crate::schema::TableSchema;
 use crate::vdbe::{Instruction, Opcode, Program, P4};
 
+/// Compiles `DROP TABLE` into a single `Opcode::DropTable` instruction that
+/// frees the table's pages, cascade-drops its indexes, and removes its
+/// `sqlite_master` row(s) at exec time.
 pub fn compile_drop_table(drop: &DropTable, schema: &TableSchema) -> Result<Program, CodegenError> {
     let indexes = schema
         .indexes

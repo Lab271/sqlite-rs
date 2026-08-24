@@ -10,13 +10,21 @@ use crate::vdbe::program::{Opcode, Program, SortKeyColumn, P4};
 /// One rendered `EXPLAIN` row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExplainRow {
+    /// Program address (instruction index) of this row.
     pub addr: usize,
+    /// The opcode's mnemonic name.
     pub opcode: &'static str,
+    /// First operand.
     pub p1: i32,
+    /// Second operand.
     pub p2: i32,
+    /// Third operand.
     pub p3: i32,
+    /// Fourth operand, rendered in its display form (not raw bytes).
     pub p4: String,
+    /// Fifth operand (flags).
     pub p5: u16,
+    /// A short human-readable annotation of the instruction's effect.
     pub comment: String,
 }
 

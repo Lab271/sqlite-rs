@@ -12,6 +12,8 @@ use super::ast::{
 use super::grammar::Parser;
 use super::tokenizer::{Span, Tokenizer};
 
+/// The three-way result of attempting to parse a statement: cleanly
+/// accepted, syntactically-valid-but-unimplemented, or genuinely malformed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseOutcome<T> {
     /// Parsed successfully into a `T` (e.g. [`Select`], [`Update`]).
@@ -19,10 +21,20 @@ pub enum ParseOutcome<T> {
     /// Syntactically-recognized SQL this parser doesn't implement yet
     /// (joins, subqueries, compound selects, ...). `span` points at the
     /// token that triggered the unsupported construct.
-    Unsupported { message: String, span: Span },
+    Unsupported {
+        /// Human-readable description of the unsupported construct.
+        message: String,
+        /// Location of the token that triggered the unsupported construct.
+        span: Span,
+    },
     /// Malformed SQL: a genuine syntax error. `span` points at the
     /// offending token.
-    Invalid { message: String, span: Span },
+    Invalid {
+        /// Human-readable description of the syntax error.
+        message: String,
+        /// Location of the offending token.
+        span: Span,
+    },
 }
 
 /// Failure carried internally by the recursive-descent parser; folded

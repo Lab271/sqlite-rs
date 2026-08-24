@@ -60,11 +60,17 @@ const MAX_PAGES_VISITED: usize = 1_000_000;
 /// (e.g. `decode_record(&row.payload, ..)`) keep working unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payload {
+    /// Zero-copy view into a page buffer: no overflow chain, the payload
+    /// fit entirely in the cell.
     Local {
+        /// The page buffer the payload bytes live in.
         page: Rc<[u8]>,
+        /// Byte offset of the payload's start within `page`.
         start: usize,
+        /// Payload length in bytes.
         len: usize,
     },
+    /// Owned buffer holding bytes reassembled from an overflow chain.
     Owned(Vec<u8>),
 }
 
@@ -88,7 +94,9 @@ impl Deref for Payload {
 /// rowid-alias note — `payload` may encode a rowid-alias column as NULL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
+    /// The row's SQLite rowid.
     pub rowid: i64,
+    /// The row's raw record payload.
     pub payload: Payload,
 }
 
@@ -130,6 +138,8 @@ pub struct TableCursor<P: PageSource> {
 }
 
 impl<P: PageSource> TableCursor<P> {
+    /// Creates a cursor over the table b-tree rooted at `root_page`,
+    /// unpositioned until [`Self::first`] or [`Self::last`] is called.
     pub fn new(source: P, header: &DatabaseHeader, root_page: u32) -> Self {
         TableCursor {
             source,

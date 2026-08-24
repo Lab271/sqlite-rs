@@ -10,6 +10,8 @@ use crate::codegen::Emitter;
 use crate::parser::ast::{Pragma, PragmaJournalMode};
 use crate::vdbe::{Instruction, Opcode, Program, JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL};
 
+/// Compiles `PRAGMA journal_mode = WAL|DELETE` into an
+/// `Init -> SetJournalMode -> Halt` program, `P1` carrying the target mode.
 pub fn compile_pragma(pragma: &Pragma) -> Program {
     let mode = match pragma.journal_mode {
         PragmaJournalMode::Wal => JOURNAL_MODE_WAL,

@@ -12,15 +12,23 @@
 /// original source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
+    /// 1-based line number of the token's first character.
     pub line: u32,
+    /// 1-based column number of the token's first character.
     pub column: u32,
+    /// Byte offset of the token's first character in the source.
     pub offset: u32,
+    /// Length in bytes of the token's source text.
     pub len: u32,
 }
 
+/// A single lexed unit of SQL source: its [`TokenKind`] plus the [`Span`]
+/// it occupies in the original text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
+    /// The kind of token and any associated literal value.
     pub kind: TokenKind,
+    /// Source location this token was scanned from.
     pub span: Span,
 }
 
@@ -40,49 +48,85 @@ pub enum Param {
     Dollar(String),
 }
 
+/// The kind of a scanned [`Token`], carrying any literal value it holds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
+    /// Integer literal.
     Integer(i64),
+    /// Floating-point literal.
     Float(f64),
+    /// String literal (quotes stripped, escapes resolved).
     String(String),
+    /// `X'...'` blob literal, decoded to raw bytes.
     Blob(Vec<u8>),
+    /// The `NULL` literal.
     Null,
+    /// The `TRUE` literal.
     True,
+    /// The `FALSE` literal.
     False,
 
+    /// An unquoted or quoted identifier (table/column/etc. name).
     Identifier(String),
+    /// A reserved SQL keyword.
     Keyword(Keyword),
+    /// A bind parameter (`?`, `?NNN`, `:name`, `@name`, `$name`).
     Param(Param),
 
     // Punctuation / operators
+    /// `*`
     Star,
+    /// `,`
     Comma,
+    /// `;`
     Semicolon,
+    /// `(`
     LParen,
+    /// `)`
     RParen,
+    /// `.`
     Dot,
+    /// `+`
     Plus,
+    /// `-`
     Minus,
+    /// `/`
     Slash,
+    /// `%`
     Percent,
+    /// `=` or `==`
     Eq,
+    /// `!=` or `<>`
     Ne,
+    /// `<`
     Lt,
+    /// `<=`
     Le,
+    /// `>`
     Gt,
+    /// `>=`
     Ge,
-    Concat,     // ||
-    Arrow,      // ->
-    ArrowArrow, // ->>
+    /// `||`
+    Concat,
+    /// `->`
+    Arrow,
+    /// `->>`
+    ArrowArrow,
+    /// `&`
     BitAnd,
+    /// `|`
     BitOr,
+    /// `~`
     BitNot,
+    /// `<<`
     Shl,
+    /// `>>`
     Shr,
 
     /// Malformed input; `String` is a human-readable reason.
     Error(String),
+    /// End of input.
     Eof,
 }
 
@@ -91,151 +135,297 @@ pub enum TokenKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum Keyword {
+    /// The `ABORT` keyword.
     ABORT,
+    /// The `ACTION` keyword.
     ACTION,
+    /// The `ADD` keyword.
     ADD,
+    /// The `AFTER` keyword.
     AFTER,
+    /// The `ALL` keyword.
     ALL,
+    /// The `ALTER` keyword.
     ALTER,
+    /// The `ALWAYS` keyword.
     ALWAYS,
+    /// The `ANALYZE` keyword.
     ANALYZE,
+    /// The `AND` keyword.
     AND,
+    /// The `AS` keyword.
     AS,
+    /// The `ASC` keyword.
     ASC,
+    /// The `ATTACH` keyword.
     ATTACH,
+    /// The `AUTOINCREMENT` keyword.
     AUTOINCREMENT,
+    /// The `BEFORE` keyword.
     BEFORE,
+    /// The `BEGIN` keyword.
     BEGIN,
+    /// The `BETWEEN` keyword.
     BETWEEN,
+    /// The `BY` keyword.
     BY,
+    /// The `CASCADE` keyword.
     CASCADE,
+    /// The `CASE` keyword.
     CASE,
+    /// The `CAST` keyword.
     CAST,
+    /// The `CHECK` keyword.
     CHECK,
+    /// The `COLLATE` keyword.
     COLLATE,
+    /// The `COLUMN` keyword.
     COLUMN,
+    /// The `COMMIT` keyword.
     COMMIT,
+    /// The `CONFLICT` keyword.
     CONFLICT,
+    /// The `CONSTRAINT` keyword.
     CONSTRAINT,
+    /// The `CREATE` keyword.
     CREATE,
+    /// The `CROSS` keyword.
     CROSS,
+    /// The `CURRENT` keyword.
     CURRENT,
+    /// The `CURRENT_DATE` keyword.
     CURRENT_DATE,
+    /// The `CURRENT_TIME` keyword.
     CURRENT_TIME,
+    /// The `CURRENT_TIMESTAMP` keyword.
     CURRENT_TIMESTAMP,
+    /// The `DATABASE` keyword.
     DATABASE,
+    /// The `DEFAULT` keyword.
     DEFAULT,
+    /// The `DEFERRABLE` keyword.
     DEFERRABLE,
+    /// The `DEFERRED` keyword.
     DEFERRED,
+    /// The `DELETE` keyword.
     DELETE,
+    /// The `DESC` keyword.
     DESC,
+    /// The `DETACH` keyword.
     DETACH,
+    /// The `DISTINCT` keyword.
     DISTINCT,
+    /// The `DO` keyword.
     DO,
+    /// The `DROP` keyword.
     DROP,
+    /// The `EACH` keyword.
     EACH,
+    /// The `ELSE` keyword.
     ELSE,
+    /// The `END` keyword.
     END,
+    /// The `ESCAPE` keyword.
     ESCAPE,
+    /// The `EXCEPT` keyword.
     EXCEPT,
+    /// The `EXCLUDE` keyword.
     EXCLUDE,
+    /// The `EXCLUSIVE` keyword.
     EXCLUSIVE,
+    /// The `EXISTS` keyword.
     EXISTS,
+    /// The `EXPLAIN` keyword.
     EXPLAIN,
+    /// The `FAIL` keyword.
     FAIL,
+    /// The `FILTER` keyword.
     FILTER,
+    /// The `FIRST` keyword.
     FIRST,
+    /// The `FOLLOWING` keyword.
     FOLLOWING,
+    /// The `FOR` keyword.
     FOR,
+    /// The `FOREIGN` keyword.
     FOREIGN,
+    /// The `FROM` keyword.
     FROM,
+    /// The `FULL` keyword.
     FULL,
+    /// The `GENERATED` keyword.
     GENERATED,
+    /// The `GLOB` keyword.
     GLOB,
+    /// The `GROUP` keyword.
     GROUP,
+    /// The `GROUPS` keyword.
     GROUPS,
+    /// The `HAVING` keyword.
     HAVING,
+    /// The `IF` keyword.
     IF,
+    /// The `IGNORE` keyword.
     IGNORE,
+    /// The `IMMEDIATE` keyword.
     IMMEDIATE,
+    /// The `IN` keyword.
     IN,
+    /// The `INDEX` keyword.
     INDEX,
+    /// The `INDEXED` keyword.
     INDEXED,
+    /// The `INITIALLY` keyword.
     INITIALLY,
+    /// The `INNER` keyword.
     INNER,
+    /// The `INSERT` keyword.
     INSERT,
+    /// The `INSTEAD` keyword.
     INSTEAD,
+    /// The `INTERSECT` keyword.
     INTERSECT,
+    /// The `INTO` keyword.
     INTO,
+    /// The `IS` keyword.
     IS,
+    /// The `ISNULL` keyword.
     ISNULL,
+    /// The `JOIN` keyword.
     JOIN,
+    /// The `KEY` keyword.
     KEY,
+    /// The `LAST` keyword.
     LAST,
+    /// The `LEFT` keyword.
     LEFT,
+    /// The `LIKE` keyword.
     LIKE,
+    /// The `LIMIT` keyword.
     LIMIT,
+    /// The `MATCH` keyword.
     MATCH,
+    /// The `MATERIALIZED` keyword.
     MATERIALIZED,
+    /// The `NATURAL` keyword.
     NATURAL,
+    /// The `NO` keyword.
     NO,
+    /// The `NOT` keyword.
     NOT,
+    /// The `NOTHING` keyword.
     NOTHING,
+    /// The `NOTNULL` keyword.
     NOTNULL,
+    /// The `NULLS` keyword.
     NULLS,
+    /// The `OF` keyword.
     OF,
+    /// The `OFFSET` keyword.
     OFFSET,
+    /// The `ON` keyword.
     ON,
+    /// The `OR` keyword.
     OR,
+    /// The `ORDER` keyword.
     ORDER,
+    /// The `OTHERS` keyword.
     OTHERS,
+    /// The `OUTER` keyword.
     OUTER,
+    /// The `OVER` keyword.
     OVER,
+    /// The `PARTITION` keyword.
     PARTITION,
+    /// The `PLAN` keyword.
     PLAN,
+    /// The `PRAGMA` keyword.
     PRAGMA,
+    /// The `PRECEDING` keyword.
     PRECEDING,
+    /// The `PRIMARY` keyword.
     PRIMARY,
+    /// The `QUERY` keyword.
     QUERY,
+    /// The `RAISE` keyword.
     RAISE,
+    /// The `RANGE` keyword.
     RANGE,
+    /// The `RECURSIVE` keyword.
     RECURSIVE,
+    /// The `REFERENCES` keyword.
     REFERENCES,
+    /// The `REGEXP` keyword.
     REGEXP,
+    /// The `REINDEX` keyword.
     REINDEX,
+    /// The `RELEASE` keyword.
     RELEASE,
+    /// The `RENAME` keyword.
     RENAME,
+    /// The `REPLACE` keyword.
     REPLACE,
+    /// The `RESTRICT` keyword.
     RESTRICT,
+    /// The `RETURNING` keyword.
     RETURNING,
+    /// The `RIGHT` keyword.
     RIGHT,
+    /// The `ROLLBACK` keyword.
     ROLLBACK,
+    /// The `ROW` keyword.
     ROW,
+    /// The `ROWS` keyword.
     ROWS,
+    /// The `SAVEPOINT` keyword.
     SAVEPOINT,
+    /// The `SELECT` keyword.
     SELECT,
+    /// The `SET` keyword.
     SET,
+    /// The `TABLE` keyword.
     TABLE,
+    /// The `TEMP` keyword.
     TEMP,
+    /// The `TEMPORARY` keyword.
     TEMPORARY,
+    /// The `THEN` keyword.
     THEN,
+    /// The `TIES` keyword.
     TIES,
+    /// The `TO` keyword.
     TO,
+    /// The `TRANSACTION` keyword.
     TRANSACTION,
+    /// The `TRIGGER` keyword.
     TRIGGER,
+    /// The `UNBOUNDED` keyword.
     UNBOUNDED,
+    /// The `UNION` keyword.
     UNION,
+    /// The `UNIQUE` keyword.
     UNIQUE,
+    /// The `UPDATE` keyword.
     UPDATE,
+    /// The `USING` keyword.
     USING,
+    /// The `VACUUM` keyword.
     VACUUM,
+    /// The `VALUES` keyword.
     VALUES,
+    /// The `VIEW` keyword.
     VIEW,
+    /// The `VIRTUAL` keyword.
     VIRTUAL,
+    /// The `WHEN` keyword.
     WHEN,
+    /// The `WHERE` keyword.
     WHERE,
+    /// The `WINDOW` keyword.
     WINDOW,
+    /// The `WITH` keyword.
     WITH,
+    /// The `WITHOUT` keyword.
     WITHOUT,
 }
 
@@ -426,6 +616,7 @@ pub struct Tokenizer {
 }
 
 impl Tokenizer {
+    /// Creates a tokenizer positioned at the start of `src`.
     pub fn new(src: &str) -> Self {
         Tokenizer {
             chars: src.char_indices().collect(),
@@ -549,6 +740,8 @@ impl Tokenizer {
         None
     }
 
+    /// Scans and returns the next [`Token`], including trivia skipping.
+    /// Returns [`TokenKind::Eof`] once the input is exhausted; never panics.
     pub fn next_token(&mut self) -> Token {
         // Captured before `skip_trivia` so an unterminated-comment error
         // span points at the comment's start, not the EOF it scanned to.

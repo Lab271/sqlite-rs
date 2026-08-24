@@ -36,7 +36,7 @@ use crate::record::{encode_record, encode_varint, TextEncoding, Value};
 /// a WITHOUT ROWID table) into the index b-tree rooted at `root_page`,
 /// splitting leaves/interior pages (and the root itself) as needed.
 /// Returns `Err(BtreeError::DuplicateKey)` if an entry comparing exactly
-/// equal to `key` (via [`compare_keys`]) already exists.
+/// equal to `key` (via `compare_keys`) already exists.
 pub fn insert_entry(
     pager: &mut Pager,
     header: &DatabaseHeader,

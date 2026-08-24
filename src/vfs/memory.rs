@@ -23,6 +23,7 @@ pub struct MemoryVfs {
 }
 
 impl MemoryVfs {
+    /// Creates an empty in-memory filesystem with no registered files.
     pub fn new() -> Self {
         Self::default()
     }

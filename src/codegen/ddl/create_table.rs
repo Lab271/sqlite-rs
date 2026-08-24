@@ -15,6 +15,9 @@ use crate::codegen::Emitter;
 use crate::parser::ast::CreateTable;
 use crate::vdbe::{Instruction, Opcode, Program, P4};
 
+/// Compiles `CREATE TABLE` into a single `Opcode::CreateTable` instruction
+/// that allocates the root page, registers the verbatim source text as the
+/// `sqlite_master` row, and bumps the schema cookie at exec time.
 pub fn compile_create_table(create: &CreateTable, source: &str) -> Result<Program, CodegenError> {
     let start = create.span.offset as usize;
     let end = start.saturating_add(create.span.len as usize);

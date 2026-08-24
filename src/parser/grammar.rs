@@ -27,6 +27,8 @@ use super::ast::*;
 use super::error::{PResult, ParseFail};
 use super::tokenizer::{Keyword, Param, Span, Token, TokenKind};
 
+/// Recursive-descent parser state: the token stream, a cursor into it, and
+/// the current expression-nesting depth (see [`MAX_EXPR_DEPTH`]).
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -48,6 +50,8 @@ fn join_span(a: Span, b: Span) -> Span {
 }
 
 impl Parser {
+    /// Creates a parser positioned at the start of `tokens`, with an
+    /// empty expression-nesting depth.
     pub fn new(tokens: Vec<Token>) -> Self {
         Parser {
             tokens,

@@ -26,14 +26,18 @@ use crate::btree::{BtreeError, TableCursor};
 use crate::record::{decode_record, RecordError, TextEncoding, Value};
 use crate::vfs::PageSource;
 
+/// Failure walking or decoding `sqlite_master`.
 #[derive(Debug, Error)]
 pub enum DdlError {
+    /// Failure walking the `sqlite_master` b-tree.
     #[error("walking sqlite_master: {0}")]
     Btree(#[from] BtreeError),
 
+    /// Failure decoding a `sqlite_master` row's record payload.
     #[error("decoding a sqlite_master row: {0}")]
     Record(#[from] RecordError),
 
+    /// A `sqlite_master` row didn't have exactly 5 columns.
     #[error("sqlite_master row has {0} columns, expected 5")]
     MalformedRow(usize),
 }
@@ -42,10 +46,15 @@ pub enum DdlError {
 /// read a table without the full SQL parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
+    /// The table's name.
     pub name: String,
+    /// The table's b-tree root page (`sqlite_master.rootpage`).
     pub root_page: u32,
+    /// Column names, in declared order.
     pub columns: Vec<String>,
+    /// Whether the table was declared `WITHOUT ROWID`.
     pub without_rowid: bool,
+    /// Whether the table was declared `STRICT`.
     pub strict: bool,
     /// Each column's declared type text, position-for-position with
     /// `columns` (empty string when a column has none) — the
@@ -78,8 +87,11 @@ pub struct TableSchema {
 /// (#211).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSchema {
+    /// The index's name.
     pub name: String,
+    /// Whether the index was declared `UNIQUE`.
     pub unique: bool,
+    /// The indexed columns, in declared key order.
     pub columns: Vec<IndexedColumn>,
     /// The index b-tree's root page (`sqlite_master.rootpage`), needed
     /// to `OpenWrite` a write cursor onto it (#196).
@@ -90,7 +102,10 @@ pub struct IndexSchema {
 /// position-for-position with the index's declared column order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedColumn {
+    /// The column's (unquoted) name, or raw expression text for an
+    /// expression index.
     pub name: String,
+    /// Whether this key part is sorted `DESC`.
     pub desc: bool,
 }
 
@@ -158,7 +173,9 @@ pub fn read_table_and_view_names<P: PageSource>(
 /// stays independent of the full SQL parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewSchema {
+    /// The view's name.
     pub name: String,
+    /// The verbatim `CREATE VIEW ...` source text.
     pub sql: String,
 }
 

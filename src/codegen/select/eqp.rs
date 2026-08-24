@@ -10,9 +10,13 @@ use super::*;
 /// summary's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EqpRow {
+    /// This row's identifier within the plan.
     pub id: i32,
+    /// The `id` of this row's parent in the plan tree (0 for a top-level row).
     pub parent: i32,
+    /// Unused column, kept for SQLite's `EXPLAIN QUERY PLAN` shape.
     pub notused: i32,
+    /// Human-readable plan step, e.g. `SCAN ...`/`SEARCH ... USING ...`.
     pub detail: String,
 }
 

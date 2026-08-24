@@ -12,25 +12,37 @@ use thiserror::Error;
 
 use super::{AnyVfsFile, FileLock, Vfs, VfsError, VfsFile};
 
+/// Failure reading or writing a whole page through a [`PageSource`].
 #[derive(Debug, Error)]
 pub enum PageError {
+    /// Page numbers are 1-based; page 0 was requested.
     #[error("invalid page number 0")]
     InvalidPageNumber,
 
+    /// A read returned fewer bytes than a full page.
     #[error("short read on page {page_num}: expected {expected} bytes, got {got}")]
     ShortRead {
+        /// The page that came up short.
         page_num: u32,
+        /// The page size that was expected.
         expected: usize,
+        /// The number of bytes actually read.
         got: usize,
     },
 
+    /// [`WritablePageSource::write_page`] was given a buffer that isn't
+    /// exactly one page long.
     #[error("wrong buffer length writing page {page_num}: expected {expected} bytes, got {got}")]
     WrongLength {
+        /// The page that was being written.
         page_num: u32,
+        /// The page size that was expected.
         expected: usize,
+        /// The length of the buffer actually given.
         got: usize,
     },
 
+    /// The underlying VFS operation failed.
     #[error(transparent)]
     Vfs(#[from] VfsError),
 }
@@ -78,6 +90,7 @@ pub struct VfsPageSource {
 }
 
 impl VfsPageSource {
+    /// Opens `path` for reading through `vfs`.
     pub fn open(vfs: &dyn Vfs, path: &Path, page_size: u32) -> Result<Self, VfsError> {
         let file = vfs.open_read(path)?;
         Ok(VfsPageSource { file, page_size })
@@ -111,6 +124,7 @@ pub struct WritablePageSource {
 }
 
 impl WritablePageSource {
+    /// Opens `path` for reading and writing through `vfs`.
     pub fn open(vfs: &dyn Vfs, path: &Path, page_size: u32) -> Result<Self, VfsError> {
         let file = vfs.open_write(path)?;
         Ok(WritablePageSource { file, page_size })

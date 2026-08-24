@@ -22,71 +22,143 @@ use crate::vdbe::program::{Instruction, Opcode, Program, P4};
 use crate::vdbe::{arithmetic, control, cursor, pragma, result, sorter};
 use crate::vfs::PageSource;
 
+/// The ways the fetch-decode-execute loop can fail to run a [`Program`]
+/// to completion.
 #[derive(Debug, Error)]
 pub enum ExecError {
     #[error("{opcode}: register index {index} is out of range")]
-    RegisterOutOfRange { opcode: &'static str, index: i32 },
+    /// `opcode` addressed register `index`, which lies outside the
+    /// register file.
+    RegisterOutOfRange {
+        /// The opcode that made the out-of-range access.
+        opcode: &'static str,
+        /// The offending register index.
+        index: i32,
+    },
 
     #[error("{opcode}: register range count {count} exceeds the maximum ({MAX_REGISTERS})")]
-    RegisterRangeTooLarge { opcode: &'static str, count: i32 },
+    /// `opcode` requested a register range of `count` registers, more
+    /// than [`MAX_REGISTERS`] allows.
+    RegisterRangeTooLarge {
+        /// The opcode that requested the range.
+        opcode: &'static str,
+        /// The requested register count.
+        count: i32,
+    },
 
     #[error("{opcode}: expected a different value type, found {found}")]
+    /// `opcode` required a register to hold a particular [`Value`]
+    /// variant but found `found` instead.
     TypeMismatch {
+        /// The opcode that performed the check.
         opcode: &'static str,
+        /// The value's actual runtime type.
         found: &'static str,
     },
 
     #[error("MustBeInt: value cannot be converted to an integer without data loss")]
+    /// `MustBeInt`'s coercion failed: the register's value cannot be
+    /// converted to an integer without losing information.
     MustBeInt,
 
     #[error("{opcode}: malformed instruction ({reason})")]
+    /// `opcode`'s operands are structurally invalid (e.g. bad `P4`
+    /// payload) for `reason`.
     MalformedInstruction {
+        /// The opcode whose operands failed validation.
         opcode: &'static str,
+        /// Human-readable explanation of what was wrong.
         reason: String,
     },
 
     #[error("opcode {opcode:?} is not yet implemented by this VM")]
-    Unimplemented { opcode: Opcode },
+    /// `opcode` is a recognized opcode with no dispatch arm yet.
+    Unimplemented {
+        /// The opcode with no implementation.
+        opcode: Opcode,
+    },
 
     #[error("cursor slot {slot} is not open")]
-    CursorNotOpen { slot: i32 },
+    /// `slot` was referenced but has no cursor open in it.
+    CursorNotOpen {
+        /// The cursor-slot table index that was empty.
+        slot: i32,
+    },
 
     #[error("{opcode}: cursor slot {slot} is a {found}, not a {expected}")]
+    /// `opcode` expected the cursor in `slot` to be `expected` (e.g. a
+    /// table cursor) but found `found` (e.g. a sorter cursor).
     CursorTypeMismatch {
+        /// The opcode that performed the check.
         opcode: &'static str,
+        /// The cursor-slot table index that was checked.
         slot: i32,
+        /// The cursor kind actually found in the slot.
         found: &'static str,
+        /// The cursor kind `opcode` required.
         expected: &'static str,
     },
 
     #[error("{opcode} requires a database attached to this VM (see Vm::with_db)")]
-    NoDatabase { opcode: &'static str },
+    /// `opcode` needs a real database (see [`Vm::with_db`]) but this
+    /// `Vm` has none attached.
+    NoDatabase {
+        /// The opcode that required a database.
+        opcode: &'static str,
+    },
 
     #[error("program counter {pc} is out of range")]
-    ProgramCounterOutOfRange { pc: usize },
+    /// A jump or fall-through moved the program counter to `pc`, past
+    /// the end of the program's instructions.
+    ProgramCounterOutOfRange {
+        /// The out-of-range program counter value.
+        pc: usize,
+    },
 
     #[error("program exceeded the maximum step count ({MAX_STEPS}) without halting")]
+    /// The program executed [`MAX_STEPS`] instructions without halting —
+    /// treated as a runaway/looping program.
     StepLimitExceeded,
 
     #[error("{opcode}: ephemeral table/index exceeded the maximum row count ({limit})")]
-    EphemeralRowLimitExceeded { opcode: &'static str, limit: usize },
+    /// `opcode`'s ephemeral table/index grew past `limit` rows.
+    EphemeralRowLimitExceeded {
+        /// The opcode operating on the ephemeral structure.
+        opcode: &'static str,
+        /// The row-count limit that was exceeded.
+        limit: usize,
+    },
 
     #[error("statement halted with SQLite result code {code}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
-    Halted { code: i32, message: Option<String> },
+    /// The program executed `Halt` with a non-success SQLite result
+    /// `code`, optionally carrying an error `message`.
+    Halted {
+        /// The SQLite result code the program halted with.
+        code: i32,
+        /// An optional human-readable error message.
+        message: Option<String>,
+    },
 
     #[error("failed to flush pending writes on statement commit: {0}")]
+    /// Flushing pending writes on statement commit failed at the pager
+    /// layer.
     FlushFailed(#[from] crate::pager::PagerError),
 
     #[error("cannot start a transaction within a transaction")]
+    /// A `Transaction` opcode ran while a transaction was already open.
     TransactionAlreadyActive,
 
     #[error("cannot commit - no transaction is active")]
+    /// A commit opcode ran with no transaction currently active.
     NoActiveTransactionToCommit,
 
     #[error("cannot rollback - no transaction is active")]
+    /// A rollback opcode ran with no transaction currently active.
     NoActiveTransactionToRollback,
 
     #[error("cannot change journal_mode within a transaction")]
+    /// A `journal_mode` change was attempted while a transaction was
+    /// open.
     JournalModeChangeDuringTransaction,
 }
 
@@ -94,9 +166,18 @@ pub enum ExecError {
 /// to an explicit target, or halt the program.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
+    /// Continue at the instruction immediately after the one just run.
     Next,
+    /// Jump to the given program-counter value.
     Jump(usize),
-    Halt { code: i32, message: Option<String> },
+    /// Stop the program with an SQLite result `code` and optional
+    /// `message`.
+    Halt {
+        /// The SQLite result code to halt with.
+        code: i32,
+        /// An optional human-readable error message.
+        message: Option<String>,
+    },
 }
 
 /// The database a `Vm` reads real table cursors from (`OpenRead`) — the
@@ -201,6 +282,9 @@ impl Default for Vm {
 pub(crate) const MAX_REGISTERS: usize = 1 << 20;
 
 impl Vm {
+    /// Builds a `Vm` with no database attached — suitable for programs
+    /// that never open a real cursor (arithmetic/control tests,
+    /// sorter/ephemeral-only tests).
     pub fn new() -> Self {
         Self::default()
     }
@@ -422,10 +506,12 @@ impl Vm {
         Ok(())
     }
 
+    /// Appends `row` to the set of rows produced so far (`ResultRow`).
     pub fn emit_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
     }
 
+    /// The rows emitted by the program so far, in emission order.
     pub fn rows(&self) -> &[Vec<Value>] {
         &self.rows
     }
@@ -793,6 +879,8 @@ fn parse_function_descriptor(descriptor: &str) -> Option<(&str, usize)> {
 /// previously 1_000_000, which a real ~830k-row scan already exceeded.
 const MAX_STEPS: u32 = 50_000_000;
 
+/// Runs `program` to completion on a fresh, database-less [`Vm`] and
+/// returns the rows it emitted via `ResultRow`.
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
     run(Vm::new(), program).map(|(rows, _)| rows)
 }
