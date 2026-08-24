@@ -3,6 +3,7 @@ use super::projection::{
     compile_row_values, emit_distinct_guard, emit_row_via_sink, ResultColumnPlan,
 };
 use super::*;
+use crate::planner::{is_skip_scan_worthwhile, Stats};
 /// LIMIT/OFFSET counters, set up once before the scan loop starts.
 pub(super) struct LimitState {
     offset_reg: Option<i32>,
@@ -402,6 +403,185 @@ where
     Ok(true)
 }
 
+/// A [`find_skip_scan_index`] match: which of `schema.indexes` was
+/// matched, the matched column's position *within that index*
+/// (guaranteed `> 0` — position `0` is the leading column, already
+/// handled by [`find_covering_index`]/[`try_compile_rowid_seek`]), and
+/// a clone of the probe operand expression.
+pub(super) struct SkipScanMatch {
+    pub(super) index_position: usize,
+    pub(super) column_position: usize,
+    pub(super) operand: Expr,
+}
+
+/// Finds an index usable for a skip-scan (#485) over `select`:
+/// `select.where_clause` must be a single top-level equality between a
+/// *non-leading* column of one of `schema.indexes` and a literal/bind-
+/// parameter operand, and [`is_skip_scan_worthwhile`] must judge the
+/// index's leading column low-cardinality enough (per `stats`) for
+/// walking the whole index to beat a full table scan. Deliberately
+/// narrow, mirroring [`find_covering_index`]'s scope: an integer
+/// literal or bind-parameter operand only, no `DISTINCT`, no `WITHOUT
+/// ROWID` table (this path leans on `SeekRowid` to fetch the full row
+/// once the index entry matches, same as
+/// [`super::index_scan::try_compile_index_ordered_scan`]).
+pub(super) fn find_skip_scan_index(
+    schema: &TableSchema,
+    select: &Select,
+    stats: &Stats,
+) -> Option<SkipScanMatch> {
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        return None;
+    }
+    if schema.without_rowid {
+        return None;
+    }
+    let where_expr = select.where_clause.as_ref()?;
+    let (lhs, rhs) = top_level_equality_operands(where_expr)?;
+    let (where_col_name, operand) = match (where_col(lhs), where_col(rhs)) {
+        (Some(name), _) => (name, rhs),
+        (_, Some(name)) => (name, lhs),
+        _ => return None,
+    };
+    let is_supported_operand = matches!(
+        &operand.kind,
+        ExprKind::Literal(Literal::Integer(_))
+            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+    );
+    if !is_supported_operand {
+        return None;
+    }
+    schema
+        .indexes
+        .iter()
+        .enumerate()
+        .find_map(|(index_position, index)| {
+            let column_position = index
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(where_col_name))?;
+            if column_position == 0 {
+                // The leading column is a covering-index/rowid-seek match,
+                // not a skip-scan one.
+                return None;
+            }
+            if !is_skip_scan_worthwhile(&index.name, stats) {
+                return None;
+            }
+            Some(SkipScanMatch {
+                index_position,
+                column_position,
+                operand: operand.clone(),
+            })
+        })
+}
+
+/// Compiles a skip-scan (#485): a query filtering on a non-leading
+/// column of a composite index, where [`find_skip_scan_index`] judges
+/// the leading column's cardinality low enough that walking the whole
+/// index (`IdxRewind`/`IdxNext`) — checking the matched column on each
+/// narrower index entry, then `IdxRowid` + `SeekRowid` to fetch the
+/// full row only for a match — beats a full `Rewind`/`Next` table scan
+/// that decodes every column of every row. Unlike real SQLite's
+/// skip-scan (a genuine per-distinct-leading-value binary seek),
+/// `IndexCursor::seek` in this codebase is a documented Tier 0 linear
+/// scan (`src/btree/index.rs`), so this walks every index entry rather
+/// than truly skipping past a large group once it stops matching — the
+/// win here comes from decoding narrower index rows and only touching
+/// the table for genuine matches, not from sub-linear seeking.
+///
+/// Returns `Ok(true)` when this fast path was taken; `Ok(false)` leaves
+/// `em`/`reg` untouched so the caller falls back to the ordinary scan.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_skip_scan_index<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    stats: &Stats,
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let Some(SkipScanMatch {
+        index_position,
+        column_position,
+        operand,
+    }) = find_skip_scan_index(schema, select, stats)
+    else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_position) else {
+        return Ok(false);
+    };
+
+    // No dedicated cursor slot exists for this path's index cursor —
+    // reuse the sort cursor number, mirroring
+    // `try_compile_index_ordered_scan`/`try_compile_covering_index_scan`
+    // (neither of `SorterOpen`/`SorterInsert` ever runs on this branch).
+    let index_cursor = cursors.sort;
+    let root_page = crate::codegen::index_maintenance::valid_index_root_page(index)?;
+    let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+    open_instr.p5 = 1;
+    em.emit(open_instr);
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+    let probe_reg = compile_value(em, reg, &scope, &operand)?;
+
+    let rewind_addr = em.emit(Instruction::new(Opcode::IdxRewind, index_cursor, 0, 0));
+    em.patch_p2(rewind_addr, end_label);
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
+    let row_skip = em.new_label();
+    let col_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::Column,
+        index_cursor,
+        i32::try_from(column_position).unwrap_or(0),
+        col_reg,
+    ));
+    let eq_addr = em.emit(Instruction::new(Opcode::Eq, col_reg, 0, probe_reg));
+    let matched = em.new_label();
+    em.patch_p2(eq_addr, matched);
+    let mismatch_addr = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(mismatch_addr, row_skip);
+
+    em.place(matched);
+    let rowid_reg = reg.alloc();
+    em.emit(Instruction::new(
+        Opcode::IdxRowid,
+        index_cursor,
+        rowid_reg,
+        0,
+    ));
+    let table_seek_addr = em.emit(Instruction::new(
+        Opcode::SeekRowid,
+        cursors.table,
+        0,
+        rowid_reg,
+    ));
+    em.patch_p2(table_seek_addr, row_skip);
+
+    if let Some(limit) = &limit {
+        emit_offset_guard(em, limit, row_skip);
+    }
+    if let Some(limit) = &limit {
+        emit_limit_guard(em, limit, end_label);
+    }
+    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
+
+    em.place(row_skip);
+    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_direct_scan<F>(
     em: &mut Emitter,
@@ -411,6 +591,7 @@ pub(super) fn compile_direct_scan<F>(
     cursors: ScanCursors,
     end_label: Label,
     catalog: &[TableSchema],
+    stats: &Stats,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -421,6 +602,11 @@ where
     }
     if try_compile_covering_index_scan(em, reg, select, schema, cursors, end_label, catalog, sink)?
     {
+        return Ok(());
+    }
+    if try_compile_skip_scan_index(
+        em, reg, select, schema, cursors, end_label, catalog, stats, sink,
+    )? {
         return Ok(());
     }
     if matches!(select.distinct, Some(Distinctness::Distinct)) {

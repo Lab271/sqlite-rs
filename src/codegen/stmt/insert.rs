@@ -469,6 +469,7 @@ pub fn compile_insert(
                     select_cursors,
                     end_label,
                     std::slice::from_ref(select_schema),
+                    &crate::planner::Stats::default(),
                     &mut sink,
                 )?;
             }

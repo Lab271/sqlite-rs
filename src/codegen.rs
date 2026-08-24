@@ -24,7 +24,7 @@ pub use dispatch::{compile_statement, leading_keywords, DispatchError};
 pub use pragma::compile_pragma;
 pub use select::{
     compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    explain_query_plan, CodegenError, EqpRow,
+    compile_select_with_catalog_and_stats, explain_query_plan, CodegenError, EqpRow,
 };
 pub use stmt::delete::{compile_delete, compile_delete_with_catalog};
 pub use stmt::insert::compile_insert;
