@@ -8,6 +8,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+chore: add WAL-mode variants to `engine.rs`'s transaction benchmarks
+(#436) — `insert_single_tx_wal`, `insert_batch_tx_100_wal`,
+`insert_batch_tx_1000_wal`, `update_batch_tx_wal` now run each
+transaction scenario under `journal_mode=WAL` (via a `PRAGMA
+journal_mode=WAL` switch excluded from the timed closure, mirroring
+`v6.rs`'s existing `switch_to_wal` pattern) against the oracle,
+alongside the existing DELETE-mode variants — previously only `v6.rs`
+compared WAL vs DELETE, with no oracle reference point.
+
 fix: share one `-shm` fd per path per process across all WAL lock
 guards (#491, follow-up from #412's investigation) —
 `WalWriteLock`/`WalCheckpointLock`/`WalReadLock`/`UnixWalShm`
