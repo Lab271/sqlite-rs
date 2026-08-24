@@ -229,3 +229,43 @@ rows in the same reordered execution order this produces.
   un-reordered plan
 
 **Tests:** `tests/corpus/analyze_test.rs::join_order_reorders_by_analyze_row_counts`
+
+### Requirement 6: Bloom-Filter Pre-Check for Unindexed Join Levels [MUST]
+
+When a join level's single `ON` equality has no structural rowid/unique-
+index seek available (`choose_join_access` returns `None`) and `ANALYZE`
+records at least `join_access::MIN_ROWS_TO_BLOOM` rows for that level's
+table, `compile_join_level_traverse` (`src/codegen/select/joins/level.rs`)
+MUST preface that level's `Rewind`/`Next` scan with a one-time (`Once`-
+guarded) `FilterAdd` pre-pass over the table's join-key column and a
+per-outer-row `Filter` check that skips the scan entirely on a definite
+miss. The underlying `FilterAdd`/`Filter` opcodes (`crate::vdbe::filter`)
+MUST NOT produce a false negative for any `Value`: only an exact-match
+`Value::Integer` key is ever hashed, and any other type (or a filter that
+has ever seen one) always reports "maybe present" rather than risk
+excluding a value real join semantics would still match. A database with
+no `ANALYZE` history, or a table below the row threshold, MUST compile
+with no `FilterAdd`/`Filter` opcode at all — byte-for-byte the pre-#464
+program.
+
+**Implementation:** `src/vdbe/filter.rs::BloomFilterState`,
+`src/codegen/select/join_access.rs::choose_bloom_probe`,
+`src/codegen/select/joins/level.rs::compile_join_level_traverse`
+
+#### Scenario: Unindexed join level gets a Bloom pre-check once ANALYZE has run
+
+- GIVEN `ANALYZE` stats recording a table with more rows than
+  `MIN_ROWS_TO_BLOOM`, joined on a plain (non-indexed) equality
+- WHEN that join is compiled
+- THEN the program contains a `FilterAdd` and a `Filter` opcode for that
+  level, and the join still returns the same rows as the oracle
+
+**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_prefaces_unindexed_join_level_once_analyzed`
+
+#### Scenario: Small or stats-free tables never get a Bloom pre-check
+
+- GIVEN a table below `MIN_ROWS_TO_BLOOM` rows (with or without `ANALYZE`)
+- WHEN a plain-equality join against it is compiled
+- THEN the program contains no `FilterAdd`/`Filter` opcode
+
+**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_is_skipped_below_row_threshold`

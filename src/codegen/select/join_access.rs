@@ -124,6 +124,71 @@ pub(in crate::codegen) fn choose_join_access(
     })
 }
 
+/// #464 (spec 011): the smallest table size an `ANALYZE`-recorded row
+/// count must clear before a level's nested-loop scan is worth
+/// prefacing with a Bloom-filter pre-pass — below this, the pre-pass's
+/// own one-time full scan of the table plus a `Filter` check per outer
+/// row is more overhead than the `Rewind`/`Next` scan it might skip.
+const MIN_ROWS_TO_BLOOM: u64 = 25;
+
+/// A Bloom-filter pre-check picked for a join level whose nested-loop
+/// scan [`choose_join_access`] couldn't turn into a seek — see
+/// [`choose_bloom_probe`].
+pub(in crate::codegen) struct BloomProbe {
+    /// The expression to hash and test against the filter each time
+    /// this level's own scan would otherwise start (`prior_bindings`
+    /// only — see [`expr_is_safe_join_probe`]).
+    pub(in crate::codegen) probe: Expr,
+    /// `binding`'s own column the filter is built from (one `FilterAdd`
+    /// per row, in a one-time pre-pass over `binding`'s cursor).
+    pub(in crate::codegen) key_column: usize,
+    /// `ANALYZE`'s row-count estimate for `binding`'s table — sizes the
+    /// filter's bit array (`FilterAdd`'s `P4::Int` hint).
+    pub(in crate::codegen) rows: u64,
+}
+
+/// Picks a Bloom-filter pre-check for join level `binding` once
+/// [`choose_join_access`] has already ruled out a structural seek —
+/// same top-level-equality shape (a single `binding.column = <safe
+/// probe>` `ON` clause) as that function, gated additionally on
+/// `ANALYZE` stats recording at least [`MIN_ROWS_TO_BLOOM`] rows for
+/// `binding`'s table (no stats at all, or too few rows, and this
+/// returns `None` — a stats-free database is therefore byte-for-byte
+/// unaffected by this optimization's mere existence, same guarantee
+/// #461 makes for `choose_join_access` itself).
+pub(in crate::codegen) fn choose_bloom_probe(
+    binding: &TableBinding,
+    on_expr: &Expr,
+    prior_bindings: &[TableBinding],
+) -> Option<BloomProbe> {
+    let rows = binding.stats.table_rows()?;
+    if rows < MIN_ROWS_TO_BLOOM {
+        return None;
+    }
+    let (lhs, rhs) = top_level_equality_operands(on_expr)?;
+    let (this_side, other_side) = if matches!(&lhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (lhs, rhs)
+    } else if matches!(&rhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (rhs, lhs)
+    } else {
+        return None;
+    };
+    if !expr_is_safe_join_probe(other_side, prior_bindings) {
+        return None;
+    }
+    let ExprKind::Column { name, .. } = &this_side.kind else {
+        return None;
+    };
+    let key_column = column_index(&binding.schema, name)?;
+    Some(BloomProbe {
+        probe: other_side.clone(),
+        key_column,
+        rows,
+    })
+}
+
 /// Projects `select`'s result columns against `scope` (a join-aware
 /// counterpart to `emit_row_via_sink`/`compile_row_values`: `*`/
 /// `table.*` expand across every binding in `scope`, in FROM order,
