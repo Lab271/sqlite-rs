@@ -14,6 +14,8 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const CLI: &str = env!("CARGO_BIN_EXE_sqlite-rs");
+
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::compile_select_with_catalog_and_stats;
 use sqlite_rs::header::DatabaseHeader;
@@ -264,5 +266,62 @@ fn high_cardinality_leading_column_falls_back_to_full_scan_matching_oracle() {
     assert_eq!(
         our_rows(&db, &header, &schema, &stats, sql),
         oracle_rows(&oracle, &db, sql)
+    );
+}
+
+/// #485 phase 3: `EXPLAIN QUERY PLAN` reports the oracle-confirmed
+/// skip-scan text (`SEARCH t USING INDEX idx (ANY(category) AND
+/// price=?)`) via the `sqlite-rs` CLI end to end — this exercises
+/// `query.rs`'s real `stats_by_table` plumbing (loaded from
+/// `sqlite_stat1` on disk), not the in-process `Stats` this file's
+/// other tests build directly.
+#[test]
+fn explain_query_plan_reports_skip_scan_text_matching_oracle() {
+    let db = scratch_db("eqp-skip-scan");
+    let ddls = [
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, category TEXT, price INTEGER)",
+        "CREATE INDEX idx ON t(category, price)",
+    ];
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("skip_scan_eqp");
+        return;
+    };
+    for stmt in ddls {
+        let status = Command::new(&oracle).arg(&db).arg(stmt).status().unwrap();
+        assert!(status.success(), "oracle setup failed: {stmt}");
+    }
+    let status = Command::new(&oracle)
+        .arg(&db)
+        .arg(
+            "INSERT INTO t(category, price) \
+             SELECT 'cat' || (value % 3), value FROM generate_series(1, 3000)",
+        )
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = Command::new(CLI)
+        .arg("exec")
+        .arg(&db)
+        .arg("ANALYZE")
+        .status()
+        .unwrap();
+    assert!(status.success(), "ANALYZE failed");
+
+    let output = Command::new(CLI)
+        .arg("query")
+        .arg(&db)
+        .arg("EXPLAIN QUERY PLAN SELECT * FROM t WHERE price = 1000")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "0|0|0|SEARCH t USING INDEX idx (ANY(category) AND price=?)",
     );
 }

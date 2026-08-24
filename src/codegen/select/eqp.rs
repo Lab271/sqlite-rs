@@ -1,5 +1,7 @@
 use super::join_access::{choose_join_access, JoinAccess};
-use super::limit_scan::{find_covering_index, is_rowid_reference, top_level_equality_operands};
+use super::limit_scan::{
+    find_covering_index, find_skip_scan_index, is_rowid_reference, top_level_equality_operands,
+};
 use super::*;
 /// One row of `EXPLAIN QUERY PLAN` output (#243) -- SQLite's own EQP
 /// shape (`id, parent, notused, detail`), distinct from plain
@@ -218,13 +220,29 @@ pub fn explain_query_plan(
         } else {
             None
         };
+        // #485: a skip-scan only applies to the outermost table's own
+        // `WHERE` clause (like the rowid-seek/covering-index checks
+        // above), and only once neither of those already found a
+        // cheaper access path -- mirrors `compile_direct_scan`'s
+        // dispatch precedence (rowid seek, then covering index, then
+        // skip-scan, then plain scan) exactly, so this report can
+        // never drift from what actually gets compiled.
+        let skip_scan = if level == 0 && access.is_none() && covering.is_none() {
+            find_skip_scan_index(&binding.schema, select, &binding.stats)
+        } else {
+            None
+        };
         let detail = match (
             access,
             covering
                 .as_ref()
                 .and_then(|m| binding.schema.indexes.get(m.index_position)),
+            skip_scan
+                .as_ref()
+                .and_then(|m| binding.schema.indexes.get(m.index_position))
+                .zip(skip_scan.as_ref().map(|m| m.column_position)),
         ) {
-            (_, Some(index)) => format!(
+            (_, Some(index), _) => format!(
                 "SEARCH {} USING COVERING INDEX {} ({}=?)",
                 eqp_display_name(table_ref),
                 index.name,
@@ -233,12 +251,39 @@ pub fn explain_query_plan(
                     .first()
                     .map_or_else(String::new, |c| c.name.clone())
             ),
-            (None, None) => format!("SCAN {}", eqp_display_name(table_ref)),
-            (Some(JoinAccess::Rowid(_)), None) => format!(
+            (None, None, Some((index, column_position))) => {
+                // Oracle sqlite3's own skip-scan EQP text, confirmed
+                // empirically (sqlite3 3.51.0): `SEARCH t USING INDEX
+                // idx (ANY(category) AND price=?)` -- one `ANY(col)`
+                // per unconstrained leading column, then `col=?` for
+                // the actually-probed column.
+                let parts: Vec<String> = index
+                    .columns
+                    .get(..column_position)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|c| format!("ANY({})", c.name))
+                    .chain(std::iter::once(format!(
+                        "{}=?",
+                        index
+                            .columns
+                            .get(column_position)
+                            .map_or_else(String::new, |c| c.name.clone())
+                    )))
+                    .collect();
+                format!(
+                    "SEARCH {} USING INDEX {} ({})",
+                    eqp_display_name(table_ref),
+                    index.name,
+                    parts.join(" AND ")
+                )
+            }
+            (None, None, None) => format!("SCAN {}", eqp_display_name(table_ref)),
+            (Some(JoinAccess::Rowid(_)), None, _) => format!(
                 "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
                 eqp_display_name(table_ref)
             ),
-            (Some(JoinAccess::UniqueIndex { index, .. }), None) => format!(
+            (Some(JoinAccess::UniqueIndex { index, .. }), None, _) => format!(
                 "SEARCH {} USING INDEX {} ({}=?)",
                 eqp_display_name(table_ref),
                 index.name,
