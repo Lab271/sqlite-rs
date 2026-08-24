@@ -37,6 +37,7 @@ pub use freelist::TrunkPage;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::header::JournalMode;
 use crate::vfs::{
@@ -80,7 +81,7 @@ const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
 /// working set is warm.
 struct PageCache {
     capacity: usize,
-    entries: HashMap<u32, (Vec<u8>, u64)>,
+    entries: HashMap<u32, (Rc<[u8]>, u64)>,
     tick: u64,
 }
 
@@ -98,14 +99,14 @@ impl PageCache {
         self.tick
     }
 
-    fn get(&mut self, page_num: u32) -> Option<&Vec<u8>> {
+    fn get(&mut self, page_num: u32) -> Option<&Rc<[u8]>> {
         let tick = self.next_tick();
         let entry = self.entries.get_mut(&page_num)?;
         entry.1 = tick;
         Some(&entry.0)
     }
 
-    fn insert(&mut self, page_num: u32, bytes: Vec<u8>) {
+    fn insert(&mut self, page_num: u32, bytes: Rc<[u8]>) {
         let tick = self.next_tick();
         self.entries.insert(page_num, (bytes, tick));
         if self.entries.len() > self.capacity {
@@ -653,7 +654,7 @@ impl Pager {
         // to hold a backfilled frame for page 1 — writing back a copy
         // read before that would silently discard the checkpoint's own
         // write.
-        let mut page1 = self.source.read_page(1)?;
+        let mut page1 = self.source.read_page(1)?.to_vec();
         let version_bytes = if mode == JournalMode::Wal {
             [2, 2]
         } else {
@@ -940,7 +941,7 @@ fn read_page(
     if let Some(page) = wal_pages.get(&page_num) {
         return Ok(page.clone());
     }
-    source.read_page(page_num)
+    source.read_page(page_num).map(|bytes| bytes.to_vec())
 }
 
 /// Reads and merges committed WAL frames from `path`'s adjacent `-wal`
@@ -988,18 +989,20 @@ fn read_wal_pages<V: Vfs>(
 }
 
 impl PageSource for Pager {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         if let Some(page) = self.dirty.get(&page_num) {
-            return Ok(page.clone());
+            return Ok(Rc::from(page.as_slice()));
         }
         if let Some(page) = self.wal_pages.get(&page_num) {
-            return Ok(page.clone());
+            return Ok(Rc::from(page.as_slice()));
         }
         if let Some(cached) = self.page_cache.borrow_mut().get(page_num) {
-            return Ok(cached.clone());
+            return Ok(Rc::clone(cached));
         }
         let bytes = self.source.read_page(page_num)?;
-        self.page_cache.borrow_mut().insert(page_num, bytes.clone());
+        self.page_cache
+            .borrow_mut()
+            .insert(page_num, Rc::clone(&bytes));
         Ok(bytes)
     }
 }
@@ -1012,7 +1015,7 @@ impl PageSource for Pager {
 /// both `TableCursor`'s read traversal and the write opcodes without
 /// duplicating page state.
 impl PageSource for std::cell::RefCell<Pager> {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         self.borrow().read_page(page_num)
     }
 }
@@ -1077,7 +1080,7 @@ mod tests {
         vfs.insert("/test.db-journal", journal_bytes);
 
         let pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
-        assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512].into());
         assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
     }
 
@@ -1111,7 +1114,7 @@ mod tests {
         vfs.insert("/test.db-journal", journal_bytes);
 
         let pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
-        assert_eq!(pager.read_page(2).unwrap(), original_page_2);
+        assert_eq!(pager.read_page(2).unwrap(), (original_page_2).into());
         assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
     }
 
@@ -1353,17 +1356,17 @@ mod tests {
 
         let page = pager.get_page_mut(2).unwrap();
         page.fill(9u8);
-        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512].into());
         // Untouched page is unaffected.
-        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512].into());
 
         pager.flush().unwrap();
 
-        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512].into());
 
         let reopened = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
-        assert_eq!(reopened.read_page(2).unwrap(), vec![9u8; 512]);
-        assert_eq!(reopened.read_page(1).unwrap(), vec![1u8; 512]);
+        assert_eq!(reopened.read_page(2).unwrap(), vec![9u8; 512].into());
+        assert_eq!(reopened.read_page(1).unwrap(), vec![1u8; 512].into());
     }
 
     /// #320: a page cached by an earlier `read_page` must not survive a
@@ -1377,40 +1380,40 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
 
         // Populate the cache with page 1's original bytes.
-        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512].into());
 
         pager.get_page_mut(1).unwrap().fill(9u8);
         pager.flush().unwrap();
 
-        assert_eq!(pager.read_page(1).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), vec![9u8; 512].into());
     }
 
     #[test]
     fn page_cache_hit_returns_the_same_bytes_as_the_original_read() {
         let mut cache = PageCache::new(2);
         assert_eq!(cache.get(1), None);
-        cache.insert(1, vec![1u8; 4]);
-        assert_eq!(cache.get(1), Some(&vec![1u8; 4]));
+        cache.insert(1, (vec![1u8; 4]).into());
+        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8; 4])));
     }
 
     #[test]
     fn page_cache_evicts_least_recently_used_at_capacity() {
         let mut cache = PageCache::new(2);
-        cache.insert(1, vec![1u8]);
-        cache.insert(2, vec![2u8]);
+        cache.insert(1, (vec![1u8]).into());
+        cache.insert(2, (vec![2u8]).into());
         // Touch page 1 so page 2 becomes the least-recently-used entry.
-        assert_eq!(cache.get(1), Some(&vec![1u8]));
-        cache.insert(3, vec![3u8]);
+        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8])));
+        cache.insert(3, Rc::from(vec![3u8]));
 
-        assert_eq!(cache.get(1), Some(&vec![1u8]));
+        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8])));
         assert_eq!(cache.get(2), None, "page 2 should have been evicted");
-        assert_eq!(cache.get(3), Some(&vec![3u8]));
+        assert_eq!(cache.get(3), Some(&Rc::from(vec![3u8])));
     }
 
     #[test]
     fn page_cache_invalidate_removes_the_entry() {
         let mut cache = PageCache::new(2);
-        cache.insert(1, vec![1u8]);
+        cache.insert(1, Rc::from(vec![1u8]));
         cache.invalidate(1);
         assert_eq!(cache.get(1), None);
     }
@@ -1421,7 +1424,7 @@ mod tests {
         vfs.insert("/test.db", vec![7u8; 512]);
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
         pager.flush().unwrap();
-        assert_eq!(pager.read_page(1).unwrap(), vec![7u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), Rc::from(vec![7u8; 512]));
     }
 
     /// #388: `PRAGMA journal_mode=WAL` creates a fresh `-wal`/`-shm` and
@@ -1524,7 +1527,7 @@ mod tests {
         pager.set_journal_mode(JournalMode::Wal).unwrap();
         pager.get_page_mut(2).unwrap().fill(9u8);
         pager.flush().unwrap();
-        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
 
         pager.set_journal_mode(JournalMode::Legacy).unwrap();
 
@@ -1532,7 +1535,7 @@ mod tests {
         assert!(!vfs.exists(Path::new("/test.db-shm")).unwrap());
         let page1 = pager.read_page(1).unwrap();
         assert_eq!(page1.get(18..20), Some(&[1u8, 1u8][..]));
-        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
     }
 
     /// #389: `flush` in WAL mode must append a WAL frame rather than
@@ -1576,7 +1579,7 @@ mod tests {
 
         // The writer's own connection sees its just-committed write
         // immediately, without re-claiming a reader slot.
-        assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
     }
 
     /// #389's "readers don't block writers, writers don't block readers,
@@ -1596,20 +1599,23 @@ mod tests {
 
         // Reader B opens before the commit below and must never see it.
         let reader_before = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
-        assert_eq!(reader_before.read_page(2).unwrap(), vec![2u8; 512]);
+        assert_eq!(
+            reader_before.read_page(2).unwrap(),
+            Rc::from(vec![2u8; 512])
+        );
 
         writer.get_page_mut(2).unwrap().fill(9u8);
         writer.flush().unwrap();
 
         assert_eq!(
             reader_before.read_page(2).unwrap(),
-            vec![2u8; 512],
+            Rc::from(vec![2u8; 512]),
             "a reader opened before the commit must keep its own snapshot"
         );
 
         // Reader C, opened fresh after the commit, must see the new data.
         let reader_after = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
-        assert_eq!(reader_after.read_page(2).unwrap(), vec![9u8; 512]);
+        assert_eq!(reader_after.read_page(2).unwrap(), Rc::from(vec![9u8; 512]));
     }
 
     /// #389: `rollback` in WAL mode must discard dirty pages without ever
@@ -1660,7 +1666,7 @@ mod tests {
         assert_eq!(allocated, 2);
         let new_header = pager.read_page(1).unwrap();
         assert_eq!(read_be_u32(&new_header, PAGE_COUNT_OFFSET).unwrap(), 2);
-        assert_eq!(pager.read_page(2).unwrap(), vec![0u8; 512]);
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![0u8; 512]));
     }
 
     /// Deallocating a page with no existing freelist makes it the sole
@@ -1788,8 +1794,8 @@ mod tests {
         vfs.insert("/test.db", contents);
 
         let pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
-        assert_eq!(pager.read_page(1).unwrap(), vec![1u8; 512]);
-        assert_eq!(pager.read_page(2).unwrap(), vec![2u8; 512]);
+        assert_eq!(pager.read_page(1).unwrap(), Rc::from(vec![1u8; 512]));
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![2u8; 512]));
     }
 
     mod fixtures {

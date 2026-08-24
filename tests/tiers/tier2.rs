@@ -142,7 +142,7 @@ fn t2_statement_atomicity() {
     drop(pager); // the statement "fails" before ever calling flush()
 
     let reopened = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
-    assert_eq!(reopened.read_page(1).unwrap(), original);
+    assert_eq!(reopened.read_page(1).unwrap(), original.into());
 }
 
 /// #172 — [`Pager::flush`] is the commit boundary: a transaction that
@@ -172,7 +172,10 @@ fn t2_journal_transactions_commit_and_rollback() {
     assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
     {
         let pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
-        assert_eq!(pager.read_page(2).unwrap(), vec![2u8; page_size as usize]);
+        assert_eq!(
+            pager.read_page(2).unwrap(),
+            vec![2u8; page_size as usize].into()
+        );
     }
 
     // Rollback half: simulate a crash between "journal synced" and "main
@@ -201,6 +204,6 @@ fn t2_journal_transactions_commit_and_rollback() {
     vfs.insert("/test.db-journal", journal_bytes);
 
     let recovered = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
-    assert_eq!(recovered.read_page(2).unwrap(), pre_image);
+    assert_eq!(recovered.read_page(2).unwrap(), pre_image.into());
     assert!(!vfs.exists(Path::new("/test.db-journal")).unwrap());
 }

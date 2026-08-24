@@ -240,7 +240,7 @@ fn concurrent_writer_is_refused_the_wal_write_lock() {
     pager.flush().unwrap();
     assert_eq!(
         pager.read_page(1).unwrap(),
-        vec![0xABu8; page_size as usize]
+        vec![0xABu8; page_size as usize].into()
     );
 }
 
@@ -280,7 +280,7 @@ fn our_wal_frame_recovers_through_stock_sqlite3() {
         u32::from_be_bytes([header[28], header[29], header[30], header[31]])
     };
     let snapshot: Vec<Vec<u8>> = (1..=page_count)
-        .map(|n| source.read_page(n).unwrap())
+        .map(|n| source.read_page(n).unwrap().to_vec())
         .collect();
 
     let status = Command::new(&oracle)
@@ -310,7 +310,7 @@ fn our_wal_frame_recovers_through_stock_sqlite3() {
     let changed_page = (1..=page_count)
         .find(|&n| {
             let page = source.read_page(n).unwrap();
-            page.windows(6).any(|w| w == b"after!") && page != snapshot[(n - 1) as usize]
+            page.windows(6).any(|w| w == b"after!") && *page != snapshot[(n - 1) as usize]
         })
         .expect("the UPDATE's new text must land on some page");
     let original_content = &snapshot[(changed_page - 1) as usize];

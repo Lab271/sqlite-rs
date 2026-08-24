@@ -6,6 +6,7 @@
 //! is (see the Makefile's qualified-subset gate comment).
 
 use std::path::Path;
+use std::rc::Rc;
 
 use thiserror::Error;
 
@@ -36,7 +37,7 @@ pub enum PageError {
 
 /// Reads page `page_num` from `file`, shared between [`VfsPageSource`] and
 /// [`WritablePageSource`].
-fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Vec<u8>, PageError> {
+fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Rc<[u8]>, PageError> {
     if page_num == 0 {
         return Err(PageError::InvalidPageNumber);
     }
@@ -56,14 +57,18 @@ fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Vec
             got: n,
         });
     }
-    Ok(buf)
+    Ok(Rc::from(buf))
 }
 
-/// A source of whole database pages, numbered from 1.
+/// A source of whole database pages, numbered from 1. Returns [`Rc<[u8]>`]
+/// rather than `Vec<u8>` so a cache hit (the common case once a page is
+/// warm — see `Pager`'s `page_cache`) is a refcount bump, not a copy; the
+/// b-tree read path (`src/btree.rs`'s `reassemble_payload`) leans on this
+/// to avoid a per-row `Vec` allocation for the non-overflow case (#467).
 pub trait PageSource {
     /// Reads page `page_num` (1-based) and returns exactly `page_size`
     /// bytes. `page_num == 0` or a short read is `Err`.
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError>;
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError>;
 }
 
 /// A [`PageSource`] backed by a [`VfsFile`] opened through a [`Vfs`].
@@ -86,7 +91,7 @@ impl VfsPageSource {
 }
 
 impl PageSource for VfsPageSource {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         read_page_at(self.file.as_ref(), self.page_size, page_num)
     }
 }
@@ -159,7 +164,7 @@ impl WritablePageSource {
 }
 
 impl PageSource for WritablePageSource {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         read_page_at(self.file.as_ref(), self.page_size, page_num)
     }
 }
@@ -169,7 +174,7 @@ impl PageSource for WritablePageSource {
 /// cloning the underlying file handle — `Rc` is cheap to clone, and the
 /// VM is single-threaded, so this never needs to be `Send`/`Sync`.
 impl PageSource for std::rc::Rc<dyn PageSource> {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         (**self).read_page(page_num)
     }
 }
@@ -182,7 +187,7 @@ impl PageSource for std::rc::Rc<dyn PageSource> {
 // compiler won't warn about a missing forward on a trait with only one
 // method.
 impl<T: PageSource + ?Sized> PageSource for &T {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         (**self).read_page(page_num)
     }
 }
