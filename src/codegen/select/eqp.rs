@@ -58,6 +58,18 @@ pub(super) fn table_binding_name(table_ref: &TableRef) -> String {
 /// actually executes; a query that also has a RIGHT JOIN keeps working
 /// via the ordinary (unseeked) fallback below since `on_expr` there
 /// won't resolve against these FROM-order-built `prior_bindings`.
+///
+/// #470's cost-model reordering of a pure `INNER`/`CROSS` chain *is*
+/// reflected here (unlike the RIGHT-JOIN case above): `execution_order`
+/// mirrors `join_order::plan_join_order`'s decision exactly, rows are
+/// emitted in that order, and each join's `ON` clause is associated
+/// with the execution level where every table it references is first
+/// fully bound (via `join_order::referenced_binding_indices`) rather
+/// than assumed adjacent -- matching `compile_select_joined`'s own
+/// `LevelCheck` placement for a reordered chain. A level with more than
+/// one such check (a multi-table `ON` chain landing on the same level)
+/// falls back to reporting a plain `SCAN`, same as
+/// `compile_join_level_traverse`'s single-check-only seek optimization.
 pub fn explain_query_plan(
     select: &Select,
     schemas: &[TableSchema],
@@ -95,18 +107,84 @@ pub fn explain_query_plan(
                 .unwrap_or_default(),
         })
         .collect();
+    let n = bindings.len();
 
-    let mut rows = Vec::with_capacity(bindings.len());
-    for (level, (table_ref, binding)) in table_refs.iter().zip(bindings.iter()).enumerate() {
-        let on_expr = level
-            .checked_sub(1)
-            .and_then(|i| from.joins.get(i))
-            .and_then(|j| j.constraint.as_ref())
-            .and_then(|c| match c {
-                JoinConstraint::On(e) => Some(e),
-                JoinConstraint::Using(_) => None,
-            });
-        let prior_bindings = bindings.get(..level).unwrap_or(&[]);
+    let reorder = super::join_order::is_reorderable_inner_chain(from).then(|| {
+        let costs = super::join_order::scan_costs(schemas, stats_by_table);
+        super::join_order::plan_join_order(&costs)
+    });
+    let execution_order: Vec<usize> = reorder.clone().unwrap_or_else(|| (0..n).collect());
+    let mut pos_of = vec![0usize; n];
+    for (pos, &orig) in execution_order.iter().enumerate() {
+        if let Some(slot) = pos_of.get_mut(orig) {
+            *slot = pos;
+        }
+    }
+    // Only populated when `reorder` fired: `level_joins[level]` lists
+    // every join index whose `ON` clause is checkable once execution
+    // reaches `level` (i.e. every table it references has
+    // `pos_of[..] <= level`) -- mirrors `compile_select_joined_scan`'s
+    // reordered-chain `LevelCheck` placement.
+    let mut level_joins: Vec<Vec<usize>> = vec![Vec::new(); n];
+    if reorder.is_some() {
+        for (j, join) in from.joins.iter().enumerate() {
+            let right_idx = j.saturating_add(1);
+            let on_expr = match &join.constraint {
+                Some(JoinConstraint::On(e)) => Some(e),
+                _ => None,
+            };
+            let level = match on_expr {
+                Some(e) => super::join_order::referenced_binding_indices(e, &bindings)
+                    .into_iter()
+                    .chain(std::iter::once(right_idx))
+                    .filter_map(|i| pos_of.get(i).copied())
+                    .max()
+                    .unwrap_or(0),
+                None => pos_of.get(right_idx).copied().unwrap_or(0),
+            };
+            if let Some(slot) = level_joins.get_mut(level) {
+                slot.push(j);
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(n);
+    for (level, &orig) in execution_order.iter().enumerate() {
+        let Some(&table_ref) = table_refs.get(orig) else {
+            continue;
+        };
+        let Some(binding) = bindings.get(orig) else {
+            continue;
+        };
+        let on_expr = if reorder.is_some() {
+            match level_joins.get(level).map(Vec::as_slice) {
+                Some([j]) => from.joins.get(*j).and_then(|join| match &join.constraint {
+                    Some(JoinConstraint::On(e)) => Some(e),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        } else {
+            level
+                .checked_sub(1)
+                .and_then(|i| from.joins.get(i))
+                .and_then(|j| j.constraint.as_ref())
+                .and_then(|c| match c {
+                    JoinConstraint::On(e) => Some(e),
+                    JoinConstraint::Using(_) => None,
+                })
+        };
+        let prior_bindings: Vec<TableBinding> = if reorder.is_some() {
+            bindings
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| pos_of.get(i).is_some_and(|&p| p < level))
+                .map(|(_, b)| b.clone())
+                .collect()
+        } else {
+            bindings.get(..level).unwrap_or(&[]).to_vec()
+        };
+        let prior_bindings = prior_bindings.as_slice();
         let access = if level == 0 {
             // The outermost table has no `ON` clause to seek against --
             // an equality `WHERE` predicate against its rowid still

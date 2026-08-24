@@ -161,6 +161,7 @@ mod eqp;
 mod index_scan;
 pub(super) mod join_access;
 mod join_full;
+mod join_order;
 mod joins;
 mod limit_scan;
 mod order_by;

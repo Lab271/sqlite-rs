@@ -217,3 +217,54 @@ fn cost_model_can_veto_expensive_index_seek() {
         "got: {plan_after}"
     );
 }
+
+/// #470 (spec 011): without `ANALYZE`, a plain `INNER JOIN` between two
+/// full-scan tables still compiles FROM-clause order unchanged (t1
+/// outermost) -- the #461 "stats-free behavior is unaffected" guarantee
+/// extended to join order.
+#[test]
+fn join_order_unchanged_without_analyze() {
+    let Some(db) = seed_db("join-order-no-stats") else {
+        return skip_no_oracle("join_order_unchanged_without_analyze");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3), (4), (5)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1)");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t1.a = t2.x",
+    );
+    assert_eq!(plan, "0|0|0|SCAN t1\n1|0|0|SCAN t2\n", "got: {plan}");
+}
+
+/// #470/#462 (spec 011): once `ANALYZE` has recorded that `t1` has far
+/// more rows than `t2`, a plain `INNER JOIN` between the two full-scan
+/// tables is reordered to scan the smaller table (`t2`) outermost,
+/// instead of always compiling FROM-clause order -- and the join still
+/// returns the same rows as the un-reordered plan (oracle-equivalent
+/// result set, only the scan order changes).
+#[test]
+fn join_order_reorders_by_analyze_row_counts() {
+    let Some(db) = seed_db("join-order-analyze") else {
+        return skip_no_oracle("join_order_reorders_by_analyze_row_counts");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3), (4), (5)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (1)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t1.a = t2.x",
+    );
+    assert_eq!(plan, "0|0|0|SCAN t2\n1|0|0|SCAN t1\n", "got: {plan}");
+
+    let rows = run_query(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a",
+    );
+    assert_eq!(rows, "1|1\n", "got: {rows}");
+}

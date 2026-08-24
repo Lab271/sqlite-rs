@@ -267,6 +267,18 @@ where
         constraints.push(constraint);
     }
 
+    // #470/#462 (spec 011): a chain made entirely of `INNER`/`CROSS`
+    // joins (already-resolved `NATURAL`/`USING` included) is safe to
+    // execute in any order — reorder it by the #461 cost model's
+    // estimated row counts (smallest table outermost) rather than
+    // always compiling FROM-clause order. `LEFT`/`RIGHT`/`FULL` chains
+    // (and `right_step` below) keep their original order unconditionally,
+    // since reordering either would change the result set.
+    let reorder_plan = super::join_order::is_reorderable_inner_chain(from).then(|| {
+        let costs = super::join_order::scan_costs(schemas, stats_by_table);
+        super::join_order::plan_join_order(&costs)
+    });
+
     // Determine execution order: `working_order[exec_pos]` is the
     // original FROM-clause index executed at that recursion level.
     // Every `Inner`/`Left`/`Cross` join (including already-resolved
@@ -308,8 +320,13 @@ where
                 is_left: join.op == JoinOp::Left,
                 join_index: j,
             });
-            working_order.push(new_table);
+            if reorder_plan.is_none() {
+                working_order.push(new_table);
+            }
         }
+    }
+    if let Some(order) = &reorder_plan {
+        working_order = order.clone();
     }
 
     // `pos_of[original_index]` is the execution-order recursion level
@@ -363,8 +380,27 @@ where
     // this level owns an outer-join "matched" register.
     let mut levels: Vec<LevelPlan> = vec![LevelPlan::default(); n];
     for step in &normal_steps {
-        let pos = pos_of.get(step.table).copied().unwrap_or(0);
         let constraint = constraints.get(step.join_index).cloned().flatten();
+        // Reordered chains can't rely on a join's constraint being
+        // checkable at its own (originally-adjacent) table's level
+        // anymore — place it at the first execution level where every
+        // table the constraint actually reads (plus the joined table
+        // itself) is already bound, per
+        // `join_order::referenced_binding_indices`'s doc comment.
+        // Unreordered chains keep the original, narrower placement
+        // unchanged.
+        let pos = match &reorder_plan {
+            Some(_) => constraint
+                .as_ref()
+                .map(|c| super::join_order::referenced_binding_indices(c, &bindings))
+                .unwrap_or_default()
+                .into_iter()
+                .chain(std::iter::once(step.table))
+                .filter_map(|i| pos_of.get(i).copied())
+                .max()
+                .unwrap_or(0),
+            None => pos_of.get(step.table).copied().unwrap_or(0),
+        };
         if let Some(plan) = levels.get_mut(pos) {
             plan.checks.push(LevelCheck {
                 constraint,

@@ -218,7 +218,6 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 | FULL/RESTART/TRUNCATE checkpoint | PASSIVE sufficient for most apps |
 | Auto-checkpoint | Manual checkpoint works |
 | busy_handler/busy_timeout | Concurrency tuning, not core |
-| Join ordering heuristics | Optimization, not correctness |
 | group_concat | Convenience aggregate |
 | INTERSECT/EXCEPT | Rare set operations |
 
@@ -254,7 +253,6 @@ INSERT/UPDATE/DELETE on ordinary rowid tables, basic constraints, rollback-journ
 | FULL/RESTART/TRUNCATE checkpoint | Advanced checkpoint modes |
 | Auto-checkpoint | Automatic WAL checkpoint |
 | busy_handler/busy_timeout | Concurrency tuning |
-| Join ordering heuristics | Query optimization |
 | group_concat | Aggregate function |
 | INTERSECT/EXCEPT | Set operations |
 
