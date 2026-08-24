@@ -242,6 +242,20 @@ fn with_clause_cte_referenced_from_union_all_arms_matches_oracle() {
     );
 }
 
+/// Same shape as above, plus a trailing `ORDER BY`/`LIMIT` on the
+/// compound (#484) — confirms the shared sorter composes with CTE
+/// per-arm materialization.
+#[test]
+fn with_clause_cte_referenced_from_union_all_arms_with_order_by_matches_oracle() {
+    let db = cte_fixture_db("union_all_arms_order_by");
+    assert_matches_oracle(
+        &db,
+        "WITH cte AS (SELECT id, x FROM t) \
+         SELECT * FROM cte UNION ALL SELECT * FROM cte ORDER BY id LIMIT 3",
+        "with_clause_cte_referenced_from_union_all_arms_with_order_by_matches_oracle",
+    );
+}
+
 /// Same shape as above but with a plain `UNION` (dedup) and three arms,
 /// exercising the dedup ephemeral index alongside per-arm materialization.
 #[test]
