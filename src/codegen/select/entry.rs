@@ -33,6 +33,27 @@ pub fn compile_select_with_catalog(
     schema: &TableSchema,
     catalog: &[TableSchema],
 ) -> Result<Program, CodegenError> {
+    compile_select_with_catalog_and_stats(
+        select,
+        schema,
+        catalog,
+        &crate::planner::Stats::default(),
+    )
+}
+
+/// [`compile_select_with_catalog`], plus `stats` — this table's
+/// `ANALYZE`-derived [`crate::planner::Stats`] (#485), threaded down to
+/// [`compile_direct_scan`]'s skip-scan dispatch. `compile_select_with_catalog`
+/// is the common case (no stats available/needed, e.g. every existing
+/// caller before #485) and just calls through with `Stats::default()`
+/// — the same "no ANALYZE history behaves exactly as before" guarantee
+/// this module's stats consumers already give.
+pub fn compile_select_with_catalog_and_stats(
+    select: &Select,
+    schema: &TableSchema,
+    catalog: &[TableSchema],
+    stats: &crate::planner::Stats,
+) -> Result<Program, CodegenError> {
     let Some(from) = &select.from else {
         return compile_select_no_from(select, catalog);
     };
@@ -86,7 +107,7 @@ pub fn compile_select_with_catalog(
         Ok(())
     };
     compile_select_scan(
-        &mut em, &mut reg, select, schema, cursors, end_label, catalog, &mut sink,
+        &mut em, &mut reg, select, schema, cursors, end_label, catalog, stats, &mut sink,
     )?;
 
     em.place(end_label);
@@ -180,6 +201,7 @@ pub(crate) fn compile_select_scan<F>(
     cursors: ScanCursors,
     end_label: Label,
     catalog: &[TableSchema],
+    stats: &crate::planner::Stats,
     sink: &mut F,
 ) -> Result<(), CodegenError>
 where
@@ -242,7 +264,9 @@ where
 
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
-        compile_direct_scan(em, reg, select, schema, cursors, end_label, catalog, sink)
+        compile_direct_scan(
+            em, reg, select, schema, cursors, end_label, catalog, stats, sink,
+        )
     } else if try_compile_index_ordered_scan(
         em,
         reg,
@@ -589,7 +613,15 @@ pub fn compile_select_compound(
         }
         let arm_end = em.new_label();
         compile_select_scan(
-            em, reg, select, schema, cursors, arm_end, catalog, &mut sink,
+            em,
+            reg,
+            select,
+            schema,
+            cursors,
+            arm_end,
+            catalog,
+            &crate::planner::Stats::default(),
+            &mut sink,
         )?;
         em.place(arm_end);
         Ok(())

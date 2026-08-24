@@ -13,9 +13,9 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_select_compound, compile_select_joined, compile_select_with_catalog, expand_views,
-    expand_with_clause, explain_query_plan, resolve_from_table_schema, resolve_views, CodegenError,
-    EqpRow,
+    compile_select_compound, compile_select_joined, compile_select_with_catalog,
+    compile_select_with_catalog_and_stats, expand_views, expand_with_clause, explain_query_plan,
+    resolve_from_table_schema, resolve_views, CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
@@ -118,7 +118,12 @@ pub(crate) fn compile_select_program(
         compile_select_compound(select, &schema, &arm_schemas, schemas)
             .map_err(|e| e.to_string())?
     } else if from.joins.is_empty() {
-        compile_select_with_catalog(select, &schema, schemas).map_err(|e| e.to_string())?
+        let stats = stats_by_table
+            .get(&schema.name)
+            .cloned()
+            .unwrap_or_default();
+        compile_select_with_catalog_and_stats(select, &schema, schemas, &stats)
+            .map_err(|e| e.to_string())?
     } else {
         let mut joined_schemas = vec![schema];
         for join in &from.joins {

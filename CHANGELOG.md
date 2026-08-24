@@ -50,6 +50,28 @@ read support for index-mode ephemeral cursors, so a cache entry's key
 (the probe value) and its cached result no longer have to be the same
 registers (`src/vdbe/cursor.rs`).
 
+feat(planner): skip-scan for non-leading composite-index columns (#485)
+— `WHERE b = ?` against a composite index `(a, b)` (leading column `a`
+unconstrained) now uses the index instead of a full table scan,
+whenever `a`'s `ANALYZE`-derived `avg_eq` clears the oracle-confirmed
+skip-scan threshold (empirically measured against sqlite3 3.51.0: `avg_eq
+>= 18`, matching sqlite.org/optoverview.html's documented "~18
+duplicates"). `is_skip_scan_worthwhile` (`src/planner.rs`) mirrors
+oracle's own decision; `try_compile_skip_scan_index`
+(`src/codegen/select/limit_scan.rs`) walks the whole index
+(`IdxRewind`/`IdxNext`), checking the constrained column on each
+narrower index entry and `IdxRowid`+`SeekRowid`-ing into the table only
+for a match; `eqp.rs` reports the same oracle-verbatim EQP text
+(`SEARCH t USING INDEX idx (ANY(category) AND price=?)`). Unlike real
+SQLite's skip-scan (a genuine per-distinct-leading-value binary seek),
+`IndexCursor::seek` in this codebase is a documented Tier 0 linear scan
+— this walks every index entry rather than truly skipping past a large
+group, so the measured win (`tests/performance/skip_scan.rs`, `make
+bench-skip-scan`: ~1.24x, 10.04ms → 8.12ms at 200K rows/3 leading
+values) comes from narrower index-row decode and selective table
+lookups, not sub-linear seeking — reported honestly rather than as an
+oracle-parity ratio. spend: ~1.2M token budget, matched estimate.
+
 perf: zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
 — follow-up to #467, which left `IndexRow::payload` (src/btree/index.rs)
 as an owned `Vec<u8>` out of scope. `IndexFrame.page` is now `Rc<[u8]>`

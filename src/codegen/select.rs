@@ -167,7 +167,10 @@ mod limit_scan;
 mod order_by;
 mod projection;
 
-pub use entry::{compile_select, compile_select_compound, compile_select_with_catalog};
+pub use entry::{
+    compile_select, compile_select_compound, compile_select_with_catalog,
+    compile_select_with_catalog_and_stats,
+};
 pub use eqp::{explain_query_plan, EqpRow};
 pub use joins::compile_select_joined;
 

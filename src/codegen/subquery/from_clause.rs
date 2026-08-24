@@ -286,7 +286,15 @@ pub(crate) fn materialize_from_subquery(
             }
         }
         compile_select_scan(
-            em, reg, subquery, schema, cursors, end_label, catalog, &mut sink,
+            em,
+            reg,
+            subquery,
+            schema,
+            cursors,
+            end_label,
+            catalog,
+            &crate::planner::Stats::default(),
+            &mut sink,
         )?;
     } else {
         let cursor_base = reg.alloc_cursor();

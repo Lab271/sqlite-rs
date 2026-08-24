@@ -114,6 +114,28 @@ pub fn estimate_scan_cost(stats: &Stats) -> PlanCost {
     }
 }
 
+/// The minimum leading-column `avg_eq` (average rows sharing one
+/// leading-column value) for skip-scan to be considered worthwhile —
+/// #485. Mirrors oracle sqlite3's documented "about 18 or more
+/// duplicates" threshold (sqlite.org/optoverview.html's Skip-Scan
+/// section), confirmed empirically against sqlite3 3.51.0: `avg_eq =
+/// 19` on a composite index's leading column picks a skip-scan plan
+/// (`SEARCH t USING INDEX idx (ANY(a) AND b=?)`), `avg_eq = 17` falls
+/// back to a full scan.
+const SKIP_SCAN_MIN_AVG_EQ: u64 = 18;
+
+/// Whether a skip-scan over `index_name` (probing a non-leading column
+/// while the leading column is unconstrained) is worth attempting —
+/// #485. `false` whenever `ANALYZE` has never recorded stats for this
+/// index, matching oracle sqlite3's behavior of never choosing
+/// skip-scan without `ANALYZE` history (its own no-stats default guess
+/// of 10 duplicates sits below [`SKIP_SCAN_MIN_AVG_EQ`]).
+pub fn is_skip_scan_worthwhile(index_name: &str, stats: &Stats) -> bool {
+    stats
+        .index_stats(index_name)
+        .is_some_and(|(_rows, avg_eq)| avg_eq >= SKIP_SCAN_MIN_AVG_EQ)
+}
+
 /// Estimates the cost of an equality probe against `index_name`: the
 /// index's recorded `avg_eq` (average rows sharing one key value,
 /// floored at 1 since even a matching probe touches at least one row),
@@ -278,5 +300,30 @@ mod tests {
     fn malformed_stat_text_is_skipped_not_a_hard_error() {
         let stats = Stats::from_stat1_rows(vec![(None, "not-a-number".to_string())]);
         assert_eq!(stats.table_rows(), None);
+    }
+
+    /// #485: mirrors oracle sqlite3 3.51.0's empirically-confirmed
+    /// skip-scan threshold — a leading-column `avg_eq` of 19 picks
+    /// skip-scan, 17 does not (`SKIP_SCAN_MIN_AVG_EQ = 18`).
+    #[test]
+    fn skip_scan_worthwhile_matches_oracle_threshold() {
+        let above = Stats::from_stat1_rows(vec![(Some("idx".to_string()), "20001 19".to_string())]);
+        assert!(is_skip_scan_worthwhile("idx", &above));
+
+        let below = Stats::from_stat1_rows(vec![(Some("idx".to_string()), "20001 17".to_string())]);
+        assert!(!is_skip_scan_worthwhile("idx", &below));
+
+        let at_threshold =
+            Stats::from_stat1_rows(vec![(Some("idx".to_string()), "20001 18".to_string())]);
+        assert!(is_skip_scan_worthwhile("idx", &at_threshold));
+    }
+
+    /// #485: without `ANALYZE` having ever recorded stats for the
+    /// index, skip-scan is never chosen — matches oracle's behavior of
+    /// never picking skip-scan absent `ANALYZE` history.
+    #[test]
+    fn skip_scan_never_worthwhile_without_analyze_stats() {
+        let stats = Stats::default();
+        assert!(!is_skip_scan_worthwhile("idx", &stats));
     }
 }
