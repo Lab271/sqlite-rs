@@ -2,8 +2,11 @@ use super::aggregate::{
     compile_grouped_scan, select_has_aggregate, try_compile_index_ordered_group_by,
 };
 use super::index_scan::try_compile_index_ordered_scan;
-use super::limit_scan::{compile_direct_scan, compile_sorted_scan};
-use super::order_by::resolve_order_by;
+use super::limit_scan::{
+    compile_direct_scan, compile_limit_setup, compile_sorted_scan, emit_limit_guard,
+    emit_offset_guard,
+};
+use super::order_by::{output_column_names, resolve_order_by, OrderByTarget};
 use super::projection::{compile_row_values, emit_dedup_check, result_columns};
 use super::*;
 use crate::codegen::index_maintenance::valid_table_root_page;
@@ -392,13 +395,43 @@ pub fn compile_select_compound(
                 .to_string(),
         });
     }
-    if !first.order_by.is_empty() || first.limit.is_some() {
-        return Err(CodegenError::Unsupported {
-            reason: "ORDER BY/LIMIT on a UNION compound SELECT is not yet supported".to_string(),
-        });
-    }
 
     let expected = select_result_column_count(first, first_schema);
+    // `first.order_by`/`first.limit` apply to the whole compound, not
+    // any individual arm (#484) — resolved against a synthetic schema
+    // naming the compound's own output columns (the first arm's
+    // names/aliases), since only the outermost select-stmt carries a
+    // trailing ORDER BY/LIMIT and its terms bind to the compound's
+    // result columns, never to any arm's table columns.
+    let output_schema = TableSchema {
+        name: String::new(),
+        root_page: 0,
+        columns: output_column_names(first, first_schema),
+        without_rowid: false,
+        strict: false,
+        column_types: vec![String::new(); expected],
+        is_virtual: false,
+        sql: String::new(),
+        indexes: Vec::new(),
+    };
+    let order_by_plans = resolve_order_by(first, &output_schema)?;
+    // A compound's ORDER BY term must be an ordinal position or a bare
+    // output column name/alias — real SQLite rejects any other
+    // expression here ("1st ORDER BY term does not match any column in
+    // the result set"), even one that only references output column
+    // names (`ORDER BY a+1`), since a compound statement has no table
+    // scope for expression evaluation once its arms are combined.
+    if order_by_plans
+        .iter()
+        .any(|plan| matches!(plan.target, OrderByTarget::Expr(_)))
+    {
+        return Err(CodegenError::Unsupported {
+            reason: "ORDER BY on a UNION compound SELECT only supports an output column name \
+                     or ordinal position, not an arbitrary expression"
+                .to_string(),
+        });
+    }
+    let needs_sort = !order_by_plans.is_empty();
     let mut arm_selects = Vec::with_capacity(first.compound.len());
     for (arm, arm_schema) in first.compound.iter().zip(arm_schemas) {
         if arm.from.as_ref().is_some_and(|from| !from.joins.is_empty()) {
@@ -418,8 +451,12 @@ pub fn compile_select_compound(
     // One cursor block per arm (`ScanCursors::for_arm`, 4 cursors
     // each) — the shared dedup cursor sits right past the last arm's
     // block so it never collides with any arm's own table/sort/pseudo/
-    // distinct cursors.
+    // distinct cursors. The whole-compound sorter (only opened when
+    // `needs_sort`) and its pseudo-cursor (for reading a sorted row
+    // back out in pass 2) follow right after.
     let dedup_cursor = ScanCursors::after_arms(arm_schemas.len().saturating_add(1));
+    let sort_cursor = dedup_cursor.saturating_add(1);
+    let pseudo_cursor = dedup_cursor.saturating_add(2);
 
     let mut em = Emitter::new();
     let mut reg = RegAlloc::new();
@@ -433,14 +470,92 @@ pub fn compile_select_compound(
         em.emit(Instruction::new(Opcode::OpenEphemeral, dedup_cursor, 0, 0));
     }
 
-    let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, reg_first: i32, count: i32| {
+    let limit_state = match &first.limit {
+        Some(_) => compile_limit_setup(
+            &mut em,
+            &mut reg,
+            &Scope::single(&output_schema, pseudo_cursor),
+            first,
+        )?,
+        None => None,
+    };
+    // Single shared jump target for "the compound is done producing
+    // rows" — reached when the sorter's pass 2 runs dry, or when LIMIT
+    // exhausts its budget (in either the sorted or the direct-emit
+    // path below). Always placed just before `Halt`, so it's harmless
+    // to allocate even when neither path ever jumps to it.
+    let end_label = em.new_label();
+
+    let sorter_open_addr = if needs_sort {
+        let sorter_open = Instruction::with_p4(Opcode::SorterOpen, sort_cursor, 0, 0, P4::None);
+        Some(em.emit(sorter_open))
+    } else {
+        None
+    };
+    let mut sort_keys_patched = false;
+
+    let mut sink = |em: &mut Emitter, reg: &mut RegAlloc, reg_first: i32, count: i32| {
+        let mut emit_row = |em: &mut Emitter, reg: &mut RegAlloc| -> Result<(), CodegenError> {
+            if needs_sort {
+                // Buffer this row's already-projected tuple into the
+                // shared sorter — every ORDER BY term is a bare output
+                // column/ordinal (`OrderByTarget::Column`, enforced
+                // above), so its sort key is just that column's own
+                // position within the tuple, no re-evaluation needed.
+                if let (false, Some(addr)) = (sort_keys_patched, sorter_open_addr) {
+                    // Every `plan.target` is `OrderByTarget::Column` here
+                    // — `OrderByTarget::Expr` was already rejected above
+                    // — so `0` is never actually reached.
+                    let computed_keys = order_by_plans
+                        .iter()
+                        .map(|plan| {
+                            let index = match &plan.target {
+                                OrderByTarget::Column(index) => *index,
+                                OrderByTarget::Expr(_) => 0,
+                            };
+                            SortKeyColumn {
+                                index,
+                                descending: plan.descending,
+                                collation: plan.collation,
+                                nulls_first: plan.nulls_first,
+                            }
+                        })
+                        .collect();
+                    em.patch_p4(addr, P4::SortKey(computed_keys));
+                    sort_keys_patched = true;
+                }
+                let record_reg = reg.alloc();
+                em.emit(Instruction::new(
+                    Opcode::MakeRecord,
+                    reg_first,
+                    count,
+                    record_reg,
+                ));
+                em.emit(Instruction::new(
+                    Opcode::SorterInsert,
+                    sort_cursor,
+                    record_reg,
+                    0,
+                ));
+            } else if let Some(limit) = &limit_state {
+                let row_skip = em.new_label();
+                emit_offset_guard(em, limit, row_skip);
+                emit_limit_guard(em, limit, end_label);
+                em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+                em.place(row_skip);
+            } else {
+                em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+            }
+            Ok(())
+        };
+
         if has_union {
             let skip = em.new_label();
             emit_dedup_check(em, dedup_cursor, reg_first, count, skip);
-            em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+            emit_row(em, reg)?;
             em.place(skip);
         } else {
-            em.emit(Instruction::new(Opcode::ResultRow, reg_first, count, 0));
+            emit_row(em, reg)?;
         }
         Ok(())
     };
@@ -480,7 +595,17 @@ pub fn compile_select_compound(
         Ok(())
     };
 
-    compile_arm(&mut em, &mut reg, 0, first, first_schema)?;
+    // `first`'s own `order_by`/`limit` belong to the whole compound
+    // (already consumed above via `order_by_plans`/`limit_state`), not
+    // to arm 0's own scan — strip them the same way `arm_as_select`
+    // does for every other arm, or arm 0 would additionally sort/limit
+    // itself before ever reaching the compound-level sorter.
+    let first_for_scan = Select {
+        order_by: Vec::new(),
+        limit: None,
+        ..first.clone()
+    };
+    compile_arm(&mut em, &mut reg, 0, &first_for_scan, first_schema)?;
     for (i, (arm_select, arm_schema)) in arm_selects.iter().zip(arm_schemas).enumerate() {
         compile_arm(
             &mut em,
@@ -491,6 +616,54 @@ pub fn compile_select_compound(
         )?;
     }
 
+    if needs_sort {
+        let sort_addr = em.emit(Instruction::new(Opcode::SorterSort, sort_cursor, 0, 0));
+        em.patch_p2(sort_addr, end_label);
+
+        let sorted_loop = em.new_label();
+        em.place(sorted_loop);
+        let sorter_data_reg = reg.alloc();
+        em.emit(Instruction::new(
+            Opcode::SorterData,
+            sort_cursor,
+            sorter_data_reg,
+            0,
+        ));
+        em.emit(Instruction::new(
+            Opcode::OpenPseudo,
+            pseudo_cursor,
+            sorter_data_reg,
+            0,
+        ));
+
+        let row_skip = em.new_label();
+        if let Some(limit) = &limit_state {
+            emit_offset_guard(&mut em, limit, row_skip);
+            emit_limit_guard(&mut em, limit, end_label);
+        }
+        let out_first = reg.peek();
+        for i in 0..expected {
+            let r = reg.alloc();
+            em.emit(Instruction::new(
+                Opcode::Column,
+                pseudo_cursor,
+                i32::try_from(i).unwrap_or(0),
+                r,
+            ));
+        }
+        em.emit(Instruction::new(
+            Opcode::ResultRow,
+            out_first,
+            i32::try_from(expected).unwrap_or(0),
+            0,
+        ));
+
+        em.place(row_skip);
+        let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, sort_cursor, 0, 0));
+        em.patch_p2(sorted_next, sorted_loop);
+    }
+
+    em.place(end_label);
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     Ok(em.finish())
 }

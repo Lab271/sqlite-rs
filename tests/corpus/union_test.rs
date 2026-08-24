@@ -328,21 +328,78 @@ fn union_does_not_coerce_between_mismatched_arm_types() {
 /// rejects it outright) — pins that it fails cleanly rather than
 /// silently sorting only the last arm or being ignored.
 #[test]
-fn union_with_trailing_order_by_is_rejected_cleanly() {
+fn union_with_trailing_order_by_matches_oracle() {
     let db = union_fixture_db("order_by");
-    let output = run_query(
+    let output = run_query_ok(
         &db,
         "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC",
     );
+    assert_eq!(output, "4\n3\n2\n1\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC",
+        "union_with_trailing_order_by_matches_oracle",
+    );
+}
+
+#[test]
+fn union_all_with_order_by_and_limit_matches_oracle() {
+    let db = union_fixture_db("order_by_limit");
+    let output = run_query_ok(
+        &db,
+        "SELECT a FROM t1 UNION ALL SELECT b FROM t2 ORDER BY a LIMIT 2",
+    );
+    assert_eq!(output, "1\n2\n");
+    assert_matches_oracle(
+        &db,
+        "SELECT a FROM t1 UNION ALL SELECT b FROM t2 ORDER BY a LIMIT 2",
+        "union_all_with_order_by_and_limit_matches_oracle",
+    );
+}
+
+#[test]
+fn union_with_order_by_ordinal_and_limit_offset_matches_oracle() {
+    let db = union_fixture_db("order_by_ordinal");
+    let sql = "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY 1 LIMIT 2 OFFSET 1";
+    let output = run_query_ok(&db, sql);
+    assert_eq!(output, "2\n3\n");
+    assert_matches_oracle(
+        &db,
+        sql,
+        "union_with_order_by_ordinal_and_limit_offset_matches_oracle",
+    );
+}
+
+/// A compound-level `LIMIT` with no `ORDER BY` still bounds the
+/// dedup'd/concatenated result, without needing the shared sorter.
+#[test]
+fn union_all_with_limit_only_matches_oracle() {
+    let db = union_fixture_db("limit_only");
+    let sql = "SELECT a FROM t1 UNION ALL SELECT b FROM t2 LIMIT 3";
+    let output = run_query_ok(&db, sql);
+    assert_eq!(output, "1\n2\n3\n");
+    assert_matches_oracle(&db, sql, "union_all_with_limit_only_matches_oracle");
+}
+
+/// An `ORDER BY` term that's a genuine expression (not a bare output
+/// column name/alias or an ordinal) is rejected — real SQLite rejects
+/// this too ("1st ORDER BY term does not match any column in the
+/// result set"), even when the expression only references an output
+/// column name, since a compound statement has no table scope left
+/// once its arms are combined.
+#[test]
+fn union_with_order_by_expression_is_rejected_cleanly() {
+    let db = union_fixture_db("order_by_expr");
+    let output = run_query(&db, "SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY -a");
     assert!(
         !output.status.success(),
-        "expected ORDER BY on a UNION compound to be rejected, got success: {}",
+        "expected an ORDER BY expression on a UNION compound to be rejected, got success: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ORDER BY/LIMIT on a UNION compound SELECT is not yet supported"),
-        "expected the documented ORDER BY/LIMIT rejection, got: {stderr}"
+        stderr.contains("only supports an output column name or ordinal position"),
+        "expected the documented ORDER BY expression rejection, got: {stderr}"
     );
 }
 

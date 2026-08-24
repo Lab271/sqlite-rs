@@ -8,6 +8,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 V7 phase 1 in progress (targets 0.18.0 on close):
 
+feat: `ORDER BY`/`LIMIT` on a compound (`UNION`/`UNION ALL`) `SELECT`
+(#484) — `compile_select_compound` previously rejected any top-level
+`ORDER BY`/`LIMIT` trailing a compound statement. Every arm's projected
+rows now feed a shared sorter (reusing the sorter opcodes
+`compile_sorted_scan` already uses for a single-table `ORDER BY`)
+before `LIMIT`/`OFFSET` and final `ResultRow` emission; a `LIMIT` with
+no `ORDER BY` skips the sorter entirely, reusing the simpler
+counter-based guards `compile_direct_scan` uses. An `ORDER BY` term
+must be an output column name/alias or an ordinal position — matching
+real SQLite, which rejects any other expression here even when it only
+references an output column name. Refs: #484.
+
 fix: CTE referenced from more than one arm of a compound `SELECT` (#424)
 — `compile_select_compound`'s per-arm codegen unconditionally
 `OpenRead`'d a resolved-table root page, ignoring

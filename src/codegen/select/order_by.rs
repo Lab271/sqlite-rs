@@ -73,6 +73,27 @@ pub(super) const SYNTHETIC_SPAN: Span = Span {
     len: 0,
 };
 
+/// The compound `SELECT`'s own output column names, in projection
+/// order — an alias when the result column has one, else (for a bare
+/// column reference) that column's name, else SQLite's positional
+/// `columnN` fallback. Used to build the synthetic [`TableSchema`]
+/// [`resolve_order_by`] resolves a compound's trailing `ORDER BY`
+/// against, since a compound's `ORDER BY` binds to its own result
+/// columns (only the first arm's names are visible), never to any
+/// arm's underlying table columns.
+pub(super) fn output_column_names(select: &Select, schema: &TableSchema) -> Vec<String> {
+    order_by_entries(select, schema)
+        .into_iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            entry.alias.unwrap_or_else(|| match &entry.expr.kind {
+                ExprKind::Column { name, .. } => name.clone(),
+                _ => format!("column{}", i.saturating_add(1)),
+            })
+        })
+        .collect()
+}
+
 pub(super) fn order_by_entries(select: &Select, schema: &TableSchema) -> Vec<OrderByEntry> {
     let mut out = Vec::new();
     for col in &select.columns {
