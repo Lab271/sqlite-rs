@@ -18,6 +18,7 @@
 )]
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -35,10 +36,10 @@ struct FakePageSource {
 }
 
 impl PageSource for FakePageSource {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         self.pages
             .get(&page_num)
-            .cloned()
+            .map(|page| Rc::from(page.as_slice()))
             .ok_or(PageError::InvalidPageNumber)
     }
 }

@@ -31,6 +31,9 @@ pub use master::{
 pub use schema::{create_empty_index_root, create_empty_table_root, populate_index_from_table};
 pub use table::{delete_row, insert_row};
 
+use std::ops::Deref;
+use std::rc::Rc;
+
 use crate::header::DatabaseHeader;
 use crate::record::{decode_varint, encode_varint};
 use crate::vfs::PageSource;
@@ -48,13 +51,44 @@ const MAX_PAYLOAD_LEN: u64 = 2_147_483_647;
 /// unbounded loop.
 const MAX_PAGES_VISITED: usize = 1_000_000;
 
+/// A table row's raw record payload: a zero-copy slice into the page it
+/// was read from when the payload fits entirely in the cell (no overflow
+/// pages — the common case), or an owned buffer when overflow-chain
+/// reassembly had to concatenate bytes from multiple pages (#467).
+/// `Deref<Target = [u8]>` lets every existing `&row.payload` call site
+/// (e.g. `decode_record(&row.payload, ..)`) keep working unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    Local {
+        page: Rc<[u8]>,
+        start: usize,
+        len: usize,
+    },
+    Owned(Vec<u8>),
+}
+
+impl Deref for Payload {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "start/len are computed from a validated in-bounds slice at construction (reassemble_payload)"
+            )]
+            Payload::Local { page, start, len } => &page[*start..start.saturating_add(*len)],
+            Payload::Owned(bytes) => bytes,
+        }
+    }
+}
+
 /// One decoded table b-tree row: the SQLite rowid and its raw record
 /// payload (after overflow-chain reassembly). See the module doc's
 /// rowid-alias note — `payload` may encode a rowid-alias column as NULL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     pub rowid: i64,
-    pub payload: Vec<u8>,
+    pub payload: Payload,
 }
 
 struct Frame {
@@ -65,7 +99,7 @@ struct Frame {
     next_cell: usize,
     rightmost: u32,
     rightmost_done: bool,
-    page: Vec<u8>,
+    page: Rc<[u8]>,
 }
 
 /// Depth-first, read-only cursor over a table b-tree, yielding rows in
@@ -180,14 +214,12 @@ impl<P: PageSource> TableCursor<P> {
                         let (rowid, payload_len, tail_start) =
                             decode_cell_head(&page, cell_start, page_num)?;
                         if rowid == target_rowid {
-                            let tail = page
-                                .get(tail_start..)
-                                .ok_or(BtreeError::PayloadTooShort { page_num })?;
                             let payload = reassemble_payload(
                                 &self.source,
                                 self.usable_size,
                                 page_num,
-                                tail,
+                                &page,
+                                tail_start,
                                 payload_len,
                             )?;
                             return Ok(Some(TableRow { rowid, payload }));
@@ -230,7 +262,7 @@ impl<P: PageSource> TableCursor<P> {
         }
     }
 
-    fn read_page(&mut self, page_num: u32) -> Result<Vec<u8>, BtreeError> {
+    fn read_page(&mut self, page_num: u32) -> Result<Rc<[u8]>, BtreeError> {
         self.pages_visited = self.pages_visited.saturating_add(1);
         if self.pages_visited > MAX_PAGES_VISITED {
             return Err(BtreeError::TraversalTooLong {
@@ -410,12 +442,14 @@ impl<P: PageSource> TableCursor<P> {
         let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         let (rowid, payload_len, tail_start) = decode_cell_head(&frame.page, cell_start, page_num)?;
-        let tail = frame
-            .page
-            .get(tail_start..)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let payload =
-            reassemble_payload(&self.source, self.usable_size, page_num, tail, payload_len)?;
+        let payload = reassemble_payload(
+            &self.source,
+            self.usable_size,
+            page_num,
+            &frame.page,
+            tail_start,
+            payload_len,
+        )?;
         Ok(TableRow { rowid, payload })
     }
 }
@@ -451,21 +485,29 @@ fn reassemble_payload<P: PageSource>(
     source: &P,
     usable_size: u32,
     page_num: u32,
-    cell_tail: &[u8],
+    page: &Rc<[u8]>,
+    tail_start: usize,
     payload_len: u64,
-) -> Result<Vec<u8>, BtreeError> {
+) -> Result<Payload, BtreeError> {
     if payload_len > MAX_PAYLOAD_LEN {
         return Err(BtreeError::PayloadTooLarge {
             page_num,
             payload_len,
         });
     }
+    let cell_tail = page
+        .get(tail_start..)
+        .ok_or(BtreeError::PayloadTooShort { page_num })?;
     let local_size = local_payload_size(usable_size, payload_len) as usize;
     let local_bytes = cell_tail
         .get(..local_size)
         .ok_or(BtreeError::PayloadTooShort { page_num })?;
     if local_size as u64 == payload_len {
-        return Ok(local_bytes.to_vec());
+        return Ok(Payload::Local {
+            page: Rc::clone(page),
+            start: tail_start,
+            len: local_size,
+        });
     }
 
     let overflow_end = local_size.saturating_add(4);
@@ -525,7 +567,7 @@ fn reassemble_payload<P: PageSource>(
         remaining = remaining.saturating_sub(take as u64);
         overflow_page = next;
     }
-    Ok(result)
+    Ok(Payload::Owned(result))
 }
 
 /// Descends from `page_num` (a table b-tree root or subtree) to the leaf
@@ -1614,10 +1656,10 @@ mod tests {
     }
 
     impl PageSource for FakePageSource {
-        fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
             self.pages
                 .get(&page_num)
-                .cloned()
+                .map(|page| Rc::from(page.as_slice()))
                 .ok_or(PageError::InvalidPageNumber)
         }
     }
@@ -1801,8 +1843,38 @@ mod tests {
         let source = FakePageSource {
             pages: HashMap::new(),
         };
-        let err = reassemble_payload(&source, 512, 2, &[], MAX_PAYLOAD_LEN).unwrap_err();
+        let page: Rc<[u8]> = Rc::from(Vec::new().as_slice());
+        let err = reassemble_payload(&source, 512, 2, &page, 0, MAX_PAYLOAD_LEN).unwrap_err();
         assert!(!matches!(err, BtreeError::PayloadTooLarge { .. }));
+    }
+
+    /// #467: a row whose payload fits entirely in the local cell (no
+    /// overflow) must borrow from the page's `Rc<[u8]>` rather than
+    /// allocating a fresh `Vec<u8>` copy. Asserted two ways: the returned
+    /// `Payload` is the `Local` (borrowed) variant, and the page's
+    /// refcount goes up (the row and the still-open cursor frame share
+    /// one allocation) instead of staying at 1 (which would mean a copy
+    /// was made instead of a share).
+    #[test]
+    fn local_payload_borrows_from_the_page_instead_of_copying() {
+        let cell = table_cell(1, b"hello world");
+        let page = leaf_page_with_cells(512, &[cell]);
+        let mut pages = HashMap::new();
+        pages.insert(2u32, page);
+        let source = FakePageSource { pages };
+        let mut cursor = TableCursor::new(source, &fake_header(), 2);
+
+        let row = cursor.first().unwrap().unwrap();
+        assert_eq!(&*row.payload, b"hello world");
+        match &row.payload {
+            Payload::Local { page, .. } => {
+                assert!(
+                    Rc::strong_count(page) >= 2,
+                    "expected the row to share the page's Rc, not hold the only reference"
+                );
+            }
+            Payload::Owned(_) => panic!("expected a borrowed Local payload, got an Owned copy"),
+        }
     }
 
     #[test]

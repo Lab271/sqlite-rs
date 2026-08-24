@@ -20,6 +20,7 @@
 //! get-wrong implementation — acceptable at Tier 0 scope.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 use super::{
     cell_ptr_offset, local_payload_size, page1_header_start, read_cell_pointer, read_num_cells,
@@ -156,6 +157,7 @@ impl<P: PageSource> IndexCursor<P> {
         }
         self.source
             .read_page(page_num)
+            .map(|page| page.to_vec())
             .map_err(|source| BtreeError::PageSource { page_num, source })
     }
 
@@ -347,12 +349,16 @@ impl<P: PageSource> IndexCursor<P> {
         let ptr_off = cell_ptr_offset(frame.cell_ptr_base, cell_index);
         let cell_start = read_cell_pointer(&frame.page, ptr_off, page_num, cell_index)?;
         let (payload_len, tail_start) = decode_payload_len(&frame.page, cell_start, page_num)?;
-        let tail = frame
-            .page
-            .get(tail_start..)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let payload =
-            reassemble_payload(&self.source, self.usable_size, page_num, tail, payload_len)?;
+        let page: Rc<[u8]> = Rc::from(frame.page.as_slice());
+        let payload = reassemble_payload(
+            &self.source,
+            self.usable_size,
+            page_num,
+            &page,
+            tail_start,
+            payload_len,
+        )?
+        .to_vec();
         Ok(IndexRow { payload })
     }
 
@@ -373,12 +379,16 @@ impl<P: PageSource> IndexCursor<P> {
         // payload-length-varint + payload shape as a leaf cell.
         let (payload_len, tail_start) =
             decode_payload_len(&frame.page, cell_start.saturating_add(4), page_num)?;
-        let tail = frame
-            .page
-            .get(tail_start..)
-            .ok_or(BtreeError::PayloadTooShort { page_num })?;
-        let payload =
-            reassemble_payload(&self.source, self.usable_size, page_num, tail, payload_len)?;
+        let page: Rc<[u8]> = Rc::from(frame.page.as_slice());
+        let payload = reassemble_payload(
+            &self.source,
+            self.usable_size,
+            page_num,
+            &page,
+            tail_start,
+            payload_len,
+        )?
+        .to_vec();
         Ok(IndexRow { payload })
     }
 }
@@ -524,10 +534,15 @@ fn decode_value_cell(
         .get(value_start..cell_end)
         .ok_or(BtreeError::PayloadTooShort { page_num })?
         .to_vec();
-    let tail = buf
-        .get(tail_start..)
-        .ok_or(BtreeError::PayloadTooShort { page_num })?;
-    let payload = reassemble_payload(source, usable_size, page_num, tail, payload_len)?;
+    let page: Rc<[u8]> = Rc::from(buf);
+    let payload = reassemble_payload(
+        source,
+        usable_size,
+        page_num,
+        &page,
+        tail_start,
+        payload_len,
+    )?;
     let key = decode_record(&payload, encoding)?;
     Ok((key, cell_bytes))
 }
@@ -866,10 +881,10 @@ mod tests {
     }
 
     impl PageSource for FakePageSource {
-        fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+        fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
             self.pages
                 .get(&page_num)
-                .cloned()
+                .map(|page| Rc::from(page.as_slice()))
                 .ok_or(PageError::InvalidPageNumber)
         }
     }
