@@ -1388,6 +1388,26 @@ mod tests {
         assert_eq!(pager.read_page(1).unwrap(), vec![9u8; 512].into());
     }
 
+    /// #469: `Pager::read_page`'s cache-hit branch (`PageSource for
+    /// Pager`, not the `PageCache` helper below) must return the same
+    /// `Rc<[u8]>` allocation on a repeat read of an already-cached page —
+    /// a refcount bump, not a fresh clone of the page bytes — which is
+    /// what #467's `Payload::Local` zero-copy sharing relies on.
+    #[test]
+    fn read_page_cache_hit_shares_the_same_rc_allocation() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![7u8; 512]);
+        let pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        let first = pager.read_page(1).unwrap();
+        let second = pager.read_page(1).unwrap();
+
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "expected a cache hit to share the page's Rc allocation, not clone it"
+        );
+    }
+
     #[test]
     fn page_cache_hit_returns_the_same_bytes_as_the_original_read() {
         let mut cache = PageCache::new(2);

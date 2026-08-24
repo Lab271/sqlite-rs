@@ -1659,6 +1659,14 @@ mod tests {
     fn overflow_single_page_payload_is_byte_identical_to_oracle() {
         let mut cursor = open_cursor("overflow_single_page.db");
         let row = cursor.first_row().unwrap().unwrap();
+        // #469: an overflow chain must reassemble into an owned copy —
+        // there is no single page range to borrow from — unlike the
+        // local-only case covered by
+        // local_payload_borrows_from_the_page_instead_of_copying.
+        assert!(
+            matches!(row.payload, Payload::Owned(_)),
+            "expected an Owned payload for an overflow-chain row, got a Local borrow"
+        );
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&values[0]), 1);
         let b = blob(&values[1]);
@@ -1674,6 +1682,13 @@ mod tests {
     fn overflow_multi_page_payload_is_byte_identical_to_oracle() {
         let mut cursor = open_cursor("overflow_multi_page.db");
         let row = cursor.first_row().unwrap().unwrap();
+        // #469: same Owned-variant check as the single-page overflow test
+        // above, exercised here across a 14-page overflow chain instead
+        // of a single overflow page.
+        assert!(
+            matches!(row.payload, Payload::Owned(_)),
+            "expected an Owned payload for a multi-page overflow-chain row, got a Local borrow"
+        );
         let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(int(&values[0]), 1);
         let b = blob(&values[1]);
