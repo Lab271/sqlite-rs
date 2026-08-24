@@ -110,11 +110,11 @@ fn rows(
     let pager = Pager::open(&vfs, path, page_size).unwrap();
     let mut cursor = TableCursor::new(pager, header, root_page);
     let mut out = Vec::new();
-    let mut row = cursor.first().unwrap();
+    let mut row = cursor.first_row().unwrap();
     while let Some(r) = row {
         let values = decode_record(&r.payload, TextEncoding::Utf8).unwrap();
         out.push((r.rowid, values));
-        row = cursor.next().unwrap();
+        row = cursor.next_row().unwrap();
     }
     out
 }

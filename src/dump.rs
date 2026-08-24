@@ -219,12 +219,12 @@ fn read_table_rows<P: PageSource>(
     } else {
         let mut cursor = TableCursor::new(source, header, schema.root_page);
         let mut rows = Vec::new();
-        let mut row = cursor.first()?;
+        let mut row = cursor.first_row()?;
         while let Some(r) = row {
             let mut values = decode_table_row(&r, header.text_encoding, alias_col)?;
             apply_real_affinity(&mut values, &real_affinity);
             rows.push(values);
-            row = cursor.next()?;
+            row = cursor.next_row()?;
         }
         Ok(rows)
     }

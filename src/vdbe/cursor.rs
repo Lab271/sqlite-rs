@@ -49,7 +49,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::btree::{self, IndexCursor, TableCursor, TableRow};
+use crate::btree::{self, IndexCursor, TableCursor};
 use crate::record::{
     decode_column, decode_record, decode_serial_value, encode_record, parse_header_into,
     TextEncoding, Value,
@@ -119,7 +119,15 @@ impl CursorSlot {
 /// `Rewind` clear it again on the next real positioning call).
 pub(crate) struct TableCursorState {
     cursor: TableCursor<Rc<dyn crate::vfs::PageSource>>,
-    current: Option<TableRow>,
+    /// The rowid of the row `Rewind`/`Next`/`Last`/`Prev`/`SeekRowid` most
+    /// recently positioned on, or `None` once exhausted/never positioned.
+    /// Deliberately NOT a cached `TableRow` (#473): the payload is
+    /// reassembled lazily, on demand, via `self.cursor.current_payload()`
+    /// only when `Column` actually reads it — see this struct's own doc
+    /// for why a cached row can't be a borrow here, and why nothing
+    /// downstream needs one anyway (only "is a row positioned" and the
+    /// rowid itself ever survive across opcode dispatches).
+    current_rowid: Option<i64>,
     forced_null: bool,
     /// The table b-tree's root page (#194) — recorded so `Insert`/
     /// `Delete`/`NewRowid` know which b-tree to write to without a
@@ -142,18 +150,28 @@ pub(crate) struct TableCursorState {
 }
 
 impl TableCursorState {
-    /// The sole setter for `current` — always paired with invalidating
-    /// `header_cache`, so a cache can never survive its row.
-    fn set_current(&mut self, row: Option<TableRow>) {
-        self.current = row;
+    /// The sole setter for `current_rowid` — always paired with
+    /// invalidating `header_cache`, so a cache can never survive its row.
+    fn set_current(&mut self, rowid: Option<i64>) {
+        self.current_rowid = rowid;
         self.header_cache.invalidate();
+    }
+
+    /// Reassembles the payload of the row `current_rowid` refers to, or
+    /// `None` if the cursor isn't positioned on a row. Lazy (#473): does
+    /// the actual reassembly — including any overflow-chain walk — only
+    /// when called, not eagerly at position time.
+    fn current_payload(&self) -> Result<Option<btree::Payload>, btree::BtreeError> {
+        self.current_rowid
+            .map(|_| self.cursor.current_payload())
+            .transpose()
     }
 }
 
 impl std::fmt::Debug for TableCursorState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableCursorState")
-            .field("current", &self.current)
+            .field("current_rowid", &self.current_rowid)
             .field("forced_null", &self.forced_null)
             .finish_non_exhaustive()
     }
@@ -428,7 +446,7 @@ pub fn open_read(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         instr.p1,
         CursorSlot::Table(TableCursorState {
             cursor,
-            current: None,
+            current_rowid: None,
             forced_null: false,
             root_page,
             header_cache: RowHeaderCache::default(),
@@ -463,7 +481,7 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         instr.p1,
         CursorSlot::Table(TableCursorState {
             cursor,
-            current: None,
+            current_rowid: None,
             forced_null: false,
             root_page,
             header_cache: RowHeaderCache::default(),
@@ -514,7 +532,7 @@ pub fn rewind(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 })?;
             state.set_current(row);
-            state.current.is_some()
+            state.current_rowid.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
             state.pos = if state.rows.is_empty() { None } else { Some(0) };
@@ -552,7 +570,7 @@ pub fn last(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 })?;
             state.set_current(row);
-            state.current.is_some()
+            state.current_rowid.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
             state.pos = state.rows.len().checked_sub(1);
@@ -590,7 +608,7 @@ pub fn next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 })?;
             state.set_current(row);
-            state.current.is_some()
+            state.current_rowid.is_some()
         }
         CursorSlot::EphemeralTable(state) => {
             let next_pos = state.pos.map(|p| p.saturating_add(1)).unwrap_or(0);
@@ -679,24 +697,26 @@ fn read_row_column(
             if state.forced_null {
                 return Ok(Value::Null);
             }
-            let payload = &state
-                .current
-                .as_ref()
+            let payload = state
+                .current_payload()
+                .map_err(|e| ExecError::MalformedInstruction {
+                    opcode,
+                    reason: e.to_string(),
+                })?
                 .ok_or(ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
-                })?
-                .payload;
+                })?;
             state
                 .header_cache
-                .ensure(payload)
+                .ensure(&payload)
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
                 })?;
             state
                 .header_cache
-                .column(payload, idx, TextEncoding::Utf8)
+                .column(&payload, idx, TextEncoding::Utf8)
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode,
                     reason: e.to_string(),
@@ -762,14 +782,11 @@ pub fn rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             if state.forced_null {
                 Value::Null
             } else {
-                let row = state
-                    .current
-                    .as_ref()
-                    .ok_or(ExecError::MalformedInstruction {
-                        opcode: "Rowid",
-                        reason: "cursor has no current row".to_string(),
-                    })?;
-                Value::Integer(row.rowid)
+                let rowid = state.current_rowid.ok_or(ExecError::MalformedInstruction {
+                    opcode: "Rowid",
+                    reason: "cursor has no current row".to_string(),
+                })?;
+                Value::Integer(rowid)
             }
         }
         CursorSlot::EphemeralTable(state) => {
@@ -816,7 +833,7 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             reason: e.to_string(),
         })?;
     state.set_current(row);
-    Ok(if state.current.is_none() {
+    Ok(if state.current_rowid.is_none() {
         Step::Jump(to_pc(instr.p2))
     } else {
         Step::Next
@@ -1328,14 +1345,10 @@ pub fn idx_le(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     match vm.cursor(instr.p1)? {
         CursorSlot::Table(state) => {
-            let rowid = state
-                .current
-                .as_ref()
-                .ok_or(ExecError::MalformedInstruction {
-                    opcode: "Delete",
-                    reason: "cursor has no current row".to_string(),
-                })?
-                .rowid;
+            let rowid = state.current_rowid.ok_or(ExecError::MalformedInstruction {
+                opcode: "Delete",
+                reason: "cursor has no current row".to_string(),
+            })?;
             let root_page = state.root_page;
             let pager = vm.writer("Delete")?;
             let db = vm.db()?;
@@ -1467,7 +1480,7 @@ pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             opcode: "NewRowid",
             reason: e.to_string(),
         })?
-        .map_or(0, |row| row.rowid);
+        .unwrap_or(0);
 
     let new_rowid = if instr.p5 != 0 {
         let table_name = match &instr.p4 {
@@ -1494,7 +1507,7 @@ pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         let mut seq_cursor = TableCursor::new(&*pager, &header, seq_root);
         let mut tracked_seq = 0i64;
         let mut row = seq_cursor
-            .first()
+            .first_row()
             .map_err(|e| ExecError::MalformedInstruction {
                 opcode: "NewRowid",
                 reason: e.to_string(),
@@ -1515,7 +1528,7 @@ pub fn new_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                 }
             }
             row = seq_cursor
-                .next()
+                .next_row()
                 .map_err(|e| ExecError::MalformedInstruction {
                     opcode: "NewRowid",
                     reason: e.to_string(),

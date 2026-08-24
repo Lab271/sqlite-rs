@@ -1871,7 +1871,7 @@ mod tests {
             let pager = Pager::open(&vfs, path, header.page_size).unwrap();
             let mut cursor = TableCursor::new(pager, &header, 1);
 
-            let row = cursor.first().unwrap().unwrap();
+            let row = cursor.first_row().unwrap().unwrap();
             let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
             assert_eq!(text(&values[0]), "table");
             assert_eq!(text(&values[1]), "t");
@@ -1900,7 +1900,7 @@ mod tests {
 
             let pager = Pager::open(&vfs, path, header.page_size).unwrap();
             let mut cursor = TableCursor::new(pager, &header, t.root_page);
-            let row = cursor.first().unwrap().unwrap();
+            let row = cursor.first_row().unwrap().unwrap();
             let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
             assert_eq!(text(&values[1]), "auto-vacuum full");
         }
@@ -1935,11 +1935,11 @@ mod tests {
             let pager = Pager::open(&vfs, path, header.page_size).unwrap();
             let mut cursor = TableCursor::new(pager, &header, t.root_page);
             let mut rows = Vec::new();
-            let mut row = cursor.first().unwrap();
+            let mut row = cursor.first_row().unwrap();
             while let Some(r) = row {
                 let values = decode_record(&r.payload, header.text_encoding).unwrap();
                 rows.push((int(&values[0]), text(&values[1]).to_string()));
-                row = cursor.next().unwrap();
+                row = cursor.next_row().unwrap();
             }
             rows
         }

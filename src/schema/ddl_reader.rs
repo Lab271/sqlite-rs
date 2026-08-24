@@ -104,7 +104,7 @@ pub fn read_schema<P: PageSource>(
 ) -> Result<Vec<TableSchema>, DdlError> {
     let mut schemas = Vec::new();
     let mut pending_indexes: Vec<(String, IndexSchema)> = Vec::new();
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if values.len() != 5 {
@@ -115,7 +115,7 @@ pub fn read_schema<P: PageSource>(
             "index" => pending_indexes.extend(index_schema(&values)),
             _ => {}
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     for (table_name, index) in pending_indexes {
         if let Some(schema) = schemas.iter_mut().find(|t| t.name == table_name) {
@@ -135,7 +135,7 @@ pub fn read_table_and_view_names<P: PageSource>(
     encoding: TextEncoding,
 ) -> Result<Vec<String>, DdlError> {
     let mut names = Vec::new();
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if values.len() != 5 {
@@ -144,7 +144,7 @@ pub fn read_table_and_view_names<P: PageSource>(
         if matches!(text(values.first()), "table" | "view") {
             names.push(text(values.get(1)).to_string());
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     Ok(names)
 }
@@ -172,7 +172,7 @@ pub fn read_views<P: PageSource>(
     encoding: TextEncoding,
 ) -> Result<Vec<ViewSchema>, DdlError> {
     let mut views = Vec::new();
-    let mut row = cursor.first()?;
+    let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
         if values.len() != 5 {
@@ -184,7 +184,7 @@ pub fn read_views<P: PageSource>(
                 sql: text(values.get(4)).to_string(),
             });
         }
-        row = cursor.next()?;
+        row = cursor.next_row()?;
     }
     Ok(views)
 }

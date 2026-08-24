@@ -119,7 +119,7 @@ fn insert_round_trips_through_v1_reader_on_a_real_temp_file() {
     // opened after the writing Vm (and its Pager) has gone out of scope.
     let read_pager = Pager::open(&vfs, &path, page_size).unwrap();
     let mut cursor = TableCursor::new(read_pager, &header, 1);
-    let row = cursor.first().unwrap().expect("one row was inserted");
+    let row = cursor.first_row().unwrap().expect("one row was inserted");
     assert_eq!(row.rowid, 1);
     let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
     assert_eq!(
