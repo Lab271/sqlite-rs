@@ -56,9 +56,12 @@ fn main() -> ExitCode {
             Some(path) => repl::run_repl(Path::new(&path)),
             None => usage_error("repl <file>"),
         },
-        // No recognized subcommand: treat the bare argument as a database
-        // file and enter the REPL directly, matching `sqlite3 <file>`.
-        Some(path) => repl::run_repl(Path::new(&path)),
-        None => usage_error("[--version] <dump|export|query|tables|exec|repl> <file>"),
+        // No recognized subcommand: treat a single bare argument as a
+        // database file and enter the REPL directly, matching
+        // `sqlite3 <file>` — but a second stray argument (not a real
+        // invocation shape) still reports the usage error rather than
+        // silently discarding it.
+        Some(path) if args.next().is_none() => repl::run_repl(Path::new(&path)),
+        _ => usage_error("[--version] <dump|export|query|tables|exec|repl> <file>"),
     }
 }
