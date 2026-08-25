@@ -6,6 +6,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
+`compile_grouped_scan`'s pass 1 now only serializes columns actually
+referenced by the `GROUP BY` key, aggregate arguments, or plain
+result/`HAVING` columns (every other schema column becomes a cheap
+`Null` placeholder rather than a real per-row read); `SorterInsert` no
+longer copies the record blob on every insert (reuses the already-
+`Rc`'d bytes); `OpenPseudo` is now emitted once before pass 2's loop
+instead of once per row. Also fixed a pre-existing, ticket-adjacent bug
+found while adding regression coverage: a plain (non-key,
+non-aggregate) result/`HAVING` column's "arbitrary row" snapshot picked
+the group's *last* row instead of the *first*, mismatching the real
+oracle's own sort-then-group behavior. `group_by_agg` benchmark:
+20.8ms -> 11.2ms on the 1MB fixture (~46% faster), still short of the
+ticket's `<3x`-oracle target — the residual gap looks architectural
+(VDBE per-instruction dispatch, the sort pipeline's inherent
+double-decode), out of this ticket's scope. spend: ~2-3x estimate.
+
 ## [0.18.0] - 2026-08-25 — V7 Performance & Planner
 
 Epic #421's V7.2 phase (Performance & Planner), now complete: the query

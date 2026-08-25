@@ -27,6 +27,7 @@ mod cte_test;
 mod dump_oracle_test;
 mod expr_vectors_test;
 mod families_test;
+mod group_by_projection_test;
 mod harness_test;
 mod index_maintenance_test;
 mod index_ordered_group_by_test;
