@@ -112,7 +112,16 @@ pub fn explain_query_plan(
     let n = bindings.len();
 
     let reorder = super::join_order::is_reorderable_inner_chain(from).then(|| {
-        let costs = super::join_order::scan_costs(schemas, stats_by_table);
+        let on_exprs: Vec<Option<Expr>> = from
+            .joins
+            .iter()
+            .map(|j| match &j.constraint {
+                Some(JoinConstraint::On(e)) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        let seekable = super::join_order::seekable_tables(schemas, &on_exprs);
+        let costs = super::join_order::scan_costs(schemas, stats_by_table, &seekable);
         super::join_order::plan_join_order(&costs)
     });
     let execution_order: Vec<usize> = reorder.clone().unwrap_or_else(|| (0..n).collect());

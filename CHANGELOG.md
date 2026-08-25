@@ -6,6 +6,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: JOIN reordering now prefers a rowid/unique-index-seekable inner
+table over raw ANALYZE row-count ordering (#510) —
+`join_order::seekable_tables` flags a table whose `ON` equality is a
+structural rowid-alias/single-column-`UNIQUE`-index match (the same
+shape `join_access::choose_join_access` looks for), and `scan_costs`
+gives such a table `u64::MAX` so `plan_join_order`'s ascending sort
+always places it innermost, letting the existing seek codegen fire
+regardless of the table's own size — a rowid/index seek is O(1)/O(log
+n) and always cheaper as an inner probe than as the outer scan. Fixes
+the `bench_data JOIN bench_lookup ON bench_data.bucket =
+bench_lookup.code` case (`bench_lookup.code` an `INTEGER PRIMARY KEY`)
+where the smaller table's row count previously won it the outer scan
+slot, forcing a full scan on the larger table's join column instead of
+a `SeekRowid` on the smaller one. spend: matched estimate.
+
 ## [0.18.1] - 2026-08-25
 
 fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —

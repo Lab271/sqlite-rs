@@ -275,7 +275,8 @@ where
     // (and `right_step` below) keep their original order unconditionally,
     // since reordering either would change the result set.
     let reorder_plan = super::join_order::is_reorderable_inner_chain(from).then(|| {
-        let costs = super::join_order::scan_costs(schemas, stats_by_table);
+        let seekable = super::join_order::seekable_tables(schemas, &constraints);
+        let costs = super::join_order::scan_costs(schemas, stats_by_table, &seekable);
         super::join_order::plan_join_order(&costs)
     });
 
