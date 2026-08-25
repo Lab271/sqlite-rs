@@ -72,9 +72,9 @@ fn oracle_query(oracle: &Path, db: &Path, sql: &str) -> Result<String, String> {
 /// JOIN, and the implicit whole-table aggregate (no `GROUP BY` at all)
 /// combined with a JOIN.
 #[test]
-fn join_group_by_aggregate_matches_oracle() {
+fn join_group_by_aggregate_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("join_group_by_aggregate_matches_oracle");
+        skip_no_oracle("join_group_by_aggregate_acceptance_and_output_match");
         return;
     };
 

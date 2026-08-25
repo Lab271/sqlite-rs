@@ -577,7 +577,13 @@ pub fn compile_select_compound(
 
         if has_union {
             let skip = em.new_label();
-            emit_dedup_check(em, dedup_cursor, reg_first, count, skip);
+            // UNION's compound-arm dedup stays `Binary`-only (matching
+            // `output_schema.column_collations` being intentionally empty
+            // above, so the compound's own ORDER BY is Binary too) — a
+            // synthetic per-arm output schema has no single declared
+            // COLLATE to consult, unlike a single-table `SELECT DISTINCT`.
+            let collations = vec![Collation::Binary; usize::try_from(count).unwrap_or(0)];
+            emit_dedup_check(em, dedup_cursor, reg_first, collations, skip);
             emit_row(em, reg)?;
             em.place(skip);
         } else {

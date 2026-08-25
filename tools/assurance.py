@@ -169,7 +169,9 @@ def plan_blocks():
     if not PLAN_PATH.exists():
         return {}
     blocks = {}
-    for m in re.finditer(r"^\|\s*\*\*(V\d+)\*\*\s*\|\s*([^|]+?)\s*\|", PLAN_PATH.read_text(), re.MULTILINE):
+    for m in re.finditer(
+        r"^\|\s*\*\*(V\d+)(?:\s+\w+)?\*\*\s*\|\s*([^|]+?)\s*\|", PLAN_PATH.read_text(), re.MULTILINE
+    ):
         blocks.setdefault(m.group(1), m.group(2))
     return blocks
 

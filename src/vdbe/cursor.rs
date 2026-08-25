@@ -488,6 +488,27 @@ fn seek_key_collations(
     }
 }
 
+/// Normalizes `values` for use as an ephemeral-index dedup key (#518):
+/// `NoCase` case-folds text, `RTrim` strips trailing spaces, so that
+/// byte-equality on the resulting encoded record matches
+/// [`compare`](crate::vdbe::compare::compare)'s notion of equality under
+/// that collation — without switching the `BTreeMap`-keyed dedup
+/// structure itself to a `compare()`-based lookup. Non-text values, and
+/// any column under `Binary`, pass through unchanged.
+fn normalize_key_values(values: &[Value], collations: &[Collation]) -> Vec<Value> {
+    values
+        .iter()
+        .zip(collations.iter())
+        .map(|(v, collation)| match (v, collation) {
+            (Value::Text(s), Collation::NoCase) => {
+                Value::Text(Rc::from(s.to_ascii_lowercase().as_str()))
+            }
+            (Value::Text(s), Collation::RTrim) => Value::Text(Rc::from(s.trim_end_matches(' '))),
+            _ => v.clone(),
+        })
+        .collect()
+}
+
 fn p4_count(instr: &Instruction, opcode: &'static str) -> Result<usize, ExecError> {
     match &instr.p4 {
         P4::Int(n) => usize::try_from(*n).map_err(|_| ExecError::MalformedInstruction {
@@ -1259,13 +1280,17 @@ pub fn sequence(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 }
 
 /// `Found`: probes ephemeral cursor `P1` for the key built from `P4`
-/// (`Int`, the key column count) registers starting at `P3`, jumping to
-/// `P2` if present. Either way, remembers the probed key as the target
-/// of a following `IdxInsert`/`Delete`.
+/// (`SeekKey`, a per-column collation list — a plain `Int` count treats
+/// every column as `Binary`, #518) registers starting at `P3`, jumping
+/// to `P2` if present. Either way, remembers the probed key as the
+/// target of a following `IdxInsert`/`Delete`.
 pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let count = p4_count(instr, "Found")?;
-    let values = read_register_range(vm, instr.p3, count, "Found")?;
-    let key = encode_record(&values, TextEncoding::Utf8);
+    let collations = seek_key_collations(instr, "Found")?;
+    let values = read_register_range(vm, instr.p3, collations.len(), "Found")?;
+    let key = encode_record(
+        &normalize_key_values(&values, &collations),
+        TextEncoding::Utf8,
+    );
     let state = vm.ephemeral_mut(instr.p1, "Found")?;
     let present = state.entries.contains_key(&key);
     state.last_key = Some(key);
@@ -1276,9 +1301,10 @@ pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     })
 }
 
-/// `IdxInsert`: for an ephemeral cursor (DISTINCT's dedup path,
-/// unchanged), inserts the key built from `P4` (`Int`, the key column
-/// count) registers starting at `P2` into ephemeral cursor `P1`. For a
+/// `IdxInsert`: for an ephemeral cursor (DISTINCT's dedup path), inserts
+/// the key built from `P4` (`SeekKey`, a per-column collation list — a
+/// plain `Int` count treats every column as `Binary`, #518) registers
+/// starting at `P2` into ephemeral cursor `P1`. For a
 /// real [`CursorSlot::IndexWrite`] cursor (#194, opened by `OpenWrite`
 /// with `P5` nonzero), instead encodes the same register range as a
 /// full index entry and writes it into the on-disk index b-tree via
@@ -1298,7 +1324,8 @@ pub fn found(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// having to double as part of the key. Defaults to `0`, which is
 /// exactly today's behavior (key == whole stored record).
 pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let key_count = p4_count(instr, "IdxInsert")?;
+    let key_collations = seek_key_collations(instr, "IdxInsert")?;
+    let key_count = key_collations.len();
     match vm.cursor(instr.p1)? {
         CursorSlot::IndexWrite { root_page } => {
             let root_page = *root_page;
@@ -1331,7 +1358,10 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     opcode: "IdxInsert",
                     reason: "key column count exceeds the values read".to_string(),
                 })?;
-            let key = encode_record(key_values, TextEncoding::Utf8);
+            let key = encode_record(
+                &normalize_key_values(key_values, &key_collations),
+                TextEncoding::Utf8,
+            );
             let state = vm.ephemeral_mut(instr.p1, "IdxInsert")?;
             if !state.entries.contains_key(&key) && state.entries.len() >= MAX_EPHEMERAL_ROWS {
                 return Err(ExecError::EphemeralRowLimitExceeded {

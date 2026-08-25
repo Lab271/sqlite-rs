@@ -65,9 +65,9 @@ fn oracle_query(oracle: &Path, db: &Path, sql: &str) -> Result<String, String> {
 /// rows — a differently-ordered join over a small/large table pair,
 /// where the heuristic has an actual choice to make.
 #[test]
-fn join_ordering_heuristic_matches_oracle() {
+fn join_ordering_heuristic_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("join_ordering_heuristic_matches_oracle");
+        skip_no_oracle("join_ordering_heuristic_output_match");
         return;
     };
 
@@ -105,9 +105,9 @@ fn join_ordering_heuristic_matches_oracle() {
 /// #485: skip-scan for a query that filters on a non-leading index
 /// column must still return exactly the rows a full scan would.
 #[test]
-fn skip_scan_non_leading_index_column_matches_oracle() {
+fn skip_scan_non_leading_index_column_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("skip_scan_non_leading_index_column_matches_oracle");
+        skip_no_oracle("skip_scan_non_leading_index_column_output_match");
         return;
     };
 
@@ -145,9 +145,9 @@ fn skip_scan_non_leading_index_column_matches_oracle() {
 /// #484: `ORDER BY`/`LIMIT` applied to a compound (`UNION`) `SELECT`
 /// must sort/limit the merged result set, not just one arm.
 #[test]
-fn compound_select_order_by_limit_matches_oracle() {
+fn compound_select_order_by_limit_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("compound_select_order_by_limit_matches_oracle");
+        skip_no_oracle("compound_select_order_by_limit_output_match");
         return;
     };
 

@@ -6,6 +6,28 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+fix: `SELECT DISTINCT` respects declared/explicit `COLLATE` (#518) —
+the ephemeral-index dedup path (`Found`/`IdxInsert` against an
+in-memory `BTreeMap`) compared raw encoded record bytes, ignoring
+collation entirely; a `COLLATE NOCASE` column returned case-variant
+duplicates as distinct rows. Codegen now resolves each result column's
+collation (mirroring #500's `resolve_order_by` fallback) into a new
+`P4::SeekKey` operand, and the ephemeral-cursor key-building
+normalizes `NoCase`/`RTrim` text before encoding so byte-equality on
+the normalized key matches `compare()`'s notion of equality. UNION's
+shared dedup path stays `Binary`-only, matching its existing
+conservative ORDER BY handling.
+
+fix: assurance's `plan_blocks()` regex dropped V5/V6 ("V5 Slim"/"V6
+Slim" in plan.md's table didn't match the bare-tag-only regex),
+causing a false "grammar tags not in plan.md value blocks" drift
+report; also renamed `tests/parity/v04.rs`-`v07.rs`'s test fns to name
+the dimensions they actually cover (`acceptance`/`output`), fixing
+`make assurance-gate`'s parity count from a misleading 3/12 to the
+accurate 7/12 — no test logic changed, only a naming-convention gap
+that made real coverage invisible to the dashboard's name-based
+heuristic.
+
 feat: track and apply column-declared `COLLATE` across schema and
 comparisons (#500) — `TableSchema`/`IndexedColumn`
 (`src/schema/ddl_reader.rs`) now capture each column's/index-column's

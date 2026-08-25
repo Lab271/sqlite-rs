@@ -320,3 +320,69 @@ fn group_by_uses_declared_collation_without_explicit_collate() {
         sort(oracle_rows(&oracle, &db, sql))
     );
 }
+
+/// #518: `SELECT DISTINCT` dedups against the ephemeral `Found`/
+/// `IdxInsert` index, a different mechanism from `GROUP BY`'s own
+/// comparisons — #500 left it out of scope on purpose.
+#[test]
+fn distinct_uses_declared_collation_without_explicit_collate() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("declared_collate");
+        return;
+    };
+    let db = scratch_db("distinct");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE); \
+         INSERT INTO t(name) VALUES ('Alice'), ('alice'), ('ALICE'), ('bob'), ('Bob');",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let sql = "SELECT DISTINCT name FROM t";
+    let sort = |rows: String| {
+        let mut lines: Vec<String> = rows.lines().map(str::to_string).collect();
+        lines.sort();
+        lines.join("\n")
+    };
+    assert_eq!(
+        sort(our_rows(&db, &header, &schema, sql)),
+        sort(oracle_rows(&oracle, &db, sql))
+    );
+}
+
+/// Multi-column `DISTINCT`: only the `NOCASE`-declared column folds
+/// case for dedup purposes, the `BINARY` (default) column still
+/// distinguishes case — proving the fix is per-column collation-aware
+/// rather than an all-or-nothing normalization of the whole key.
+#[test]
+fn multi_column_distinct_only_folds_the_collated_column() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("declared_collate");
+        return;
+    };
+    let db = scratch_db("distinct-multi");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE, tag TEXT); \
+         INSERT INTO t(name, tag) VALUES \
+             ('Alice', 'x'), ('alice', 'x'), ('alice', 'X'), ('Bob', 'y');",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    let sql = "SELECT DISTINCT name, tag FROM t";
+    let sort = |rows: String| {
+        let mut lines: Vec<String> = rows.lines().map(str::to_string).collect();
+        lines.sort();
+        lines.join("\n")
+    };
+    assert_eq!(
+        sort(our_rows(&db, &header, &schema, sql)),
+        sort(oracle_rows(&oracle, &db, sql))
+    );
+}
