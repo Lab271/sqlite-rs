@@ -6,6 +6,8 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-25
+
 fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
 `compile_grouped_scan`'s pass 1 now only serializes columns actually
 referenced by the `GROUP BY` key, aggregate arguments, or plain
