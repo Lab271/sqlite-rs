@@ -72,6 +72,26 @@ KEY`/`UNIQUE` constraints are already dropped by
 internal `sqlite_schema`/`sqlite_temp_schema` rows stock `sqlite3`
 lists (no temp-db support). Tests: `tests/unit/introspection_pragmas.rs`.
 
+### Fixed
+
+- `tools/bench_status.py` fails loud instead of silently omitting a
+scenario/fixture pair from `bench-status.json` when its criterion
+output is missing (#523) — previously `tier1_results()` treated a
+missing `estimates.json` (e.g. because the bench binary hit the VDBE
+step-limit guard rail or otherwise crashed partway through `make
+bench`) the same as "not measured", `continue`-ing past it with no
+signal. That's exactly how #303's 785x `correlated_subquery`
+regression (fixed by #434) went unnoticed for weeks: it read as "no
+data" instead of "catastrophically slow". `expected_pairs()` now
+states explicitly which (scenario, fixture) combinations a healthy run
+must produce — accounting for `tests/performance/crud.rs`'s
+intentional `bench_1mb.db`-only scenarios — and any other absence
+raises `MissingBenchResults`, failing the script instead of writing an
+incomplete status file. (The bench binaries themselves already
+fail loud via `fail()`/`process::exit(1)` on any execution error,
+including `StepLimitExceeded`, since #112 — this closes the one
+remaining place a missing result could go unreported.)
+
 ## [0.18.2] - 2026-08-25
 
 ### Fixed
