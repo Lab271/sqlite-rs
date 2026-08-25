@@ -63,6 +63,39 @@ TIER1_SCENARIOS = [
 ]
 FIXTURES = ["bench_1mb.db", "bench_50mb.db"]
 
+# tests/performance/crud.rs only ever benches against bench_1mb.db (see that
+# file's own module doc comment) — these scenarios never produce a
+# bench_50mb.db result by design, so that absence must not be reported as a
+# missing/failed run (#523).
+BENCH_1MB_ONLY_SCENARIOS = {
+    "read_pk",
+    "read_indexed_range",
+    "read_full_scan",
+    "read_join",
+    "read_group_by_agg",
+    "insert_single",
+    "insert_batch_10",
+    "insert_no_explicit_pk",
+    "update_pk",
+    "update_filtered_range",
+    "update_indexed_column",
+    "update_multi_column",
+    "delete_pk",
+    "delete_filtered_range",
+    "delete_equality_bucket",
+}
+
+
+def expected_pairs():
+    """(scenario, fixture) pairs a healthy `make bench` run must produce."""
+    pairs = []
+    for scenario in TIER1_SCENARIOS:
+        for fixture in FIXTURES:
+            if fixture == "bench_50mb.db" and scenario in BENCH_1MB_ONLY_SCENARIOS:
+                continue
+            pairs.append((scenario, fixture))
+    return pairs
+
 
 def pinned_oracle_version():
     cargo_toml = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
@@ -107,24 +140,42 @@ def criterion_median_ns(group_dir_name, engine):
     return data["median"]["point_estimate"]
 
 
+class MissingBenchResults(Exception):
+    """Raised when an expected criterion result is absent — e.g. the bench
+    binary hit the VDBE step-limit guard rail (or crashed for any other
+    reason) partway through and never reached that scenario. Previously
+    this was silently skipped (`continue`), so a catastrophic regression
+    that blows the step limit produced no result and no error — it just
+    looked like "no data" (#523)."""
+
+
 def tier1_results():
     results = []
-    for scenario in TIER1_SCENARIOS:
-        for fixture in FIXTURES:
-            group_dir_name = f"{scenario}_{fixture}"
-            ours_ns = criterion_median_ns(group_dir_name, "ours")
-            oracle_ns = criterion_median_ns(group_dir_name, "oracle")
-            if ours_ns is None or oracle_ns is None:
-                continue
-            results.append(
-                {
-                    "scenario": scenario,
-                    "fixture": fixture,
-                    "ours_ns": ours_ns,
-                    "oracle_ns": oracle_ns,
-                    "ratio_ours_over_oracle": ours_ns / oracle_ns,
-                }
-            )
+    missing = []
+    for scenario, fixture in expected_pairs():
+        group_dir_name = f"{scenario}_{fixture}"
+        ours_ns = criterion_median_ns(group_dir_name, "ours")
+        oracle_ns = criterion_median_ns(group_dir_name, "oracle")
+        if ours_ns is None or oracle_ns is None:
+            missing.append(group_dir_name)
+            continue
+        results.append(
+            {
+                "scenario": scenario,
+                "fixture": fixture,
+                "ours_ns": ours_ns,
+                "oracle_ns": oracle_ns,
+                "ratio_ours_over_oracle": ours_ns / oracle_ns,
+            }
+        )
+    if missing:
+        raise MissingBenchResults(
+            "missing criterion results for: "
+            + ", ".join(sorted(missing))
+            + " — did `make bench` abort partway through "
+            "(e.g. a VDBE step-limit hit)? Check its output; a missing "
+            "result must be treated as a failed run, not silently skipped."
+        )
     return results
 
 
