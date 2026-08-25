@@ -27,34 +27,47 @@ pub use unix::UnixVfs;
 
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
-
 /// Failure opening, reading, or locking a database file through the VFS.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum VfsError {
     /// No file exists at the given path.
-    #[error("file not found: {path}")]
     NotFound {
         /// The path that had no file behind it.
         path: String,
     },
 
     /// The database is held by another connection's lock.
-    #[error("database is locked: {path}")]
     Locked {
         /// The path of the locked database file.
         path: String,
     },
 
     /// The underlying OS file operation failed.
-    #[error("I/O error on {path}: {source}")]
     Io {
         /// The path the failing operation targeted.
         path: String,
         /// The underlying OS error.
-        #[source]
         source: std::io::Error,
     },
+}
+
+impl std::fmt::Display for VfsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VfsError::NotFound { path } => write!(f, "file not found: {path}"),
+            VfsError::Locked { path } => write!(f, "database is locked: {path}"),
+            VfsError::Io { path, source } => write!(f, "I/O error on {path}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for VfsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VfsError::NotFound { .. } | VfsError::Locked { .. } => None,
+            VfsError::Io { source, .. } => Some(source),
+        }
+    }
 }
 
 /// Shorthand for a [`VfsError`]-producing result.

@@ -364,7 +364,7 @@ pub enum Opcode {
 
 impl Opcode {
     /// The 65 harvested variants (`tools/opcodes-v2.json`), in
-    /// enum-declaration order — `tests/vdbe/opcode_completeness_test.rs`
+    /// enum-declaration order — `tests/unit/vdbe_opcode_completeness_test.rs`
     /// checks this list against that harvest exactly, so `OpenWrite`/
     /// `Insert`/`NewRowid` (#194, the V3 write path — never harvested
     /// from a V2 oracle EXPLAIN, since V2 predates any write-path

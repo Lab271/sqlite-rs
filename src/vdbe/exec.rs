@@ -8,8 +8,6 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use thiserror::Error;
-
 use crate::header::DatabaseHeader;
 use crate::record::{Collation, Value};
 use crate::vdbe::affinity::{apply_affinity, Affinity};
@@ -23,9 +21,8 @@ use crate::vfs::PageSource;
 
 /// The ways the fetch-decode-execute loop can fail to run a [`Program`]
 /// to completion.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ExecError {
-    #[error("{opcode}: register index {index} is out of range")]
     /// `opcode` addressed register `index`, which lies outside the
     /// register file.
     RegisterOutOfRange {
@@ -35,7 +32,6 @@ pub enum ExecError {
         index: i32,
     },
 
-    #[error("{opcode}: register range count {count} exceeds the maximum ({MAX_REGISTERS})")]
     /// `opcode` requested a register range of `count` registers, more
     /// than [`MAX_REGISTERS`] allows.
     RegisterRangeTooLarge {
@@ -45,7 +41,6 @@ pub enum ExecError {
         count: i32,
     },
 
-    #[error("{opcode}: expected a different value type, found {found}")]
     /// `opcode` required a register to hold a particular [`Value`]
     /// variant but found `found` instead.
     TypeMismatch {
@@ -55,12 +50,10 @@ pub enum ExecError {
         found: &'static str,
     },
 
-    #[error("MustBeInt: value cannot be converted to an integer without data loss")]
     /// `MustBeInt`'s coercion failed: the register's value cannot be
     /// converted to an integer without losing information.
     MustBeInt,
 
-    #[error("{opcode}: malformed instruction ({reason})")]
     /// `opcode`'s operands are structurally invalid (e.g. bad `P4`
     /// payload) for `reason`.
     MalformedInstruction {
@@ -70,21 +63,18 @@ pub enum ExecError {
         reason: String,
     },
 
-    #[error("opcode {opcode:?} is not yet implemented by this VM")]
     /// `opcode` is a recognized opcode with no dispatch arm yet.
     Unimplemented {
         /// The opcode with no implementation.
         opcode: Opcode,
     },
 
-    #[error("cursor slot {slot} is not open")]
     /// `slot` was referenced but has no cursor open in it.
     CursorNotOpen {
         /// The cursor-slot table index that was empty.
         slot: i32,
     },
 
-    #[error("{opcode}: cursor slot {slot} is a {found}, not a {expected}")]
     /// `opcode` expected the cursor in `slot` to be `expected` (e.g. a
     /// table cursor) but found `found` (e.g. a sorter cursor).
     CursorTypeMismatch {
@@ -98,7 +88,6 @@ pub enum ExecError {
         expected: &'static str,
     },
 
-    #[error("{opcode} requires a database attached to this VM (see Vm::with_db)")]
     /// `opcode` needs a real database (see [`Vm::with_db`]) but this
     /// `Vm` has none attached.
     NoDatabase {
@@ -106,7 +95,6 @@ pub enum ExecError {
         opcode: &'static str,
     },
 
-    #[error("program counter {pc} is out of range")]
     /// A jump or fall-through moved the program counter to `pc`, past
     /// the end of the program's instructions.
     ProgramCounterOutOfRange {
@@ -114,12 +102,10 @@ pub enum ExecError {
         pc: usize,
     },
 
-    #[error("program exceeded the maximum step count ({MAX_STEPS}) without halting")]
     /// The program executed [`MAX_STEPS`] instructions without halting —
     /// treated as a runaway/looping program.
     StepLimitExceeded,
 
-    #[error("{opcode}: ephemeral table/index exceeded the maximum row count ({limit})")]
     /// `opcode`'s ephemeral table/index grew past `limit` rows.
     EphemeralRowLimitExceeded {
         /// The opcode operating on the ephemeral structure.
@@ -128,7 +114,6 @@ pub enum ExecError {
         limit: usize,
     },
 
-    #[error("statement halted with SQLite result code {code}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     /// The program executed `Halt` with a non-success SQLite result
     /// `code`, optionally carrying an error `message`.
     Halted {
@@ -138,27 +123,115 @@ pub enum ExecError {
         message: Option<String>,
     },
 
-    #[error("failed to flush pending writes on statement commit: {0}")]
     /// Flushing pending writes on statement commit failed at the pager
     /// layer.
-    FlushFailed(#[from] crate::pager::PagerError),
+    FlushFailed(crate::pager::PagerError),
 
-    #[error("cannot start a transaction within a transaction")]
     /// A `Transaction` opcode ran while a transaction was already open.
     TransactionAlreadyActive,
 
-    #[error("cannot commit - no transaction is active")]
     /// A commit opcode ran with no transaction currently active.
     NoActiveTransactionToCommit,
 
-    #[error("cannot rollback - no transaction is active")]
     /// A rollback opcode ran with no transaction currently active.
     NoActiveTransactionToRollback,
 
-    #[error("cannot change journal_mode within a transaction")]
     /// A `journal_mode` change was attempted while a transaction was
     /// open.
     JournalModeChangeDuringTransaction,
+}
+
+impl std::fmt::Display for ExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecError::RegisterOutOfRange { opcode, index } => {
+                write!(f, "{opcode}: register index {index} is out of range")
+            }
+            ExecError::RegisterRangeTooLarge { opcode, count } => write!(
+                f,
+                "{opcode}: register range count {count} exceeds the maximum ({MAX_REGISTERS})"
+            ),
+            ExecError::TypeMismatch { opcode, found } => {
+                write!(
+                    f,
+                    "{opcode}: expected a different value type, found {found}"
+                )
+            }
+            ExecError::MustBeInt => write!(
+                f,
+                "MustBeInt: value cannot be converted to an integer without data loss"
+            ),
+            ExecError::MalformedInstruction { opcode, reason } => {
+                write!(f, "{opcode}: malformed instruction ({reason})")
+            }
+            ExecError::Unimplemented { opcode } => {
+                write!(f, "opcode {opcode:?} is not yet implemented by this VM")
+            }
+            ExecError::CursorNotOpen { slot } => write!(f, "cursor slot {slot} is not open"),
+            ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found,
+                expected,
+            } => write!(
+                f,
+                "{opcode}: cursor slot {slot} is a {found}, not a {expected}"
+            ),
+            ExecError::NoDatabase { opcode } => write!(
+                f,
+                "{opcode} requires a database attached to this VM (see Vm::with_db)"
+            ),
+            ExecError::ProgramCounterOutOfRange { pc } => {
+                write!(f, "program counter {pc} is out of range")
+            }
+            ExecError::StepLimitExceeded => write!(
+                f,
+                "program exceeded the maximum step count ({MAX_STEPS}) without halting"
+            ),
+            ExecError::EphemeralRowLimitExceeded { opcode, limit } => write!(
+                f,
+                "{opcode}: ephemeral table/index exceeded the maximum row count ({limit})"
+            ),
+            ExecError::Halted { code, message } => write!(
+                f,
+                "statement halted with SQLite result code {code}{}",
+                message
+                    .as_deref()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default()
+            ),
+            ExecError::FlushFailed(e) => {
+                write!(f, "failed to flush pending writes on statement commit: {e}")
+            }
+            ExecError::TransactionAlreadyActive => {
+                write!(f, "cannot start a transaction within a transaction")
+            }
+            ExecError::NoActiveTransactionToCommit => {
+                write!(f, "cannot commit - no transaction is active")
+            }
+            ExecError::NoActiveTransactionToRollback => {
+                write!(f, "cannot rollback - no transaction is active")
+            }
+            ExecError::JournalModeChangeDuringTransaction => {
+                write!(f, "cannot change journal_mode within a transaction")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExecError::FlushFailed(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<crate::pager::PagerError> for ExecError {
+    fn from(e: crate::pager::PagerError) -> Self {
+        ExecError::FlushFailed(e)
+    }
 }
 
 /// The outcome of executing one instruction: fall through to PC+1, jump

@@ -170,7 +170,7 @@ jobs:
           # committed file without any change to this repo — pin so a
           # tool release can't silently break the gate again; bump
           # deliberately alongside a regenerated imports.lock.
-          tool: cargo-deny,cargo-semver-checks,cargo-vet@0.10.2
+          tool: cargo-deny,cargo-semver-checks,cargo-vet@0.10.2,cargo-audit
       - run: make lint
       - run: make deny
       - name: Check semver compatibility
@@ -178,6 +178,8 @@ jobs:
         run: cargo semver-checks check-release
       - name: Supply chain audit (cargo vet)
         run: cargo vet
+      - name: Vulnerability audit (cargo audit)
+        run: make audit
       - run: make assurance-gate
 
   # The oracle-diff corpus, the only job that needs the pinned real

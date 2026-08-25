@@ -194,7 +194,7 @@ the just-produced duplicate row if present.
   falls through to end the loop when exhausted
 
 **Tests:** `src/vdbe/cursor.rs::tests::full_scan_opens_rewinds_iterates_reads`,
-`tests/vdbe/cursor_sorter_test.rs::full_scan_program_matches_oracle_row_for_row`
+`tests/unit/vdbe_cursor_sorter_test.rs::full_scan_program_matches_oracle_row_for_row`
 
 #### Scenario: A rowid-alias column is read with Rowid on every path, including `*`
 
@@ -226,7 +226,7 @@ the just-produced duplicate row if present.
   compound conditions (`rowid = 5 AND x = 3`), DISTINCT, and any
   non-rowid column — those stay V4 per the issue's bounded scope
 
-**Tests:** `tests/unit/codegen.rs::rowid_alias_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::bare_rowid_keyword_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_equality_against_parameter_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_range_comparison_does_not_use_seek_rowid`, `tests/unit/codegen.rs::non_rowid_column_equality_does_not_use_seek_rowid`, `tests/codegen/select_test.rs::rowid_equality_seeks_and_matches_oracle`, `tests/codegen/select_test.rs::rowid_equality_seek_missing_row_returns_empty`
+**Tests:** `tests/unit/codegen.rs::rowid_alias_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::bare_rowid_keyword_equality_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_equality_against_parameter_compiles_to_seek_rowid`, `tests/unit/codegen.rs::rowid_range_comparison_does_not_use_seek_rowid`, `tests/unit/codegen.rs::non_rowid_column_equality_does_not_use_seek_rowid`, `tests/unit/codegen_select_test.rs::rowid_equality_seeks_and_matches_oracle`, `tests/unit/codegen_select_test.rs::rowid_equality_seek_missing_row_returns_empty`
 
 #### Scenario: DISTINCT probes an ephemeral index before emitting each row
 
@@ -240,7 +240,7 @@ the just-produced duplicate row if present.
   page-format file structure
 
 **Tests:** `src/vdbe/cursor.rs::tests::distinct_probes_ephemeral_index_before_emit`,
-`tests/vdbe/cursor_sorter_test.rs::distinct_program_discards_rows_already_seen`
+`tests/unit/vdbe_cursor_sorter_test.rs::distinct_program_discards_rows_already_seen`
 
 DISTINCT's NULL-equals-NULL dedup — unlike `=`, and unlike ORDER BY's
 default NULL placement — is pinned separately in Requirement 9's "NULL
@@ -380,7 +380,7 @@ value (#139).
 `src/vdbe/arithmetic.rs::tests::bit_not_complements_and_propagates_null`,
 `src/vdbe/arithmetic.rs::tests::null_propagates_through_bitwise_shift_and_concat`,
 `src/vdbe/coerce.rs::tests::shift_handles_negative_and_oversized_amounts`,
-`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+`tests/unit/codegen_expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 #### Scenario: Cast forces P1's target affinity via the kernel's own CAST rule, never MustBeInt/RealAffinity
 
@@ -402,7 +402,7 @@ value (#139).
 `src/vdbe/cast.rs::tests::cast_to_text_matches_oracle_truth_table`,
 `src/vdbe/cast.rs::tests::cast_to_blob_matches_oracle_truth_table`,
 `src/vdbe/cast.rs::tests::cast_to_numeric_matches_oracle_truth_table`,
-`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+`tests/unit/codegen_expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 ### Requirement 7: Function Opcode [MUST]
 
@@ -430,9 +430,9 @@ it callable via this opcode, with no VDBE-layer change required.
   `abs(1)` are dispatched through the identical opcode logic, differing
   only in their P4 descriptor
 
-**Tests:** `tests/codegen/expr_test.rs::like_and_glob_dispatch_through_the_function_opcode`,
-`tests/codegen/expr_test.rs::single_arg_function_call_compiles`,
-`tests/codegen/expr_test.rs::multi_arg_function_call_compiles_with_contiguous_registers`
+**Tests:** `tests/unit/codegen_expr_test.rs::like_and_glob_dispatch_through_the_function_opcode`,
+`tests/unit/codegen_expr_test.rs::single_arg_function_call_compiles`,
+`tests/unit/codegen_expr_test.rs::multi_arg_function_call_compiles_with_contiguous_registers`
 
 #### Scenario: Zero-arg function call compiles with no argument registers
 
@@ -443,7 +443,7 @@ it callable via this opcode, with no VDBE-layer change required.
   and emits a single `Function` instance with P4 `"sqlite_version(0)"`,
   writing the registry's return value to P3
 
-**Tests:** `tests/codegen/expr_test.rs::zero_arg_function_call_compiles`
+**Tests:** `tests/unit/codegen_expr_test.rs::zero_arg_function_call_compiles`
 
 ### Requirement 8: Result-Row Opcodes [MUST]
 
@@ -500,7 +500,7 @@ VDBE-private serialization.
   reason `WHERE b = x'41'` always returned zero rows before this)
 
 **Tests:** `src/vdbe/result.rs::tests::int64_real_and_blob_load_typed_literals`,
-`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+`tests/unit/codegen_expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 #### Scenario: Variable loads a bound parameter, defaulting to NULL when unbound
 
@@ -513,7 +513,7 @@ VDBE-private serialization.
   rather than erroring — consistent with the rest of the VM's
   unwritten-register-reads-as-NULL rule
 
-**Tests:** `tests/codegen/select_test.rs::rowid_equality_against_bound_parameter_seeks`
+**Tests:** `tests/unit/codegen_select_test.rs::rowid_equality_against_bound_parameter_seeks`
 
 #### Scenario: Null writes NULL over a register that already holds a value
 
@@ -541,8 +541,8 @@ VDBE-private serialization.
   `ResultRow` need (or into a CASE branch's shared result register)
   instead of refusing the query outright
 
-**Tests:** `tests/codegen/expr_test.rs::case_branch_with_computed_expression_compiles_via_copy`,
-`tests/codegen/select_test.rs::two_computed_result_columns_do_not_collide`
+**Tests:** `tests/unit/codegen_expr_test.rs::case_branch_with_computed_expression_compiles_via_copy`,
+`tests/unit/codegen_select_test.rs::two_computed_result_columns_do_not_collide`
 
 #### Scenario: ResultRow emits a fixed register range as one output row every iteration
 
@@ -565,8 +565,8 @@ VDBE-private serialization.
   (WHERE/GROUP BY/HAVING/ORDER BY/LIMIT/DISTINCT/compound) is rejected
   as unsupported rather than silently no-op'd
 
-**Tests:** `tests/codegen/expr_test.rs::from_less_select_compiles_a_bare_expression_list`,
-`tests/codegen/expr_test.rs::from_less_select_rejects_star`
+**Tests:** `tests/unit/codegen_expr_test.rs::from_less_select_compiles_a_bare_expression_list`,
+`tests/unit/codegen_expr_test.rs::from_less_select_rejects_star`
 
 #### Scenario: MakeRecord's output is byte-identical to spec 003's record format
 
@@ -607,7 +607,7 @@ sorter-sourced rows.
   buffered
 
 **Tests:** `src/vdbe/sorter.rs::tests::order_by_buffers_all_rows_before_sorting`,
-`tests/vdbe/cursor_sorter_test.rs::order_by_program_emits_rows_in_sorted_order`
+`tests/unit/vdbe_cursor_sorter_test.rs::order_by_program_emits_rows_in_sorted_order`
 
 #### Scenario: Sort key descriptor encodes column count and per-column direction
 
@@ -632,8 +632,8 @@ sorter-sourced rows.
   aliases-of-columns both bottom out at a raw table column index — and
   an out-of-range ordinal or an unresolvable alias is rejected the same
   way an unknown bare column name already is
-**Tests:** `tests/codegen/select_test.rs::order_by_ordinal_resolves_result_column`,
-`tests/codegen/select_test.rs::order_by_alias_resolves_result_column`
+**Tests:** `tests/unit/codegen_select_test.rs::order_by_ordinal_resolves_result_column`,
+`tests/unit/codegen_select_test.rs::order_by_alias_resolves_result_column`
 
 #### Scenario: ORDER BY terms may be genuine expressions, not just columns/ordinals/aliases (#155)
 
@@ -656,11 +656,11 @@ sorter-sourced rows.
   decoded record, so the trailing sort-key-only registers are never
   projected
 
-**Tests:** `tests/codegen/select_test.rs::order_by_unary_expression_matches_oracle`,
-`tests/codegen/select_test.rs::order_by_binary_expression_matches_oracle`,
-`tests/codegen/select_test.rs::order_by_function_call_matches_oracle`,
-`tests/codegen/select_test.rs::order_by_alias_to_computed_expression_matches_oracle`,
-`tests/codegen/select_test.rs::order_by_expression_with_limit_offset_and_second_key`
+**Tests:** `tests/unit/codegen_select_test.rs::order_by_unary_expression_matches_oracle`,
+`tests/unit/codegen_select_test.rs::order_by_binary_expression_matches_oracle`,
+`tests/unit/codegen_select_test.rs::order_by_function_call_matches_oracle`,
+`tests/unit/codegen_select_test.rs::order_by_alias_to_computed_expression_matches_oracle`,
+`tests/unit/codegen_select_test.rs::order_by_expression_with_limit_offset_and_second_key`
 
 #### Scenario: NULL is comparison-distinct across `=`, DISTINCT, and ORDER BY (#146)
 
@@ -701,7 +701,7 @@ pinned oracle, compared instruction-by-instruction.
   populated in all seven columns (`addr` matching the instruction's linear
   position, `p4` empty/blank when absent rather than a placeholder value)
 
-**Tests:** `tests/vdbe/explain_test.rs::explain_renders_one_row_per_instruction_all_columns`
+**Tests:** `tests/unit/vdbe_explain_test.rs::explain_renders_one_row_per_instruction_all_columns`
 
 #### Scenario: EXPLAIN's p4 column renders the operand's display form, not its raw bytes
 
@@ -711,7 +711,7 @@ pinned oracle, compared instruction-by-instruction.
   shows `g%` — both are the same rendering the oracle itself produces via
   `EXPLAIN`, not an internal debug representation
 
-**Tests:** `tests/vdbe/explain_test.rs::explain_p4_column_matches_oracle_display_form`
+**Tests:** `tests/unit/vdbe_explain_test.rs::explain_p4_column_matches_oracle_display_form`
 
 ### Requirement 11: Expression Emission — Control Flow, Not Boolean Values [MUST]
 
@@ -744,7 +744,7 @@ to produce NULL, not only 0/1.
 > completed; its kept oracle vectors
 > (`tests/corpus/expr_vectors/walker.jsonl`) now run through the real
 > compiled path
-> (`tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`),
+> (`tests/unit/codegen_expr_test.rs::walker_vectors_pass_through_the_compiled_path`),
 > confirming this requirement's jump-shape description. #134 added the
 > `NullTarget` clause above and the `Null`/`Not` opcodes behind it,
 > retiring the NOT/AND/OR/BETWEEN/IN-over-NULL vectors from that test's
@@ -766,7 +766,7 @@ to produce NULL, not only 0/1.
   scanning) — there is no intermediate register holding a boolean 0/1
   that a separate opcode then branches on
 
-**Tests:** `tests/codegen/expr_test.rs::where_clause_compiles_to_direct_jump`
+**Tests:** `tests/unit/codegen_expr_test.rs::where_clause_compiles_to_direct_jump`
 
 #### Scenario: AND short-circuits without evaluating its second operand on a false first operand
 
@@ -776,7 +776,7 @@ to produce NULL, not only 0/1.
   ever reaching the `Lt` instruction — `qty < 50` is not evaluated when
   `price >= 10` is already false
 
-**Tests:** `tests/codegen/expr_test.rs::and_short_circuits_on_false_first_operand`
+**Tests:** `tests/unit/codegen_expr_test.rs::and_short_circuits_on_false_first_operand`
 
 #### Scenario: NOT over a comparison keeps the unknown outcome excluding the row
 
@@ -811,7 +811,7 @@ to produce NULL, not only 0/1.
   `Not` opcode (Requirement 6), and a comparison lowers to a jump-mode
   test whose unknown branch writes the `Null` opcode (Requirement 8)
 
-**Tests:** `tests/unit/codegen.rs::not_in_value_context_uses_the_not_opcode`, `tests/unit/codegen.rs::comparison_in_value_context_materializes_three_outcomes`, `tests/codegen/expr_test.rs::walker_vectors_pass_through_the_compiled_path`
+**Tests:** `tests/unit/codegen.rs::not_in_value_context_uses_the_not_opcode`, `tests/unit/codegen.rs::comparison_in_value_context_materializes_three_outcomes`, `tests/unit/codegen_expr_test.rs::walker_vectors_pass_through_the_compiled_path`
 
 ### Requirement 12: Aggregate Opcodes [MUST]
 
@@ -888,7 +888,7 @@ cursor machinery is introduced by this requirement.
   have stayed the minimum since it sorts below every lowercase letter
 
 **Tests:** `src/vdbe/exec.rs::tests::agg_step_min_honours_a_nocase_collation`,
-`tests/codegen/select_test.rs::min_max_aggregate_honours_collate_nocase`
+`tests/unit/codegen_select_test.rs::min_max_aggregate_honours_collate_nocase`
 
 ### Requirement 13: Non-Recursive CTE Materialization [MUST]
 
@@ -1224,7 +1224,7 @@ rerouted that codegen onto `AggStep`/`AggFinal` and retired the
 register-arithmetic scheme, fixing a collation gap and adding the `P5`
 reset mechanism along the way.
 
-`tests/vdbe/opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
+`tests/unit/vdbe_opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
 harvested opcode set — the full 61-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`

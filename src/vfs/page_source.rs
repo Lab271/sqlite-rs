@@ -8,19 +8,15 @@
 use std::path::Path;
 use std::rc::Rc;
 
-use thiserror::Error;
-
 use super::{AnyVfsFile, FileLock, Vfs, VfsError, VfsFile};
 
 /// Failure reading or writing a whole page through a [`PageSource`].
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum PageError {
     /// Page numbers are 1-based; page 0 was requested.
-    #[error("invalid page number 0")]
     InvalidPageNumber,
 
     /// A read returned fewer bytes than a full page.
-    #[error("short read on page {page_num}: expected {expected} bytes, got {got}")]
     ShortRead {
         /// The page that came up short.
         page_num: u32,
@@ -32,7 +28,6 @@ pub enum PageError {
 
     /// [`WritablePageSource::write_page`] was given a buffer that isn't
     /// exactly one page long.
-    #[error("wrong buffer length writing page {page_num}: expected {expected} bytes, got {got}")]
     WrongLength {
         /// The page that was being written.
         page_num: u32,
@@ -43,8 +38,49 @@ pub enum PageError {
     },
 
     /// The underlying VFS operation failed.
-    #[error(transparent)]
-    Vfs(#[from] VfsError),
+    Vfs(VfsError),
+}
+
+impl std::fmt::Display for PageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PageError::InvalidPageNumber => write!(f, "invalid page number 0"),
+            PageError::ShortRead {
+                page_num,
+                expected,
+                got,
+            } => write!(
+                f,
+                "short read on page {page_num}: expected {expected} bytes, got {got}"
+            ),
+            PageError::WrongLength {
+                page_num,
+                expected,
+                got,
+            } => write!(
+                f,
+                "wrong buffer length writing page {page_num}: expected {expected} bytes, got {got}"
+            ),
+            PageError::Vfs(source) => std::fmt::Display::fmt(source, f),
+        }
+    }
+}
+
+impl std::error::Error for PageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PageError::Vfs(source) => Some(source),
+            PageError::InvalidPageNumber
+            | PageError::ShortRead { .. }
+            | PageError::WrongLength { .. } => None,
+        }
+    }
+}
+
+impl From<VfsError> for PageError {
+    fn from(source: VfsError) -> Self {
+        PageError::Vfs(source)
+    }
 }
 
 /// Reads page `page_num` directly into `buf`, which must already be

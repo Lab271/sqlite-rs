@@ -226,7 +226,7 @@ def opcode_model():
     counts as implemented if `dispatch`'s match has a real arm for it,
     not the `other => Unimplemented` catch-all. `Opcode::ALL`
     (src/vdbe/program.rs) is checked against this same JSON by
-    tests/vdbe/opcode_completeness_test.rs, so the total here always
+    tests/unit/vdbe_opcode_completeness_test.rs, so the total here always
     equals the full frozen set.
     """
     if not OPCODES_JSON.exists() or not VDBE_EXEC.exists():

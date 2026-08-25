@@ -10,7 +10,7 @@
 //! delete+reinsert mid-scan), an update that leaves some columns
 //! untouched, and a rowid-alias reassignment — executed via
 //! `execute_with_writable_db` and read back with `TableCursor`/
-//! `decode_record`, mirroring `tests/codegen/insert_test.rs`'s harness.
+//! `decode_record`, mirroring `tests/unit/codegen_insert_test.rs`'s harness.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

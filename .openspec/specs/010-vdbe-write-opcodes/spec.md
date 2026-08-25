@@ -25,7 +25,7 @@ wrappers over `src/btree::{insert_row, delete_row, insert_entry}`.
 Unlike spec 009's opcodes, `OpenWrite`/`Insert`/`NewRowid` were never
 harvested from a V2-era oracle `EXPLAIN` (V2 predates any write-path
 support), so `tools/opcodes-v2.json`/`Opcode::ALL`'s harvested-parity
-check (`tests/vdbe/opcode_completeness_test.rs`) deliberately does not
+check (`tests/unit/vdbe_opcode_completeness_test.rs`) deliberately does not
 cover them — see `src/vdbe/program.rs`'s `ALL` doc comment. This spec's
 requirements are the traceability surface for those three opcodes
 instead.
@@ -64,7 +64,7 @@ RefCell<Pager>`)
   row inserted
 
 **Tests:**
-`tests/vdbe/write_opcodes_test.rs::insert_round_trips_through_v1_reader_on_a_real_temp_file`
+`tests/unit/vdbe_write_opcodes_test.rs::insert_round_trips_through_v1_reader_on_a_real_temp_file`
 
 ### Requirement 2: MakeRecord affinity [MUST]
 
@@ -124,7 +124,7 @@ duplicate rowid surfaces as `ExecError::MalformedInstruction` wrapping
 
 **Tests:**
 `src/vdbe/cursor.rs::tests::insert_then_read_back_round_trips_through_make_record_and_column`,
-`tests/vdbe/write_opcodes_test.rs::insert_round_trips_through_v1_reader_on_a_real_temp_file`
+`tests/unit/vdbe_write_opcodes_test.rs::insert_round_trips_through_v1_reader_on_a_real_temp_file`
 
 ### Requirement 4: Delete (real cursor path) [MUST]
 
@@ -150,7 +150,7 @@ error rather than delete an arbitrary row.
 
 **Tests:**
 `src/vdbe/cursor.rs::tests::delete_removes_the_row_at_the_cursors_current_position`,
-`tests/vdbe/write_opcodes_test.rs::delete_removes_a_previously_inserted_row_from_the_on_disk_file`
+`tests/unit/vdbe_write_opcodes_test.rs::delete_removes_a_previously_inserted_row_from_the_on_disk_file`
 
 #### Scenario: Delete on an ephemeral cursor is unaffected by the real-cursor path
 

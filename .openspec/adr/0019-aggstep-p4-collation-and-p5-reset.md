@@ -104,7 +104,7 @@ this is an additive semantic, not a breaking one.
   representation — they are unaffected; no re-harvest needed. This
   implementation's own `EXPLAIN` rendering of `P4::AggFunc` (`"name(arity)-COLLATION"`)
   is not yet exercised by any parity/EXPLAIN-diffing test (spec 009's
-  `tests/vdbe/explain_test.rs` has no `AggStep`/`AggFinal` case), so no
+  `tests/unit/vdbe_explain_test.rs` has no `AggStep`/`AggFinal` case), so no
   existing byte-for-byte contract is broken; a future EXPLAIN-parity
   ticket for aggregate opcodes should decide then whether to match the
   oracle's plain descriptor instead.

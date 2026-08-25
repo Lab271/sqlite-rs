@@ -11,8 +11,6 @@
 
 use std::path::Path;
 
-use thiserror::Error;
-
 use crate::btree::{BtreeError, IndexCursor, IndexRow, TableCursor, TableRow};
 use crate::header::{DatabaseHeader, HeaderError, HEADER_LEN};
 use crate::pager::{Pager, PagerError};
@@ -23,23 +21,56 @@ use crate::schema::{
 use crate::vfs::{PageSource, Vfs, VfsError};
 
 /// Failure reading a database while producing a [`DumpResult`].
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum DumpError {
     /// Failure opening or reading the database file through the VFS.
-    #[error(transparent)]
-    Vfs(#[from] VfsError),
+    Vfs(VfsError),
 
     /// The 100-byte database header failed to parse.
-    #[error("parsing database header: {0}")]
-    Header(#[from] HeaderError),
+    Header(HeaderError),
 
     /// Failure opening the pager over the database file.
-    #[error("opening pager: {0}")]
-    Pager(#[from] PagerError),
+    Pager(PagerError),
 
     /// Failure reading `sqlite_master` into a schema.
-    #[error("reading schema: {0}")]
-    Schema(#[from] DdlError),
+    Schema(DdlError),
+}
+
+impl std::fmt::Display for DumpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DumpError::Vfs(e) => write!(f, "{e}"),
+            DumpError::Header(e) => write!(f, "parsing database header: {e}"),
+            DumpError::Pager(e) => write!(f, "opening pager: {e}"),
+            DumpError::Schema(e) => write!(f, "reading schema: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DumpError {}
+
+impl From<VfsError> for DumpError {
+    fn from(e: VfsError) -> Self {
+        DumpError::Vfs(e)
+    }
+}
+
+impl From<HeaderError> for DumpError {
+    fn from(e: HeaderError) -> Self {
+        DumpError::Header(e)
+    }
+}
+
+impl From<PagerError> for DumpError {
+    fn from(e: PagerError) -> Self {
+        DumpError::Pager(e)
+    }
+}
+
+impl From<DdlError> for DumpError {
+    fn from(e: DdlError) -> Self {
+        DumpError::Schema(e)
+    }
 }
 
 /// One table's decoded rows, ready for `-list`/`-csv` rendering. The
@@ -258,13 +289,33 @@ fn decode_index_row(row: &IndexRow, encoding: TextEncoding) -> Result<Vec<Value>
     Ok(decode_record(&row.payload, encoding)?)
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 enum TableReadError {
-    #[error(transparent)]
-    Btree(#[from] BtreeError),
+    Btree(BtreeError),
+    Record(RecordError),
+}
 
-    #[error(transparent)]
-    Record(#[from] RecordError),
+impl std::fmt::Display for TableReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableReadError::Btree(e) => write!(f, "{e}"),
+            TableReadError::Record(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for TableReadError {}
+
+impl From<BtreeError> for TableReadError {
+    fn from(e: BtreeError) -> Self {
+        TableReadError::Btree(e)
+    }
+}
+
+impl From<RecordError> for TableReadError {
+    fn from(e: RecordError) -> Self {
+        TableReadError::Record(e)
+    }
 }
 
 #[cfg(test)]

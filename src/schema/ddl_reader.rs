@@ -20,26 +20,47 @@
 //! WITHOUT ROWID / STRICT markers, and (#211) each table's indexes
 //! (column list, ASC/DESC, uniqueness), per the originating issues' scope.
 
-use thiserror::Error;
-
 use crate::btree::{BtreeError, TableCursor};
 use crate::record::{decode_record, Collation, RecordError, TextEncoding, Value};
 use crate::vfs::PageSource;
 
 /// Failure walking or decoding `sqlite_master`.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum DdlError {
     /// Failure walking the `sqlite_master` b-tree.
-    #[error("walking sqlite_master: {0}")]
-    Btree(#[from] BtreeError),
+    Btree(BtreeError),
 
     /// Failure decoding a `sqlite_master` row's record payload.
-    #[error("decoding a sqlite_master row: {0}")]
-    Record(#[from] RecordError),
+    Record(RecordError),
 
     /// A `sqlite_master` row didn't have exactly 5 columns.
-    #[error("sqlite_master row has {0} columns, expected 5")]
     MalformedRow(usize),
+}
+
+impl std::fmt::Display for DdlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DdlError::Btree(e) => write!(f, "walking sqlite_master: {e}"),
+            DdlError::Record(e) => write!(f, "decoding a sqlite_master row: {e}"),
+            DdlError::MalformedRow(n) => {
+                write!(f, "sqlite_master row has {n} columns, expected 5")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DdlError {}
+
+impl From<BtreeError> for DdlError {
+    fn from(e: BtreeError) -> Self {
+        DdlError::Btree(e)
+    }
+}
+
+impl From<RecordError> for DdlError {
+    fn from(e: RecordError) -> Self {
+        DdlError::Record(e)
+    }
 }
 
 /// A minimally-parsed table schema entry: everything Tier 0 needs to

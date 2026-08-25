@@ -5,8 +5,6 @@
 //! byte 100. The b-tree layer must account for the header when computing
 //! in-page offsets on page 1 — this module only parses the header itself.
 
-use thiserror::Error;
-
 use crate::record::TextEncoding;
 
 /// Byte length of the SQLite database header (bytes 0-99 of page 1).
@@ -20,30 +18,24 @@ pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// Failure parsing or validating a [`DatabaseHeader`].
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum HeaderError {
     /// `buf` is shorter than [`HEADER_LEN`].
-    #[error("header is {len} bytes, need at least 100")]
     TooShort {
         /// Actual length of the buffer that was passed in.
         len: usize,
     },
 
     /// Bytes 0-15 don't match the SQLite magic string.
-    #[error("missing or invalid SQLite magic string")]
     InvalidMagic,
 
     /// Bytes 16-17 don't encode a valid page size.
-    #[error(
-        "invalid page size encoding {raw} (must be a power of two from 512 to 32768, or 1 for 65536)"
-    )]
     InvalidPageSize {
         /// The raw, unresolved 16-bit page-size field.
         raw: u16,
     },
 
     /// Byte 18 or 19 (write/read version) is neither 1 nor 2.
-    #[error("invalid {field:?} version byte {value} (must be 1 or 2)")]
     InvalidFileFormatVersion {
         /// Which of the two version bytes was invalid.
         field: VersionField,
@@ -52,7 +44,6 @@ pub enum HeaderError {
     },
 
     /// Byte 20 (reserved space) leaves no usable bytes in the page.
-    #[error("reserved space {reserved_space} leaves no usable bytes in a {page_size}-byte page")]
     InvalidReservedSpace {
         /// The invalid reserved-space byte.
         reserved_space: u8,
@@ -61,12 +52,44 @@ pub enum HeaderError {
     },
 
     /// Bytes 56-59 don't encode a recognized text encoding.
-    #[error("invalid text encoding {raw} (must be 1, 2, or 3)")]
     InvalidTextEncoding {
         /// The raw, unrecognized text-encoding value.
         raw: u32,
     },
 }
+
+impl std::fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeaderError::TooShort { len } => {
+                write!(f, "header is {len} bytes, need at least 100")
+            }
+            HeaderError::InvalidMagic => {
+                write!(f, "missing or invalid SQLite magic string")
+            }
+            HeaderError::InvalidPageSize { raw } => write!(
+                f,
+                "invalid page size encoding {raw} (must be a power of two from 512 to 32768, or 1 for 65536)"
+            ),
+            HeaderError::InvalidFileFormatVersion { field, value } => write!(
+                f,
+                "invalid {field:?} version byte {value} (must be 1 or 2)"
+            ),
+            HeaderError::InvalidReservedSpace {
+                reserved_space,
+                page_size,
+            } => write!(
+                f,
+                "reserved space {reserved_space} leaves no usable bytes in a {page_size}-byte page"
+            ),
+            HeaderError::InvalidTextEncoding { raw } => {
+                write!(f, "invalid text encoding {raw} (must be 1, 2, or 3)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HeaderError {}
 
 /// Which header byte an [`HeaderError::InvalidFileFormatVersion`] refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
