@@ -1041,21 +1041,29 @@ pub fn execute_transaction_step(
 }
 
 fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
+    // #509: `steps`/`pc` are both backstops against pathological programs
+    // (a step-limit runaway, a jump target past the end), not values any
+    // real program comes close to overflowing (`MAX_STEPS` is 50_000_000,
+    // program lengths are a handful of instructions per SQL statement) —
+    // `saturating_add` keeps the overflow-safety `arithmetic_side_effects`
+    // lint demands without `checked_add`'s per-step `Option` construction
+    // and `.ok_or` unwrap on this hot loop. (A batched, check-every-N-steps
+    // variant of the `MAX_STEPS` comparison was also tried and measured no
+    // further win beyond this — see the closing comment on #509 — so it
+    // was dropped rather than kept as unjustified complexity.)
     let mut pc = 0usize;
     let mut steps = 0u32;
     loop {
-        steps = steps.checked_add(1).ok_or(ExecError::StepLimitExceeded)?;
+        steps = steps.saturating_add(1);
         if steps > MAX_STEPS {
             return Err(ExecError::StepLimitExceeded);
         }
-        let instr = program
-            .get(pc)
-            .ok_or(ExecError::ProgramCounterOutOfRange { pc })?;
+        let Some(instr) = program.get(pc) else {
+            return Err(ExecError::ProgramCounterOutOfRange { pc });
+        };
         match dispatch(&mut vm, pc, instr)? {
             Step::Next => {
-                pc = pc
-                    .checked_add(1)
-                    .ok_or(ExecError::ProgramCounterOutOfRange { pc })?;
+                pc = pc.saturating_add(1);
             }
             Step::Jump(target) => pc = target,
             Step::Halt { code: 0, .. } => {
