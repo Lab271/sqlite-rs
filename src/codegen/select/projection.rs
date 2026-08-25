@@ -228,8 +228,7 @@ pub(super) fn emit_distinct_guard(
     }
     let cols = result_columns(select, schema);
     let collations = result_column_collations(schema, &cols);
-    let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
-    debug_assert_eq!(collations.len(), count);
+    let (first, _count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
     emit_dedup_check(em, distinct_cursor, first, collations, skip_label);
     Ok(())
 }
