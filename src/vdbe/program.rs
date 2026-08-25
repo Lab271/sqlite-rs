@@ -191,6 +191,33 @@ pub enum Opcode {
     /// Advances index cursor `P1` backward, jumping to `P2` if there was
     /// a previous entry.
     IdxPrev,
+    // #545: transient automatic-index primitives — a join level builds
+    // one of these (opened via `OpenEphemeral` with `P5 == 2`, a third
+    // mode alongside the existing index-mode/table-mode `OpenEphemeral`
+    // cursors) over an otherwise-unindexed equality join column, then
+    // seeks it once per outer row instead of a `Rewind`/`Next` full
+    // scan. Unlike `SeekIndexEq`/`IdxNext`'s byte-order seek-then-walk
+    // shape (built for a real, sorted index b-tree), this is a plain
+    // exact-key multi-map (`BTreeMap<key, Vec<rowid>>`) — every join
+    // only ever asks "which rows share this exact key", never a range,
+    // so there is no need to reproduce a real index's ordering
+    // semantics. Postdates the V2 oracle harvest, so excluded from
+    // `ALL` but fully dispatched and exhaustiveness-checked, like
+    // `SeekIndexEq`/`IdxRowid` above.
+    /// Appends the rowid in register `P3` under the key built from
+    /// register `P2` (`P4::SeekKey`, one column) into automatic-index
+    /// cursor `P1`.
+    AutoIndexInsert,
+    /// Seeks automatic-index cursor `P1` for every rowid sharing the key
+    /// built from register `P3` (`P4::SeekKey`, one column), positioning
+    /// on the first if any exist, jumping to `P2` if none do.
+    AutoIndexSeek,
+    /// Reads automatic-index cursor `P1`'s currently-seeked rowid into
+    /// register `P2`.
+    AutoIndexRowid,
+    /// Advances automatic-index cursor `P1` to the next rowid sharing
+    /// its current key, jumping to `P2` if there was one.
+    AutoIndexNext,
     // DDL (#215) — schema-mutating statements, each done procedurally in
     // one exec.rs handler rather than decomposed into cursor-driven
     // multi-instruction sequences; never harvested from a V2 oracle
@@ -497,6 +524,10 @@ fn _exhaustive(o: Opcode) {
         | Opcode::IdxLast
         | Opcode::IdxNext
         | Opcode::IdxPrev
+        | Opcode::AutoIndexInsert
+        | Opcode::AutoIndexSeek
+        | Opcode::AutoIndexRowid
+        | Opcode::AutoIndexNext
         | Opcode::CreateTable
         | Opcode::CreateView
         | Opcode::DropTable

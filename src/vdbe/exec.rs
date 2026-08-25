@@ -725,10 +725,11 @@ fn cast(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 
 fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecError> {
     use Opcode::{
-        Add, AggFinal, AggStep, Analyze, AutoCommit, BeginSubrtn, BitAnd, BitNot, BitOr, Blob,
-        Cast, Column, Concat, Copy, Count, CreateIndex, CreateTable, CreateView, DecrJumpZero,
-        Delete, Divide, DropIndex, DropTable, Eq, Filter, FilterAdd, Found, Function, Ge, Goto, Gt,
-        Halt, IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot,
+        Add, AggFinal, AggStep, Analyze, AutoCommit, AutoIndexInsert, AutoIndexNext,
+        AutoIndexRowid, AutoIndexSeek, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
+        Concat, Copy, Count, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete, Divide,
+        DropIndex, DropTable, Eq, Filter, FilterAdd, Found, Function, Ge, Goto, Gt, Halt,
+        IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot,
         IfNotZero, IfPos, Init, Insert, Int64, Integer, IntegrityCheck, IsNull, Last, Le, Lt,
         MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow,
         OffsetLimit, Once, OpenDup, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real,
@@ -811,6 +812,10 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         IdxInsert => cursor::idx_insert(vm, instr),
         IdxDelete => cursor::idx_delete(vm, instr),
         Count => cursor::count(vm, instr),
+        AutoIndexInsert => cursor::auto_index_insert(vm, instr),
+        AutoIndexSeek => cursor::auto_index_seek(vm, instr),
+        AutoIndexRowid => cursor::auto_index_rowid(vm, instr),
+        AutoIndexNext => cursor::auto_index_next(vm, instr),
         IdxLE => cursor::idx_le(vm, instr),
         NoConflict => cursor::no_conflict(vm, instr),
         Delete => cursor::delete(vm, instr),

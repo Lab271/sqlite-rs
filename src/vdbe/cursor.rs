@@ -92,6 +92,15 @@ pub(crate) enum CursorSlot {
     /// exactly like [`CursorSlot::Table`], just without any on-disk
     /// b-tree backing it.
     EphemeralTable(EphemeralTableState),
+    /// A transient automatic index (#545) — opened by `OpenEphemeral`
+    /// with `P5 == 2`, a third mode alongside the two above. Backs a
+    /// join level's own equality-key-to-rowid multi-map: `AutoIndexInsert`
+    /// appends a rowid under its join key, `AutoIndexSeek`/`AutoIndexRowid`/
+    /// `AutoIndexNext` then walk every rowid sharing one probed key. See
+    /// [`AutoIndexState`]'s own doc for why this is a plain exact-key
+    /// multi-map rather than reusing [`CursorSlot::Ephemeral`]'s
+    /// single-value-per-key shape or a real index's ordered-seek shape.
+    EphemeralAutoIndex(AutoIndexState),
     Pseudo {
         register: i32,
     },
@@ -106,6 +115,7 @@ impl CursorSlot {
             CursorSlot::IndexRead(_) => "index read cursor",
             CursorSlot::Ephemeral(_) => "ephemeral cursor",
             CursorSlot::EphemeralTable(_) => "ephemeral table cursor",
+            CursorSlot::EphemeralAutoIndex(_) => "ephemeral automatic-index cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
             CursorSlot::Sorter(_) => "sorter cursor",
         }
@@ -328,6 +338,26 @@ pub(crate) struct EphemeralState {
     last_key: Option<Vec<u8>>,
 }
 
+/// Backing store for [`CursorSlot::EphemeralAutoIndex`] (#545): a plain
+/// exact-key multi-map (encoded key -> every rowid inserted under it),
+/// deliberately *not* [`EphemeralState`]'s `BTreeMap<key, Vec<Value>>`
+/// shape (one value per key — a later `IdxInsert` of a duplicate key
+/// there silently overwrites the earlier one, correct for DISTINCT's
+/// dedup but wrong for a join index, where every duplicate-key row must
+/// still be found) and *not* a real index's ordered/byte-comparable
+/// b-tree seek shape either (`SeekIndexEq` + walk-while-still-equal
+/// `IdxNext`, #450) — a join level only ever asks "which rows share
+/// this exact key", never a range, so there's no need to reproduce a
+/// real index's ordering semantics or byte-order key encoding at all.
+#[derive(Debug, Default)]
+pub(crate) struct AutoIndexState {
+    entries: BTreeMap<Vec<u8>, Vec<i64>>,
+    /// The key and within-key position `AutoIndexSeek`/`AutoIndexNext`
+    /// most recently positioned on, read by `AutoIndexRowid` — `None`
+    /// before any seek, on a miss, or once exhausted.
+    current: Option<(Vec<u8>, usize)>,
+}
+
 /// One materialized row: its rowid, plus its decoded column values.
 type EphemeralRow = (i64, Vec<Value>);
 
@@ -442,6 +472,22 @@ impl Vm {
                 slot,
                 found: other.type_name(),
                 expected: "ephemeral cursor",
+            }),
+        }
+    }
+
+    fn auto_index_mut(
+        &mut self,
+        slot: i32,
+        opcode: &'static str,
+    ) -> Result<&mut AutoIndexState, ExecError> {
+        match self.cursor_mut(slot)? {
+            CursorSlot::EphemeralAutoIndex(state) => Ok(state),
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "ephemeral automatic-index cursor",
             }),
         }
     }
@@ -649,6 +695,18 @@ pub fn open_write(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// opens a [`CursorSlot::EphemeralTable`] — an ephemeral table cursor for
 /// a materialized subquery-in-FROM.
 pub fn open_ephemeral(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    // #545: `P5 == 2` selects the transient automatic-index mode
+    // (`AutoIndexState`), a third cursor flavor alongside the
+    // index-mode (`P5 == 0`) and table-mode (`P5` nonzero, historically
+    // just "nonzero") cursors below -- checked first so it doesn't fall
+    // into the table-mode `!= 0` branch.
+    if instr.p5 == 2 {
+        vm.set_cursor(
+            instr.p1,
+            CursorSlot::EphemeralAutoIndex(AutoIndexState::default()),
+        )?;
+        return Ok(Step::Next);
+    }
     if instr.p5 != 0 {
         vm.set_cursor(
             instr.p1,
@@ -1562,6 +1620,107 @@ pub fn idx_le(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     } else {
         Step::Next
     })
+}
+
+/// `AutoIndexInsert` (#545): appends the rowid in register `P3` under
+/// the key built from register `P2` (one column, per `P4::SeekKey`'s
+/// declared collation, or `P4::Int(1)` for `Binary`) into automatic-
+/// index cursor `P1` — unlike [`idx_insert`]'s ephemeral-index path,
+/// never overwrites an existing entry under the same key, since the
+/// whole point is remembering every rowid a duplicate join key maps to.
+pub fn auto_index_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let collations = seek_key_collations(instr, "AutoIndexInsert")?;
+    let key_values = read_register_range(vm, instr.p2, collations.len(), "AutoIndexInsert")?;
+    let key = encode_record(
+        &normalize_key_values(&key_values, &collations),
+        TextEncoding::Utf8,
+    );
+    let rowid = match vm.register(instr.p3)? {
+        Value::Integer(i) => *i,
+        other => {
+            return Err(ExecError::MalformedInstruction {
+                opcode: "AutoIndexInsert",
+                reason: format!("rowid register holds {other:?}, not an integer"),
+            })
+        }
+    };
+    let state = vm.auto_index_mut(instr.p1, "AutoIndexInsert")?;
+    state.entries.entry(key).or_default().push(rowid);
+    Ok(Step::Next)
+}
+
+/// `AutoIndexSeek` (#545): probes automatic-index cursor `P1` for every
+/// rowid inserted under the key built from register `P3` (same operand
+/// shape as [`auto_index_insert`]'s key), positioning on the first if
+/// any exist and jumping to `P2` if none do (an empty key's `Vec` is
+/// never actually left behind by [`auto_index_insert`], but treated the
+/// same as "no entry" defensively either way).
+pub fn auto_index_seek(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let collations = seek_key_collations(instr, "AutoIndexSeek")?;
+    let key_values = read_register_range(vm, instr.p3, collations.len(), "AutoIndexSeek")?;
+    let key = encode_record(
+        &normalize_key_values(&key_values, &collations),
+        TextEncoding::Utf8,
+    );
+    let state = vm.auto_index_mut(instr.p1, "AutoIndexSeek")?;
+    let has_match = state
+        .entries
+        .get(&key)
+        .is_some_and(|rowids| !rowids.is_empty());
+    state.current = has_match.then_some((key, 0));
+    Ok(if has_match {
+        Step::Next
+    } else {
+        Step::Jump(to_pc(instr.p2))
+    })
+}
+
+/// `AutoIndexRowid` (#545): writes automatic-index cursor `P1`'s
+/// currently-seeked rowid into register `P2`. Errors if called without
+/// a preceding successful `AutoIndexSeek`/`AutoIndexNext` on this
+/// cursor.
+pub fn auto_index_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = vm.auto_index_mut(instr.p1, "AutoIndexRowid")?;
+    let (key, pos) = state
+        .current
+        .clone()
+        .ok_or_else(|| ExecError::MalformedInstruction {
+            opcode: "AutoIndexRowid",
+            reason: "no current row on this automatic-index cursor (AutoIndexSeek missed, or no \
+                 positioning opcode was run)"
+                .to_string(),
+        })?;
+    let rowid = state
+        .entries
+        .get(&key)
+        .and_then(|rowids| rowids.get(pos))
+        .copied()
+        .ok_or_else(|| ExecError::MalformedInstruction {
+            opcode: "AutoIndexRowid",
+            reason: "current position out of range for its key's rowid list".to_string(),
+        })?;
+    vm.set_register(instr.p2, Value::Integer(rowid))?;
+    Ok(Step::Next)
+}
+
+/// `AutoIndexNext` (#545): advances automatic-index cursor `P1` to the
+/// next rowid sharing its current key, jumping to `P2` if there was
+/// one — falls through once every rowid under that key has been
+/// visited. Mirrors `IdxNext`'s "jump on found" shape.
+pub fn auto_index_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let state = vm.auto_index_mut(instr.p1, "AutoIndexNext")?;
+    let Some((key, pos)) = state.current.clone() else {
+        return Ok(Step::Next);
+    };
+    let len = state.entries.get(&key).map_or(0, Vec::len);
+    let next_pos = pos.saturating_add(1);
+    if next_pos < len {
+        state.current = Some((key, next_pos));
+        Ok(Step::Jump(to_pc(instr.p2)))
+    } else {
+        state.current = None;
+        Ok(Step::Next)
+    }
 }
 
 /// `Delete`: for an ephemeral cursor (unchanged), removes cursor `P1`'s
