@@ -76,9 +76,9 @@ const SETUP: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT)";
 /// A `BEGIN`/write/`COMMIT` script durably applies its writes, matching
 /// the oracle running the identical script.
 #[test]
-fn commit_persists_writes_matching_oracle() {
+fn commit_persists_writes_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("commit_persists_writes_matching_oracle");
+        skip_no_oracle("commit_persists_writes_acceptance_and_output_match");
         return;
     };
 
@@ -107,9 +107,9 @@ fn commit_persists_writes_matching_oracle() {
 /// A `BEGIN`/write/`ROLLBACK` script leaves the table exactly as it was
 /// before the transaction — matching the oracle's rollback behavior.
 #[test]
-fn rollback_discards_writes_matching_oracle() {
+fn rollback_discards_writes_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("rollback_discards_writes_matching_oracle");
+        skip_no_oracle("rollback_discards_writes_acceptance_and_output_match");
         return;
     };
 
@@ -140,9 +140,9 @@ fn rollback_discards_writes_matching_oracle() {
 /// `BEGIN` for a single-connection commit — no distinct outcome to
 /// diverge on here, but acceptance (does it run at all) must match.
 #[test]
-fn begin_mode_keywords_accepted_matching_oracle() {
+fn begin_mode_keywords_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("begin_mode_keywords_accepted_matching_oracle");
+        skip_no_oracle("begin_mode_keywords_acceptance_and_output_match");
         return;
     };
 

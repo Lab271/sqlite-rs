@@ -78,9 +78,9 @@ const SETUP: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER); \
 /// with a concurrently running oracle process is covered separately by
 /// `wal_concurrent_interop_test.rs`).
 #[test]
-fn wal_mode_write_then_read_matches_oracle() {
+fn wal_mode_write_then_read_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("wal_mode_write_then_read_matches_oracle");
+        skip_no_oracle("wal_mode_write_then_read_acceptance_and_output_match");
         return;
     };
 
@@ -109,9 +109,9 @@ fn wal_mode_write_then_read_matches_oracle() {
 
 /// A non-recursive `WITH`/CTE query matches the oracle's output.
 #[test]
-fn non_recursive_cte_matches_oracle() {
+fn non_recursive_cte_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("non_recursive_cte_matches_oracle");
+        skip_no_oracle("non_recursive_cte_output_match");
         return;
     };
 
@@ -130,9 +130,9 @@ fn non_recursive_cte_matches_oracle() {
 /// Plain `UNION` (dedup, as opposed to `UNION ALL`) matches the
 /// oracle's deduplicated output.
 #[test]
-fn union_dedup_matches_oracle() {
+fn union_dedup_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("union_dedup_matches_oracle");
+        skip_no_oracle("union_dedup_output_match");
         return;
     };
 
@@ -150,9 +150,9 @@ fn union_dedup_matches_oracle() {
 
 /// `CREATE VIEW` plus a `SELECT` against it matches the oracle.
 #[test]
-fn view_select_matches_oracle() {
+fn view_select_acceptance_and_output_match() {
     let Some(oracle) = pinned_oracle() else {
-        skip_no_oracle("view_select_matches_oracle");
+        skip_no_oracle("view_select_acceptance_and_output_match");
         return;
     };
 
