@@ -97,7 +97,7 @@ fn our_rows(db: &Path, header: &DatabaseHeader, schema: &TableSchema, sql: &str)
                 .map(|v| match v {
                     sqlite_rs::record::Value::Null => String::new(),
                     sqlite_rs::record::Value::Integer(i) => i.to_string(),
-                    sqlite_rs::record::Value::Real(r) => r.to_string(),
+                    sqlite_rs::record::Value::Real(r) => sqlite_rs::format::format_real(*r),
                     sqlite_rs::record::Value::Text(s) => s.to_string(),
                     sqlite_rs::record::Value::Blob(_) => "<blob>".to_string(),
                 })
@@ -461,4 +461,102 @@ fn index_only_count_star_equality_where_non_unique_matches_oracle() {
             "mismatch for {sql:?}"
         );
     }
+}
+
+/// #544: `SUM(indexed_col)`/`AVG(indexed_col)` walk the index b-tree
+/// directly (`IdxRewind`/`IdxNext`) rather than the table, so no
+/// `Rewind`/`Next` table scan and no `SeekRowid` appear in the
+/// compiled program.
+fn assert_index_only_sum(schema: &TableSchema, sql: &str) {
+    let opcodes = compiled_opcodes(schema, sql);
+    assert!(
+        opcodes.contains(&Opcode::IdxRewind),
+        "expected IdxRewind in the compiled program for {sql:?}, got: {opcodes:?}"
+    );
+    assert!(
+        !opcodes.contains(&Opcode::Rewind) && !opcodes.contains(&Opcode::SeekRowid),
+        "expected no table scan/lookup for index-only SUM/AVG {sql:?}, got: {opcodes:?}"
+    );
+}
+
+#[test]
+fn index_only_sum_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("sum-indexed");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT); \
+         CREATE INDEX idx_a ON t(a); \
+         INSERT INTO t(a, payload) VALUES (1, 'x'), (2, 'y'), (3, 'z'), (NULL, 'w');",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    for sql in ["SELECT sum(a) FROM t", "SELECT avg(a) FROM t"] {
+        assert_index_only_sum(&schema, sql);
+        assert_eq!(
+            our_rows(&db, &header, &schema, sql),
+            oracle_rows(&oracle, &db, sql),
+            "mismatch for {sql:?}"
+        );
+    }
+}
+
+#[test]
+fn index_only_sum_empty_table_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("sum-indexed-empty");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER); \
+         CREATE INDEX idx_a ON t(a);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+
+    for sql in ["SELECT sum(a) FROM t", "SELECT avg(a) FROM t"] {
+        assert_index_only_sum(&schema, sql);
+        assert_eq!(
+            our_rows(&db, &header, &schema, sql),
+            oracle_rows(&oracle, &db, sql),
+            "mismatch for {sql:?}"
+        );
+    }
+}
+
+/// A `SUM` on a column with no index still falls back to the ordinary
+/// full-scan aggregate path and produces the correct result.
+#[test]
+fn sum_no_index_falls_back_and_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("sum-no-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER); \
+         INSERT INTO t(a) VALUES (1), (2), (3);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(schema.indexes.is_empty());
+
+    let sql = "SELECT sum(a) FROM t";
+    assert_eq!(
+        our_rows(&db, &header, &schema, sql),
+        oracle_rows(&oracle, &db, sql)
+    );
 }

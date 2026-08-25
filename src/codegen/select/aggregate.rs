@@ -162,6 +162,119 @@ where
     Ok(true)
 }
 
+/// Emits an index-only `SUM(col)`/`AVG(col)` (#544): when `col` is the
+/// leading column of some index on `schema` and there's no `WHERE`
+/// clause restricting which rows are summed, walks that index's
+/// b-tree end to end (`IdxRewind`/`IdxNext`), reading each entry's
+/// leading column straight off the index cursor and folding it into
+/// the ordinary `AggStep` accumulator (`crate::vdbe::aggregate`) —
+/// the table cursor is never opened at all.
+///
+/// Returns `Ok(true)` when this fast path was taken (result row
+/// already emitted via `sink`); `Ok(false)` leaves `em`/`reg`
+/// untouched. Deliberately narrow: any `WHERE`/`GROUP BY`/`HAVING`/
+/// `DISTINCT`/`ORDER BY`/`LIMIT`, a non-bare-column argument, or a
+/// table with no matching index all fall back to
+/// [`compile_grouped_scan`].
+pub(super) fn try_compile_index_only_sum<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if select.where_clause.is_some()
+        || select.having.is_some()
+        || select.limit.is_some()
+        || !select.order_by.is_empty()
+        || !select.group_by.is_empty()
+    {
+        return Ok(false);
+    }
+    let [ResultColumn::Expr { expr, .. }] = select.columns.as_slice() else {
+        return Ok(false);
+    };
+    let ExprKind::FunctionCall {
+        name,
+        args,
+        distinct,
+    } = &expr.kind
+    else {
+        return Ok(false);
+    };
+    if *distinct || !(name.eq_ignore_ascii_case("sum") || name.eq_ignore_ascii_case("avg")) {
+        return Ok(false);
+    }
+    let FunctionArgs::List(list) = args else {
+        return Ok(false);
+    };
+    let [arg] = list.as_slice() else {
+        return Ok(false);
+    };
+    let ExprKind::Column { name: col_name, .. } = &arg.kind else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.iter().find(|idx| {
+        idx.columns
+            .first()
+            .is_some_and(|c| c.name.eq_ignore_ascii_case(col_name))
+    }) else {
+        return Ok(false);
+    };
+
+    let index_cursor = cursors.sort;
+    let root_page = valid_index_root_page(index)?;
+    let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+    open_instr.p5 = 1;
+    em.emit(open_instr);
+
+    let agg_name = name.to_ascii_lowercase();
+    let leading_collation = index
+        .columns
+        .first()
+        .map_or(Collation::Binary, |c| c.collation);
+
+    let done_label = em.new_label();
+    let rewind_addr = em.emit(Instruction::new(Opcode::IdxRewind, index_cursor, 0, 0));
+    em.patch_p2(rewind_addr, done_label);
+    let loop_start = em.new_label();
+    em.place(loop_start);
+
+    let value_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Column, index_cursor, 0, value_reg));
+    em.emit(Instruction::with_p4(
+        Opcode::AggStep,
+        0,
+        value_reg,
+        0,
+        P4::AggFunc {
+            name: agg_name.clone(),
+            arity: 1,
+            collation: leading_collation,
+        },
+    ));
+
+    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    em.place(done_label);
+
+    let final_reg = reg.alloc();
+    em.emit(Instruction::with_p4(
+        Opcode::AggFinal,
+        0,
+        0,
+        final_reg,
+        P4::Str(format!("{agg_name}(1)")),
+    ));
+
+    sink(em, reg, final_reg, 1)?;
+    Ok(true)
+}
+
 /// #506: which of `schema`'s columns [`compile_grouped_scan`]'s pass 1
 /// actually needs to serialize into the sort record — the `GROUP BY`
 /// key, every aggregate argument, and every plain column `select.columns`/
