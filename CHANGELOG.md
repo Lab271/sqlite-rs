@@ -6,8 +6,6 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-## [0.18.2] - 2026-08-25
-
 fix: JOIN reordering now prefers a rowid/unique-index-seekable inner
 table over raw ANALYZE row-count ordering (#510) —
 `join_order::seekable_tables` flags a table whose `ON` equality is a
