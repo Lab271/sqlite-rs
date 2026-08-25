@@ -352,6 +352,142 @@ fn create_view_self_reference_is_rejected_cleanly() {
     );
 }
 
+// #532: predicate push-down into FROM-subqueries/views — an outer WHERE
+// conjunct that resolves solely against a pushdown-safe view's own
+// (identity-mapped) output columns is moved into the view's own WHERE
+// clause before it materializes, so an index on the underlying table can
+// be used. These are oracle-diff correctness checks (does pushing the
+// predicate change which rows come back?); `eqp_test.rs` covers the
+// actual plan-shape/index-selection assertion.
+
+/// A plain `SELECT * FROM t` view — every column is identity-mapped, so
+/// the outer `WHERE` should push straight through to the base table.
+#[test]
+fn predicate_pushdown_into_simple_view_matches_oracle() {
+    let db = view_fixture_db("pushdown_simple");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT * FROM t");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v WHERE x > 15 ORDER BY id",
+        "predicate_pushdown_into_simple_view_matches_oracle",
+    );
+}
+
+/// A view with a renamed output column (`CREATE VIEW v(a, b)`) is still
+/// identity-mapped — the pushed predicate must be rewritten against the
+/// view body's own underlying column name, not the outer alias.
+#[test]
+fn predicate_pushdown_into_renamed_column_view_matches_oracle() {
+    let db = view_fixture_db("pushdown_renamed");
+    run_exec_ok(&db, "CREATE VIEW v (a, b) AS SELECT id, x FROM t");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v WHERE b > 15 ORDER BY a",
+        "predicate_pushdown_into_renamed_column_view_matches_oracle",
+    );
+}
+
+/// A view whose body is itself filtered — the pushed-down outer
+/// predicate must combine (AND) with the view's own `WHERE`, not replace
+/// it.
+#[test]
+fn predicate_pushdown_combines_with_views_own_where_matches_oracle() {
+    let db = view_fixture_db("pushdown_combine");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x FROM t WHERE x > 10");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v WHERE x < 25 ORDER BY id",
+        "predicate_pushdown_combines_with_views_own_where_matches_oracle",
+    );
+}
+
+/// A `DISTINCT` view is unsafe to push a predicate into ahead of the
+/// dedup — this pins that pushdown is correctly suppressed (an oracle
+/// mismatch would be the failure mode if it weren't).
+#[test]
+fn predicate_pushdown_skips_distinct_view_matches_oracle() {
+    let db = view_fixture_db("pushdown_distinct");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT DISTINCT x FROM t");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v WHERE x > 15 ORDER BY x",
+        "predicate_pushdown_skips_distinct_view_matches_oracle",
+    );
+}
+
+/// A predicate referencing a *computed* view column (no single
+/// underlying column to rewrite against) must stay outer, untouched.
+#[test]
+fn predicate_pushdown_skips_computed_view_column_matches_oracle() {
+    let db = view_fixture_db("pushdown_computed");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT id, x * 2 AS doubled FROM t");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v WHERE doubled > 30 ORDER BY id",
+        "predicate_pushdown_skips_computed_view_column_matches_oracle",
+    );
+}
+
+/// A predicate pushed into a nested view (a view of a view) must keep
+/// chaining inward.
+#[test]
+fn predicate_pushdown_chains_through_nested_views_matches_oracle() {
+    let db = view_fixture_db("pushdown_nested");
+    run_exec_ok(&db, "CREATE VIEW v1 AS SELECT id, x FROM t");
+    run_exec_ok(&db, "CREATE VIEW v2 AS SELECT id, x FROM v1");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM v2 WHERE x > 15 ORDER BY id",
+        "predicate_pushdown_chains_through_nested_views_matches_oracle",
+    );
+}
+
+/// #532's `EXPLAIN QUERY PLAN` acceptance criterion: an `x = 15`
+/// predicate on a `SELECT x FROM t` view (the projection an index on `x`
+/// alone can cover) must nest a `SEARCH` row (naming the pushed-down
+/// predicate's index) underneath the outer `SCAN (subquery)` row —
+/// proving the predicate actually reached the view body's own `WHERE`
+/// clause before it materializes, not just that results are correct.
+/// (A `SELECT *` view over a `t(id INTEGER PRIMARY KEY, x)` table hits a
+/// pre-existing, unrelated covering-index gap — this engine doesn't yet
+/// treat a rowid-alias column as "free" from an index leaf — so this
+/// test sticks to the shape that already works today, matching
+/// `create_view_explicit_column_list_matches_oracle`'s `(a, b)`
+/// renamed-projection fixture rather than a bare `*`.)
+#[test]
+fn eqp_reports_predicate_pushed_into_view_uses_index() {
+    let db = view_fixture_db("eqp_pushdown_view");
+    run_exec_ok(&db, "CREATE INDEX t_x ON t(x)");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT x FROM t");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM v WHERE x = 15");
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.contains("SCAN (subquery) AS v"),
+        "expected the outer row to report scanning the materialized view, got: {output}"
+    );
+    assert!(
+        output.contains("SEARCH t USING") && output.contains("INDEX t_x"),
+        "expected a nested SEARCH row naming the pushed-down index t_x, got: {output}"
+    );
+}
+
+/// The `DISTINCT`-view mirror of the test above: pushdown must be
+/// suppressed, so the nested row for `t` stays a plain `SCAN` even
+/// though `x` has an index — filtering ahead of the dedup would change
+/// results, not just plan shape.
+#[test]
+fn eqp_reports_no_pushdown_for_distinct_view() {
+    let db = view_fixture_db("eqp_no_pushdown_distinct");
+    run_exec_ok(&db, "CREATE INDEX t_x ON t(x)");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT DISTINCT x FROM t");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM v WHERE x = 15");
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.contains("SCAN t"),
+        "expected the nested row for t to stay a full SCAN (no unsafe pushdown), got: {output}"
+    );
+}
+
 /// Two views that reference each other (a longer cycle than direct
 /// self-reference) must also be rejected cleanly.
 #[test]

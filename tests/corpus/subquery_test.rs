@@ -754,6 +754,51 @@ fn subquery_in_from_own_join_matches_oracle() {
     );
 }
 
+// #532: predicate push-down into a derived-table (FROM-subquery) — an
+// outer WHERE conjunct against a pushdown-safe derived table's own
+// (identity-mapped) output columns moves into the derived table's own
+// WHERE before it materializes.
+
+/// The acceptance criterion's own example: `SELECT * FROM (SELECT * FROM
+/// t) WHERE x = 5`-shaped derived table, outer predicate on a plain
+/// passthrough column.
+#[test]
+fn predicate_pushdown_into_from_subquery_matches_oracle() {
+    let db = subquery_fixture_db("pushdown_from_subquery");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT id, x FROM t) AS sub WHERE x > 15 ORDER BY id",
+        "predicate_pushdown_into_from_subquery_matches_oracle",
+    );
+}
+
+/// A joined outer query: the pushed predicate must reference only the
+/// derived table's own alias-qualified column, not the join partner's.
+#[test]
+fn predicate_pushdown_into_from_subquery_joined_outer_matches_oracle() {
+    let db = subquery_fixture_db("pushdown_from_subquery_joined");
+    assert_matches_oracle(
+        &db,
+        "SELECT sub.id, other.a_id FROM (SELECT id, x FROM t) AS sub \
+         JOIN other ON other.a_id = sub.id WHERE sub.x > 10 ORDER BY sub.id",
+        "predicate_pushdown_into_from_subquery_joined_outer_matches_oracle",
+    );
+}
+
+/// A derived table whose own `FROM` is joined is not a pushdown target
+/// (this pass only pushes into a single-table body) — correctness must
+/// still hold, with the predicate simply staying outer.
+#[test]
+fn predicate_pushdown_skips_from_subquery_with_own_join_matches_oracle() {
+    let db = subquery_fixture_db("pushdown_from_subquery_own_join");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT t.id, other.a_id FROM t JOIN other ON other.a_id = t.id) AS sub \
+         WHERE sub.id > 1 ORDER BY sub.id",
+        "predicate_pushdown_skips_from_subquery_with_own_join_matches_oracle",
+    );
+}
+
 // #314: correlated scalar subquery memoized per distinct value of the
 // single outer column it's correlated against (ADR-0021's follow-up
 // from #303/#306). `catalog`'s `category` column repeats only 4
