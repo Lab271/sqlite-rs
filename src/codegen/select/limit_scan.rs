@@ -193,16 +193,13 @@ where
 /// ever need columns an index already carries" without pulling in the
 /// general projection machinery, which doesn't (yet) know how to read a
 /// computed expression off an index record.
-fn bare_result_column_names<'a>(
-    select: &'a Select,
-    schema: &'a TableSchema,
-) -> Option<Vec<&'a str>> {
+fn bare_result_column_names(select: &Select, schema: &TableSchema) -> Option<Vec<String>> {
     let mut out = Vec::with_capacity(select.columns.len());
     for col in &select.columns {
         match col {
-            ResultColumn::Star => out.extend(schema.columns.iter().map(String::as_str)),
+            ResultColumn::Star => out.extend(schema.columns.iter().cloned()),
             ResultColumn::TableStar { table } if table.eq_ignore_ascii_case(&schema.name) => {
-                out.extend(schema.columns.iter().map(String::as_str));
+                out.extend(schema.columns.iter().cloned());
             }
             ResultColumn::Expr {
                 expr:
@@ -211,7 +208,7 @@ fn bare_result_column_names<'a>(
                         ..
                     },
                 ..
-            } => out.push(name.as_str()),
+            } => out.push(name.clone()),
             _ => return None,
         }
     }
