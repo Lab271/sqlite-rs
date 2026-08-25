@@ -546,6 +546,26 @@ fn read_register_range(
     Ok(values)
 }
 
+/// `Count` (#543): counts the rows in the table/index b-tree rooted at
+/// page `P1`, storing the exact result in register `P2`. Never opens a
+/// cursor slot — walks the b-tree directly via [`btree::count_table_rows`],
+/// mirroring SQLite's own `OP_Count`.
+pub fn count(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let root_page = u32::try_from(instr.p1).map_err(|_| ExecError::MalformedInstruction {
+        opcode: "Count",
+        reason: format!("invalid root page {}", instr.p1),
+    })?;
+    let db = vm.db()?;
+    let count = btree::count_table_rows(&db.source, root_page).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode: "Count",
+            reason: e.to_string(),
+        }
+    })?;
+    vm.set_register(instr.p2, Value::Integer(count))?;
+    Ok(Step::Next)
+}
+
 /// `OpenRead`: opens a real read cursor on `P2` (the table's root page)
 /// into cursor slot `P1`, sharing the `Vm`'s attached database page
 /// source (see `Vm::with_db`) with every other open `OpenRead` cursor.

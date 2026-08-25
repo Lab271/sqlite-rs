@@ -155,6 +155,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::Found => "Found",
         Opcode::IdxInsert => "IdxInsert",
         Opcode::IdxDelete => "IdxDelete",
+        Opcode::Count => "Count",
         Opcode::NoConflict => "NoConflict",
         Opcode::IdxLE => "IdxLE",
         Opcode::Delete => "Delete",
@@ -251,6 +252,7 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::Found => format!("cursor {p1} found key at r[{p3}..], jump {p2}"),
         Opcode::IdxInsert => format!("cursor {p1} insert key r[{p2}..]"),
         Opcode::IdxDelete => format!("cursor {p1} delete key r[{p2}..]"),
+        Opcode::Count => format!("r[{p2}] = count of b-tree rooted at page {p1}"),
         Opcode::NoConflict => format!("cursor {p1} no matching key at r[{p3}..], jump {p2}"),
         Opcode::SeekIndexEq => {
             format!("cursor {p1} seek index key at r[{p3}..], jump {p2} if miss")
@@ -340,6 +342,7 @@ mod tests {
             (Opcode::Found, "Found"),
             (Opcode::IdxInsert, "IdxInsert"),
             (Opcode::IdxDelete, "IdxDelete"),
+            (Opcode::Count, "Count"),
             (Opcode::NoConflict, "NoConflict"),
             (Opcode::IdxLE, "IdxLE"),
             (Opcode::Delete, "Delete"),
