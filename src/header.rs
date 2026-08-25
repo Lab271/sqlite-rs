@@ -12,6 +12,11 @@ use crate::record::TextEncoding;
 /// Byte length of the SQLite database header (bytes 0-99 of page 1).
 pub const HEADER_LEN: usize = 100;
 
+/// Page size stock `sqlite3` has defaulted to for new databases since
+/// 3.12.0 — used when bootstrapping a brand-new file with no page size
+/// of its own to inherit (#448).
+pub const DEFAULT_PAGE_SIZE: u32 = 4096;
+
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// Failure parsing or validating a [`DatabaseHeader`].
@@ -140,6 +145,17 @@ fn read_u32(buf: &[u8], offset: usize) -> Result<u32, HeaderError> {
     Ok(u32::from_be_bytes(bytes))
 }
 
+/// Writes `bytes` at `offset` into `buf`, silently doing nothing if that
+/// range is out of bounds — `new_empty_page1` builds `buf` at
+/// `page_size` bytes (parse() requires `page_size >= 512`), so every call
+/// site here is in range by construction; this just avoids the panicking
+/// index/slice syntax clippy flags in library code.
+fn put(buf: &mut [u8], offset: usize, bytes: &[u8]) {
+    if let Some(slice) = buf.get_mut(offset..offset.saturating_add(bytes.len())) {
+        slice.copy_from_slice(bytes);
+    }
+}
+
 impl DatabaseHeader {
     /// Parses the 100-byte database header from the start of a database
     /// file. `buf` may be longer (e.g. a full page) but must be at least
@@ -237,6 +253,50 @@ impl DatabaseHeader {
     )]
     pub fn usable_page_size(&self) -> u32 {
         self.page_size - self.reserved_space as u32
+    }
+
+    /// Builds a fresh page 1 (header bytes + an empty leaf schema table,
+    /// `page_size` bytes total) for a brand-new database file that has no
+    /// bytes of its own yet — the CLI `exec`/`repl` bootstrap path (#448)
+    /// writes this once before running a script's first statement, the
+    /// same way stock `sqlite3 <file> "<sql>"` lazily creates its target
+    /// file. Byte layout mirrors [`crate::btree::write_leaf_page`]'s
+    /// empty-page case: page type `0x0d` (leaf table), zero cells, cell
+    /// content area starting at `page_size` (all still-free space).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "parse() requires page_size to be a power of two >= 512; the 65536 case is the only one needing the on-disk 1-encoding, handled below"
+    )]
+    pub fn new_empty_page1(page_size: u32) -> Vec<u8> {
+        let mut page1 = vec![0u8; page_size as usize];
+        put(&mut page1, 0, MAGIC);
+        let raw_page_size: u16 = if page_size == 65536 {
+            1
+        } else {
+            page_size as u16
+        };
+        put(&mut page1, 16, &raw_page_size.to_be_bytes());
+        put(&mut page1, 18, &[1]); // write_version
+        put(&mut page1, 19, &[1]); // read_version
+        put(&mut page1, 21, &[64]); // max embedded payload fraction
+        put(&mut page1, 22, &[32]); // min embedded payload fraction
+        put(&mut page1, 23, &[32]); // leaf payload fraction
+        put(&mut page1, 28, &1u32.to_be_bytes()); // page_count
+        put(&mut page1, 44, &4u32.to_be_bytes()); // schema_format
+        put(&mut page1, 56, &1u32.to_be_bytes()); // text_encoding = UTF-8
+
+        // Page 1's b-tree header starts right after the 100-byte file
+        // header; an empty leaf page's cell content area starts at the
+        // very end of the page (nothing written into it yet).
+        put(&mut page1, HEADER_LEN, &[0x0d]); // LEAF_TABLE
+        let content_start: u16 = if page_size == 65536 {
+            0
+        } else {
+            page_size as u16
+        };
+        put(&mut page1, HEADER_LEN + 5, &content_start.to_be_bytes());
+
+        page1
     }
 }
 
