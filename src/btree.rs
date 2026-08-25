@@ -841,6 +841,66 @@ fn free_btree_pages_inner(
     Ok(pager.deallocate_page(page_num)?)
 }
 
+/// Exact row count for a table b-tree (#543), mirroring SQLite's
+/// `OP_Count`/`sqlite3BtreeCount`: walks every page reachable from
+/// `root_page`, summing leaf-page cell counts, without decoding any row
+/// payload. Cheaper than a full row scan (no payload/overflow reads) but
+/// still `O(pages)`, not `O(1)` — there is no cached table-level row count
+/// in this file format, so this is the fastest *exact* count available.
+pub(crate) fn count_table_rows<P: PageSource>(
+    source: &P,
+    root_page: u32,
+) -> Result<i64, BtreeError> {
+    let mut visited = 0usize;
+    let mut total = 0i64;
+    count_table_rows_inner(source, root_page, &mut visited, &mut total)?;
+    Ok(total)
+}
+
+fn count_table_rows_inner<P: PageSource>(
+    source: &P,
+    page_num: u32,
+    visited: &mut usize,
+    total: &mut i64,
+) -> Result<(), BtreeError> {
+    *visited = visited.saturating_add(1);
+    if *visited > MAX_PAGES_VISITED {
+        return Err(BtreeError::TraversalTooLong {
+            max: MAX_PAGES_VISITED,
+        });
+    }
+    let buf = source
+        .read_page(page_num)
+        .map_err(|source| BtreeError::PageSource { page_num, source })?;
+    let header_start = page1_header_start(page_num);
+    let page_type = read_page_type(&buf, header_start, page_num)?;
+    match page_type {
+        LEAF_TABLE => {
+            let num_cells = read_num_cells(&buf, header_start, page_num)?;
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "num_cells is a page's cell count, always <= u16::MAX by file-format construction"
+            )]
+            let num_cells = num_cells as i64;
+            *total = total.saturating_add(num_cells);
+        }
+        INTERIOR_TABLE => {
+            let (entries, rightmost) = collect_interior_entries(&buf, header_start, page_num)?;
+            for (child, _) in &entries {
+                count_table_rows_inner(source, *child, visited, total)?;
+            }
+            count_table_rows_inner(source, rightmost, visited, total)?;
+        }
+        _ => {
+            return Err(BtreeError::UnexpectedPageType {
+                page_num,
+                page_type,
+            })
+        }
+    }
+    Ok(())
+}
+
 /// Reads every cell of a leaf page in on-disk (rowid-ascending) order,
 /// returning each cell's rowid alongside its raw, verbatim cell bytes (so
 /// splits/merges/rebuilds can move cells without re-encoding payloads or

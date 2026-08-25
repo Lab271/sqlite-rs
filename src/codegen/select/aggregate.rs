@@ -4,7 +4,7 @@ mod join;
 use super::limit_scan::compile_limit_setup;
 use super::order_by::{order_by_target_for_expr, OrderByPlan, OrderByTarget};
 use super::*;
-use crate::codegen::index_maintenance::valid_index_root_page;
+use crate::codegen::index_maintenance::{valid_index_root_page, valid_table_root_page};
 
 pub(crate) use accum::select_has_aggregate;
 use accum::FLUSH_CURSOR;
@@ -14,12 +14,12 @@ pub(super) use accum::{
 };
 pub(crate) use join::compile_joined_grouped_scan;
 
-/// Emits an index-only `COUNT(*)` (#444): either a bare `SELECT
-/// count(*) FROM t` (no `WHERE`) counted by walking any one index's
-/// b-tree entry-for-entry (`IdxRewind`/`IdxNext`, one entry per table
-/// row regardless of the index's own column values), or `SELECT
-/// count(*) FROM t WHERE indexed_col = <literal/param>` against a
-/// `UNIQUE` index's leading column (`SeekIndexEq`, a single-entry
+/// Emits a fast `COUNT(*)` (#444, #543): either a bare `SELECT
+/// count(*) FROM t` (no `WHERE`), counted by `Opcode::Count` — summing
+/// leaf-page cell counts of the table's own b-tree without opening a
+/// cursor or decoding any row (#543; works even without an index) — or
+/// `SELECT count(*) FROM t WHERE indexed_col = <literal/param>` against
+/// a `UNIQUE` index's leading column (`SeekIndexEq`, a single-entry
 /// probe — the count is trivially 0 or 1). Either way, the table cursor
 /// is never opened at all.
 ///
@@ -27,8 +27,7 @@ pub(crate) use join::compile_joined_grouped_scan;
 /// emitted via `sink`); `Ok(false)` leaves `em`/`reg` untouched.
 /// Deliberately narrow: `GROUP BY`/`HAVING`/`DISTINCT`/`ORDER BY`/
 /// `LIMIT` all fall back to [`compile_grouped_scan`], as does any
-/// non-equality or multi-column `WHERE`, or a table with no index at
-/// all for the no-`WHERE` case.
+/// non-equality or multi-column `WHERE`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_compile_index_only_count<F>(
     em: &mut Emitter,
@@ -66,27 +65,8 @@ where
 
     match &select.where_clause {
         None => {
-            let Some(index) = schema.indexes.first() else {
-                return Ok(false);
-            };
-            let root_page = valid_index_root_page(index)?;
-            let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
-            open_instr.p5 = 1;
-            em.emit(open_instr);
-
-            let done_label = em.new_label();
-            let rewind_addr = em.emit(Instruction::new(Opcode::IdxRewind, index_cursor, 0, 0));
-            em.patch_p2(rewind_addr, done_label);
-            let loop_start = em.new_label();
-            em.place(loop_start);
-
-            let one_reg = reg.alloc();
-            em.emit(Instruction::new(Opcode::Integer, 1, one_reg, 0));
-            em.emit(Instruction::new(Opcode::Add, one_reg, count_reg, count_reg));
-
-            let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
-            em.patch_p2(next_addr, loop_start);
-            em.place(done_label);
+            let root_page = valid_table_root_page(schema)?;
+            em.emit(Instruction::new(Opcode::Count, root_page, count_reg, 0));
         }
         Some(where_expr) => {
             let Some((lhs, rhs)) = super::limit_scan::top_level_equality_operands(where_expr)

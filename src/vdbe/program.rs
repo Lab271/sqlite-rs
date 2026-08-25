@@ -140,6 +140,15 @@ pub enum Opcode {
     NewRowid,
     /// Deletes cursor `P1`'s current index entry.
     IdxDelete,
+    // #543: exact `COUNT(*)` shortcut — walks the b-tree rooted at page
+    // `P1`, summing leaf-page cell counts, without opening a cursor or
+    // decoding any row. Like #207/#243/#296 below, postdates the V2
+    // oracle harvest, so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked.
+    /// Counts the rows in the table/index b-tree rooted at page `P1`,
+    /// storing the exact count into register `P2` (mirrors SQLite's own
+    /// `OP_Count`).
+    Count,
     // #207: real-index seek+branch primitive for non-rowid UNIQUE
     // constraint enforcement — like #194's other V3 write-path opcodes
     // above, this postdates the V2 oracle harvest, so it's excluded
@@ -480,6 +489,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Insert
         | Opcode::NewRowid
         | Opcode::IdxDelete
+        | Opcode::Count
         | Opcode::NoConflict
         | Opcode::SeekIndexEq
         | Opcode::IdxRowid

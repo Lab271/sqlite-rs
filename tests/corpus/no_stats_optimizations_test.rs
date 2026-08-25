@@ -134,14 +134,16 @@ fn assert_covering_index_scan(schema: &TableSchema, sql: &str) {
     );
 }
 
-/// Confirms the index-only `COUNT(*)` fast path was taken: an
-/// `IdxRewind`/`SeekIndexEq` probe, never a `Rewind`/`Next` table scan.
+/// Confirms the fast `COUNT(*)` path was taken: a bare `count(*)` with
+/// no `WHERE` compiles to `Opcode::Count` (#543, exact b-tree page-cell
+/// summation), an equality `WHERE` compiles to `SeekIndexEq` — either
+/// way, never a `Rewind`/`Next` table scan.
 fn assert_index_only_count(schema: &TableSchema, sql: &str) {
     let opcodes = compiled_opcodes(schema, sql);
-    let uses_index = opcodes.contains(&Opcode::IdxRewind) || opcodes.contains(&Opcode::SeekIndexEq);
+    let uses_fast_path = opcodes.contains(&Opcode::Count) || opcodes.contains(&Opcode::SeekIndexEq);
     assert!(
-        uses_index,
-        "expected IdxRewind/SeekIndexEq in the compiled program for {sql:?}, got: {opcodes:?}"
+        uses_fast_path,
+        "expected Count/SeekIndexEq in the compiled program for {sql:?}, got: {opcodes:?}"
     );
     assert!(
         !opcodes.contains(&Opcode::Rewind),
@@ -355,6 +357,39 @@ fn index_only_count_star_no_where_matches_oracle() {
 
     let sql = "SELECT count(*) FROM t";
     assert_index_only_count(&schema, sql);
+    assert_eq!(
+        our_rows(&db, &header, &schema, sql),
+        oracle_rows(&oracle, &db, sql)
+    );
+}
+
+/// #543: unlike the old index-walk fast path, `Opcode::Count` reads
+/// the table's own b-tree directly, so a bare `count(*)` is fast even
+/// with no index at all on the table.
+#[test]
+fn count_star_no_where_no_index_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("count-all-no-index");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER); \
+         INSERT INTO t(a) VALUES (1), (2), (3), (4), (5);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(schema.indexes.is_empty());
+
+    let sql = "SELECT count(*) FROM t";
+    let opcodes = compiled_opcodes(&schema, sql);
+    assert!(
+        opcodes.contains(&Opcode::Count),
+        "expected Opcode::Count in the compiled program for {sql:?}, got: {opcodes:?}"
+    );
     assert_eq!(
         our_rows(&db, &header, &schema, sql),
         oracle_rows(&oracle, &db, sql)
