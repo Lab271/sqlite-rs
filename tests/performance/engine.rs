@@ -122,10 +122,27 @@ const SCENARIOS: &[(&str, &str)] = &[
     // access strategy) instead of a per-outer-row full scan — no
     // caching involved, so this now runs measurably fast against both
     // fixtures.
+    //
+    // #524: the original comparison (`bucket > (SELECT code ... WHERE
+    // code = bench_data.bucket)`) always evaluated `bucket > bucket` —
+    // always false, so the query returned 0 rows and only measured
+    // subquery execution overhead, never result materialization/row
+    // decoding/output. An `EXISTS`/aggregate rewrite was tried first but
+    // loses the exact scalar-subquery shape #434 optimized (a bare
+    // `EXISTS`/aggregate subquery isn't recognized by
+    // `join_access::choose_join_access`, so it falls back to a
+    // per-outer-row full scan of `bench_lookup` and blows the 50M-step
+    // VDBE guard rail again). Keeping the identical
+    // `code = bench_data.bucket` scalar-subquery shape (so `SeekRowid`
+    // still applies) but returning `999 - code` instead of `code` makes
+    // the outer comparison selective: `bucket > 999 - bucket` holds for
+    // roughly half of `bucket`'s 0..999 range, so the benchmark now
+    // returns a meaningful fraction of rows instead of 0.
     (
         "correlated_subquery",
         "SELECT id, x FROM bench_data \
-         WHERE bucket > (SELECT code FROM bench_lookup WHERE code = bench_data.bucket)",
+         WHERE bucket > (SELECT 999 - code FROM bench_lookup \
+         WHERE code = bench_data.bucket)",
     ),
     // #322: an uncorrelated *aggregate* subquery (#304) in the WHERE
     // clause of an outer query that is *itself* aggregate/GROUP BY
