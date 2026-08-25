@@ -357,8 +357,21 @@ where
             // there's no leading-column recheck loop needed — every
             // rowid `AutoIndexNext` yields already shares the seeked
             // key by construction.
-            let Some(probe) = &auto_index_probe else {
-                unreachable!("guarded by the match arm's own is_some() condition");
+            //
+            // The match arm's own guard already established
+            // `auto_index_probe.is_some()`; a nested `match` (rather
+            // than an `unreachable!` else-branch) keeps that fact
+            // encoded in the type system instead of a runtime panic
+            // path, which this crate's macro-vocabulary gate (`make
+            // mvl-limit`) doesn't allow outside its curated allowlist.
+            let probe = match &auto_index_probe {
+                Some(probe) => probe,
+                None => {
+                    return Err(CodegenError::Unsupported {
+                        reason: "unreachable: guarded by the match arm's own is_some() condition"
+                            .to_string(),
+                    })
+                }
             };
             let rewind_end = em.new_label();
             let eph_cursor = reg.alloc_cursor();
