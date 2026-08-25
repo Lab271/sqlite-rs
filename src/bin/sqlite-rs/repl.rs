@@ -10,14 +10,20 @@
 //! (`SELECT` here reads through the *same* shared `Pager`, not a fresh
 //! read-only one, precisely so that's true).
 //!
-//! Deliberately minimal, per the issue's explicit scope-down: only
-//! `.quit`/`.exit`/`.tables` as dot-commands (#478 adds `.tables` and
-//! `sqlite3`-style prefix matching — `.t`..`.tables`, `.q`..`.quit` — to
-//! the `.quit`/`.exit` this module started with), no readline/history, no
-//! `-csv`/`-explain`/`EXPLAIN QUERY PLAN` (those stay `query`-only). A `;`
-//! inside a string/blob literal never ends a statement early —
-//! `ends_with_semicolon` goes through the real tokenizer, not a
-//! newline-oblivious `str::ends_with(';')`.
+//! Deliberately minimal, per the issue's explicit scope-down: no
+//! readline/history, no `-csv`/`-explain`/`EXPLAIN QUERY PLAN` (those
+//! stay `query`-only). A `;` inside a string/blob literal never ends a
+//! statement early — `ends_with_semicolon` goes through the real
+//! tokenizer, not a newline-oblivious `str::ends_with(';')`.
+//!
+//! Dot-commands (#478, #495): `.quit`/`.exit`/`.tables` plus `.help`,
+//! `.version`, `.schema`, `.dump`, `.headers`, `.mode`, `.databases`,
+//! `.indices` — all `sqlite3`-style prefix-matched (`.t`..`.tables`,
+//! `.q`..`.quit`, etc.), dispatched from the `if let Some(rest) =
+//! trimmed.strip_prefix('.')` block below. `.headers`/`.mode` flip
+//! `ReplState` fields the query-result printer (`mode.rs::print_rows`)
+//! reads on every subsequent `SELECT`; the rest read from the database
+//! (via `dot_commands.rs`) and print immediately.
 
 use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
@@ -26,17 +32,31 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{compile_statement, leading_keywords};
+use sqlite_rs::codegen::{
+    compile_statement, leading_keywords, output_column_names, resolve_from_table_schema,
+};
 use sqlite_rs::dump;
-use sqlite_rs::format::format_query_value;
 use sqlite_rs::parser::{ends_with_semicolon, parse_select, split_statements, ParseOutcome};
 use sqlite_rs::schema::{read_schema, read_views};
 use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
+use crate::dot_commands::{
+    print_databases, print_dump, print_help, print_indices, print_schema, print_version,
+};
+use crate::mode::{print_rows, OutputMode};
 use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
 use crate::query::{compile_select_program, write_list_row, SelectOutcome};
 use crate::tables::{list_table_and_view_names, print_table_names};
+
+/// Session state that persists across statements within one `run_repl`
+/// call: `.mode`/`.headers` (#495) alongside the pre-existing
+/// `autocommit` flag threaded through the transaction-control machinery.
+struct ReplState {
+    mode: OutputMode,
+    headers: bool,
+    autocommit: bool,
+}
 
 pub fn run_repl(path: &Path) -> ExitCode {
     let (header, pager) = match dump::open(&UnixVfs, path) {
@@ -50,7 +70,11 @@ pub fn run_repl(path: &Path) -> ExitCode {
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-    let mut autocommit = true;
+    let mut state = ReplState {
+        mode: OutputMode::List,
+        headers: false,
+        autocommit: true,
+    };
     let mut buffer = String::new();
 
     loop {
@@ -69,20 +93,63 @@ pub fn run_repl(path: &Path) -> ExitCode {
         if buffer.is_empty() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix('.') {
-                // sqlite3-style prefix matching: `.t`/`.ta`/.../`.tables`
-                // all resolve to `.tables`, `.q`/`.qu`/.../`.quit` to
-                // `.quit`; `.exit` stays its own exact alias.
-                if trimmed == ".exit" || (!rest.is_empty() && "quit".starts_with(rest)) {
+                if trimmed == ".exit" {
                     break;
                 }
-                if !rest.is_empty() && "tables".starts_with(rest) {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let cmd = parts.next().unwrap_or("");
+                let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+                if !cmd.is_empty() && "quit".starts_with(cmd) {
+                    break;
+                }
+                if !cmd.is_empty() && "tables".starts_with(cmd) {
                     match list_table_and_view_names(
                         Rc::clone(&pager) as Rc<dyn PageSource>,
                         &header,
-                        None,
+                        arg,
                     ) {
                         Ok(names) => print_table_names(&names),
                         Err(e) => eprintln!("Error: {e}"),
+                    }
+                    continue;
+                }
+                if !cmd.is_empty() && "help".starts_with(cmd) {
+                    print_help();
+                    continue;
+                }
+                if !cmd.is_empty() && "version".starts_with(cmd) {
+                    print_version();
+                    continue;
+                }
+                if !cmd.is_empty() && "schema".starts_with(cmd) {
+                    print_schema(&pager, &header, arg);
+                    continue;
+                }
+                if !cmd.is_empty() && "indices".starts_with(cmd) {
+                    print_indices(&pager, &header, arg);
+                    continue;
+                }
+                if !cmd.is_empty() && "databases".starts_with(cmd) {
+                    print_databases(path);
+                    continue;
+                }
+                if !cmd.is_empty() && "dump".starts_with(cmd) {
+                    print_dump(path, arg);
+                    continue;
+                }
+                if !cmd.is_empty() && "headers".starts_with(cmd) {
+                    match arg.map(str::to_ascii_lowercase).as_deref() {
+                        Some("on") => state.headers = true,
+                        Some("off") => state.headers = false,
+                        _ => eprintln!("Error: usage: .headers on|off"),
+                    }
+                    continue;
+                }
+                if !cmd.is_empty() && "mode".starts_with(cmd) {
+                    match arg.and_then(OutputMode::parse) {
+                        Some(m) => state.mode = m,
+                        None => eprintln!("Error: usage: .mode csv|column|line|list"),
                     }
                     continue;
                 }
@@ -98,7 +165,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
         }
 
         for stmt in split_statements(&buffer) {
-            run_one_statement(&stmt, &pager, header, &mut autocommit, path);
+            run_one_statement(&stmt, &pager, header, &mut state, path);
         }
         buffer.clear();
     }
@@ -127,7 +194,7 @@ fn run_one_statement(
     stmt: &str,
     pager: &Rc<RefCell<sqlite_rs::pager::Pager>>,
     header: sqlite_rs::header::DatabaseHeader,
-    autocommit: &mut bool,
+    state: &mut ReplState,
     db_path: &Path,
 ) {
     // #489: checked before anything else, same as `query.rs`'s
@@ -237,15 +304,14 @@ fn run_one_statement(
         // `src/pager.rs`) — an uncommitted write earlier in this same
         // transaction must be visible here, not just what's on disk.
         let source: Rc<dyn PageSource> = Rc::clone(pager) as Rc<dyn PageSource>;
+        let columns = derive_headers(&select, &schemas);
         match execute_with_db(&program, source, header) {
             Ok(rows) => {
                 let mut stdout = io::BufWriter::new(io::stdout().lock());
-                for row in &rows {
-                    let rendered: Vec<Vec<u8>> = row.iter().map(format_query_value).collect();
-                    if let Err(e) = write_list_row(&mut stdout, &rendered) {
-                        eprintln!("Error: {e}");
-                        return;
-                    }
+                if let Err(e) = print_rows(&mut stdout, state.mode, state.headers, &columns, &rows)
+                {
+                    eprintln!("Error: {e}");
+                    return;
                 }
                 stdout.flush().ok();
             }
@@ -261,8 +327,36 @@ fn run_one_statement(
             return;
         }
     };
-    match execute_transaction_step(&program, Rc::clone(pager), header, *autocommit) {
-        Ok((_, ac)) => *autocommit = ac,
+    match execute_transaction_step(&program, Rc::clone(pager), header, state.autocommit) {
+        Ok((_, ac)) => state.autocommit = ac,
         Err(e) => eprintln!("Error: {e}"),
     }
+}
+
+/// `.headers on`'s column labels for `select`'s result set: for a
+/// single-table, non-compound `SELECT` this is
+/// [`output_column_names`]'s "alias, else bare column name, else
+/// `columnN`" rule against the resolved `FROM` table; anything the
+/// codegen pipeline resolves less directly (no `FROM`, a join, or a
+/// compound) falls back to positional `column1..columnN` labels — a
+/// scope-cut noted in the issue's write-up rather than plumbing this
+/// REPL's header derivation through the full join/compound resolver.
+fn derive_headers(
+    select: &sqlite_rs::parser::ast::Select,
+    schemas: &[sqlite_rs::schema::TableSchema],
+) -> Vec<String> {
+    let single_table = select.compound.is_empty()
+        && select
+            .from
+            .as_ref()
+            .is_some_and(|from| from.joins.is_empty());
+    if single_table {
+        if let Some(from) = &select.from {
+            if let Ok(schema) = resolve_from_table_schema(&from.first, schemas) {
+                return output_column_names(select, &schema);
+            }
+        }
+    }
+    let count = select.columns.len().max(1);
+    (1..=count).map(|i| format!("column{i}")).collect()
 }

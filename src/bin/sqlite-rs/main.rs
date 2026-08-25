@@ -15,8 +15,10 @@
 //! REPL directly, matching `sqlite3 <file>`.
 
 mod common;
+mod dot_commands;
 mod dump;
 mod exec;
+mod mode;
 mod pragma_query;
 mod query;
 mod repl;

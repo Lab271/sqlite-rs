@@ -89,7 +89,12 @@ pub(super) const SYNTHETIC_SPAN: Span = Span {
 /// against, since a compound's `ORDER BY` binds to its own result
 /// columns (only the first arm's names are visible), never to any
 /// arm's underlying table columns.
-pub(super) fn output_column_names(select: &Select, schema: &TableSchema) -> Vec<String> {
+///
+/// Also reused (crate-external, `pub`) by `bin/sqlite-rs/repl.rs` to
+/// derive `.headers on` column labels for a single-table `SELECT` —
+/// the same "alias, else bare column name, else `columnN`" rule
+/// applies there.
+pub fn output_column_names(select: &Select, schema: &TableSchema) -> Vec<String> {
     order_by_entries(select, schema)
         .into_iter()
         .enumerate()
