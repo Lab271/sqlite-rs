@@ -978,9 +978,14 @@ semantics — a documented narrowing, not the general case. Every arm
 must project the same number of result columns as `first` — checked at
 compile time via `select_result_column_count` and reported as
 `CodegenError::CompoundColumnMismatch`, never silently
-padded/truncated. `ORDER BY`/`LIMIT` on the whole compound statement,
-joins/subqueries within an arm, and `INTERSECT`/`EXCEPT` (unsupported
-at the parser level, #377) remain out of scope.
+padded/truncated. `ORDER BY`/`LIMIT` trailing the whole compound
+statement is supported (sorts/bounds the combined result, not just the
+last arm) — but an `ORDER BY` term must be an output column name/alias
+or an ordinal, never a genuine expression, since a compound statement
+has no table scope left once its arms are combined (matching real
+SQLite's own rejection of this). Joins/subqueries within an arm, and
+`INTERSECT`/`EXCEPT` (unsupported at the parser level, #377), remain out
+of scope.
 
 **Implementation:** `src/codegen/select/entry.rs::compile_select_compound`,
 `src/codegen/select/projection.rs::emit_dedup_guard`
@@ -1010,14 +1015,24 @@ at the parser level, #377) remain out of scope.
 
 **Tests:** `tests/corpus/union_test.rs::column_count_mismatch_is_rejected`, `tests/corpus/union_test.rs::union_column_count_mismatch_is_rejected`
 
-#### Scenario: ORDER BY/LIMIT on the whole compound statement is rejected
+#### Scenario: ORDER BY/LIMIT trailing the whole compound statement sorts/bounds the combined result
 
-- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC`
-- THEN compilation fails cleanly with the documented "not yet supported"
-  `CodegenError::Unsupported`, per this requirement's explicit
-  out-of-scope note, rather than silently sorting only the last arm
+- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY a DESC` (also
+  covering `UNION ALL` with `LIMIT`, an ordinal `ORDER BY` term, and
+  `LIMIT`/`OFFSET` together)
+- THEN the whole compound result is sorted/bounded accordingly, not just
+  the last arm
 
-**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_matches_oracle`
+**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_matches_oracle`, `tests/corpus/union_test.rs::union_all_with_order_by_and_limit_matches_oracle`, `tests/corpus/union_test.rs::union_with_order_by_ordinal_and_limit_offset_matches_oracle`, `tests/corpus/union_test.rs::union_all_with_limit_only_matches_oracle`
+
+#### Scenario: An ORDER BY expression term on a compound statement is rejected
+
+- GIVEN `SELECT a FROM t1 UNION SELECT b FROM t2 ORDER BY -a` (a genuine
+  expression, not a bare output column name/alias or an ordinal)
+- THEN compilation fails cleanly rather than silently sorting by
+  something else or ignoring the term
+
+**Tests:** `tests/corpus/union_test.rs::union_with_order_by_expression_is_rejected_cleanly`
 
 ### Requirement 15: View Storage and Query Expansion [MUST]
 

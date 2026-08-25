@@ -35,7 +35,8 @@ pub use error::PagerError;
 pub use freelist::TrunkPage;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -77,9 +78,20 @@ const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
 /// `O(capacity)` `retain`-based reorder on every hit was tried first and
 /// measurably *regressed* the `join` tier-1 benchmark (millions of
 /// `SeekRowid` calls each re-touching the same handful of hot pages).
-/// Eviction (an `O(capacity)` scan for the smallest tick) only runs on
-/// a miss that pushes the cache over capacity, which is rare once the
-/// working set is warm.
+/// Eviction candidates are tracked in a `BinaryHeap` keyed by tick
+/// (#509), so finding the smallest tick is `O(log capacity)` rather than
+/// an `O(capacity)` scan of every entry: a full sequential scan over a
+/// working set larger than the cache — every read is a miss that
+/// immediately evicts, the opposite of the "rare once warm" case the
+/// linear scan was tuned for — turned that scan into the dominant cost,
+/// visible as time inside `Pager::read_page` in a `perf`/`sample`
+/// profile of the `full_scan_1col`/`full_scan_3col` benches (#509). A
+/// heap entry can go stale (the same page re-inserted or re-touched
+/// after being pushed, so an older tick for it still sits in the heap);
+/// `insert`'s eviction loop checks the popped entry's tick against the
+/// page's current tick in `entries` and skips/discards anything that no
+/// longer matches, rather than removing the stale entry from the heap
+/// up front (removal from a `BinaryHeap` by key isn't `O(log n)`).
 /// Multiplicative `u32` hasher (FxHash's mixing constant) for
 /// [`PageCache::entries`] (#457) — page numbers are plain sequential
 /// integers, not attacker-controlled input, so the DoS-resistance
@@ -111,6 +123,12 @@ impl Hasher for PageNumHasher {
 struct PageCache {
     capacity: usize,
     entries: HashMap<u32, (Rc<[u8]>, u64), BuildHasherDefault<PageNumHasher>>,
+    /// Eviction candidates as `(tick, page_num)`, smallest tick first via
+    /// `Reverse`. May contain stale entries for a page that was
+    /// re-inserted/re-touched after being pushed here — see this
+    /// struct's own doc for why those are checked-and-skipped in
+    /// `insert` rather than removed up front.
+    eviction_heap: BinaryHeap<Reverse<(u64, u32)>>,
     tick: u64,
 }
 
@@ -119,6 +137,7 @@ impl PageCache {
         PageCache {
             capacity,
             entries: HashMap::default(),
+            eviction_heap: BinaryHeap::new(),
             tick: 0,
         }
     }
@@ -130,24 +149,70 @@ impl PageCache {
 
     fn get(&mut self, page_num: u32) -> Option<&Rc<[u8]>> {
         let tick = self.next_tick();
-        let entry = self.entries.get_mut(&page_num)?;
-        entry.1 = tick;
-        Some(&entry.0)
+        self.entries.get_mut(&page_num)?.1 = tick;
+        self.eviction_heap.push(Reverse((tick, page_num)));
+        // A hit never evicts (only an over-capacity `insert` does), so a
+        // hot working set that's touched over and over (e.g. `point_lookup`/
+        // `join`'s repeated root/index-page hits) would otherwise grow
+        // `eviction_heap` by one stale-or-not entry per touch forever.
+        // Rebuilding it from `entries`' current ticks once it's grown well
+        // past `capacity` bounds it to O(capacity) amortized instead.
+        if self.eviction_heap.len() > self.capacity.saturating_mul(4).max(16) {
+            self.compact_eviction_heap();
+        }
+        self.entries.get(&page_num).map(|entry| &entry.0)
+    }
+
+    fn compact_eviction_heap(&mut self) {
+        self.eviction_heap = self
+            .entries
+            .iter()
+            .map(|(&page_num, &(_, tick))| Reverse((tick, page_num)))
+            .collect();
     }
 
     fn insert(&mut self, page_num: u32, bytes: Rc<[u8]>) {
         let tick = self.next_tick();
         self.entries.insert(page_num, (bytes, tick));
+        self.eviction_heap.push(Reverse((tick, page_num)));
         if self.entries.len() > self.capacity {
-            if let Some(&oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (_, last_used))| *last_used)
-                .map(|(page_num, _)| page_num)
-            {
-                self.entries.remove(&oldest);
-            }
+            self.evict_one();
         }
+    }
+
+    /// Pops the least-recently-used entry, if any, discarding stale heap
+    /// candidates along the way (see this struct's own doc).
+    fn evict_one(&mut self) -> Option<(u32, Rc<[u8]>)> {
+        while let Some(Reverse((candidate_tick, candidate_page))) = self.eviction_heap.pop() {
+            let is_current = self
+                .entries
+                .get(&candidate_page)
+                .is_some_and(|&(_, current_tick)| current_tick == candidate_tick);
+            if is_current {
+                return self
+                    .entries
+                    .remove(&candidate_page)
+                    .map(|(bytes, _)| (candidate_page, bytes));
+            }
+            // Stale heap entry (the page was re-inserted/re-touched after
+            // this tick was pushed, or already evicted) — discard and try
+            // the next candidate.
+        }
+        None
+    }
+
+    /// If inserting one more page would push the cache over capacity,
+    /// evicts one entry now and hands back its buffer (#509) so the
+    /// caller can try to recycle it in place (`Rc::get_mut`) for the
+    /// incoming page instead of allocating and zero-filling a fresh one.
+    /// A no-op (returns `None`) once the cache isn't yet full — the
+    /// initial fill-up still pays one allocation per page, same as
+    /// before.
+    fn evict_one_if_full(&mut self) -> Option<Rc<[u8]>> {
+        if self.entries.len() < self.capacity {
+            return None;
+        }
+        self.evict_one().map(|(_, bytes)| bytes)
     }
 
     fn invalidate(&mut self, page_num: u32) {
@@ -1070,7 +1135,24 @@ impl PageSource for Pager {
         if let Some(cached) = self.page_cache.borrow_mut().get(page_num) {
             return Ok(Rc::clone(cached));
         }
-        let bytes = self.source.read_page(page_num)?;
+        // #509: once the cache is full, every miss is also an eviction —
+        // recycle the evicted page's buffer in place (`Rc::get_mut`,
+        // which only succeeds if nothing else still holds a clone of it)
+        // instead of paying a fresh allocation and zero-fill for the
+        // incoming page. Falls back to the ordinary allocating read
+        // whenever there's nothing to evict yet, or the victim is still
+        // referenced elsewhere.
+        let victim = self.page_cache.borrow_mut().evict_one_if_full();
+        let bytes = match victim {
+            Some(mut recycled) => match Rc::get_mut(&mut recycled) {
+                Some(buf) => {
+                    self.source.read_page_into(page_num, buf)?;
+                    recycled
+                }
+                None => self.source.read_page(page_num)?,
+            },
+            None => self.source.read_page(page_num)?,
+        };
         self.page_cache
             .borrow_mut()
             .insert(page_num, Rc::clone(&bytes));
