@@ -4,8 +4,6 @@
 //! binary so it's usable without depending on the binary crate, e.g. by
 //! a future REPL).
 
-use thiserror::Error;
-
 use crate::parser::ast::{InsertSource, TableRefKind};
 use crate::parser::error::ParseOutcome;
 use crate::parser::error::{
@@ -27,32 +25,56 @@ use super::{
 /// [`compile_statement`] can fail with, folded into one error type so
 /// callers (the CLI, a future REPL) don't need to know about the
 /// per-statement parser/codegen error types individually.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum DispatchError {
     /// The statement referenced a table not present in the schema catalog.
-    #[error("no such table: {0}")]
     NoSuchTable(String),
 
     /// The statement referenced an index not present in the schema catalog.
-    #[error("no such index: {0}")]
     NoSuchIndex(String),
 
     /// The leading keyword(s) didn't match any statement kind this
     /// dispatcher knows how to parse/compile.
-    #[error("unsupported or unrecognized statement: {0:?} ...")]
     Unrecognized(String),
 
     /// A `SELECT` (or an embedding statement) had no `FROM` clause.
-    #[error("SELECT has no FROM clause")]
     NoFromClause,
 
     /// Compilation of the parsed statement failed.
-    #[error(transparent)]
-    Codegen(#[from] CodegenError),
+    Codegen(CodegenError),
 
     /// Parsing the statement failed.
-    #[error("{0}")]
     ParseFailed(String),
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DispatchError::NoSuchTable(name) => write!(f, "no such table: {name}"),
+            DispatchError::NoSuchIndex(name) => write!(f, "no such index: {name}"),
+            DispatchError::Unrecognized(kw) => {
+                write!(f, "unsupported or unrecognized statement: {kw:?} ...")
+            }
+            DispatchError::NoFromClause => write!(f, "SELECT has no FROM clause"),
+            DispatchError::Codegen(source) => write!(f, "{source}"),
+            DispatchError::ParseFailed(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DispatchError::Codegen(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<CodegenError> for DispatchError {
+    fn from(source: CodegenError) -> Self {
+        DispatchError::Codegen(source)
+    }
 }
 
 /// The first one or two whitespace-separated words of `sql`, uppercased

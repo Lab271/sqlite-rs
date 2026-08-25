@@ -21,17 +21,14 @@
 
 use std::cmp::Ordering;
 
-use thiserror::Error;
-
 use crate::format::{format_blob, format_real};
 use crate::record::{Collation, Value};
 use crate::vdbe::compare::compare;
 
 /// The ways a scalar/aggregate function call can fail to evaluate.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum FunctionError {
     /// No registered function matches `name` at the given `arity`.
-    #[error("unknown function {name} with {arity} argument(s)")]
     Unknown {
         /// The unrecognized function name.
         name: String,
@@ -41,15 +38,33 @@ pub enum FunctionError {
 
     /// `name` is a known function but was not called with a supported
     /// argument count.
-    #[error("wrong number of arguments to function {name}()")]
     WrongArity {
         /// The function name.
         name: String,
     },
 
     /// An arithmetic result overflowed `i64`.
-    #[error("integer overflow")]
     IntegerOverflow,
+}
+
+impl std::fmt::Display for FunctionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FunctionError::Unknown { name, arity } => {
+                write!(f, "unknown function {name} with {arity} argument(s)")
+            }
+            FunctionError::WrongArity { name } => {
+                write!(f, "wrong number of arguments to function {name}()")
+            }
+            FunctionError::IntegerOverflow => write!(f, "integer overflow"),
+        }
+    }
+}
+
+impl std::error::Error for FunctionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
 }
 
 /// Renders `v` the way `CAST(v AS TEXT)` would, for `length()`/`hex()` on

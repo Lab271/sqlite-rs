@@ -12,19 +12,33 @@
 //! A leaf page's own contents are never interpreted — it is pure free
 //! space, addressed only by its page number in a trunk's leaf array.
 
-use thiserror::Error;
-
 /// Errors from parsing or writing a freelist trunk page.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum FreelistError {
     /// The page buffer was too short to hold a field at the given offset.
-    #[error("freelist trunk page is {len} bytes, too short to read a field at offset {offset}")]
     PageTooShort {
         /// Byte offset of the field that could not be read/written.
         offset: usize,
         /// Actual length of the page buffer.
         len: usize,
     },
+}
+
+impl std::fmt::Display for FreelistError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FreelistError::PageTooShort { offset, len } => write!(
+                f,
+                "freelist trunk page is {len} bytes, too short to read a field at offset {offset}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FreelistError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
 }
 
 /// Reads a big-endian `u32` at `offset` in `buf`, never panicking on a

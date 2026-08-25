@@ -34,8 +34,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use thiserror::Error;
-
 use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
 /// Fixed size, in bytes, of the WAL header (see the module doc's byte
@@ -49,24 +47,21 @@ pub(crate) const FRAME_HEADER_LEN: usize = 24;
 const FORMAT_VERSION: u32 = 3_007_000;
 
 /// Errors from parsing or validating a WAL header.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum WalError {
     /// The buffer was shorter than [`HEADER_LEN`].
-    #[error("WAL header is {len} bytes, need at least {HEADER_LEN}")]
     HeaderTooShort {
         /// Actual length of the buffer.
         len: usize,
     },
 
     /// The header's magic number was neither valid WAL magic value.
-    #[error("invalid WAL magic {magic:#010x} (must be 0x377f0682 or 0x377f0683)")]
     InvalidMagic {
         /// The magic value actually read.
         magic: u32,
     },
 
     /// The header's page size wasn't a power of two in `512..=65536`.
-    #[error("invalid WAL page size {page_size} (must be a power of two from 512 to 65536)")]
     InvalidPageSize {
         /// The page size actually read.
         page_size: u32,
@@ -74,9 +69,6 @@ pub enum WalError {
 
     /// The header's stored checksum didn't match the checksum computed over
     /// its bytes — the WAL header is corrupt.
-    #[error(
-        "WAL header checksum mismatch: stored {stored:?}, computed {computed:?} — corrupt WAL"
-    )]
     HeaderChecksumMismatch {
         /// Checksum stored in the header.
         stored: (u32, u32),
@@ -85,8 +77,51 @@ pub enum WalError {
     },
 
     /// A VFS-level I/O error.
-    #[error(transparent)]
-    Vfs(#[from] VfsError),
+    Vfs(VfsError),
+}
+
+impl std::fmt::Display for WalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WalError::HeaderTooShort { len } => {
+                write!(f, "WAL header is {len} bytes, need at least {HEADER_LEN}")
+            }
+            WalError::InvalidMagic { magic } => {
+                write!(
+                    f,
+                    "invalid WAL magic {magic:#010x} (must be 0x377f0682 or 0x377f0683)"
+                )
+            }
+            WalError::InvalidPageSize { page_size } => {
+                write!(
+                    f,
+                    "invalid WAL page size {page_size} (must be a power of two from 512 to 65536)"
+                )
+            }
+            WalError::HeaderChecksumMismatch { stored, computed } => {
+                write!(
+                    f,
+                    "WAL header checksum mismatch: stored {stored:?}, computed {computed:?} — corrupt WAL"
+                )
+            }
+            WalError::Vfs(source) => std::fmt::Display::fmt(source, f),
+        }
+    }
+}
+
+impl std::error::Error for WalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WalError::Vfs(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<VfsError> for WalError {
+    fn from(source: VfsError) -> Self {
+        WalError::Vfs(source)
+    }
 }
 
 /// A parsed/serialized 32-byte WAL header.

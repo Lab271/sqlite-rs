@@ -1,5 +1,3 @@
-use thiserror::Error;
-
 use super::freelist::FreelistError;
 use super::journal::JournalError;
 use super::wal::WalError;
@@ -7,53 +5,98 @@ use crate::vfs::{PageError, VfsError};
 
 /// Errors surfaced by the pager while opening a database, replaying
 /// recovery state, or servicing page reads/writes.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum PagerError {
     /// A hot rollback journal exists at `path`: the previous writer did not
     /// clean up, so the main database file may not reflect committed data.
-    #[error(
-        "hot rollback journal present at {path}: database was not cleanly closed and its main \
-         file may not reflect committed data; refusing to open read-only rather than risk \
-         serving pre-rollback pages as committed"
-    )]
     HotJournal {
         /// Path to the hot journal file that triggered the refusal.
         path: String,
     },
 
     /// The rollback journal itself failed to parse.
-    #[error("rollback journal is corrupt: {0}")]
-    Journal(#[source] JournalError),
+    Journal(JournalError),
 
     /// The write-ahead log at `path` failed to parse or validate.
-    #[error("reading WAL at {path}: {source}")]
     Wal {
         /// Path to the WAL file that failed.
         path: String,
         /// The underlying WAL parsing/validation error.
-        #[source]
         source: WalError,
     },
 
     /// A page-level error propagated from the storage layer.
-    #[error(transparent)]
-    Page(#[from] PageError),
+    Page(PageError),
 
     /// A VFS-level I/O or locking error.
-    #[error(transparent)]
-    Vfs(#[from] VfsError),
+    Vfs(VfsError),
 
     /// A freelist trunk/leaf page failed to parse.
-    #[error(transparent)]
-    Freelist(#[from] FreelistError),
+    Freelist(FreelistError),
 
     /// `journal_mode` cannot be changed while a transaction is pending.
-    #[error("cannot change journal_mode with a pending transaction")]
     PendingTransaction,
 
     /// Switching `journal_mode` out of WAL requires a checkpoint that fully
     /// back-fills the WAL into the main file first; the checkpoint left
     /// frames behind.
-    #[error("checkpoint did not fully back-fill the WAL while switching journal_mode out of WAL")]
     CheckpointIncomplete,
+}
+
+impl std::fmt::Display for PagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PagerError::HotJournal { path } => write!(
+                f,
+                "hot rollback journal present at {path}: database was not cleanly closed and its main \
+                 file may not reflect committed data; refusing to open read-only rather than risk \
+                 serving pre-rollback pages as committed"
+            ),
+            PagerError::Journal(source) => write!(f, "rollback journal is corrupt: {source}"),
+            PagerError::Wal { path, source } => write!(f, "reading WAL at {path}: {source}"),
+            PagerError::Page(source) => write!(f, "{source}"),
+            PagerError::Vfs(source) => write!(f, "{source}"),
+            PagerError::Freelist(source) => write!(f, "{source}"),
+            PagerError::PendingTransaction => {
+                write!(f, "cannot change journal_mode with a pending transaction")
+            }
+            PagerError::CheckpointIncomplete => write!(
+                f,
+                "checkpoint did not fully back-fill the WAL while switching journal_mode out of WAL"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PagerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PagerError::Journal(source) => Some(source),
+            PagerError::Wal { source, .. } => Some(source),
+            PagerError::Page(source) => Some(source),
+            PagerError::Vfs(source) => Some(source),
+            PagerError::Freelist(source) => Some(source),
+            PagerError::HotJournal { .. }
+            | PagerError::PendingTransaction
+            | PagerError::CheckpointIncomplete => None,
+        }
+    }
+}
+
+impl From<PageError> for PagerError {
+    fn from(source: PageError) -> Self {
+        PagerError::Page(source)
+    }
+}
+
+impl From<VfsError> for PagerError {
+    fn from(source: VfsError) -> Self {
+        PagerError::Vfs(source)
+    }
+}
+
+impl From<FreelistError> for PagerError {
+    fn from(source: FreelistError) -> Self {
+        PagerError::Freelist(source)
+    }
 }

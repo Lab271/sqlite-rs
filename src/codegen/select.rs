@@ -13,8 +13,6 @@
 //! itself was already implemented and tested by #89; this ticket just
 //! doesn't happen to need it for a correct LIMIT/OFFSET shape.
 
-use thiserror::Error;
-
 use crate::codegen::expr::{
     collation_of, column_index, compile_cond, compile_value, emit_column_read, expr_affinity,
     expr_collation, is_aggregate_call,
@@ -34,15 +32,13 @@ use crate::vdbe::{
 
 /// Errors raised while compiling a `SELECT` (or a statement that embeds one,
 /// e.g. `INSERT ... SELECT`) into a `Program`.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CodegenError {
     /// The statement has no `FROM` clause, which this compiler doesn't
     /// support.
-    #[error("SELECT has no FROM clause — not supported by this V2-scope compiler")]
     NoFromClause,
 
     /// A referenced column name doesn't resolve against any table in scope.
-    #[error("unknown column {name:?}")]
     UnknownColumn {
         /// The column name that failed to resolve.
         name: String,
@@ -50,7 +46,6 @@ pub enum CodegenError {
 
     /// #237: an unqualified column name in a multi-table `FROM` matched
     /// more than one joined table's schema.
-    #[error("ambiguous column name: {name:?}")]
     AmbiguousColumn {
         /// The unqualified column name that matched more than one joined
         /// table's schema.
@@ -59,7 +54,6 @@ pub enum CodegenError {
 
     /// A construct recognized by the parser but not (yet) handled by this
     /// compiler.
-    #[error("unsupported: {reason}")]
     Unsupported {
         /// Human-readable description of the unsupported construct.
         reason: String,
@@ -67,7 +61,6 @@ pub enum CodegenError {
 
     /// #195: an `INSERT` row supplied a different number of values than
     /// the target column list names.
-    #[error("{table} has {expected} columns but {found} values were supplied")]
     RowShapeMismatch {
         /// Name of the target table.
         table: String,
@@ -80,10 +73,6 @@ pub enum CodegenError {
     /// #240: a `UNION ALL` arm projected a different number of result
     /// columns than the first arm — SQLite rejects this at compile time
     /// rather than padding/truncating rows.
-    #[error(
-        "SELECTs to the left and right of UNION ALL do not have the same number of result \
-         columns: expected {expected}, found {found}"
-    )]
     CompoundColumnMismatch {
         /// Number of result columns projected by the first compound arm.
         expected: usize,
@@ -95,11 +84,48 @@ pub enum CodegenError {
     /// views) references itself in its own `FROM`/`JOIN` clause. Message
     /// matches stock SQLite's own wording (`view {name} is circularly
     /// defined`) for oracle-diff parity.
-    #[error("view {name} is circularly defined")]
     CircularView {
         /// Name of the view that references itself.
         name: String,
     },
+}
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoFromClause => {
+                write!(
+                    f,
+                    "SELECT has no FROM clause — not supported by this V2-scope compiler"
+                )
+            }
+            Self::UnknownColumn { name } => write!(f, "unknown column {name:?}"),
+            Self::AmbiguousColumn { name } => write!(f, "ambiguous column name: {name:?}"),
+            Self::Unsupported { reason } => write!(f, "unsupported: {reason}"),
+            Self::RowShapeMismatch {
+                table,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "{table} has {expected} columns but {found} values were supplied"
+                )
+            }
+            Self::CompoundColumnMismatch { expected, found } => write!(
+                f,
+                "SELECTs to the left and right of UNION ALL do not have the same number of \
+                 result columns: expected {expected}, found {found}"
+            ),
+            Self::CircularView { name } => write!(f, "view {name} is circularly defined"),
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
 }
 
 const TABLE_CURSOR: i32 = 0;

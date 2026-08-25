@@ -20,8 +20,6 @@
 
 use std::path::Path;
 
-use thiserror::Error;
-
 use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 
 /// Fixed size, in bytes, of the rollback-journal header (see the module
@@ -29,14 +27,12 @@ use crate::vfs::{AnyVfs, AnyVfsFile, VfsError};
 pub const JOURNAL_HEADER_LEN: usize = 28;
 
 /// Errors from parsing a rollback journal's header or page records.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum JournalError {
     /// The buffer was shorter than [`JOURNAL_HEADER_LEN`].
-    #[error("journal header too short: expected at least {JOURNAL_HEADER_LEN} bytes, got {0}")]
     HeaderTooShort(usize),
 
     /// A page record ran past the end of the available journal bytes.
-    #[error("journal record {index} truncated: expected {expected} bytes, got {got}")]
     RecordTruncated {
         /// Zero-based index of the truncated record.
         index: u32,
@@ -47,8 +43,42 @@ pub enum JournalError {
     },
 
     /// A VFS-level I/O error.
-    #[error(transparent)]
-    Vfs(#[from] VfsError),
+    Vfs(VfsError),
+}
+
+impl std::fmt::Display for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JournalError::HeaderTooShort(got) => write!(
+                f,
+                "journal header too short: expected at least {JOURNAL_HEADER_LEN} bytes, got {got}"
+            ),
+            JournalError::RecordTruncated {
+                index,
+                expected,
+                got,
+            } => write!(
+                f,
+                "journal record {index} truncated: expected {expected} bytes, got {got}"
+            ),
+            JournalError::Vfs(source) => std::fmt::Display::fmt(source, f),
+        }
+    }
+}
+
+impl std::error::Error for JournalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            JournalError::Vfs(source) => Some(source),
+            JournalError::HeaderTooShort(_) | JournalError::RecordTruncated { .. } => None,
+        }
+    }
+}
+
+impl From<VfsError> for JournalError {
+    fn from(source: VfsError) -> Self {
+        JournalError::Vfs(source)
+    }
 }
 
 /// `4 + page_size + 4`: big-endian page number, the page's content, then
