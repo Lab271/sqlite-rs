@@ -665,6 +665,15 @@ where
     for agg in &agg_slots {
         emit_agg_step(em, reg, &pseudo_scope, agg, true)?;
     }
+    // A plain (non-aggregate) result/`HAVING` column has no aggregate
+    // to fold, so it takes on a single "arbitrary row" from the group
+    // instead — and the real oracle's own sort-then-group strategy
+    // (`select.c`) observably picks the *first* row of the group for
+    // that arbitrary choice, not the last. So the snapshot happens
+    // exactly once, here, on the group's first (boundary) row; a
+    // group's second-and-later rows (`not_boundary_label` below) only
+    // fold their aggregates and never touch `snapshot_regs` again.
+    read_row_columns_into(em, schema, cursors.pseudo, &snapshot_regs)?;
     let after_accumulate = em.new_label();
     let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
     em.patch_p2(goto_after_accumulate, after_accumulate);
@@ -675,8 +684,6 @@ where
     }
 
     em.place(after_accumulate);
-    read_row_columns_into(em, schema, cursors.pseudo, &snapshot_regs)?;
-
     let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
     em.patch_p2(sorted_next, sorted_loop);
 
