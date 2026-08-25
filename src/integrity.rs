@@ -16,7 +16,6 @@
 //! informational problem rather than silently mis-validated.
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use crate::btree::{IndexCursor, IndexRow, TableCursor};
 use crate::header::DatabaseHeader;
@@ -28,8 +27,13 @@ use crate::vfs::PageSource;
 /// Runs the check and returns `["ok"]` if nothing is wrong, or one
 /// human-readable problem description per row otherwise. `quick` skips
 /// the index-vs-table cross-check pass (`PRAGMA quick_check`, #541).
-pub fn run_integrity_check(
-    source: Rc<dyn PageSource>,
+/// Generic over `P` (rather than a `dyn PageSource` trait object) to stay
+/// inside the `mvl-limit` qualified subset (see `src/pager.rs`'s module
+/// doc: only `src/vfs/` and the VDBE's `Rc<dyn PageSource>` boundary in
+/// `src/vdbe/{exec,cursor}.rs` are exempt) -- the caller in
+/// `src/vdbe/pragma.rs` passes its own `Rc<dyn PageSource>` as `P`.
+pub fn run_integrity_check<P: PageSource + Clone>(
+    source: P,
     header: &DatabaseHeader,
     quick: bool,
 ) -> Vec<String> {
@@ -74,8 +78,8 @@ pub fn run_integrity_check(
 /// Walks `table`'s b-tree via [`TableCursor`], checking rowids are
 /// strictly increasing (the on-disk invariant every table b-tree must
 /// satisfy). Returns the set of rowids seen, for the index cross-check.
-fn check_table(
-    source: &Rc<dyn PageSource>,
+fn check_table<P: PageSource + Clone>(
+    source: &P,
     header: &DatabaseHeader,
     table: &TableSchema,
     problems: &mut Vec<String>,
@@ -127,8 +131,8 @@ fn check_table(
 /// (the "exhaustive" part `quick_check` skips) cross-checking every
 /// decoded entry's trailing rowid against `table_rowids`, plus that the
 /// index has exactly as many entries as the table has rows.
-fn check_index(
-    source: &Rc<dyn PageSource>,
+fn check_index<P: PageSource + Clone>(
+    source: &P,
     header: &DatabaseHeader,
     table: &TableSchema,
     index: &IndexSchema,
@@ -198,8 +202,8 @@ fn check_index(
     }
 }
 
-fn advance(
-    cursor: &mut IndexCursor<Rc<dyn PageSource>>,
+fn advance<P: PageSource>(
+    cursor: &mut IndexCursor<P>,
     index: &IndexSchema,
     problems: &mut Vec<String>,
 ) -> Option<IndexRow> {
@@ -253,11 +257,7 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// checking that the number of leaf pages visited matches
 /// `header.freelist_page_count` and that no page number repeats or is
 /// out of range.
-fn check_freelist(
-    source: &Rc<dyn PageSource>,
-    header: &DatabaseHeader,
-    problems: &mut Vec<String>,
-) {
+fn check_freelist<P: PageSource>(source: &P, header: &DatabaseHeader, problems: &mut Vec<String>) {
     if header.freelist_trunk_page == 0 {
         if header.freelist_page_count != 0 {
             problems.push(format!(
