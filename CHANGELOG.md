@@ -24,14 +24,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   pre-pass (#464) whenever both are eligible for the same level.
 
 - Readline-style line editing and persistent history for the REPL
-  (#551): `repl` now reads input through `rustyline` instead of raw
-  `stdin.lines()`, giving up/down arrow history navigation and
-  Ctrl-C-abandons-the-current-line behavior; each submitted line is
-  appended to `~/.sqlite-rs_history` and reloaded on the next session.
-  Loading/saving history is best-effort — a missing `$HOME` or an
-  unwritable history file never blocks the session. Piped/non-tty
-  stdin (used by every existing REPL test) is unaffected, since
-  `rustyline` falls back to plain line reads there.
+  (#551), hand-rolled from scratch rather than depending on `rustyline`
+  (#558, superseding #551's original `rustyline`-based approach before
+  release): `repl` now reads input through a zero-dependency-beyond-
+  `nix` line editor (`src/bin/sqlite-rs/readline/`) giving up/down
+  arrow history navigation, Ctrl-C-abandons-the-current-line behavior,
+  Ctrl-A/E/K/U, SQL-aware tab completion (keywords, dot-commands,
+  live table/column names from the open database's schema), and
+  tokenizer-backed syntax highlighting (keywords, strings, numbers,
+  comments). Each submitted line is appended to
+  `$XDG_STATE_HOME/sqlite-rs/history` (falling back to
+  `~/.sqlite-rs_history` when `$XDG_STATE_HOME` is unset) and reloaded
+  on the next session; loading/saving is best-effort — a missing
+  `$HOME`/`$XDG_STATE_HOME` or an unwritable history file never blocks
+  the session. Piped/non-tty stdin (used by every existing REPL test)
+  is unaffected, falling back to a plain buffered line read there.
 
 - `EXPLAIN QUERY PLAN` on a `UNION`/`UNION ALL` compound (#539): only
   the left-most arm's plan was reported before. Now every arm gets its

@@ -11,8 +11,7 @@ keywords = ["sqlite", "database", "sql", "embedded"]
 categories = ["database", "database-implementations"]
 
 [dependencies]
-nix = { version = "0.31.3", features = ["fs"] }
-rustyline = "14"
+nix = { version = "0.31.3", features = ["fs", "term"] }
 
 # Test-only helper: a genuine second OS process for `src/vfs/lock.rs` and
 # `src/vfs/shm.rs`'s cross-process lock-contention tests (#66). Not a

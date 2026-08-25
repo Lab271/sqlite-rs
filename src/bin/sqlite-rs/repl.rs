@@ -16,13 +16,15 @@
 //! `ends_with_semicolon` goes through the real tokenizer, not a
 //! newline-oblivious `str::ends_with(';')`.
 //!
-//! Line editing and history (#551): input is read through a
-//! `rustyline` [`DefaultEditor`], which gives up/down arrow history
-//! navigation for free and falls back to plain line reads when stdin
-//! isn't a tty (piped scripts, as used by every test in this crate).
-//! History persists across sessions at [`history_path`]
-//! (`~/.sqlite-rs_history`); loading/saving is best-effort — a missing
-//! `$HOME` or an unwritable history file never blocks the session.
+//! Line editing and history (#551, hand-rolled per #558): input is
+//! read through [`crate::readline::Readline`], a zero-dependency
+//! (beyond `nix`) editor giving up/down arrow history navigation,
+//! tab completion, and syntax highlighting, falling back to plain line
+//! reads when stdin isn't a tty (piped scripts, as used by every test
+//! in this crate). History persists across sessions at
+//! [`crate::readline::history_path`]; loading/saving is best-effort — a
+//! missing `$HOME`/`$XDG_STATE_HOME` or an unwritable history file
+//! never blocks the session.
 //!
 //! Dot-commands (#478, #495): `.quit`/`.exit`/`.tables` plus `.help`,
 //! `.version`, `.schema`, `.dump`, `.headers`, `.mode`, `.databases`,
@@ -35,12 +37,9 @@
 
 use std::cell::RefCell;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::rc::Rc;
-
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
@@ -58,6 +57,7 @@ use crate::dot_commands::{
 use crate::mode::{print_rows, OutputMode};
 use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
 use crate::query::{compile_select_program, write_list_row, SelectOutcome};
+use crate::readline::{history_path, ReadlineError};
 use crate::tables::{list_table_and_view_names, print_table_names};
 
 /// Session state that persists across statements within one `run_repl`
@@ -79,7 +79,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
     };
     let pager = Rc::new(RefCell::new(pager));
 
-    let mut editor = match DefaultEditor::new() {
+    let mut editor = match crate::readline::Readline::new() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("error: initializing line editor: {e}");
@@ -90,7 +90,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
     if let Some(history_file) = &history_file {
         // Best-effort: a fresh install has no history file yet, and
         // that's not an error.
-        editor.load_history(history_file).ok();
+        editor.load_history(history_file);
     }
     let mut state = ReplState {
         mode: OutputMode::List,
@@ -100,7 +100,16 @@ pub fn run_repl(path: &Path) -> ExitCode {
     let mut buffer = String::new();
 
     loop {
-        let line = match editor.readline(prompt_str(&buffer)) {
+        // Best-effort: completion works against whatever schema is
+        // currently readable; a read error just means "no completion
+        // candidates from the schema this keystroke", never a fatal
+        // error for the REPL itself.
+        let completion_schemas = {
+            let borrowed = pager.borrow();
+            let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
+            read_schema(&mut schema_cursor, header.text_encoding).unwrap_or_default()
+        };
+        let line = match editor.read_line(prompt_str(&buffer), &completion_schemas) {
             Ok(l) => l,
             Err(ReadlineError::Eof) => break, // Ctrl-D, or piped input exhausted.
             Err(ReadlineError::Interrupted) => {
@@ -115,7 +124,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
             }
         };
         if !line.trim().is_empty() {
-            editor.add_history_entry(line.as_str()).ok();
+            editor.add_history_entry(line.as_str());
         }
 
         if buffer.is_empty() {
@@ -199,7 +208,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
     }
 
     if let Some(history_file) = &history_file {
-        editor.save_history(history_file).ok();
+        editor.save_history(history_file);
     }
 
     ExitCode::SUCCESS
@@ -211,13 +220,6 @@ fn prompt_str(buffer: &str) -> &'static str {
     } else {
         "   ...> "
     }
-}
-
-/// `~/.sqlite-rs_history`, or `None` if `$HOME` isn't set — persisting
-/// history is a nice-to-have, never a reason to fail the session.
-fn history_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".sqlite-rs_history"))
 }
 
 /// Runs one already-complete statement against the session's shared
