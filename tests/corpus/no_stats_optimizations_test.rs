@@ -267,6 +267,74 @@ fn covering_index_equality_select_non_unique_duplicates_stop_at_boundary_matches
     }
 }
 
+/// #535: a `SELECT *` (or an explicit column list naming the rowid-alias
+/// `INTEGER PRIMARY KEY` column) must still hit the covering-index scan
+/// when every *other* column it needs is carried by the index — the
+/// rowid-alias column itself is free from any index leaf's own rowid, no
+/// separate table lookup needed.
+#[test]
+fn covering_index_select_star_with_rowid_alias_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("covering-rowid-alias-star");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER); \
+         CREATE INDEX idx_x ON t(x); \
+         INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert_eq!(schema.indexes.len(), 1);
+
+    for sql in [
+        "SELECT * FROM t WHERE x = 20",
+        "SELECT id, x FROM t WHERE x = 20",
+    ] {
+        assert_covering_index_scan(&schema, sql);
+        assert_eq!(
+            our_rows(&db, &header, &schema, sql),
+            oracle_rows(&oracle, &db, sql),
+            "mismatch for {sql:?}"
+        );
+    }
+}
+
+/// The same rowid-alias coverage, but for a non-`UNIQUE` index with
+/// duplicate-key siblings (#450's walk-while-equal loop) — each emitted
+/// row must still resolve its `id` via the index leaf's own rowid, not
+/// some stale/mismatched value from the previous duplicate.
+#[test]
+fn covering_index_select_star_with_rowid_alias_non_unique_duplicates_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        skip_no_oracle("no_stats_optimizations");
+        return;
+    };
+    let db = scratch_db("covering-rowid-alias-star-dup");
+    seed(
+        &oracle,
+        &db,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER); \
+         CREATE INDEX idx_x ON t(x); \
+         INSERT INTO t VALUES (1, 5), (2, 6), (3, 6), (4, 6), (5, 7);",
+    );
+    let page_size = page_size_of(&db);
+    let header = read_header(&db, page_size);
+    let schema = table_schema(&db, &header, "t");
+    assert!(!schema.indexes[0].unique);
+
+    let sql = "SELECT * FROM t WHERE x = 6";
+    assert_covering_index_scan(&schema, sql);
+    assert_eq!(
+        our_rows(&db, &header, &schema, sql),
+        oracle_rows(&oracle, &db, sql)
+    );
+}
+
 #[test]
 fn index_only_count_star_no_where_matches_oracle() {
     let Some(oracle) = pinned_oracle() else {

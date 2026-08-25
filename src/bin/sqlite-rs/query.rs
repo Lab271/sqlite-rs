@@ -15,7 +15,7 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog,
     compile_select_with_catalog_and_stats, expand_views, expand_with_clause, explain_query_plan,
-    resolve_from_table_schema, resolve_views, CodegenError, EqpRow,
+    push_down_where_predicates, resolve_from_table_schema, resolve_views, CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
@@ -69,7 +69,12 @@ pub(crate) fn compile_select_program(
     // CTE also shadows a same-named view for the scope of its declaring
     // `SELECT`, matching how it already shadows a same-named real table.
     let resolved_views = resolve_views(views);
-    let expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
+    let mut expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
+    // #532: push safely-movable outer WHERE conjuncts into the views/
+    // derived-tables `expand_views`/`expand_with_clause` just rewrote
+    // into `TableRefKind::Subquery`, so their own materialization scan
+    // (below) can filter before scanning.
+    push_down_where_predicates(&mut expanded);
     let select = &expanded;
 
     let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
@@ -104,7 +109,7 @@ pub(crate) fn compile_select_program(
         for join in &from.joins {
             joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
         }
-        let rows = explain_query_plan(select, &joined_schemas, stats_by_table)
+        let rows = explain_query_plan(select, &joined_schemas, stats_by_table, schemas)
             .map_err(|e| e.to_string())?;
         return Ok(SelectOutcome::Eqp(rows));
     }

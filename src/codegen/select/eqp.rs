@@ -3,6 +3,7 @@ use super::limit_scan::{
     find_covering_index, find_skip_scan_index, is_rowid_reference, top_level_equality_operands,
 };
 use super::*;
+use crate::codegen::subquery::resolve_from_table_schema;
 /// One row of `EXPLAIN QUERY PLAN` output (#243) -- SQLite's own EQP
 /// shape (`id, parent, notused, detail`), distinct from plain
 /// `EXPLAIN`'s per-instruction [`crate::vdbe::explain::ExplainRow`].
@@ -76,6 +77,7 @@ pub fn explain_query_plan(
     select: &Select,
     schemas: &[TableSchema],
     stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
+    catalog: &[TableSchema],
 ) -> Result<Vec<EqpRow>, CodegenError> {
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
@@ -160,6 +162,7 @@ pub fn explain_query_plan(
     }
 
     let mut rows = Vec::with_capacity(n);
+    let mut next_id: i32 = 0;
     for (level, &orig) in execution_order.iter().enumerate() {
         let Some(&table_ref) = table_refs.get(orig) else {
             continue;
@@ -302,12 +305,54 @@ pub fn explain_query_plan(
                     .map_or_else(String::new, |c| c.name.clone())
             ),
         };
+        let row_id = next_id;
+        next_id = next_id.saturating_add(1);
         rows.push(EqpRow {
-            id: i32::try_from(level).unwrap_or(0),
+            id: row_id,
             parent: 0,
             notused: 0,
             detail,
         });
+
+        // #532: a materialized `FROM`-subquery/view has its own inner
+        // scan (`materialize_from_subquery`'s `compile_select_scan` --
+        // possibly now an index seek, once a WHERE conjunct got pushed
+        // into `table_ref`'s own `where_clause`) that this row's plain
+        // "SCAN ..."/"SEARCH ..." text can't describe on its own, since
+        // it describes the *outer* query's access to the materialized
+        // result, not what filled it. Recurse into the subquery's own
+        // plan and nest its rows underneath this one, offsetting ids so
+        // they stay unique across the whole (possibly further-nested)
+        // tree.
+        if let TableRefKind::Subquery(inner) = &table_ref.kind {
+            if let Some(inner_from) = &inner.from {
+                let inner_table_refs: Vec<&TableRef> = std::iter::once(&inner_from.first)
+                    .chain(inner_from.joins.iter().map(|j| &j.table))
+                    .collect();
+                let inner_schemas: Result<Vec<TableSchema>, CodegenError> = inner_table_refs
+                    .iter()
+                    .map(|table_ref| resolve_from_table_schema(table_ref, catalog))
+                    .collect();
+                if let Ok(inner_schemas) = inner_schemas {
+                    if let Ok(child_rows) =
+                        explain_query_plan(inner, &inner_schemas, stats_by_table, catalog)
+                    {
+                        let offset = next_id;
+                        for mut child in child_rows {
+                            let was_top_level = child.parent == 0;
+                            child.id = child.id.saturating_add(offset);
+                            child.parent = if was_top_level {
+                                row_id
+                            } else {
+                                child.parent.saturating_add(offset)
+                            };
+                            next_id = next_id.max(child.id.saturating_add(1));
+                            rows.push(child);
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(rows)
 }
