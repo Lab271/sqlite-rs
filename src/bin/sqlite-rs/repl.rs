@@ -34,6 +34,7 @@ use sqlite_rs::schema::{read_schema, read_views};
 use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
+use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
 use crate::query::{compile_select_program, write_list_row, SelectOutcome};
 use crate::tables::{list_table_and_view_names, print_table_names};
 
@@ -97,7 +98,7 @@ pub fn run_repl(path: &Path) -> ExitCode {
         }
 
         for stmt in split_statements(&buffer) {
-            run_one_statement(&stmt, &pager, header, &mut autocommit);
+            run_one_statement(&stmt, &pager, header, &mut autocommit, path);
         }
         buffer.clear();
     }
@@ -127,7 +128,52 @@ fn run_one_statement(
     pager: &Rc<RefCell<sqlite_rs::pager::Pager>>,
     header: sqlite_rs::header::DatabaseHeader,
     autocommit: &mut bool,
+    db_path: &Path,
 ) {
+    // #489: checked before anything else, same as `query.rs`'s
+    // `run_query` — a `PRAGMA` outside these 9 recognized names (e.g.
+    // `journal_mode`) falls through unrecognized and hits the ordinary
+    // `compile_statement` write-pragma path below, unchanged.
+    if let Some(pragma) = parse_pragma_query(stmt) {
+        let schemas = {
+            let borrowed = pager.borrow();
+            let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
+            match read_schema(&mut schema_cursor, header.text_encoding) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return;
+                }
+            }
+        };
+        let views = {
+            let borrowed = pager.borrow();
+            let mut view_cursor = TableCursor::new(&*borrowed, &header, 1);
+            match read_views(&mut view_cursor, header.text_encoding) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return;
+                }
+            }
+        };
+        match execute_pragma_query(&pragma, &schemas, &views, &header, db_path) {
+            Ok(rows) => {
+                let mut stdout = io::BufWriter::new(io::stdout().lock());
+                for row in rows {
+                    let rendered: Vec<Vec<u8>> = row.into_iter().map(String::into_bytes).collect();
+                    if let Err(e) = write_list_row(&mut stdout, &rendered) {
+                        eprintln!("Error: {e}");
+                        return;
+                    }
+                }
+                stdout.flush().ok();
+            }
+            Err(e) => eprintln!("Error: {e}"),
+        }
+        return;
+    }
+
     let schemas = {
         let borrowed = pager.borrow();
         let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
