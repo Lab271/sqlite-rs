@@ -9,7 +9,7 @@
 //! covering NOT NULL, PRIMARY KEY/rowid conflicts (+ `ON CONFLICT`),
 //! CHECK, and DEFAULT — executed via `execute_with_writable_db` and
 //! read back with `TableCursor`/`decode_record` (V1's own reader),
-//! mirroring `tests/vdbe/write_opcodes_test.rs`'s harness.
+//! mirroring `tests/unit/vdbe_write_opcodes_test.rs`'s harness.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +36,7 @@ fn scratch_db(label: &str) -> PathBuf {
 }
 
 /// Same one-page-doubles-as-empty-leaf-root simplification
-/// `tests/vdbe/write_opcodes_test.rs` uses.
+/// `tests/unit/vdbe_write_opcodes_test.rs` uses.
 fn seed_minimal_db(vfs: &UnixVfs, path: &Path, page_size: u32) -> DatabaseHeader {
     let mut page1 = vec![0u8; page_size as usize];
     page1[0..16].copy_from_slice(b"SQLite format 3\0");

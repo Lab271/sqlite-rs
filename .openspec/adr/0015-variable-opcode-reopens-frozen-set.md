@@ -8,7 +8,7 @@
 opcodes V2 codegen is allowed to emit (#87 froze it at 60; #139's
 bitwise/concat harvest grew it once already, so "frozen" has always meant
 "frozen except by a deliberate re-harvest," not "immutable"). `src/vdbe/
-program.rs`'s `Opcode` enum and `tests/vdbe/opcode_completeness_test.rs`
+program.rs`'s `Opcode` enum and `tests/unit/vdbe_opcode_completeness_test.rs`
 enforce that inventory as a hard boundary: an opcode outside it fails the
 build.
 

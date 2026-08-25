@@ -10,7 +10,7 @@
 //! multi-row delete (including same-leaf-page deletes mid-scan), and a
 //! `WHERE` that matches nothing — executed via `execute_with_writable_db`
 //! and read back with `TableCursor`/`decode_record`, mirroring
-//! `tests/codegen/insert_test.rs`'s harness.
+//! `tests/unit/codegen_insert_test.rs`'s harness.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

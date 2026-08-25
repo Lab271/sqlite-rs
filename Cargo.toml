@@ -92,51 +92,51 @@ path = "tests/corpus/extracted_sql_test.rs"
 
 [[test]]
 name = "vdbe_oracle_vectors"
-path = "tests/vdbe/oracle_vectors_test.rs"
+path = "tests/unit/vdbe_oracle_vectors_test.rs"
 
 [[test]]
 name = "opcode_completeness"
-path = "tests/vdbe/opcode_completeness_test.rs"
+path = "tests/unit/vdbe_opcode_completeness_test.rs"
 
 [[test]]
 name = "vdbe_cursor_sorter"
-path = "tests/vdbe/cursor_sorter_test.rs"
+path = "tests/unit/vdbe_cursor_sorter_test.rs"
 
 [[test]]
 name = "vdbe_cursor_positioning"
-path = "tests/vdbe/cursor_positioning_test.rs"
+path = "tests/unit/vdbe_cursor_positioning_test.rs"
 
 [[test]]
 name = "vdbe_explain"
-path = "tests/vdbe/explain_test.rs"
+path = "tests/unit/vdbe_explain_test.rs"
 
 [[test]]
 name = "vdbe_write_opcodes"
-path = "tests/vdbe/write_opcodes_test.rs"
+path = "tests/unit/vdbe_write_opcodes_test.rs"
 
 [[test]]
 name = "vdbe_integrity_check"
-path = "tests/vdbe/integrity_check_test.rs"
+path = "tests/unit/vdbe_integrity_check_test.rs"
 
 [[test]]
 name = "codegen_expr"
-path = "tests/codegen/expr_test.rs"
+path = "tests/unit/codegen_expr_test.rs"
 
 [[test]]
 name = "codegen_select"
-path = "tests/codegen/select_test.rs"
+path = "tests/unit/codegen_select_test.rs"
 
 [[test]]
 name = "codegen_insert"
-path = "tests/codegen/insert_test.rs"
+path = "tests/unit/codegen_insert_test.rs"
 
 [[test]]
 name = "codegen_delete"
-path = "tests/codegen/delete_test.rs"
+path = "tests/unit/codegen_delete_test.rs"
 
 [[test]]
 name = "codegen_update"
-path = "tests/codegen/update_test.rs"
+path = "tests/unit/codegen_update_test.rs"
 
 [[test]]
 name = "tokenizer_proptest"

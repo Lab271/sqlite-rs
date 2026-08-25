@@ -3,7 +3,7 @@
 //! test, result columns, ResultRow] -> Next -> Halt`, with ORDER BY
 //! wired through the sorter opcodes, LIMIT/OFFSET as independent
 //! `IfPos`/`DecrJumpZero` counters, and DISTINCT via the in-memory
-//! ephemeral index — mirroring `tests/vdbe/cursor_sorter_test.rs`'s
+//! ephemeral index — mirroring `tests/unit/vdbe_cursor_sorter_test.rs`'s
 //! hand-assembled shapes.
 //!
 //! Known simplification: LIMIT/OFFSET compile to two independent

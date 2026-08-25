@@ -20,7 +20,7 @@ Separately, `Opcode::Copy` was already hand-added to the `Opcode` enum
 (`INSERT ... SELECT`) and is already in production use across
 `src/codegen/{insert,subquery,select}.rs` — a quiet violation of the
 harvest-not-hand-add discipline `tools/opcodes-v2.json`/
-`tests/vdbe/opcode_completeness_test.rs` exist to enforce. `AggStep`/
+`tests/unit/vdbe_opcode_completeness_test.rs` exist to enforce. `AggStep`/
 `AggFinal` are in the same state from #241/#242: enum variants with real
 `src/vdbe/exec.rs` handlers and hand-assembled unit-test coverage, but
 never harvested or added to `Opcode::ALL` — `src/codegen/select.rs`'s

@@ -453,7 +453,7 @@ The system MUST be able to walk every table and index b-tree plus the freelist t
 - WHEN `PRAGMA integrity_check` or `PRAGMA quick_check` runs
 - THEN both MUST report a single `"ok"` row
 
-**Tests:** `tests/vdbe/integrity_check_test.rs::integrity_check_on_a_well_formed_database_reports_ok`, `tests/vdbe/integrity_check_test.rs::integrity_check_covers_multiple_tables_and_indexes`
+**Tests:** `tests/unit/vdbe_integrity_check_test.rs::integrity_check_on_a_well_formed_database_reports_ok`, `tests/unit/vdbe_integrity_check_test.rs::integrity_check_covers_multiple_tables_and_indexes`
 
 #### Scenario: An empty database passes
 
@@ -461,7 +461,7 @@ The system MUST be able to walk every table and index b-tree plus the freelist t
 - WHEN `PRAGMA integrity_check` runs
 - THEN it MUST report a single `"ok"` row rather than erroring on an empty `sqlite_master`
 
-**Tests:** `tests/vdbe/integrity_check_test.rs::integrity_check_on_an_empty_database_reports_ok`
+**Tests:** `tests/unit/vdbe_integrity_check_test.rs::integrity_check_on_an_empty_database_reports_ok`
 
 #### Scenario: quick_check skips the index-vs-table cross-check
 

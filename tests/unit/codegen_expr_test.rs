@@ -272,7 +272,7 @@ fn case_compiles_to_a_jump_chain() {
 /// Reads spike 008's kept oracle vectors
 /// (`tests/corpus/expr_vectors/walker.jsonl`, #59) and runs each
 /// through the real compiled path rather than a hand-assembled
-/// `Program` (`tests/vdbe/oracle_vectors_test.rs` covers the
+/// `Program` (`tests/unit/vdbe_oracle_vectors_test.rs` covers the
 /// hand-assembled acceptance bar for #89).
 /// Reads one JSON string field out of a `.jsonl` line, honouring JSON's
 /// backslash escapes.

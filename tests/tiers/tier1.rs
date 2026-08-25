@@ -123,8 +123,8 @@ fn t1_scalar_functions_match_oracle() {
 /// V2 phase 3C — codegen (#91): `parse_select` -> `compile_select` ->
 /// `execute_with_db` for a single-table WHERE query, oracle-parity
 /// acceptance covered exhaustively by
-/// `tests/codegen/select_test.rs::v2_corpus_compiles_and_matches_oracle_row_for_row`
-/// and `tests/codegen/expr_test.rs`'s named scenarios — this stub just
+/// `tests/unit/codegen_select_test.rs::v2_corpus_compiles_and_matches_oracle_row_for_row`
+/// and `tests/unit/codegen_expr_test.rs`'s named scenarios — this stub just
 /// exercises the same pipeline directly as the tier contract.
 #[test]
 fn t1_single_table_where_matches_oracle() {
@@ -185,7 +185,7 @@ fn t1_single_table_where_matches_oracle() {
 
 /// V2 phase 3C — codegen (#91): `EXPLAIN`'s addr/opcode/p1-p5/p4 output
 /// format, per spec 009 Requirement 10. Full named-scenario coverage
-/// lives in `tests/vdbe/explain_test.rs`.
+/// lives in `tests/unit/vdbe_explain_test.rs`.
 #[test]
 fn t1_explain_prints_bytecode() {
     use sqlite_rs::vdbe::{explain, Instruction, Opcode};
