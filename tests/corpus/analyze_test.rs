@@ -288,6 +288,52 @@ fn join_order_reorders_by_analyze_row_counts() {
     assert_eq!(rows, "1|1\n", "got: {rows}");
 }
 
+/// #510: a join whose `ON` equality reaches the *smaller* table via its
+/// `INTEGER PRIMARY KEY` (rowid alias) must still be ordered with that
+/// table innermost -- i.e. `join_order::seekable_tables`'s bias beats
+/// `ANALYZE`'s raw row-count ordering, since a rowid seek is O(1)
+/// regardless of the table's own size and is always cheaper as an inner
+/// probe than as the outer scan.
+#[test]
+fn join_order_prefers_seekable_inner_over_smaller_outer() {
+    let Some(db) = seed_db("join-order-seekable") else {
+        return skip_no_oracle("join_order_prefers_seekable_inner_over_smaller_outer");
+    };
+    exec_ok(
+        &db,
+        "CREATE TABLE bench_lookup(code INTEGER PRIMARY KEY, label TEXT)",
+    );
+    exec_ok(
+        &db,
+        "CREATE TABLE bench_data(id INTEGER PRIMARY KEY, bucket INTEGER)",
+    );
+    exec_ok(&db, "INSERT INTO bench_lookup VALUES (1, 'a'), (2, 'b')");
+    exec_ok(
+        &db,
+        "INSERT INTO bench_data VALUES (1, 1), (2, 2), (3, 1), (4, 2), (5, 1)",
+    );
+    exec_ok(&db, "ANALYZE");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT bench_data.id, bench_lookup.label \
+         FROM bench_data JOIN bench_lookup ON bench_data.bucket = bench_lookup.code",
+    );
+    assert_eq!(
+        plan,
+        "0|0|0|SCAN bench_data\n1|0|0|SEARCH bench_lookup USING INTEGER PRIMARY KEY (rowid=?)\n",
+        "got: {plan}"
+    );
+
+    let rows = run_query(
+        &db,
+        "SELECT bench_data.id, bench_lookup.label \
+         FROM bench_data JOIN bench_lookup ON bench_data.bucket = bench_lookup.code \
+         ORDER BY bench_data.id",
+    );
+    assert_eq!(rows, "1|a\n2|b\n3|a\n4|b\n5|a\n", "got: {rows}");
+}
+
 /// #464 (spec 011): once `ANALYZE` shows a join level's table has
 /// enough rows and no rowid/unique-index seek is structurally
 /// available, the compiled program prefaces that level's nested-loop

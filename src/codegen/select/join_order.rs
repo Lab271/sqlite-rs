@@ -14,6 +14,7 @@
 //! same "stats-free behavior is unaffected" guarantee #461 already
 //! makes for `join_access::choose_join_access`.
 
+use super::limit_scan::{is_rowid_reference, top_level_equality_operands};
 use super::*;
 use crate::planner::{estimate_scan_cost, Stats};
 
@@ -42,14 +43,29 @@ pub(super) fn plan_join_order(costs: &[u64]) -> Vec<usize> {
 /// [`plan_join_order`]'s per-table cost input: each schema's own
 /// unconditional full-scan row estimate, looked up by name in
 /// `stats_by_table` (missing entries default to [`Stats::default`],
-/// i.e. the conservative "no `ANALYZE` history" estimate).
+/// i.e. the conservative "no `ANALYZE` history" estimate) — except a
+/// table [`seekable_tables`] marks as reachable via a rowid/unique-index
+/// point lookup off some other table in the chain, which is given
+/// `u64::MAX` regardless of its own row count so [`plan_join_order`]'s
+/// ascending sort always places it last (innermost), letting
+/// `join_access::choose_join_access` turn its `ON` equality into a
+/// `SeekRowid`/`SeekIndexEq` instead of a full scan (#510). A table's
+/// own raw size is irrelevant to this choice: a seek is O(1)/O(log n)
+/// regardless, so it is always cheaper as the inner probe than as the
+/// outer scan, mirroring `choose_join_access`'s own unconditional rowid
+/// preference.
 pub(super) fn scan_costs(
     schemas: &[TableSchema],
     stats_by_table: &std::collections::HashMap<String, Stats>,
+    seekable: &[bool],
 ) -> Vec<u64> {
     schemas
         .iter()
-        .map(|schema| {
+        .zip(seekable)
+        .map(|(schema, &is_seekable)| {
+            if is_seekable {
+                return u64::MAX;
+            }
             let stats = stats_by_table
                 .get(&schema.name)
                 .cloned()
@@ -57,6 +73,62 @@ pub(super) fn scan_costs(
             estimate_scan_cost(&stats).estimated_rows
         })
         .collect()
+}
+
+/// Whether `expr` (a join's resolved `ON` constraint) is a single
+/// top-level equality between `schema`'s own rowid alias or a
+/// single-column `UNIQUE` index and anything on the other side — the
+/// same structural shape `join_access::choose_join_access` looks for,
+/// checked here *before* execution order is fixed (so, unlike
+/// `choose_join_access`, it can't yet confirm the other side only
+/// references already-bound tables — [`seekable_tables`]'s caller only
+/// uses this to bias ordering, and `choose_join_access` re-validates the
+/// real safety condition once order is fixed, so an overly-optimistic
+/// guess here only costs a suboptimal order, never a correctness bug).
+fn is_seekable_equality(schema: &TableSchema, expr: &Expr) -> bool {
+    let Some((lhs, rhs)) = top_level_equality_operands(expr) else {
+        return false;
+    };
+    [(lhs, rhs), (rhs, lhs)].into_iter().any(|(this_side, _)| {
+        let ExprKind::Column { name, .. } = &this_side.kind else {
+            return false;
+        };
+        if column_index(schema, name).is_none() {
+            return false;
+        }
+        if is_rowid_reference(schema, this_side) {
+            return true;
+        }
+        schema.indexes.iter().any(|idx| {
+            idx.unique
+                && idx.columns.len() == 1
+                && idx
+                    .columns
+                    .first()
+                    .is_some_and(|c| c.name.eq_ignore_ascii_case(name))
+        })
+    })
+}
+
+/// Per original FROM-clause index, whether that table can be reached via
+/// a rowid/unique-index point lookup off the join that brings it in
+/// (`constraints[i - 1]`, `resolve_join_constraint`'s output for the
+/// join whose right-hand table is index `i`) — table `0` is never
+/// seekable since it has no incoming join. Used to bias
+/// [`scan_costs`]/[`plan_join_order`] toward placing such a table
+/// innermost regardless of its own size (#510).
+pub(super) fn seekable_tables(schemas: &[TableSchema], constraints: &[Option<Expr>]) -> Vec<bool> {
+    let mut seekable = vec![false; schemas.len()];
+    for (join_idx, constraint) in constraints.iter().enumerate() {
+        let right_idx = join_idx.saturating_add(1);
+        let (Some(expr), Some(schema)) = (constraint, schemas.get(right_idx)) else {
+            continue;
+        };
+        if let Some(slot) = seekable.get_mut(right_idx) {
+            *slot = is_seekable_equality(schema, expr);
+        }
+    }
+    seekable
 }
 
 /// Collects the original FROM-clause indices `expr` references against
