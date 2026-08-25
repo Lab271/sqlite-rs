@@ -8,6 +8,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- REPL dot-commands for `sqlite3` shell parity (#495): `.help`,
+`.version`, `.schema [TABLE]`, `.dump [TABLE]`, `.headers on|off`,
+`.mode csv|column|line|list`, `.databases`, `.indices [TABLE]` — all
+`sqlite3`-style prefix-matched, alongside the pre-existing
+`.tables`/`.quit`/`.exit` (#478). `.schema`'s output byte-matches the
+pinned oracle. New `OutputMode` enum
+(`src/bin/sqlite-rs/mode.rs`) plus a `.headers` flag give the REPL its
+own result-set renderer (`list`/`csv`/`column`/`line`), reused for
+every `SELECT` the REPL runs — `query`/`exec`'s own one-shot output is
+unaffected. `.mode column`'s width-per-column sizing is a documented
+approximation of stock `sqlite3`'s own heuristic, not a byte-exact
+match. `src/codegen/select/order_by.rs::output_column_names` is now
+`pub` (was `pub(super)`) so the REPL can derive `.headers on` column
+labels for a single-table `SELECT` the same way the compound-`SELECT`
+codegen already does for its own `ORDER BY` resolution.
+
 - 9 read-only introspection `PRAGMA`s (#489): `table_info`,
 `table_list`, `index_list`, `index_info`, `database_list`,
 `schema_version`, `user_version`, `page_size`, `page_count`. Recognized

@@ -173,6 +173,7 @@ pub use entry::{
 };
 pub use eqp::{explain_query_plan, EqpRow};
 pub use joins::compile_select_joined;
+pub use order_by::output_column_names;
 
 pub(crate) use aggregate::{compile_grouped_scan, select_has_aggregate};
 pub(crate) use entry::{
