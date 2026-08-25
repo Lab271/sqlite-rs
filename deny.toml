@@ -2,9 +2,20 @@
 # at zero runtime dependencies — the cheapest possible moment. Run via
 # `make deny` / `cargo deny check`.
 
+# Unix-only project (the `nix` crate dependency alone rules out Windows).
+# Without this, cargo-deny resolves the full dependency graph across every
+# platform, including Windows-only transitive deps of crates like
+# `rustyline` (e.g. `clipboard-win`, BSL-1.0-licensed) that never build
+# here and shouldn't gate the license check.
 [graph]
 all-features = false
 no-default-features = false
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [advisories]
 ignore = []

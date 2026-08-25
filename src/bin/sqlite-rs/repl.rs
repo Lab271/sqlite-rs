@@ -11,10 +11,18 @@
 //! read-only one, precisely so that's true).
 //!
 //! Deliberately minimal, per the issue's explicit scope-down: no
-//! readline/history, no `-csv`/`-explain`/`EXPLAIN QUERY PLAN` (those
-//! stay `query`-only). A `;` inside a string/blob literal never ends a
-//! statement early — `ends_with_semicolon` goes through the real
-//! tokenizer, not a newline-oblivious `str::ends_with(';')`.
+//! `-csv`/`-explain`/`EXPLAIN QUERY PLAN` (those stay `query`-only). A
+//! `;` inside a string/blob literal never ends a statement early —
+//! `ends_with_semicolon` goes through the real tokenizer, not a
+//! newline-oblivious `str::ends_with(';')`.
+//!
+//! Line editing and history (#551): input is read through a
+//! `rustyline` [`DefaultEditor`], which gives up/down arrow history
+//! navigation for free and falls back to plain line reads when stdin
+//! isn't a tty (piped scripts, as used by every test in this crate).
+//! History persists across sessions at [`history_path`]
+//! (`~/.sqlite-rs_history`); loading/saving is best-effort — a missing
+//! `$HOME` or an unwritable history file never blocks the session.
 //!
 //! Dot-commands (#478, #495): `.quit`/`.exit`/`.tables` plus `.help`,
 //! `.version`, `.schema`, `.dump`, `.headers`, `.mode`, `.databases`,
@@ -26,10 +34,13 @@
 //! (via `dot_commands.rs`) and print immediately.
 
 use std::cell::RefCell;
-use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
@@ -68,8 +79,19 @@ pub fn run_repl(path: &Path) -> ExitCode {
     };
     let pager = Rc::new(RefCell::new(pager));
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut editor = match DefaultEditor::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: initializing line editor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let history_file = history_path();
+    if let Some(history_file) = &history_file {
+        // Best-effort: a fresh install has no history file yet, and
+        // that's not an error.
+        editor.load_history(history_file).ok();
+    }
     let mut state = ReplState {
         mode: OutputMode::List,
         headers: false,
@@ -78,17 +100,23 @@ pub fn run_repl(path: &Path) -> ExitCode {
     let mut buffer = String::new();
 
     loop {
-        print_prompt(&buffer);
-        let Some(line) = lines.next() else {
-            break; // EOF (e.g. piped input, or Ctrl-D) ends the session.
-        };
-        let line = match line {
+        let line = match editor.readline(prompt_str(&buffer)) {
             Ok(l) => l,
+            Err(ReadlineError::Eof) => break, // Ctrl-D, or piped input exhausted.
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl-C: abandon the in-progress line/statement, same
+                // as `sqlite3`'s own shell, and start fresh.
+                buffer.clear();
+                continue;
+            }
             Err(e) => {
-                eprintln!("error: reading stdin: {e}");
+                eprintln!("error: reading input: {e}");
                 break;
             }
         };
+        if !line.trim().is_empty() {
+            editor.add_history_entry(line.as_str()).ok();
+        }
 
         if buffer.is_empty() {
             let trimmed = line.trim();
@@ -170,20 +198,26 @@ pub fn run_repl(path: &Path) -> ExitCode {
         buffer.clear();
     }
 
+    if let Some(history_file) = &history_file {
+        editor.save_history(history_file).ok();
+    }
+
     ExitCode::SUCCESS
 }
 
-fn print_prompt(buffer: &str) {
-    let prompt = if buffer.is_empty() {
+fn prompt_str(buffer: &str) -> &'static str {
+    if buffer.is_empty() {
         "sqlite> "
     } else {
         "   ...> "
-    };
-    print!("{prompt}");
-    // Best-effort: a flush failure here (e.g. a closed pipe) isn't
-    // worth aborting the loop over — the next read from stdin will
-    // surface the real problem if there is one.
-    io::stdout().flush().ok();
+    }
+}
+
+/// `~/.sqlite-rs_history`, or `None` if `$HOME` isn't set — persisting
+/// history is a nice-to-have, never a reason to fail the session.
+fn history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".sqlite-rs_history"))
 }
 
 /// Runs one already-complete statement against the session's shared
