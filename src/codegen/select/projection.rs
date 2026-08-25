@@ -19,6 +19,35 @@ pub(super) fn result_columns(select: &Select, schema: &TableSchema) -> Vec<Resul
     out
 }
 
+/// A result column's collation for DISTINCT/UNION dedup purposes (#518):
+/// an explicit `x COLLATE name` wins, else a bare column falls back to
+/// its schema-declared `COLLATE` (default [`Collation::Binary`]) —
+/// mirrors [`order_by::resolve_order_by`]'s identical fallback for
+/// ORDER BY keys.
+fn result_column_collations(schema: &TableSchema, cols: &[ResultColumnPlan]) -> Vec<Collation> {
+    cols.iter()
+        .map(|col| match col {
+            ResultColumnPlan::Column(name) => schema
+                .columns
+                .iter()
+                .position(|c| c == name)
+                .and_then(|idx| schema.column_collations.get(idx).copied())
+                .unwrap_or(Collation::Binary),
+            ResultColumnPlan::Expr(expr) => {
+                collation_of(expr).unwrap_or_else(|| match &order_by::strip_collate(expr).kind {
+                    ExprKind::Column { name, .. } => schema
+                        .columns
+                        .iter()
+                        .position(|c| c == name)
+                        .and_then(|idx| schema.column_collations.get(idx).copied())
+                        .unwrap_or(Collation::Binary),
+                    _ => Collation::Binary,
+                })
+            }
+        })
+        .collect()
+}
+
 /// Compiles each result column into a contiguous register range,
 /// returning `(first, count)`. Each column is first compiled into
 /// whatever register the bump allocator hands out next (a compound
@@ -198,9 +227,10 @@ pub(super) fn emit_distinct_guard(
         return Ok(());
     }
     let cols = result_columns(select, schema);
+    let collations = result_column_collations(schema, &cols);
     let (first, count) = compile_row_values(em, reg, schema, &cols, cursor, pseudo, catalog)?;
-    let count = i32::try_from(count).unwrap_or(0);
-    emit_dedup_check(em, distinct_cursor, first, count, skip_label);
+    debug_assert_eq!(collations.len(), count);
+    emit_dedup_check(em, distinct_cursor, first, collations, skip_label);
     Ok(())
 }
 
@@ -216,7 +246,7 @@ pub(super) fn emit_dedup_check(
     em: &mut Emitter,
     dedup_cursor: i32,
     first: i32,
-    count: i32,
+    collations: Vec<Collation>,
     skip_label: Label,
 ) {
     let addr = em.emit(Instruction::with_p4(
@@ -224,7 +254,7 @@ pub(super) fn emit_dedup_check(
         dedup_cursor,
         0,
         first,
-        P4::Int(i64::from(count)),
+        P4::SeekKey(collations.clone()),
     ));
     em.patch_p2(addr, skip_label);
     em.emit(Instruction::with_p4(
@@ -232,6 +262,6 @@ pub(super) fn emit_dedup_check(
         dedup_cursor,
         first,
         0,
-        P4::Int(i64::from(count)),
+        P4::SeekKey(collations),
     ));
 }
