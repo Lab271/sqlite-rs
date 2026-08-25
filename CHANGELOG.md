@@ -6,6 +6,48 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+perf: trim `run()`'s per-instruction dispatch overhead (#509) —
+`checked_add`+`.ok_or` on the step counter and the program-counter
+increment are replaced with `saturating_add` (both are backstops
+against a pathological program, not values any real program comes
+close to overflowing, so the `Option` construction/unwrap on every
+single instruction was pure overhead), and `program.get(pc).ok_or(...)`
+is replaced with a `let-else` on the same `Option` to skip the extra
+error-value construction on the hot path. Confirmed via a stashed
+before/after `cargo bench --bench engine` A/B on the 50MB fixture
+(criterion `--save-baseline`/`--baseline`, not just cross-run deltas,
+since the oracle's own unchanged-code runs showed up to ~2.5% run-to-
+run noise on this machine): `full_scan` -2.8%, `full_scan_1col` -4.3%
+(both p<0.05, above the noise floor), `full_scan_3col` -2.1% (within
+noise). A batched, check-every-4096-steps variant of the step-limit
+comparison was also tried and measured no further win beyond the above
+(ours/oracle ratio unchanged within noise), so it was dropped rather
+than kept as unjustified complexity, per the ticket's own evaluate-and-
+keep-or-drop mandate. Candidate #1 (streaming rows instead of
+materializing `vm.rows: Vec<Vec<Value>>`) was evaluated and deferred:
+every current caller (CLI `query`/`repl`, the write-path executor)
+consumes rows fully after the fact, so streaming would mean threading
+a new execution API through every call site for what both this issue's
+own data and #506's prior finding indicate is a modest, not
+gap-closing, win — filed as its own follow-up rather than attempted
+speculatively here. Candidate #3 (specializing `Next`/`Rewind` so a
+tight scan loop skips re-entering `dispatch()`'s generic match) doesn't
+have a safe, small-scope implementation: Rust already compiles
+`dispatch()`'s opcode match to a jump table, so there's no per-arm
+match-order cost to cut, and a real fast path would mean recognizing
+and specially executing a whole loop body between `Rewind`/`Next` and
+its matching jump — a genuine VM-architecture change (superinstructions
+/ threaded code), not a contained edit; filed as a separate, better-
+scoped follow-up (#515) with today's benchmark numbers as its starting
+evidence rather than attempted here. Candidate #4 (Column-opcode-
+specific flat tax) is answered by the above: `full_scan_1col`/
+`full_scan_3col` still sit at ~2.0x/~1.6x oracle after this fix,
+confirming the residual gap is real column-decode cost, not a separate
+per-call tax — matching #506's own "VDBE per-instruction dispatch...
+architectural" note. `full_scan_1col`/`full_scan_3col`'s own remaining
+ResultRow-side gap is being addressed separately (agent-3, not part of
+this ticket). spend: matched estimate.
+
 fix: JOIN reordering now prefers a rowid/unique-index-seekable inner
 table over raw ANALYZE row-count ordering (#510) —
 `join_order::seekable_tables` flags a table whose `ON` equality is a
