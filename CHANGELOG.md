@@ -8,6 +8,33 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Predicate push-down into `FROM`-subqueries and views (#532): a
+  safely-movable outer `WHERE` conjunct is now moved into a view's or
+  derived table's own `WHERE` clause right after `expand_with_clause`/
+  `expand_views` rewrite it into a `TableRefKind::Subquery`, before it
+  materializes — letting the inner scan use an index on the underlying
+  table instead of always filtering after a full scan. New
+  `src/codegen/subquery/pushdown.rs` pass, gated to provably-safe cases:
+  the target subquery is single-table (no `JOIN` of its own), has no
+  `DISTINCT`/aggregate/`GROUP BY`/`HAVING`/`LIMIT`/`UNION`, and every
+  column the conjunct touches is identity-mapped (`SELECT *`, or a
+  plain, optionally-aliased column list) — anything else stays outer.
+  Recurses through nested views/CTEs. `EXPLAIN QUERY PLAN` now also
+  recurses into a materialized `FROM`-subquery's own plan, nesting its
+  rows under the outer `SCAN (subquery)` row so a pushed-down index
+  search is visible in the report (`src/codegen/select/eqp.rs`).
+
+- Covering-index scans now treat a table's `INTEGER PRIMARY KEY`
+  rowid-alias column as free from any index leaf (#535, found while
+  working on #532): `find_covering_index`/`try_compile_covering_index_scan`
+  (`src/codegen/select/limit_scan.rs`) previously required every
+  projected column to be a declared index column, so `SELECT * FROM t
+  WHERE x = 5` on a `t(id INTEGER PRIMARY KEY, x, ...)` table with an
+  index on `x` fell back to a full scan even though `id` needs no
+  separate table lookup. `bare_result_column_names` also now expands a
+  bare `SELECT *`/`table.*` against the scan's own schema, instead of
+  bailing the whole covering-index path out for any `*` projection.
+
 - REPL dot-commands for `sqlite3` shell parity (#495): `.help`,
 `.version`, `.schema [TABLE]`, `.dump [TABLE]`, `.headers on|off`,
 `.mode csv|column|line|list`, `.databases`, `.indices [TABLE]` — all
