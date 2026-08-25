@@ -47,13 +47,26 @@ pub enum PageError {
     Vfs(#[from] VfsError),
 }
 
-/// Reads page `page_num` from `file`, shared between [`VfsPageSource`] and
-/// [`WritablePageSource`].
-fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Rc<[u8]>, PageError> {
+/// Reads page `page_num` directly into `buf`, which must already be
+/// exactly `page_size` bytes long — shared between [`read_page_at`] (fresh
+/// buffer, the common case) and [`WritablePageSource::read_page_into`]
+/// (#509: an already-allocated buffer, typically an evicted page's own
+/// uniquely-owned `Rc<[u8]>` recycled in place by `Pager`'s page cache,
+/// see its own doc). No zero-fill happens here or is needed: `buf`'s
+/// existing bytes (zeros for a brand new allocation, stale page data for
+/// a recycled one) are fully overwritten by this read on success, and an
+/// error (including a short read) is propagated without the caller
+/// treating `buf` as valid.
+fn read_page_at_into(
+    file: &dyn VfsFile,
+    page_size: u32,
+    page_num: u32,
+    buf: &mut [u8],
+) -> Result<(), PageError> {
     if page_num == 0 {
         return Err(PageError::InvalidPageNumber);
     }
-    let mut buf = vec![0u8; page_size as usize];
+    debug_assert_eq!(buf.len(), page_size as usize);
     // page_num >= 1 here (checked above) and page_size is a validated
     // power of two in [512, 65536] (header.rs), so this product stays
     // far below u64::MAX; saturating_* just avoids asserting that by
@@ -61,7 +74,7 @@ fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Rc<
     let offset = (page_num as u64)
         .saturating_sub(1)
         .saturating_mul(page_size as u64);
-    let n = file.read_at(&mut buf, offset)?;
+    let n = file.read_at(buf, offset)?;
     if n != buf.len() {
         return Err(PageError::ShortRead {
             page_num,
@@ -69,6 +82,14 @@ fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Rc<
             got: n,
         });
     }
+    Ok(())
+}
+
+/// Reads page `page_num` from `file` into a freshly allocated buffer,
+/// shared between [`VfsPageSource`] and [`WritablePageSource`].
+fn read_page_at(file: &dyn VfsFile, page_size: u32, page_num: u32) -> Result<Rc<[u8]>, PageError> {
+    let mut buf = vec![0u8; page_size as usize];
+    read_page_at_into(file, page_size, page_num, &mut buf)?;
     Ok(Rc::from(buf))
 }
 
@@ -174,6 +195,18 @@ impl WritablePageSource {
     /// durable storage.
     pub fn sync(&self) -> Result<(), VfsError> {
         self.file.sync()
+    }
+
+    /// Reads page `page_num` into `buf` in place (#509) rather than
+    /// allocating a fresh, zero-filled buffer — `buf` must already be
+    /// exactly `page_size` bytes long. `Pager`'s page-cache eviction uses
+    /// this to recycle an evicted page's own uniquely-owned `Rc<[u8]>`
+    /// (via `Rc::get_mut`) for the newly missed page instead of paying a
+    /// fresh allocation and zero-fill on every cache miss once the cache
+    /// is warm (steady-state: most misses are evictions, not first
+    /// touches).
+    pub(crate) fn read_page_into(&self, page_num: u32, buf: &mut [u8]) -> Result<(), PageError> {
+        read_page_at_into(self.file.as_ref(), self.page_size, page_num, buf)
     }
 }
 
