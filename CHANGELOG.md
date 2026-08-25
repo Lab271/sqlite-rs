@@ -8,6 +8,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Automatic index for unindexed equality join columns (#545): when a
+  join level's `ON` condition is a single equality against a column
+  with no usable index, and `ANALYZE` stats judge the table big enough
+  to be worth it, a transient in-memory index is now built over that
+  column once and probed per outer row, instead of a plain nested-loop
+  `Rewind`/`Next` scan (sqlite.org/optoverview.html#autoindex). New
+  `AutoIndexInsert`/`AutoIndexSeek`/`AutoIndexRowid`/`AutoIndexNext`
+  VDBE opcodes back an exact-key rowid multi-map (opened via
+  `OpenEphemeral` with `P5 == 2`), distinct from the existing
+  DISTINCT/aggregate dedup guards' single-value-per-key `Found`/
+  `IdxInsert` and from a real index's byte-ordered `SeekIndexEq`+
+  `IdxNext` walk — a join only ever needs "every row sharing this exact
+  key", never a range. Supersedes the existing Bloom-filter join
+  pre-pass (#464) whenever both are eligible for the same level.
+
 - Readline-style line editing and persistent history for the REPL
   (#551): `repl` now reads input through `rustyline` instead of raw
   `stdin.lines()`, giving up/down arrow history navigation and
