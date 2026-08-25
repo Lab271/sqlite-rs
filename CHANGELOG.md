@@ -6,29 +6,11 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-fix: `SELECT DISTINCT` respects declared/explicit `COLLATE` (#518) —
-the ephemeral-index dedup path (`Found`/`IdxInsert` against an
-in-memory `BTreeMap`) compared raw encoded record bytes, ignoring
-collation entirely; a `COLLATE NOCASE` column returned case-variant
-duplicates as distinct rows. Codegen now resolves each result column's
-collation (mirroring #500's `resolve_order_by` fallback) into a new
-`P4::SeekKey` operand, and the ephemeral-cursor key-building
-normalizes `NoCase`/`RTrim` text before encoding so byte-equality on
-the normalized key matches `compare()`'s notion of equality. UNION's
-shared dedup path stays `Binary`-only, matching its existing
-conservative ORDER BY handling.
+## [0.18.1] - 2026-08-25
 
-fix: assurance's `plan_blocks()` regex dropped V5/V6 ("V5 Slim"/"V6
-Slim" in plan.md's table didn't match the bare-tag-only regex),
-causing a false "grammar tags not in plan.md value blocks" drift
-report; also renamed `tests/parity/v04.rs`-`v07.rs`'s test fns to name
-the dimensions they actually cover (`acceptance`/`output`), fixing
-`make assurance-gate`'s parity count from a misleading 3/12 to the
-accurate 7/12 — no test logic changed, only a naming-convention gap
-that made real coverage invisible to the dashboard's name-based
-heuristic.
+### Added
 
-feat: track and apply column-declared `COLLATE` across schema and
+- track and apply column-declared `COLLATE` across schema and
 comparisons (#500) — `TableSchema`/`IndexedColumn`
 (`src/schema/ddl_reader.rs`) now capture each column's/index-column's
 declared `COLLATE` (default `Binary`), previously parsed and
@@ -45,7 +27,65 @@ DISTINCT`'s ephemeral-index dedup (byte-equality on encoded records,
 never calling `compare()`) is a separate mechanism and was filed as a
 follow-up (#518) rather than folded in here.
 
-perf: trim `run()`'s per-instruction dispatch overhead (#509) —
+### Fixed
+
+- `SELECT DISTINCT` respects declared/explicit `COLLATE` (#518) —
+the ephemeral-index dedup path (`Found`/`IdxInsert` against an
+in-memory `BTreeMap`) compared raw encoded record bytes, ignoring
+collation entirely; a `COLLATE NOCASE` column returned case-variant
+duplicates as distinct rows. Codegen now resolves each result column's
+collation (mirroring #500's `resolve_order_by` fallback) into a new
+`P4::SeekKey` operand, and the ephemeral-cursor key-building
+normalizes `NoCase`/`RTrim` text before encoding so byte-equality on
+the normalized key matches `compare()`'s notion of equality. UNION's
+shared dedup path stays `Binary`-only, matching its existing
+conservative ORDER BY handling.
+
+- assurance's `plan_blocks()` regex dropped V5/V6 ("V5 Slim"/"V6
+Slim" in plan.md's table didn't match the bare-tag-only regex),
+causing a false "grammar tags not in plan.md value blocks" drift
+report; also renamed `tests/parity/v04.rs`-`v07.rs`'s test fns to name
+the dimensions they actually cover (`acceptance`/`output`), fixing
+`make assurance-gate`'s parity count from a misleading 3/12 to the
+accurate 7/12 — no test logic changed, only a naming-convention gap
+that made real coverage invisible to the dashboard's name-based
+heuristic.
+
+- JOIN reordering now prefers a rowid/unique-index-seekable inner
+table over raw ANALYZE row-count ordering (#510) —
+`join_order::seekable_tables` flags a table whose `ON` equality is a
+structural rowid-alias/single-column-`UNIQUE`-index match (the same
+shape `join_access::choose_join_access` looks for), and `scan_costs`
+gives such a table `u64::MAX` so `plan_join_order`'s ascending sort
+always places it innermost, letting the existing seek codegen fire
+regardless of the table's own size — a rowid/index seek is O(1)/O(log
+n) and always cheaper as an inner probe than as the outer scan. Fixes
+the `bench_data JOIN bench_lookup ON bench_data.bucket =
+bench_lookup.code` case (`bench_lookup.code` an `INTEGER PRIMARY KEY`)
+where the smaller table's row count previously won it the outer scan
+slot, forcing a full scan on the larger table's join column instead of
+a `SeekRowid` on the smaller one. spend: matched estimate.
+
+- unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
+`compile_grouped_scan`'s pass 1 now only serializes columns actually
+referenced by the `GROUP BY` key, aggregate arguments, or plain
+result/`HAVING` columns (every other schema column becomes a cheap
+`Null` placeholder rather than a real per-row read); `SorterInsert` no
+longer copies the record blob on every insert (reuses the already-
+`Rc`'d bytes); `OpenPseudo` is now emitted once before pass 2's loop
+instead of once per row. Also fixed a pre-existing, ticket-adjacent bug
+found while adding regression coverage: a plain (non-key,
+non-aggregate) result/`HAVING` column's "arbitrary row" snapshot picked
+the group's *last* row instead of the *first*, mismatching the real
+oracle's own sort-then-group behavior. `group_by_agg` benchmark:
+20.8ms -> 11.2ms on the 1MB fixture (~46% faster), still short of the
+ticket's `<3x`-oracle target — the residual gap looks architectural
+(VDBE per-instruction dispatch, the sort pipeline's inherent
+double-decode), out of this ticket's scope. spend: ~2-3x estimate.
+
+### Performance
+
+- trim `run()`'s per-instruction dispatch overhead (#509) —
 `checked_add`+`.ok_or` on the step counter and the program-counter
 increment are replaced with `saturating_add` (both are backstops
 against a pathological program, not values any real program comes
@@ -87,7 +127,7 @@ architectural" note. `full_scan_1col`/`full_scan_3col`'s own remaining
 ResultRow-side gap is being addressed separately (agent-3, not part of
 this ticket). spend: matched estimate.
 
-perf: `SorterInsert` now decodes only through the `ORDER BY` key's
+- `SorterInsert` now decodes only through the `ORDER BY` key's
 highest column index instead of every selected column (#507) —
 `SorterState` computes `decode_upto` (one past the max
 `SortKeyColumn.index`) once at `SorterOpen`, and a new
@@ -103,39 +143,7 @@ on the 1MB fixture, 43.5µs/36.4µs on 50MB) — beats the ticket's
 `<2x`-oracle target.
 spend: matched estimate (medium)
 
-fix: JOIN reordering now prefers a rowid/unique-index-seekable inner
-table over raw ANALYZE row-count ordering (#510) —
-`join_order::seekable_tables` flags a table whose `ON` equality is a
-structural rowid-alias/single-column-`UNIQUE`-index match (the same
-shape `join_access::choose_join_access` looks for), and `scan_costs`
-gives such a table `u64::MAX` so `plan_join_order`'s ascending sort
-always places it innermost, letting the existing seek codegen fire
-regardless of the table's own size — a rowid/index seek is O(1)/O(log
-n) and always cheaper as an inner probe than as the outer scan. Fixes
-the `bench_data JOIN bench_lookup ON bench_data.bucket =
-bench_lookup.code` case (`bench_lookup.code` an `INTEGER PRIMARY KEY`)
-where the smaller table's row count previously won it the outer scan
-slot, forcing a full scan on the larger table's join column instead of
-a `SeekRowid` on the smaller one. spend: matched estimate.
-
-fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
-`compile_grouped_scan`'s pass 1 now only serializes columns actually
-referenced by the `GROUP BY` key, aggregate arguments, or plain
-result/`HAVING` columns (every other schema column becomes a cheap
-`Null` placeholder rather than a real per-row read); `SorterInsert` no
-longer copies the record blob on every insert (reuses the already-
-`Rc`'d bytes); `OpenPseudo` is now emitted once before pass 2's loop
-instead of once per row. Also fixed a pre-existing, ticket-adjacent bug
-found while adding regression coverage: a plain (non-key,
-non-aggregate) result/`HAVING` column's "arbitrary row" snapshot picked
-the group's *last* row instead of the *first*, mismatching the real
-oracle's own sort-then-group behavior. `group_by_agg` benchmark:
-20.8ms -> 11.2ms on the 1MB fixture (~46% faster), still short of the
-ticket's `<3x`-oracle target — the residual gap looks architectural
-(VDBE per-instruction dispatch, the sort pipeline's inherent
-double-decode), out of this ticket's scope. spend: ~2-3x estimate.
-
-perf: `TableCursor::seek` (backing the `SeekRowid` opcode) now binary
+- `TableCursor::seek` (backing the `SeekRowid` opcode) now binary
 searches a page's cell-pointer array instead of scanning it linearly,
 on both leaf pages (rowid comparison) and interior pages (separator-key
 comparison) (#508). Repeated seeks against the same table — the `join`
