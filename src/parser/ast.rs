@@ -785,14 +785,37 @@ pub enum PragmaJournalMode {
     Delete,
 }
 
-/// `PRAGMA journal_mode = WAL|DELETE` (#388) — the narrow V6 carve-out;
-/// see [`PragmaJournalMode`].
+/// A parsed `PRAGMA` statement: the narrow V6 `journal_mode` carve-out
+/// (#388) plus the V7 `integrity_check`/`quick_check` carve-out (#540,
+/// #541). Every other pragma name stays `Unsupported` at the parser
+/// (see `parse_pragma_stmt`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Pragma {
-    /// The requested `journal_mode` value.
-    pub journal_mode: PragmaJournalMode,
-    /// The source span covering the whole statement.
-    pub span: Span,
+pub enum Pragma {
+    /// `PRAGMA journal_mode = WAL|DELETE` (#388); see [`PragmaJournalMode`].
+    JournalMode {
+        /// The requested `journal_mode` value.
+        journal_mode: PragmaJournalMode,
+        /// The source span covering the whole statement.
+        span: Span,
+    },
+    /// `PRAGMA integrity_check` / `PRAGMA quick_check` (#540, #541).
+    /// `quick_check` (`quick: true`) skips the exhaustive index-vs-table
+    /// cross-check pass that `integrity_check` performs.
+    IntegrityCheck {
+        /// `true` for `quick_check`, `false` for `integrity_check`.
+        quick: bool,
+        /// The source span covering the whole statement.
+        span: Span,
+    },
+}
+
+impl Pragma {
+    /// The source span covering the whole statement, whichever variant.
+    pub fn span(&self) -> Span {
+        match self {
+            Pragma::JournalMode { span, .. } | Pragma::IntegrityCheck { span, .. } => *span,
+        }
+    }
 }
 
 /// `ANALYZE` / `ANALYZE table-name` (#461, grammar V7 carve-out): `target

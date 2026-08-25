@@ -440,3 +440,33 @@ Because index interior cells carry a full entry (Requirement 5), deleting a key 
 - THEN every delete MUST succeed (no `KeyNotFound` false negative from an incomplete predecessor search) and the tree MUST end fully empty
 
 **Tests:** `src/btree/index/delete.rs::tests::split_then_delete_all_including_promoted_interior_entries`
+
+### Requirement 18: Structural Integrity Verification [MUST]
+
+The system MUST be able to walk every table and index b-tree plus the freelist trunk chain and report structural problems in the same textual shape stock `sqlite3` uses: a single `"ok"` row when nothing is wrong, otherwise one row per problem found. `PRAGMA quick_check` MUST skip the exhaustive index-vs-table cross-check pass that `PRAGMA integrity_check` performs (every index entry's trailing rowid exists in its table, and per-index entry counts match table row counts) — both share the same tree-walking core. An auto-vacuum database (`largest_root_btree_page != 0`) MUST report a single informational problem rather than a silent false negative: this crate has no auto-vacuum/incremental-vacuum write path and therefore never writes a pointer-map, so pointer-map cross-validation is out of scope until auto-vacuum support lands, not silently skipped.
+
+**Implementation:** `src/integrity.rs::run_integrity_check`, `src/vdbe/pragma.rs::integrity_check`, `src/codegen/pragma.rs::compile_pragma`, `src/parser/ast.rs::Pragma::IntegrityCheck`
+
+#### Scenario: A well-formed database with tables and indexes passes both pragmas
+
+- GIVEN a database with multiple tables, secondary indexes, and rows inserted through this crate's own write path
+- WHEN `PRAGMA integrity_check` or `PRAGMA quick_check` runs
+- THEN both MUST report a single `"ok"` row
+
+**Tests:** `tests/vdbe/integrity_check_test.rs::integrity_check_on_a_well_formed_database_reports_ok`, `tests/vdbe/integrity_check_test.rs::integrity_check_covers_multiple_tables_and_indexes`
+
+#### Scenario: An empty database passes
+
+- GIVEN a freshly created database with no user tables
+- WHEN `PRAGMA integrity_check` runs
+- THEN it MUST report a single `"ok"` row rather than erroring on an empty `sqlite_master`
+
+**Tests:** `tests/vdbe/integrity_check_test.rs::integrity_check_on_an_empty_database_reports_ok`
+
+#### Scenario: quick_check skips the index-vs-table cross-check
+
+- GIVEN `PRAGMA integrity_check` and `PRAGMA quick_check` compiled from the same `Pragma::IntegrityCheck` AST node
+- WHEN each compiles
+- THEN `quick_check` MUST compile `Opcode::IntegrityCheck` with `P1 = 1` and `integrity_check` with `P1 = 0`, the flag `run_integrity_check` uses to skip the index cross-check pass
+
+**Tests:** `src/codegen/pragma.rs::tests::integrity_check_compiles_p1_zero`, `src/codegen/pragma.rs::tests::quick_check_compiles_p1_one`

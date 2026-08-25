@@ -88,6 +88,24 @@ KEY`/`UNIQUE` constraints are already dropped by
 internal `sqlite_schema`/`sqlite_temp_schema` rows stock `sqlite3`
 lists (no temp-db support). Tests: `tests/unit/introspection_pragmas.rs`.
 
+- `PRAGMA integrity_check` and `PRAGMA quick_check` (#540, #541), part
+of epic #421 (V7)'s acceptance gate. `Pragma` (`src/parser/ast.rs`)
+became an enum (`JournalMode`/`IntegrityCheck`) to carry a new
+query-form pragma alongside the existing `journal_mode` set-only
+carve-out; a new `IntegrityCheck` opcode (`src/vdbe/program.rs`)
+compiles from it and emits one `TEXT` result row per problem found (or
+a single `"ok"` row). The actual check (`src/integrity.rs`) walks
+every table/index b-tree via the existing `TableCursor`/`IndexCursor`
+read APIs — table rowid ordering, index key ordering, and (skipped by
+`quick_check`) the index-vs-table cross-check (every index entry's
+trailing rowid exists in its table; entry counts match) — plus the
+freelist trunk chain. Auto-vacuum databases (`largest_root_btree_page
+!= 0`) report a single informational line rather than a false
+negative: this crate never writes a pointer-map (no auto-vacuum
+support at all), so pointer-map cross-validation is out of scope,
+tracked as a follow-up rather than implemented against machinery that
+doesn't exist yet.
+
 ### Fixed
 
 - `tools/bench_status.py` fails loud instead of silently omitting a
