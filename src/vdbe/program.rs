@@ -49,6 +49,14 @@ pub enum Opcode {
     /// `PRAGMA journal_mode = WAL|DELETE`: `P1` carries the target mode
     /// (`crate::vdbe::pragma::JOURNAL_MODE_WAL`/`JOURNAL_MODE_DELETE`).
     SetJournalMode,
+    // #540/#541: `PRAGMA integrity_check`/`quick_check` -- postdates the
+    // V2 oracle harvest, so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked, like `SetJournalMode` above.
+    /// `PRAGMA integrity_check`/`quick_check`: `P1` is 1 for the
+    /// `quick_check` reduced pass (skips the index-vs-table cross-check),
+    /// 0 for the full `integrity_check`. Emits one `TEXT` result row per
+    /// problem found, or a single `"ok"` row if none.
+    IntegrityCheck,
     /// Jumps to `P2` if register `P1` is falsy (zero/false, per SQLite's
     /// truthiness rules).
     IfNot,
@@ -443,6 +451,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::Transaction
         | Opcode::AutoCommit
         | Opcode::SetJournalMode
+        | Opcode::IntegrityCheck
         | Opcode::IfNot
         | Opcode::IfNotZero
         | Opcode::IfPos

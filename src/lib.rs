@@ -19,6 +19,7 @@ pub mod codegen;
 pub mod dump;
 pub mod format;
 pub mod header;
+pub mod integrity;
 pub mod pager;
 pub mod parser;
 pub mod planner;

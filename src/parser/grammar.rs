@@ -899,18 +899,32 @@ impl Parser {
         }
     }
 
-    /// `pragma-stmt` (#388, grammar V6 carve-out): `PRAGMA journal_mode
-    /// = (WAL|DELETE)` -- the minimal slice this ticket needs. `PRAGMA`
-    /// pragma names are identifiers in real SQLite (not a fixed keyword
-    /// list), so `journal_mode` is read via `identifier()` like any
-    /// other name; any other pragma name, or any other value for
-    /// `journal_mode`, parses far enough to report a clean
-    /// `Unsupported` rather than a hard parse error -- mirrors
-    /// `parse_with_clause`'s `WITH RECURSIVE` precedent. General PRAGMA
-    /// support stays deferred to V7 (grammar file's Future blocks).
+    /// `pragma-stmt` (#388 `journal_mode`, #540/#541 `integrity_check`/
+    /// `quick_check` grammar V6/V7 carve-outs). `PRAGMA` pragma names are
+    /// identifiers in real SQLite (not a fixed keyword list), so the name
+    /// is read via `identifier()` like any other name; any other pragma
+    /// name, or any other value for `journal_mode`, parses far enough to
+    /// report a clean `Unsupported` rather than a hard parse error --
+    /// mirrors `parse_with_clause`'s `WITH RECURSIVE` precedent. General
+    /// PRAGMA support stays deferred to V7 (grammar file's Future
+    /// blocks).
     pub(super) fn parse_pragma_stmt(&mut self) -> PResult<Pragma> {
         let start = self.expect_kw(Keyword::PRAGMA)?;
-        let (name, _) = self.identifier()?;
+        let (name, name_span) = self.identifier()?;
+        if name.eq_ignore_ascii_case("integrity_check") || name.eq_ignore_ascii_case("quick_check")
+        {
+            let quick = name.eq_ignore_ascii_case("quick_check");
+            // The `PRAGMA integrity_check(N)`/schema-qualified forms are
+            // real SQLite syntax but stay out of this narrow carve-out --
+            // only the bare query form is accepted.
+            if self.eat_punct(&TokenKind::LParen) {
+                return self.unsupported("PRAGMA integrity_check(N) form not yet supported");
+            }
+            return Ok(Pragma::IntegrityCheck {
+                quick,
+                span: join_span(start, name_span),
+            });
+        }
         if !name.eq_ignore_ascii_case("journal_mode") {
             return self.unsupported(format!("pragma {name:?} not yet supported"));
         }
@@ -922,7 +936,7 @@ impl Parser {
             return self.unsupported("PRAGMA journal_mode query form (no '=') not yet supported");
         }
         let (journal_mode, end) = self.pragma_journal_mode_value()?;
-        Ok(Pragma {
+        Ok(Pragma::JournalMode {
             journal_mode,
             span: join_span(start, end),
         })

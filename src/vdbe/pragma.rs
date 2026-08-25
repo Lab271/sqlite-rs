@@ -7,6 +7,8 @@
 //! being silently applied.
 
 use crate::header::JournalMode;
+use crate::integrity::run_integrity_check;
+use crate::record::Value;
 use crate::vdbe::exec::{ExecError, Step, Vm};
 use crate::vdbe::program::Instruction;
 
@@ -42,6 +44,22 @@ pub fn set_journal_mode(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecEr
     };
     if let Some(writer) = vm.db().ok().and_then(|db| db.writer.clone()) {
         writer.borrow_mut().set_journal_mode(mode)?;
+    }
+    Ok(Step::Next)
+}
+
+/// `IntegrityCheck` (#540, #541): `P1` is 1 for `quick_check`, 0 for the
+/// full `integrity_check`. Runs [`run_integrity_check`] against the
+/// attached database's `source`/`header` and emits one `TEXT` result row
+/// per problem found (or a single `"ok"` row if none) via
+/// [`Vm::emit_row`]. Works against a read-only `Vm` (see
+/// [`Vm::with_db`]) since it never needs `vm.db()?.writer`.
+pub fn integrity_check(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let quick = instr.p1 != 0;
+    let db = vm.db()?;
+    let problems = run_integrity_check(db.source.clone(), &db.header, quick);
+    for problem in problems {
+        vm.emit_row(vec![Value::Text(problem.into())]);
     }
     Ok(Step::Next)
 }
