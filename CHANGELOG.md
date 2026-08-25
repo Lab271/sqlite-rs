@@ -8,6 +8,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- `EXPLAIN QUERY PLAN` on a `UNION`/`UNION ALL` compound (#539): only
+  the left-most arm's plan was reported before. Now every arm gets its
+  own nested plan under a `COMPOUND QUERY` root (`COMPOUND QUERY` ->
+  `LEFT-MOST SUBQUERY` plus one `UNION`/`UNION ALL` child per arm),
+  matching the oracle's own EQP shape — plain `UNION`'s child text
+  calls out its ephemeral-index dedup step (`UNION USING TEMP
+  B-TREE`), `UNION ALL` doesn't need one.
+
 - Bare `EXPLAIN <stmt>` (#538): the parser accepted only `EXPLAIN QUERY
   PLAN`, rejecting plain `EXPLAIN` even though the opcode/bytecode-
   listing renderer it should produce (spec 009 Requirement 10) already
