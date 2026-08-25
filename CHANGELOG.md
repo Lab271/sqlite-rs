@@ -8,6 +8,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Readline-style line editing and persistent history for the REPL
+  (#551): `repl` now reads input through `rustyline` instead of raw
+  `stdin.lines()`, giving up/down arrow history navigation and
+  Ctrl-C-abandons-the-current-line behavior; each submitted line is
+  appended to `~/.sqlite-rs_history` and reloaded on the next session.
+  Loading/saving history is best-effort — a missing `$HOME` or an
+  unwritable history file never blocks the session. Piped/non-tty
+  stdin (used by every existing REPL test) is unaffected, since
+  `rustyline` falls back to plain line reads there.
+
 - `EXPLAIN QUERY PLAN` on a `UNION`/`UNION ALL` compound (#539): only
   the left-most arm's plan was reported before. Now every arm gets its
   own nested plan under a `COMPOUND QUERY` root (`COMPOUND QUERY` ->
