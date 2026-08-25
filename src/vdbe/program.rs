@@ -571,6 +571,12 @@ pub enum P4 {
         /// The comparison affinity byte, per SQLite's affinity codes.
         affinity: u8,
     },
+    /// `SeekIndexEq`'s per-key-column descriptor (#500): each probed
+    /// column's declared `COLLATE` (default [`Collation::Binary`]),
+    /// position-for-position with the probe registers starting at `P3`
+    /// — the key-column count `seek_index_eq` used to read out of a
+    /// plain `P4::Int` is just this list's length.
+    SeekKey(Vec<Collation>),
     /// `AggStep`'s `"name(arity)"` descriptor plus the collation
     /// `min`/`max` compares under (#263) — `AggFinal` has no
     /// comparison to perform, so it keeps the plain `Str` descriptor.

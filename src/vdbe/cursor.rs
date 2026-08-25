@@ -463,6 +463,31 @@ impl Vm {
     }
 }
 
+/// `SeekIndexEq`'s per-probe-column collation list (#500): a
+/// `P4::SeekKey` names each probed column's declared `COLLATE`
+/// explicitly; a plain `P4::Int(n)` (every `SeekIndexEq` emission site
+/// that hasn't been taught about declared collations yet) defaults all
+/// `n` columns to [`Collation::Binary`], preserving prior behavior.
+fn seek_key_collations(
+    instr: &Instruction,
+    opcode: &'static str,
+) -> Result<Vec<Collation>, ExecError> {
+    match &instr.p4 {
+        P4::SeekKey(collations) => Ok(collations.clone()),
+        P4::Int(n) => {
+            let n = usize::try_from(*n).map_err(|_| ExecError::MalformedInstruction {
+                opcode,
+                reason: format!("negative key column count {n}"),
+            })?;
+            Ok(vec![Collation::Binary; n])
+        }
+        other => Err(ExecError::MalformedInstruction {
+            opcode,
+            reason: format!("expected a SeekKey or integer P4 (key columns), got {other:?}"),
+        }),
+    }
+}
+
 fn p4_count(instr: &Instruction, opcode: &'static str) -> Result<usize, ExecError> {
     match &instr.p4 {
         P4::Int(n) => usize::try_from(*n).map_err(|_| ExecError::MalformedInstruction {
@@ -1002,8 +1027,8 @@ pub fn seek_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// then just `SeekIndexEq` + a walk-while-still-equal `IdxNext` loop,
 /// same as a UNIQUE index's single match falling straight through.
 pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    let count = p4_count(instr, "SeekIndexEq")?;
-    let probe = read_register_range(vm, instr.p3, count, "SeekIndexEq")?;
+    let collations = seek_key_collations(instr, "SeekIndexEq")?;
+    let probe = read_register_range(vm, instr.p3, collations.len(), "SeekIndexEq")?;
     let encoding = vm.db()?.header.text_encoding;
     let state = index_read_state_mut(vm, instr.p1, "SeekIndexEq")?;
     let found =
@@ -1026,7 +1051,8 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
                 && key
                     .iter()
                     .zip(probe.iter())
-                    .all(|(k, p)| compare(k, p, Collation::Binary).is_eq())
+                    .zip(collations.iter())
+                    .all(|((k, p), &collation)| compare(k, p, collation).is_eq())
         }
         None => false,
     };

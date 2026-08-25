@@ -1,6 +1,6 @@
 //! Jump-mode condition compilation — see `super`'s module doc.
 
-use super::value::{collation_of, compile_value, expr_affinity};
+use super::value::{collation_of, compile_value, expr_affinity, expr_collation};
 use crate::codegen::{
     p4_coll_seq, CodegenError, CondTargets, Emitter, Label, NullTarget, RegAlloc, Scope, Target,
 };
@@ -126,7 +126,10 @@ pub(crate) fn compile_cond(
                     | BinaryOp::Ge
             ) =>
         {
-            let collation = collation_of(lhs).or_else(|| collation_of(rhs));
+            let collation = collation_of(lhs)
+                .or_else(|| collation_of(rhs))
+                .or_else(|| expr_collation(scope, lhs))
+                .or_else(|| expr_collation(scope, rhs));
             let affinity =
                 comparison_affinity(expr_affinity(scope, lhs), expr_affinity(scope, rhs));
             let l = compile_value(em, reg, scope, lhs)?;
@@ -315,7 +318,10 @@ pub(crate) fn compile_cond(
             em.patch_p2(inner_null_addr, null_label);
 
             for item in list.iter() {
-                let collation = collation_of(inner).or_else(|| collation_of(item));
+                let collation = collation_of(inner)
+                    .or_else(|| collation_of(item))
+                    .or_else(|| expr_collation(scope, inner))
+                    .or_else(|| expr_collation(scope, item));
                 let affinity =
                     comparison_affinity(expr_affinity(scope, inner), expr_affinity(scope, item));
                 let p4 = p4_coll_seq(collation.unwrap_or(Collation::Binary), affinity);

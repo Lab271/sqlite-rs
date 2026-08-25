@@ -24,6 +24,7 @@ mod cli_e2e_test;
 mod cli_write_test;
 mod crash_torture_test;
 mod cte_test;
+mod declared_collate_test;
 mod dump_oracle_test;
 mod expr_vectors_test;
 mod families_test;

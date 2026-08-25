@@ -24,5 +24,5 @@ mod value;
 
 pub(crate) use cond::{column_index, compile_cond, ensure_label};
 pub(crate) use value::{
-    collation_of, compile_value, emit_column_read, expr_affinity, is_aggregate_call,
+    collation_of, compile_value, emit_column_read, expr_affinity, expr_collation, is_aggregate_call,
 };

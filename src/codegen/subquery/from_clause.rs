@@ -138,6 +138,7 @@ fn subquery_result_schema(
         without_rowid: false,
         strict: false,
         column_types: vec![String::new(); columns.len()],
+        column_collations: vec![],
         is_virtual: false,
         sql: String::new(),
         indexes: Vec::new(),

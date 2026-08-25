@@ -3,8 +3,7 @@
 
 use std::cmp::Ordering;
 
-use crate::record::Value;
-use crate::vdbe::collation::{compare_text, Collation};
+use crate::record::{compare_text, Collation, Value};
 
 fn value_rank(v: &Value) -> u8 {
     match v {

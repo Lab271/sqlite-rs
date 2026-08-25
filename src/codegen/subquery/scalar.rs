@@ -11,7 +11,7 @@ use crate::codegen::select::{
 };
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Scope, Target};
 use crate::parser::ast::{Expr, ResultColumn, Select};
-use crate::vdbe::{Instruction, Opcode, P4};
+use crate::vdbe::{Collation, Instruction, Opcode, P4};
 
 /// A subquery's single projected result-column expression — scalar
 /// subqueries and single-column `IN (SELECT ...)` both need exactly one
@@ -208,12 +208,16 @@ pub(crate) fn compile_scalar_subquery(
                 let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
                 open_instr.p5 = 1;
                 em.emit(open_instr);
+                let leading_collation = index
+                    .columns
+                    .first()
+                    .map_or(Collation::Binary, |c| c.collation);
                 let seek_instr = Instruction::with_p4(
                     Opcode::SeekIndexEq,
                     index_cursor,
                     0,
                     value_reg,
-                    P4::Int(1),
+                    P4::SeekKey(vec![leading_collation]),
                 );
                 let seek_addr = em.emit(seek_instr);
                 em.patch_p2(seek_addr, end_label);

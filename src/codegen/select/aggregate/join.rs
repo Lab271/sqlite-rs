@@ -132,7 +132,9 @@ where
                 Ok(SortKeyColumn {
                     index: offset,
                     descending,
-                    collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
+                    collation: collation_of(&term.expr)
+                        .or_else(|| expr_collation(full_scope, &term.expr))
+                        .unwrap_or(Collation::Binary),
                     nulls_first,
                 })
             })
@@ -151,7 +153,12 @@ where
         .iter()
         .zip(&group_offsets)
         .map(|(expr, &offset)| {
-            JoinOrderPlan::ascending_offset(offset, collation_of(expr).unwrap_or(Collation::Binary))
+            JoinOrderPlan::ascending_offset(
+                offset,
+                collation_of(expr)
+                    .or_else(|| expr_collation(full_scope, expr))
+                    .unwrap_or(Collation::Binary),
+            )
         })
         .collect();
 
@@ -240,7 +247,9 @@ where
         .group_by
         .iter()
         .map(|expr| {
-            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let collation = collation_of(expr)
+                .or_else(|| expr_collation(full_scope, expr))
+                .unwrap_or(Collation::Binary);
             let affinity = comparison_affinity(expr_affinity(full_scope, expr), None);
             p4_coll_seq(collation, affinity)
         })
@@ -449,7 +458,9 @@ fn emit_joined_agg_step(
             (
                 Some(r),
                 1usize,
-                collation_of(expr).unwrap_or(Collation::Binary),
+                collation_of(expr)
+                    .or_else(|| expr_collation(full_scope, expr))
+                    .unwrap_or(Collation::Binary),
             )
         }
         None => (None, 0usize, Collation::Binary),

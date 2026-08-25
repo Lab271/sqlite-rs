@@ -1017,7 +1017,7 @@ at the parser level, #377) remain out of scope.
   `CodegenError::Unsupported`, per this requirement's explicit
   out-of-scope note, rather than silently sorting only the last arm
 
-**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_is_rejected_cleanly`
+**Tests:** `tests/corpus/union_test.rs::union_with_trailing_order_by_matches_oracle`
 
 ### Requirement 15: View Storage and Query Expansion [MUST]
 

@@ -105,6 +105,25 @@ pub(crate) fn collation_of(expr: &Expr) -> Option<Collation> {
     }
 }
 
+/// An expression's collation for comparison purposes (#500): an explicit
+/// `x COLLATE name` always wins (matching SQLite's own precedence), and
+/// otherwise a bare column falls back to its schema-declared `COLLATE`
+/// (default [`Collation::Binary`] when the column has none). Mirrors
+/// [`expr_affinity`]'s column-resolution shape.
+pub(crate) fn expr_collation(scope: &Scope, expr: &Expr) -> Option<Collation> {
+    if let Some(collation) = collation_of(expr) {
+        return Some(collation);
+    }
+    match &expr.kind {
+        ExprKind::Column { table, name, .. } => {
+            let (_, idx, schema, _) = scope.resolve(table.as_deref(), name).ok()?;
+            schema.column_collations.get(idx).copied()
+        }
+        ExprKind::Paren(inner) => expr_collation(scope, inner),
+        _ => None,
+    }
+}
+
 /// Compiles `expr` into a fresh register holding its value (value
 /// mode) — used for result columns, function arguments, CASE branch
 /// results, and as the operand feed for jump-mode comparisons.

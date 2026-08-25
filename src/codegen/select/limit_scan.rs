@@ -341,12 +341,16 @@ where
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
     let value_reg = compile_value(em, reg, &scope, operand)?;
+    let leading_collation = index
+        .columns
+        .first()
+        .map_or(Collation::Binary, |c| c.collation);
     let seek_addr = em.emit(Instruction::with_p4(
         Opcode::SeekIndexEq,
         index_cursor,
         0,
         value_reg,
-        P4::Int(1),
+        P4::SeekKey(vec![leading_collation]),
     ));
     em.patch_p2(seek_addr, end_label);
 
@@ -397,18 +401,16 @@ where
     em.place(recheck);
     let leading = reg.alloc();
     em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
-    // Plain `Eq`, no `P4::CollSeq` — defaults to `Collation::Binary`, same
-    // as `SeekIndexEq`'s own probe comparison (`src/vdbe/cursor.rs`'s
-    // `seek_index_eq`, `compare(k, p, Collation::Binary)`). Consistent
-    // with the seek this recheck walks past, not a regression introduced
-    // here: no `COLLATE`d index column is specially handled anywhere in
-    // this codebase yet — `ColumnConstraint::Collate` is parsed but never
-    // stored into `TableSchema`/consulted by any comparison site, a
-    // crate-wide gap tracked separately (see the tracking issue this
-    // comment's git blame links to) rather than something to patch here
-    // in isolation, which would just make this one recheck inconsistent
-    // with the seek that feeds it.
-    let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
+    // Reuses `leading_collation` (#500) — the same declared `COLLATE`
+    // `SeekIndexEq`'s own probe comparison just above already used, so
+    // the recheck never disagrees with the seek that feeds it.
+    let eq_addr = em.emit(Instruction::with_p4(
+        Opcode::Eq,
+        leading,
+        0,
+        value_reg,
+        p4_coll_seq(leading_collation, Affinity::Blob),
+    ));
     em.patch_p2(eq_addr, loop_start);
 
     Ok(true)

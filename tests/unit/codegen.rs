@@ -33,6 +33,7 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         root_page: 2,
         columns: columns.iter().map(|c| (*c).to_string()).collect(),
         column_types: vec![],
+        column_collations: vec![],
         without_rowid: false,
         strict: false,
         is_virtual: false,

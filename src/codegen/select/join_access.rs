@@ -373,7 +373,9 @@ pub(super) fn resolve_join_order_by(
         plans.push(JoinOrderPlan {
             target,
             descending,
-            collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
+            collation: collation_of(&term.expr)
+                .or_else(|| expr_collation(scope, base_expr))
+                .unwrap_or(Collation::Binary),
             nulls_first,
         });
     }

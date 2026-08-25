@@ -130,13 +130,17 @@ where
 
             let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
             let value_reg = compile_value(em, reg, &scope, operand)?;
+            let leading_collation = index
+                .columns
+                .first()
+                .map_or(Collation::Binary, |c| c.collation);
             let miss_label = em.new_label();
             let seek_addr = em.emit(Instruction::with_p4(
                 Opcode::SeekIndexEq,
                 index_cursor,
                 0,
                 value_reg,
-                P4::Int(1),
+                P4::SeekKey(vec![leading_collation]),
             ));
             em.patch_p2(seek_addr, miss_label);
 
@@ -159,13 +163,15 @@ where
             em.place(recheck);
             let leading = reg.alloc();
             em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
-            // Plain `Eq` (Binary collation), matching `SeekIndexEq`'s own
-            // probe comparison — see `limit_scan.rs`'s identical recheck
-            // for the full rationale (no `COLLATE`d index column is
-            // specially handled anywhere in this codebase yet; this stays
-            // consistent with the seek it walks past rather than
-            // introducing a new inconsistency).
-            let eq_addr = em.emit(Instruction::new(Opcode::Eq, leading, 0, value_reg));
+            // The leading index column's declared `COLLATE` (#500),
+            // matching `SeekIndexEq`'s own probe comparison just above.
+            let eq_addr = em.emit(Instruction::with_p4(
+                Opcode::Eq,
+                leading,
+                0,
+                value_reg,
+                p4_coll_seq(leading_collation, Affinity::Blob),
+            ));
             em.patch_p2(eq_addr, loop_start);
 
             em.place(miss_label);
@@ -486,7 +492,9 @@ where
         sort_keys.push(SortKeyColumn {
             index,
             descending: false,
-            collation: collation_of(expr).unwrap_or(Collation::Binary),
+            collation: collation_of(expr)
+                .or_else(|| expr_collation(&table_scope, expr))
+                .unwrap_or(Collation::Binary),
             nulls_first: true,
         });
     }
@@ -607,7 +615,9 @@ where
         .group_by
         .iter()
         .map(|expr| {
-            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let collation = collation_of(expr)
+                .or_else(|| expr_collation(&table_scope, expr))
+                .unwrap_or(Collation::Binary);
             let affinity = comparison_affinity(expr_affinity(&table_scope, expr), None);
             p4_coll_seq(collation, affinity)
         })
@@ -794,7 +804,14 @@ where
         .map(|(expr, target)| OrderByPlan {
             target: target.clone(),
             descending: false,
-            collation: collation_of(expr).unwrap_or(Collation::Binary),
+            collation: collation_of(expr).unwrap_or_else(|| match target {
+                OrderByTarget::Column(idx) => schema
+                    .column_collations
+                    .get(*idx)
+                    .copied()
+                    .unwrap_or(Collation::Binary),
+                OrderByTarget::Expr(_) => Collation::Binary,
+            }),
             nulls_first: true,
         })
         .collect();
@@ -888,7 +905,9 @@ where
         .group_by
         .iter()
         .map(|expr| {
-            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let collation = collation_of(expr)
+                .or_else(|| expr_collation(&table_scope, expr))
+                .unwrap_or(Collation::Binary);
             let affinity = comparison_affinity(expr_affinity(&table_scope, expr), None);
             p4_coll_seq(collation, affinity)
         })

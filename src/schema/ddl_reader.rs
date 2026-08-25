@@ -23,7 +23,7 @@
 use thiserror::Error;
 
 use crate::btree::{BtreeError, TableCursor};
-use crate::record::{decode_record, RecordError, TextEncoding, Value};
+use crate::record::{decode_record, Collation, RecordError, TextEncoding, Value};
 use crate::vfs::PageSource;
 
 /// Failure walking or decoding `sqlite_master`.
@@ -65,6 +65,11 @@ pub struct TableSchema {
     /// same textual scope as `columns`, no dialect edge cases beyond
     /// what the corpus exercises.
     pub column_types: Vec<String>,
+    /// Each column's declared `COLLATE` (default [`Collation::Binary`]
+    /// when absent), position-for-position with `columns` — the
+    /// crate-wide fallback #500 introduces for comparisons that don't
+    /// spell out an explicit `COLLATE` in the query itself.
+    pub column_collations: Vec<Collation>,
     /// `CREATE VIRTUAL TABLE ...` — DDL this reader deliberately does not
     /// parse. `columns` is always empty and `root_page` is `0` (virtual
     /// tables have no b-tree storage of their own).
@@ -107,6 +112,9 @@ pub struct IndexedColumn {
     pub name: String,
     /// Whether this key part is sorted `DESC`.
     pub desc: bool,
+    /// The key part's declared `COLLATE` (default [`Collation::Binary`]
+    /// when absent).
+    pub collation: Collation,
 }
 
 /// Walks `sqlite_master` via `cursor` (which callers MUST construct with
@@ -222,6 +230,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
             without_rowid: false,
             strict: false,
             column_types: Vec::new(),
+            column_collations: Vec::new(),
             is_virtual: true,
             sql: sql.to_string(),
             indexes: Vec::new(),
@@ -236,6 +245,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
         without_rowid: parsed.without_rowid,
         strict: parsed.strict,
         column_types: parsed.column_types,
+        column_collations: parsed.column_collations,
         is_virtual: false,
         sql: sql.to_string(),
         indexes: Vec::new(),
@@ -296,6 +306,8 @@ fn indexed_column(def: &str) -> IndexedColumn {
         span = span[..rest.len()].trim_end();
     }
 
+    let collation = column_collation(span);
+
     let upper = span.to_ascii_uppercase();
     if let Some(pos) = upper.find(" COLLATE ") {
         span = span[..pos].trim_end();
@@ -307,6 +319,31 @@ fn indexed_column(def: &str) -> IndexedColumn {
             .trim_matches([']'].as_ref())
             .to_string(),
         desc,
+        collation,
+    }
+}
+
+/// The [`Collation`] declared by a `COLLATE name` constraint anywhere in
+/// `def` (a column definition or indexed-column spec), or
+/// [`Collation::Binary`] when absent or unrecognized — matching SQLite's
+/// own BINARY default.
+fn column_collation(def: &str) -> Collation {
+    let upper = def.to_ascii_uppercase();
+    let Some(pos) = upper.find("COLLATE") else {
+        return Collation::Binary;
+    };
+    let rest = def[pos.saturating_add("COLLATE".len())..].trim_start();
+    let name = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(['"', '`', '['].as_ref())
+        .trim_matches([']'].as_ref());
+    match name.to_ascii_uppercase().as_str() {
+        "BINARY" => Collation::Binary,
+        "NOCASE" => Collation::NoCase,
+        "RTRIM" => Collation::RTrim,
+        _ => Collation::Binary,
     }
 }
 
@@ -327,6 +364,7 @@ fn is_virtual_table(sql: &str) -> bool {
 struct ParsedCreateTable {
     columns: Vec<String>,
     column_types: Vec<String>,
+    column_collations: Vec<Collation>,
     without_rowid: bool,
     strict: bool,
 }
@@ -346,10 +384,12 @@ fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
         .collect();
     let columns = defs.iter().map(|def| column_name(def)).collect();
     let column_types = defs.iter().map(|def| column_type(def)).collect();
+    let column_collations = defs.iter().map(|def| column_collation(def)).collect();
 
     Some(ParsedCreateTable {
         columns,
         column_types,
+        column_collations,
         without_rowid: trailer.contains("WITHOUT ROWID"),
         strict: trailer.contains("STRICT"),
     })

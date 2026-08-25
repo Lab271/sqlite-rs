@@ -71,6 +71,7 @@ mod tests {
             without_rowid: false,
             strict: false,
             column_types: vec![String::new()],
+            column_collations: vec![],
             is_virtual: false,
             sql: format!("CREATE TABLE {name}(a)"),
             indexes,

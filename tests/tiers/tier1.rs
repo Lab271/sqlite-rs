@@ -159,6 +159,7 @@ fn t1_single_table_where_matches_oracle() {
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string()],
         column_types: vec![],
+        column_collations: vec![],
         without_rowid: false,
         strict: false,
         is_virtual: false,

@@ -246,6 +246,7 @@ mod tests {
             root_page: stat1_root,
             columns: vec!["tbl".to_string(), "idx".to_string(), "stat".to_string()],
             column_types: vec![String::new(), String::new(), String::new()],
+            column_collations: vec![],
             without_rowid: false,
             strict: false,
             is_virtual: false,

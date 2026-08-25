@@ -405,7 +405,7 @@ impl FirstN for [Value] {
 mod tests {
     use super::*;
     use crate::record::encode_record;
-    use crate::vdbe::collation::Collation;
+    use crate::record::Collation;
     use crate::vdbe::program::Opcode;
 
     fn insert_row(vm: &mut Vm, cursor: i32, values: &[Value]) {
