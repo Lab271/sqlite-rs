@@ -181,12 +181,14 @@ fn invalid_explain(src: &str) -> String {
     }
 }
 
-/// #243: bare `EXPLAIN` (no `QUERY PLAN`) is the CLI's `-explain`
-/// opcode-dump mode, not this parser's job — rejected as `Unsupported`.
+/// #538: bare `EXPLAIN` (no `QUERY PLAN`) parses the same as `EXPLAIN
+/// QUERY PLAN` — `query_plan` distinguishes the two at render time.
 #[test]
-fn test_unsupported_bare_explain() {
-    let msg = unsupported_explain("EXPLAIN SELECT 1");
-    assert!(msg.contains("-explain"), "message: {msg}");
+fn test_accept_bare_explain() {
+    match parse_explain("EXPLAIN SELECT 1") {
+        ParseOutcome::Accepted(explain) => assert!(!explain.query_plan),
+        other => panic!("expected accepted, got {other:?}"),
+    }
 }
 
 /// `EXPLAIN QUERY PLAN` followed by anything other than a `SELECT` is
