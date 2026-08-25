@@ -57,6 +57,7 @@ mod tests {
             without_rowid: false,
             strict: false,
             column_types: vec!["INTEGER".to_string()],
+            column_collations: vec![],
             is_virtual: false,
             sql: "CREATE TABLE t(a INTEGER)".to_string(),
             indexes: vec![IndexSchema {

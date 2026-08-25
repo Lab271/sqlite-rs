@@ -139,7 +139,12 @@ Unicode; `ß`/`SS` and `é`/`É` do NOT compare equal), or RTRIM (BINARY
 comparison after stripping trailing spaces from both operands, not from
 storage).
 
-**Implementation:** `src/vdbe/collation.rs`
+**Implementation:** `src/record/collation.rs`; a column/index-column's
+declared `COLLATE` (parsed but previously unstored, #500) is carried on
+`TableSchema::column_collations` / `IndexedColumn::collation`
+(`src/schema/ddl_reader.rs`) and consulted by every comparison site that
+doesn't spell out an explicit `COLLATE` in the query text — an explicit
+`COLLATE` always wins (`src/codegen/expr/value.rs::expr_collation`).
 
 **Corpus:** `tests/corpus/expr_vectors/collation.jsonl`
 
@@ -174,6 +179,16 @@ storage).
   trailing spaces or how many
 
 **Tests:** `tests/corpus/expr_vectors_test.rs::collation_vectors_cover_binary_nocase_rtrim`
+
+#### Scenario: A column's declared COLLATE applies without an explicit query-side COLLATE
+
+- GIVEN `CREATE TABLE t(name TEXT COLLATE NOCASE)` and `WHERE name = 'x'`
+  (no `COLLATE` written in the query)
+- THEN the comparison, `ORDER BY`/`GROUP BY` key comparisons, and index
+  seeks/duplicate-key rechecks against `name` all use NOCASE, matching
+  real `sqlite3` — an explicit query-side `COLLATE` still overrides it
+
+**Tests:** `tests/corpus/declared_collate_test.rs::table_schema_captures_declared_column_collation`, `tests/corpus/declared_collate_test.rs::index_schema_captures_declared_column_collation`, `tests/corpus/declared_collate_test.rs::covering_index_seek_uses_declared_collation_without_explicit_collate`, `tests/corpus/declared_collate_test.rs::declared_collation_matches_every_case_varying_duplicate`, `tests/corpus/declared_collate_test.rs::covering_index_seek_and_recheck_compile_with_declared_collation_p4`, `tests/corpus/declared_collate_test.rs::order_by_uses_declared_collation_without_explicit_collate`, `tests/corpus/declared_collate_test.rs::group_by_uses_declared_collation_without_explicit_collate`
 
 ### Requirement 4: NULL Semantics [MUST]
 

@@ -61,6 +61,7 @@ fn fixture(row_count: u32, label: &str) -> (PathBuf, TableSchema) {
         root_page: 2,
         columns: vec!["id".to_string(), "payload".to_string()],
         column_types: vec!["INTEGER".to_string(), "TEXT".to_string()],
+        column_collations: vec![],
         without_rowid: false,
         strict: false,
         is_virtual: false,

@@ -12,9 +12,8 @@
 
 use std::cmp::Ordering;
 
-use crate::record::Value;
+use crate::record::{Collation, Value};
 use crate::vdbe::coerce::coerce_text_to_numeric;
-use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 use crate::vdbe::functions::FunctionError;
 

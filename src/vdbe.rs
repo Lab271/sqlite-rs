@@ -8,7 +8,6 @@ mod aggregate;
 mod arithmetic;
 mod cast;
 mod coerce;
-mod collation;
 mod compare;
 mod control;
 mod cursor;
@@ -22,13 +21,13 @@ mod result;
 mod sorter;
 mod value;
 
+pub use crate::record::{compare_text, Collation};
 pub use affinity::{affinity_of, apply_affinity, comparison_affinity, Affinity};
 pub use cast::cast_to;
 pub use coerce::{
     cast_to_integer, checked_add, checked_div, checked_mul, checked_rem, checked_sub,
     coerce_text_to_numeric,
 };
-pub use collation::{compare_text, Collation};
 pub use compare::compare;
 pub use control::{
     TRANSACTION_MODE_DEFERRED, TRANSACTION_MODE_EXCLUSIVE, TRANSACTION_MODE_IMMEDIATE,

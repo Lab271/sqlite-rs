@@ -67,6 +67,11 @@ fn render_p4(p4: &P4) -> String {
             collation,
         } => format!("{name}({arity})-{}", collation_name(*collation)),
         P4::SortKey(cols) => render_sort_key(cols),
+        P4::SeekKey(collations) => collations
+            .iter()
+            .map(|c| collation_name(*c))
+            .collect::<Vec<_>>()
+            .join(","),
         P4::Affinity(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         P4::Bool(b) => b.to_string(),
         P4::CreateTable { name, sql } => format!("{name}: {sql}"),

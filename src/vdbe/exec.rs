@@ -11,11 +11,10 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use crate::header::DatabaseHeader;
-use crate::record::Value;
+use crate::record::{Collation, Value};
 use crate::vdbe::affinity::{apply_affinity, Affinity};
 use crate::vdbe::aggregate::AggState;
 use crate::vdbe::cast::cast_to;
-use crate::vdbe::collation::Collation;
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::program::{Instruction, Opcode, Program, P4};

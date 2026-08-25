@@ -24,8 +24,7 @@ use std::cmp::Ordering;
 use thiserror::Error;
 
 use crate::format::{format_blob, format_real};
-use crate::record::Value;
-use crate::vdbe::collation::Collation;
+use crate::record::{Collation, Value};
 use crate::vdbe::compare::compare;
 
 /// The ways a scalar/aggregate function call can fail to evaluate.

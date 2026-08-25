@@ -125,6 +125,7 @@ fn schema(sql: &str) -> TableSchema {
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],
         column_types: vec!["INTEGER".to_string(), "TEXT".to_string()],
+        column_collations: vec![],
         without_rowid: false,
         strict: false,
         is_virtual: false,

@@ -2,12 +2,14 @@
 //! header walk. Pure computation, no I/O — the b-tree layer hands this
 //! module raw payload bytes; this module never reads a page itself.
 
+mod collation;
 mod decode;
 mod encode;
 mod error;
 mod value;
 mod varint;
 
+pub use collation::{compare_text, Collation};
 pub use decode::{decode_column, decode_record, decode_record_upto};
 pub(crate) use decode::{decode_serial_value, parse_header_into};
 pub(crate) use encode::encode_varint;

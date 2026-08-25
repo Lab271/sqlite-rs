@@ -32,10 +32,18 @@ pub(super) fn resolve_order_by(
         let nulls_first = term
             .nulls_last
             .map_or(!descending, |nulls_last| !nulls_last);
+        let collation = collation_of(&term.expr).unwrap_or_else(|| match &target {
+            OrderByTarget::Column(idx) => schema
+                .column_collations
+                .get(*idx)
+                .copied()
+                .unwrap_or(Collation::Binary),
+            OrderByTarget::Expr(_) => Collation::Binary,
+        });
         plans.push(OrderByPlan {
             target,
             descending,
-            collation: collation_of(&term.expr).unwrap_or(Collation::Binary),
+            collation,
             nulls_first,
         });
     }

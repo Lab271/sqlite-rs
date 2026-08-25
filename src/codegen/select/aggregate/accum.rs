@@ -253,9 +253,10 @@ pub(in crate::codegen::select) fn read_row_columns_into(
 /// — the group-boundary row for a reused slot number passes `true`;
 /// every other row in the same group passes `false`.
 ///
-/// `min`/`max` compare under `agg.arg`'s collation (an explicit
-/// `COLLATE` wrapper only, same resolution `collation_of` gives the
-/// scalar comparison path — see #265). Unlike that scalar path, this
+/// `min`/`max` compare under `agg.arg`'s collation: an explicit
+/// `COLLATE` wrapper wins, else the argument's own schema-declared
+/// collation (#500), same resolution `expr_collation` gives the scalar
+/// comparison path. Unlike that scalar path, this
 /// does not also apply a comparison *affinity* first:
 /// `crate::vdbe::aggregate::step`'s `compare` call has no affinity
 /// parameter to feed one to, a pre-existing gap in the `AggStep`/
@@ -272,7 +273,9 @@ pub(in crate::codegen::select) fn emit_agg_step(
 ) -> Result<(), CodegenError> {
     let (arg_reg, arity, collation) = match &agg.arg {
         Some(expr) => {
-            let collation = collation_of(expr).unwrap_or(Collation::Binary);
+            let collation = collation_of(expr)
+                .or_else(|| expr_collation(scope, expr))
+                .unwrap_or(Collation::Binary);
             (
                 Some(compile_value(em, reg, scope, expr)?),
                 1usize,
@@ -368,6 +371,7 @@ where
         without_rowid: schema.without_rowid,
         strict: false,
         column_types: synthetic_types,
+        column_collations: vec![],
         is_virtual: false,
         sql: String::new(),
         indexes: Vec::new(),

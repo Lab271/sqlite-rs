@@ -274,12 +274,16 @@ where
                         Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
                     open_instr.p5 = 1;
                     em.emit(open_instr);
+                    let leading_collation = index
+                        .columns
+                        .first()
+                        .map_or(Collation::Binary, |c| c.collation);
                     let seek_instr = Instruction::with_p4(
                         Opcode::SeekIndexEq,
                         index_cursor,
                         0,
                         value_reg,
-                        P4::Int(1),
+                        P4::SeekKey(vec![leading_collation]),
                     );
                     let seek_addr = em.emit(seek_instr);
                     em.patch_p2(seek_addr, miss);

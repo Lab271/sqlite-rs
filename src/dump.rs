@@ -277,6 +277,7 @@ mod tests {
             root_page: 1,
             columns: vec![],
             column_types: vec![],
+            column_collations: vec![],
             without_rowid: false,
             strict: false,
             is_virtual: false,

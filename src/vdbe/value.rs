@@ -4,8 +4,7 @@
 
 use std::cmp::Ordering;
 
-use crate::record::Value;
-use crate::vdbe::collation::Collation;
+use crate::record::{Collation, Value};
 use crate::vdbe::compare::compare;
 
 /// `=`: NULL propagates (a NULL operand yields `None`, not a boolean).
