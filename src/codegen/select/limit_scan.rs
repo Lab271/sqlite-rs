@@ -185,17 +185,25 @@ where
 }
 
 /// Resolves every `select`'s result column to a bare, unqualified
-/// column *name* — `None` if any result column is `*`/`table.*` or a
-/// non-bare-column expression. Used by [`try_compile_covering_index_scan`]
-/// to check "does this SELECT only ever need columns an index already
-/// carries" without pulling in the general projection machinery, which
-/// doesn't (yet) know how to read a computed expression off an index
-/// record.
-fn bare_result_column_names(select: &Select) -> Option<Vec<&str>> {
-    select
-        .columns
-        .iter()
-        .map(|col| match col {
+/// column *name* — `*`/`schema`-qualified `table.*` expand to `schema`'s
+/// own column list (#535: this is a single-table scan, so `*` means
+/// exactly those columns); `None` if a `table.*` names some other table,
+/// or any result column is a non-bare-column expression. Used by
+/// [`try_compile_covering_index_scan`] to check "does this SELECT only
+/// ever need columns an index already carries" without pulling in the
+/// general projection machinery, which doesn't (yet) know how to read a
+/// computed expression off an index record.
+fn bare_result_column_names<'a>(
+    select: &'a Select,
+    schema: &'a TableSchema,
+) -> Option<Vec<&'a str>> {
+    let mut out = Vec::with_capacity(select.columns.len());
+    for col in &select.columns {
+        match col {
+            ResultColumn::Star => out.extend(schema.columns.iter().map(String::as_str)),
+            ResultColumn::TableStar { table } if table.eq_ignore_ascii_case(&schema.name) => {
+                out.extend(schema.columns.iter().map(String::as_str));
+            }
             ResultColumn::Expr {
                 expr:
                     Expr {
@@ -203,10 +211,11 @@ fn bare_result_column_names(select: &Select) -> Option<Vec<&str>> {
                         ..
                     },
                 ..
-            } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect()
+            } => out.push(name.as_str()),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 fn where_col(expr: &Expr) -> Option<&str> {
@@ -270,12 +279,18 @@ pub(super) fn find_covering_index(
             .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
     })?;
     let index = schema.indexes.get(index_position)?;
-    let result_names = bare_result_column_names(select)?;
+    let result_names = bare_result_column_names(select, schema)?;
+    // #535: the table's own `INTEGER PRIMARY KEY` alias column (when it
+    // has one) is the rowid — every index leaf entry already carries it,
+    // so it's covered by *any* index on this table, not just one that
+    // happens to declare it as a column.
+    let rowid_col = rowid_alias_column(schema).and_then(|idx| schema.columns.get(idx));
     let covers = |name: &str| {
         index
             .columns
             .iter()
             .any(|c| c.name.eq_ignore_ascii_case(name))
+            || rowid_col.is_some_and(|rc| rc.eq_ignore_ascii_case(name))
     };
     if !result_names.iter().all(|n| covers(n)) {
         return None;
@@ -330,7 +345,7 @@ where
     // Re-derived rather than threaded through `find_covering_index`'s
     // return value: `bare_result_column_names` is infallible once
     // `find_covering_index` has already returned `Some`.
-    let result_names = bare_result_column_names(select).unwrap_or_default();
+    let result_names = bare_result_column_names(select, schema).unwrap_or_default();
 
     let index_cursor = cursors.sort;
     let root_page = crate::codegen::index_maintenance::valid_index_root_page(index)?;
@@ -367,18 +382,24 @@ where
 
     let mut regs = Vec::with_capacity(result_names.len());
     for name in &result_names {
-        let col_idx = index
+        let r = reg.alloc();
+        match index
             .columns
             .iter()
             .position(|c| c.name.eq_ignore_ascii_case(name))
-            .unwrap_or(0);
-        let r = reg.alloc();
-        em.emit(Instruction::new(
-            Opcode::Column,
-            index_cursor,
-            i32::try_from(col_idx).unwrap_or(0),
-            r,
-        ));
+        {
+            Some(col_idx) => em.emit(Instruction::new(
+                Opcode::Column,
+                index_cursor,
+                i32::try_from(col_idx).unwrap_or(0),
+                r,
+            )),
+            // #535: not one of the index's own columns — must be the
+            // rowid-alias column `covers()` (in `find_covering_index`)
+            // let through, retrievable from the index leaf's own rowid
+            // rather than a declared column.
+            None => em.emit(Instruction::new(Opcode::IdxRowid, index_cursor, r, 0)),
+        };
         regs.push(r);
     }
     let (first, count) = match regs.first() {

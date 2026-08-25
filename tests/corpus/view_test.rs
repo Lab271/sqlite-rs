@@ -448,12 +448,6 @@ fn predicate_pushdown_chains_through_nested_views_matches_oracle() {
 /// predicate's index) underneath the outer `SCAN (subquery)` row —
 /// proving the predicate actually reached the view body's own `WHERE`
 /// clause before it materializes, not just that results are correct.
-/// (A `SELECT *` view over a `t(id INTEGER PRIMARY KEY, x)` table hits a
-/// pre-existing, unrelated covering-index gap — this engine doesn't yet
-/// treat a rowid-alias column as "free" from an index leaf — so this
-/// test sticks to the shape that already works today, matching
-/// `create_view_explicit_column_list_matches_oracle`'s `(a, b)`
-/// renamed-projection fixture rather than a bare `*`.)
 #[test]
 fn eqp_reports_predicate_pushed_into_view_uses_index() {
     let db = view_fixture_db("eqp_pushdown_view");
@@ -468,6 +462,28 @@ fn eqp_reports_predicate_pushed_into_view_uses_index() {
     assert!(
         output.contains("SEARCH t USING") && output.contains("INDEX t_x"),
         "expected a nested SEARCH row naming the pushed-down index t_x, got: {output}"
+    );
+}
+
+/// #535's fix (a rowid-alias `INTEGER PRIMARY KEY` column is free from
+/// any index leaf, so it doesn't block a covering-index scan) composes
+/// with #532's pushdown: a bare `SELECT * FROM t` view — needing both
+/// `id` (the rowid alias) and `x` (the index's own column) — must also
+/// nest a covering-index `SEARCH` row, not fall back to a full scan.
+#[test]
+fn eqp_reports_predicate_pushed_into_star_view_uses_covering_index() {
+    let db = view_fixture_db("eqp_pushdown_star_view");
+    run_exec_ok(&db, "CREATE INDEX t_x ON t(x)");
+    run_exec_ok(&db, "CREATE VIEW v AS SELECT * FROM t");
+    let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM v WHERE x = 15");
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.contains("SCAN (subquery) AS v"),
+        "expected the outer row to report scanning the materialized view, got: {output}"
+    );
+    assert!(
+        output.contains("SEARCH t USING COVERING INDEX t_x"),
+        "expected a nested covering-index SEARCH row for t_x, got: {output}"
     );
 }
 
