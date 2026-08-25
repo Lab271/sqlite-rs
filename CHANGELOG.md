@@ -250,49 +250,9 @@ subquery memoization, CTE materialization sharing), and the `/review`
 follow-up that closed out its warning-level findings. V7.3 (PRAGMAs &
 Introspection) is next.
 
-docs: address V7.2 review warnings from epic #421 (#501) — verified and
-documented, rather than patched, three warning-level findings that
-were already structurally safe or a pre-existing crate-wide gap: (1)
-`take_register` reuse in `ResultRow` is safe because `RegAlloc` never
-reuses a register number and `GROUP BY`'s `prev_key` bookkeeping
-registers are kept separate from anything `ResultRow` projects; (2)
-`SeekIndexEq`'s duplicate-key recheck hardcodes `Collation::Binary`
-consistently with the seek it walks past — no column-declared
-`COLLATE` exists anywhere in `TableSchema` yet, so patching just the
-recheck would have been inconsistent (tracked as the real fix in
-#500); (3) CTE materialization cache reuse is safe today because no
-volatile expression (`random()`, `CURRENT_TIME`, etc.) exists in the
-parser yet — corrected an overstated "always guaranteed" doc comment
-and spelled out what the first volatile function must account for.
+### Added
 
-fix: fail closed, not open, when a checkpoint's page-count bound
-overflows `u32` — surfaced by a `make silent-swallow` robustness audit
-(unrelated to epic #421). `checkpoint_passive`'s own comment states the
-intent plainly: a corrupted-but-checksum-valid WAL frame with a
-`page_num` near `u32::MAX` must never drive `write_at` to an arbitrary
-offset beyond the database's actual extent — but the bound computing
-the main file's current page count fell back to `u32::MAX` on `u32::
-try_from` overflow, which made `max_page` effectively unbounded,
-defeating the exact check the comment describes. Extracted into a
-testable `page_count_from_size()` helper, now falling back to `0`
-(`max_page` then falls back to the WAL's own already-validated
-`db_size` bound) instead.
-
-fix: support `GROUP BY`/aggregate combined with `ORDER BY` and a JOIN
-(#502, found via the V07 parity suite #72) — `compile_joined_grouped_
-scan` previously rejected this combination outright. A third codegen
-pass now inserts each finalized group row into a second sorter keyed
-by the resolved `ORDER BY` targets instead of sinking it directly;
-`LIMIT`/`OFFSET` move from per-group-flush time to after that final
-sort, since which rows a `LIMIT` keeps isn't known until the `ORDER
-BY` order is resolved. `ORDER BY` terms resolve against a whole
-aggregate call (matched structurally, not by `Expr` equality, since an
-`ORDER BY` term is a separately-parsed AST node from its SELECT-list
-twin), an ordinal, a result-column alias, or a bare joined column.
-`DISTINCT` + JOIN + `GROUP BY` stays unsupported (split out of this
-ticket's scope).
-
-feat: share one materialization across repeated `FROM`-subquery
+- share one materialization across repeated `FROM`-subquery
 references (#425, epic #354's V6.1 "10x on repeated subqueries"
 target) — `expand_with_clause` rewrote every reference to a
 `WITH`-clause CTE into its own independent `TableRefKind::Subquery`,
@@ -309,49 +269,7 @@ the edge of a real stack overflow in debug builds). `cte_reuse_10x`
 bench: `cte` 1.34ms vs `inline` 11.1ms (was statistically identical
 before this fix) — roughly 8x.
 
-chore: add WAL-mode variants to `engine.rs`'s transaction benchmarks
-(#436) — `insert_single_tx_wal`, `insert_batch_tx_100_wal`,
-`insert_batch_tx_1000_wal`, `update_batch_tx_wal` now run each
-transaction scenario under `journal_mode=WAL` (via a `PRAGMA
-journal_mode=WAL` switch excluded from the timed closure, mirroring
-`v6.rs`'s existing `switch_to_wal` pattern) against the oracle,
-alongside the existing DELETE-mode variants — previously only `v6.rs`
-compared WAL vs DELETE, with no oracle reference point.
-
-fix: share one `-shm` fd per path per process across all WAL lock
-guards (#491, follow-up from #412's investigation) —
-`WalWriteLock`/`WalCheckpointLock`/`WalReadLock`/`UnixWalShm`
-(`src/vfs/shm.rs`) each opened an independent `File`, but POSIX
-`fcntl` record locks are scoped to `(process, inode)`, not to a file
-descriptor: closing any fd this process holds to a file releases every
-lock the process holds on that inode, even ones taken through a
-different, still-live fd. Two such guards held concurrently in one
-process (e.g. `checkpoint::checkpoint_passive` called directly while a
-separate `Pager` holds its own long-lived `WalReadLock` on the same
-file) could have one guard's `Drop` silently release the other's still-
-needed lock. A new `open_shm_shared` registry (`Arc`/`Weak`-backed,
-keyed by path) makes every guard/helper reuse the one fd already open
-for a path — it only actually closes once nothing in the process needs
-a lock on that inode anymore. Derived from stock sqlite3's own
-`os_unix.c`, whose `unixClose` defers closing for exactly this reason.
-
-perf: index-mode memoization cache for correlated scalar subqueries
-(#494, follow-up from #434/#435) — #314's per-probe-value cache
-(`src/codegen/subquery/memoize.rs`) previously used a table-mode
-`OpenEphemeral` cursor with a linear `Rewind`/`Eq`/`Next` scan per
-lookup, capped at `MAX_MEMO_CACHE_ENTRIES = 8` distinct probe values to
-bound worst-case VDBE step counts — any higher-cardinality correlated
-column fell back to recomputing every row. The cache now uses an
-index-mode `OpenEphemeral` cursor (`Found`/`IdxInsert`), backed by a
-`BTreeMap` for an O(log n) lookup regardless of cache size, so the cap
-is removed entirely (bounded only by the ephemeral cursor's existing
-`MAX_EPHEMERAL_ROWS` ceiling). `IdxInsert` gains a `P5` operand (extra
-payload-only registers beyond the `P4` key count) and `Column` gains
-read support for index-mode ephemeral cursors, so a cache entry's key
-(the probe value) and its cached result no longer have to be the same
-registers (`src/vdbe/cursor.rs`).
-
-feat(planner): skip-scan for non-leading composite-index columns (#485)
+- skip-scan for non-leading composite-index columns (#485)
 — `WHERE b = ?` against a composite index `(a, b)` (leading column `a`
 unconstrained) now uses the index instead of a full table scan,
 whenever `a`'s `ANALYZE`-derived `avg_eq` clears the oracle-confirmed
@@ -373,7 +291,152 @@ values) comes from narrower index-row decode and selective table
 lookups, not sub-linear seeking — reported honestly rather than as an
 oracle-parity ratio. spend: ~1.2M token budget, matched estimate.
 
-perf: zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
+- `ORDER BY`/`LIMIT` on a compound (`UNION`/`UNION ALL`) `SELECT`
+(#484) — `compile_select_compound` previously rejected any top-level
+`ORDER BY`/`LIMIT` trailing a compound statement. Every arm's projected
+rows now feed a shared sorter (reusing the sorter opcodes
+`compile_sorted_scan` already uses for a single-table `ORDER BY`)
+before `LIMIT`/`OFFSET` and final `ResultRow` emission; a `LIMIT` with
+no `ORDER BY` skips the sorter entirely, reusing the simpler
+counter-based guards `compile_direct_scan` uses. An `ORDER BY` term
+must be an output column name/alias or an ordinal position — matching
+real SQLite, which rejects any other expression here even when it only
+references an output column name. Refs: #484.
+
+- REPL mode with `.tables` and `.quit`/`.exit` prefix matching
+(#478) — bare `sqlite-rs <file>` (no subcommand) now enters the REPL
+directly, matching `sqlite3`'s shell; adds a `.tables` dot-command
+(reusing the `tables` subcommand's listing/columnizing logic) and
+`sqlite3`-style prefix matching for `.tables`/`.quit` (`.t`, `.ta`, ...
+and `.q`, `.qu`, ...); `.exit` remains an exact-only alias for `.quit`.
+
+- `ANALYZE` command and cost model for the query planner (#461,
+spec 011) — `ANALYZE`/`ANALYZE table-name` populates `sqlite_stat1`
+(row counts + per-index `avg_eq`); `Stats`/`PlanCost` (`src/planner.rs`)
+estimate scan/index-probe cost from those stats; `choose_join_access`
+vetoes a structurally-picked `UNIQUE`-index seek back to a full scan
+when the cost model says it isn't actually cheaper, wired live into
+the CLI's `query`/`repl` path. A database with no `ANALYZE` history
+compiles byte-for-byte as before this change. Filed #470 (join
+ordering heuristics) as the real follow-up enabled by this ticket.
+
+### Fixed
+
+- fail closed, not open, when a checkpoint's page-count bound
+overflows `u32` — surfaced by a `make silent-swallow` robustness audit
+(unrelated to epic #421). `checkpoint_passive`'s own comment states the
+intent plainly: a corrupted-but-checksum-valid WAL frame with a
+`page_num` near `u32::MAX` must never drive `write_at` to an arbitrary
+offset beyond the database's actual extent — but the bound computing
+the main file's current page count fell back to `u32::MAX` on `u32::
+try_from` overflow, which made `max_page` effectively unbounded,
+defeating the exact check the comment describes. Extracted into a
+testable `page_count_from_size()` helper, now falling back to `0`
+(`max_page` then falls back to the WAL's own already-validated
+`db_size` bound) instead.
+
+- support `GROUP BY`/aggregate combined with `ORDER BY` and a JOIN
+(#502, found via the V07 parity suite #72) — `compile_joined_grouped_
+scan` previously rejected this combination outright. A third codegen
+pass now inserts each finalized group row into a second sorter keyed
+by the resolved `ORDER BY` targets instead of sinking it directly;
+`LIMIT`/`OFFSET` move from per-group-flush time to after that final
+sort, since which rows a `LIMIT` keeps isn't known until the `ORDER
+BY` order is resolved. `ORDER BY` terms resolve against a whole
+aggregate call (matched structurally, not by `Expr` equality, since an
+`ORDER BY` term is a separately-parsed AST node from its SELECT-list
+twin), an ordinal, a result-column alias, or a bare joined column.
+`DISTINCT` + JOIN + `GROUP BY` stays unsupported (split out of this
+ticket's scope).
+
+- share one `-shm` fd per path per process across all WAL lock
+guards (#491, follow-up from #412's investigation) —
+`WalWriteLock`/`WalCheckpointLock`/`WalReadLock`/`UnixWalShm`
+(`src/vfs/shm.rs`) each opened an independent `File`, but POSIX
+`fcntl` record locks are scoped to `(process, inode)`, not to a file
+descriptor: closing any fd this process holds to a file releases every
+lock the process holds on that inode, even ones taken through a
+different, still-live fd. Two such guards held concurrently in one
+process (e.g. `checkpoint::checkpoint_passive` called directly while a
+separate `Pager` holds its own long-lived `WalReadLock` on the same
+file) could have one guard's `Drop` silently release the other's still-
+needed lock. A new `open_shm_shared` registry (`Arc`/`Weak`-backed,
+keyed by path) makes every guard/helper reuse the one fd already open
+for a path — it only actually closes once nothing in the process needs
+a lock on that inode anymore. Derived from stock sqlite3's own
+`os_unix.c`, whose `unixClose` defers closing for exactly this reason.
+
+- CTE referenced from more than one arm of a compound `SELECT` (#424)
+— `compile_select_compound`'s per-arm codegen unconditionally
+`OpenRead`'d a resolved-table root page, ignoring
+`TableRefKind::Subquery` entirely, so any arm referencing a CTE (or
+other `FROM`-subquery) hit `unsupported: table X has an invalid root
+page (0)` instead of being materialized. Each arm now branches the
+same way the single-`SELECT` path already does, calling
+`materialize_from_subquery` per arm on its own cursor. Refs: #424.
+
+- recreate a vanished `-wal`/`-shm` during flush instead of failing
+(#422) — `Pager::flush_wal_locked` unconditionally called
+`wal::WalWriter::open_existing`, which errored if a concurrent
+connection (e.g. a real `sqlite3` client auto-checkpointing on close)
+had deleted `-wal`/`-shm` out from under this `Pager`, even though its
+own `journal_mode` still correctly said `Wal`. Now recreates a fresh
+`-wal`/`-shm` pair on that specific `NotFound` case, mirroring
+`switch_journal_to_wal`'s from-scratch creation — matches stock
+`sqlite3`'s own observed behavior in the same scenario.
+
+### Changed
+
+- address V7.2 review warnings from epic #421 (#501) — verified and
+documented, rather than patched, three warning-level findings that
+were already structurally safe or a pre-existing crate-wide gap: (1)
+`take_register` reuse in `ResultRow` is safe because `RegAlloc` never
+reuses a register number and `GROUP BY`'s `prev_key` bookkeeping
+registers are kept separate from anything `ResultRow` projects; (2)
+`SeekIndexEq`'s duplicate-key recheck hardcodes `Collation::Binary`
+consistently with the seek it walks past — no column-declared
+`COLLATE` exists anywhere in `TableSchema` yet, so patching just the
+recheck would have been inconsistent (tracked as the real fix in
+#500); (3) CTE materialization cache reuse is safe today because no
+volatile expression (`random()`, `CURRENT_TIME`, etc.) exists in the
+parser yet — corrected an overstated "always guaranteed" doc comment
+and spelled out what the first volatile function must account for.
+
+- add WAL-mode variants to `engine.rs`'s transaction benchmarks
+(#436) — `insert_single_tx_wal`, `insert_batch_tx_100_wal`,
+`insert_batch_tx_1000_wal`, `update_batch_tx_wal` now run each
+transaction scenario under `journal_mode=WAL` (via a `PRAGMA
+journal_mode=WAL` switch excluded from the timed closure, mirroring
+`v6.rs`'s existing `switch_to_wal` pattern) against the oracle,
+alongside the existing DELETE-mode variants — previously only `v6.rs`
+compared WAL vs DELETE, with no oracle reference point.
+
+- close remaining missing_docs gap for docs.rs (#430) — adds `///`
+doc comments to the ~890 previously-undocumented public items across
+the nested submodules (`parser`, `vdbe`, `btree`, `pager`, `codegen`,
+`vfs`, `record`, `schema`) that #428 left out of scope, and enables
+`#![warn(missing_docs)]` in `src/lib.rs` so future regressions are
+caught by `cargo build`/`clippy`. No logic or behavior changes.
+
+### Performance
+
+- index-mode memoization cache for correlated scalar subqueries
+(#494, follow-up from #434/#435) — #314's per-probe-value cache
+(`src/codegen/subquery/memoize.rs`) previously used a table-mode
+`OpenEphemeral` cursor with a linear `Rewind`/`Eq`/`Next` scan per
+lookup, capped at `MAX_MEMO_CACHE_ENTRIES = 8` distinct probe values to
+bound worst-case VDBE step counts — any higher-cardinality correlated
+column fell back to recomputing every row. The cache now uses an
+index-mode `OpenEphemeral` cursor (`Found`/`IdxInsert`), backed by a
+`BTreeMap` for an O(log n) lookup regardless of cache size, so the cap
+is removed entirely (bounded only by the ephemeral cursor's existing
+`MAX_EPHEMERAL_ROWS` ceiling). `IdxInsert` gains a `P5` operand (extra
+payload-only registers beyond the `P4` key count) and `Column` gains
+read support for index-mode ephemeral cursors, so a cache entry's key
+(the probe value) and its cached result no longer have to be the same
+registers (`src/vdbe/cursor.rs`).
+
+- zero-copy `IndexRow` payload for index/WITHOUT ROWID scans (#471)
 — follow-up to #467, which left `IndexRow::payload` (src/btree/index.rs)
 as an owned `Vec<u8>` out of scope. `IndexFrame.page` is now `Rc<[u8]>`
 (matching `PageSource::read_page`'s return type); `IndexRow::payload`
@@ -383,7 +446,7 @@ into `reassemble_payload` instead of wrapping it in a throwaway `Rc`
 and immediately copying the result back to a `Vec`. `decode_value_cell`
 (the Pager-only index insert/delete write path) is unchanged.
 
-perf: non-`UNIQUE`-index duplicate-key matches for the covering-index
+- non-`UNIQUE`-index duplicate-key matches for the covering-index
 scan and index-only `COUNT(*)` fast paths (#450, follow-up from #444)
 — both fast paths previously required a `UNIQUE` index because
 `SeekIndexEq`'s one-shot probe couldn't walk forward past duplicate
@@ -397,62 +460,7 @@ single match still falls out on its very first `IdxNext`, so this
 subsumes #444's original single-probe behavior without a separate
 branch). Refs: #450, 009/Req-16.
 
-feat: `ORDER BY`/`LIMIT` on a compound (`UNION`/`UNION ALL`) `SELECT`
-(#484) — `compile_select_compound` previously rejected any top-level
-`ORDER BY`/`LIMIT` trailing a compound statement. Every arm's projected
-rows now feed a shared sorter (reusing the sorter opcodes
-`compile_sorted_scan` already uses for a single-table `ORDER BY`)
-before `LIMIT`/`OFFSET` and final `ResultRow` emission; a `LIMIT` with
-no `ORDER BY` skips the sorter entirely, reusing the simpler
-counter-based guards `compile_direct_scan` uses. An `ORDER BY` term
-must be an output column name/alias or an ordinal position — matching
-real SQLite, which rejects any other expression here even when it only
-references an output column name. Refs: #484.
-
-fix: CTE referenced from more than one arm of a compound `SELECT` (#424)
-— `compile_select_compound`'s per-arm codegen unconditionally
-`OpenRead`'d a resolved-table root page, ignoring
-`TableRefKind::Subquery` entirely, so any arm referencing a CTE (or
-other `FROM`-subquery) hit `unsupported: table X has an invalid root
-page (0)` instead of being materialized. Each arm now branches the
-same way the single-`SELECT` path already does, calling
-`materialize_from_subquery` per arm on its own cursor. Refs: #424.
-
-fix: recreate a vanished `-wal`/`-shm` during flush instead of failing
-(#422) — `Pager::flush_wal_locked` unconditionally called
-`wal::WalWriter::open_existing`, which errored if a concurrent
-connection (e.g. a real `sqlite3` client auto-checkpointing on close)
-had deleted `-wal`/`-shm` out from under this `Pager`, even though its
-own `journal_mode` still correctly said `Wal`. Now recreates a fresh
-`-wal`/`-shm` pair on that specific `NotFound` case, mirroring
-`switch_journal_to_wal`'s from-scratch creation — matches stock
-`sqlite3`'s own observed behavior in the same scenario.
-
-feat(cli): REPL mode with `.tables` and `.quit`/`.exit` prefix matching
-(#478) — bare `sqlite-rs <file>` (no subcommand) now enters the REPL
-directly, matching `sqlite3`'s shell; adds a `.tables` dot-command
-(reusing the `tables` subcommand's listing/columnizing logic) and
-`sqlite3`-style prefix matching for `.tables`/`.quit` (`.t`, `.ta`, ...
-and `.q`, `.qu`, ...); `.exit` remains an exact-only alias for `.quit`.
-
-feat: `ANALYZE` command and cost model for the query planner (#461,
-spec 011) — `ANALYZE`/`ANALYZE table-name` populates `sqlite_stat1`
-(row counts + per-index `avg_eq`); `Stats`/`PlanCost` (`src/planner.rs`)
-estimate scan/index-probe cost from those stats; `choose_join_access`
-vetoes a structurally-picked `UNIQUE`-index seek back to a full scan
-when the cost model says it isn't actually cheaper, wired live into
-the CLI's `query`/`repl` path. A database with no `ANALYZE` history
-compiles byte-for-byte as before this change. Filed #470 (join
-ordering heuristics) as the real follow-up enabled by this ticket.
-
-docs: close remaining missing_docs gap for docs.rs (#430) — adds `///`
-doc comments to the ~890 previously-undocumented public items across
-the nested submodules (`parser`, `vdbe`, `btree`, `pager`, `codegen`,
-`vfs`, `record`, `schema`) that #428 left out of scope, and enables
-`#![warn(missing_docs)]` in `src/lib.rs` so future regressions are
-caught by `cargo build`/`clippy`. No logic or behavior changes.
-
-perf: hand-rolled multiplicative hasher for the pager's page-cache
+- hand-rolled multiplicative hasher for the pager's page-cache
 `HashMap` (#457) — page numbers are plain sequential `u32`s, not
 adversarial input, so the default hasher's SipHash cost on
 `PageCache::entries`'s hot get/insert path was unneeded. No new
@@ -461,7 +469,9 @@ dependency (ADR-0022 already ruled that out for this cache);
 
 ## [0.17.7] - 2026-08-24
 
-fix: cache reassembled payload per row position (#469, #475) —
+### Fixed
+
+- cache reassembled payload per row position (#469, #475) —
 `TableCursorState::current_payload()` was being called once per
 `Column` opcode instead of once per row (a regression introduced by
 the lazy-payload change), so an N-column `SELECT` paid for N payload
@@ -473,7 +483,9 @@ sharing, plus an overflow-payload reassembly benchmark.
 
 ## [0.17.6] - 2026-08-24
 
-perf: borrow table row payload from page buffer instead of copying
+### Performance
+
+- borrow table row payload from page buffer instead of copying
 (#467) — `PageSource::read_page` now returns `Rc<[u8]>` instead of
 `Vec<u8>`, so a `PageCache` hit is a refcount bump rather than a copy;
 `TableRow::payload` becomes a `Payload` enum that borrows a range of
@@ -482,7 +494,9 @@ bytes for the overflow-chain case.
 
 ## [0.17.5] - 2026-08-23
 
-perf: reuse row buffer and move registers in `ResultRow` (#465) —
+### Performance
+
+- reuse row buffer and move registers in `ResultRow` (#465) —
 eliminates the per-row `Vec` allocation and per-column `Value` clone by
 reusing a `Vm`-owned scratch buffer (mirroring `record_scratch`, #454)
 and taking each register's value via `take_register` instead of
@@ -494,7 +508,9 @@ produces.
 
 ## [0.17.4] - 2026-08-23
 
-perf: cache parsed row header for repeated `OP_Column` reads (#458) —
+### Performance
+
+- cache parsed row header for repeated `OP_Column` reads (#458) —
 table and index-read cursors now parse a row's header (serial types +
 byte offsets) once, via `record::parse_header_into`, and cache it
 (`RowHeaderCache`) on the cursor state, instead of `decode_column`
@@ -509,7 +525,9 @@ stale cache can never survive a row change. `full_scan` bench ratio
 
 ## [0.17.3] - 2026-08-23
 
-feat: no-stats query optimizations (#444) — two "always wins, no
+### Added
+
+- no-stats query optimizations (#444) — two "always wins, no
 ANALYZE/cost model needed" optimizations. Covering-index scan: a
 single-table `SELECT` whose `WHERE` is a top-level equality on a
 `UNIQUE` index's leading column, with every result column already
@@ -525,7 +543,9 @@ duplicate-key matches deferred to #450. See spec 009 Requirement 16.
 
 ## [0.17.2] - 2026-08-23
 
-fix: correlated scalar subquery equality seeks instead of scanning (#434)
+### Fixed
+
+- correlated scalar subquery equality seeks instead of scanning (#434)
 — a correlated scalar subquery's own `WHERE` clause always compiled to
 an unconditional `Rewind`/`Next` scan, even when it was a trivially
 seekable equality against the subquery table's rowid or a `UNIQUE`
@@ -543,7 +563,9 @@ See ADR-0027.
 
 ## [0.17.1] - 2026-08-23
 
-fix: decode UTF-8/UTF-16 text straight into `Rc<str>` (#441) — text
+### Fixed
+
+- decode UTF-8/UTF-16 text straight into `Rc<str>` (#441) — text
 columns were decoded through an intermediate `String` before converting
 to the `Value::Text(Rc<str>)` representation, allocating and copying
 twice per text value. `decode_text` (`src/record/decode.rs`) now builds
@@ -554,7 +576,27 @@ design needs is deferred (ADR-0022), and even once built is
 LRU-evicting/mutable in place, which is incompatible with a live
 borrow under `#![forbid(unsafe_code)]`.
 
-perf: lazy per-column record decoding for the VDBE `Column` opcode (#439)
+- cache the WAL `-shm` fd across a connection's lifetime (#437) —
+`Vfs::open_wal_shm` returns a persistent handle `Pager` caches and reuses
+for every commit's write-lock claim/`mxFrame` publish, instead of
+reopening `-shm` fresh each time. Investigated via a profiling spike
+(#438, `tests/spike/011_wal_performance`); ~17.5% faster on a
+many-commits-per-connection workload (`concurrent_read_write` benchmark),
+though the original `insert_batch_wal_wal` benchmark stays flat since it
+opens one connection per commit and has nothing to cache across.
+
+### Changed
+
+- crate-level rustdoc polish (#428) — crate-level `//!` docs, Cargo.toml
+publication metadata (`description`, `repository`, `documentation`,
+`keywords`, `categories`), and doc comments on previously-undocumented
+top-level public items (`DumpError`, `HEADER_LEN`, `HeaderError`,
+`VfsError`, `vfs::Result`). Closing the remaining ~884 `missing_docs`
+warnings in nested submodules is tracked in #430.
+
+### Performance
+
+- lazy per-column record decoding for the VDBE `Column` opcode (#439)
 — `decode_column(payload, idx, encoding)` (`src/record/decode.rs`) walks
 the record header to find one column's offset and decodes only that
 column's body, instead of `decode_record`-ing the whole row on every
@@ -565,22 +607,6 @@ decoding to SELECT, UPDATE, and DELETE uniformly with no codegen
 changes. `filter_scan` benchmark (50MB fixture): down from a reported
 2.8x gap vs. the oracle to running faster than it (0.65x).
 
-fix: cache the WAL `-shm` fd across a connection's lifetime (#437) —
-`Vfs::open_wal_shm` returns a persistent handle `Pager` caches and reuses
-for every commit's write-lock claim/`mxFrame` publish, instead of
-reopening `-shm` fresh each time. Investigated via a profiling spike
-(#438, `tests/spike/011_wal_performance`); ~17.5% faster on a
-many-commits-per-connection workload (`concurrent_read_write` benchmark),
-though the original `insert_batch_wal_wal` benchmark stays flat since it
-opens one connection per commit and has nothing to cache across.
-
-docs: crate-level rustdoc polish (#428) — crate-level `//!` docs, Cargo.toml
-publication metadata (`description`, `repository`, `documentation`,
-`keywords`, `categories`), and doc comments on previously-undocumented
-top-level public items (`DumpError`, `HEADER_LEN`, `HeaderError`,
-`VfsError`, `vfs::Result`). Closing the remaining ~884 `missing_docs`
-warnings in nested submodules is tracked in #430.
-
 ## [0.17.0] - 2026-08-23 — V6.3 Concurrency
 
 Phase V6.3 of epic #354 (V6 Slim), finalizing V6 and unlocking 1.0: real
@@ -588,7 +614,9 @@ WAL-mode writes with multi-reader/single-writer concurrency, and the
 sqlite3-interop demo that was the epic's stated goal. Closes #388, #389,
 #390, #391.
 
-feat: minimal `PRAGMA journal_mode=WAL|DELETE` switching (#388) — a
+### Added
+
+- minimal `PRAGMA journal_mode=WAL|DELETE` switching (#388) — a
 narrow V6 grammar carve-out (`.openspec/grammar/sqlite.ebnf`, general
 PRAGMA support stays deferred to V7) parses only this one pragma
 name/value pair, with everything else falling through to a clean
@@ -599,7 +627,7 @@ every pending WAL frame, deletes `-wal`/`-shm`, and flips the header
 bytes back going to DELETE. Refuses mid-transaction, matching stock
 SQLite.
 
-feat: WAL-mode writes actually go through the WAL (#389) — `Pager::flush`
+- WAL-mode writes actually go through the WAL (#389) — `Pager::flush`
 now branches on the tracked journal mode: in `journal_mode=WAL`, every
 dirty page is appended as a WAL frame (`WalWriter::open_existing`,
 resuming across sessions rather than truncating), the last one marked as
@@ -615,7 +643,9 @@ trade-off. Un-ignoring `tests/tiers/tier3.rs`'s
 `t3_wal_writing_and_live_interop` stays for #390 (live interop with a
 real stock `sqlite3` process).
 
-test: sqlite-rs + stock sqlite3 concurrent WAL interop (#390) — the "V6
+### Changed
+
+- sqlite-rs + stock sqlite3 concurrent WAL interop (#390) — the "V6
 demo" gate for epic #354: `tests/corpus/wal_concurrent_interop_test.rs`
 drives sqlite-rs through the same SQL-level entry point
 (`execute_transaction_step`/`compile_statement`, the machinery
@@ -633,7 +663,7 @@ real content lives only in the `-wal` file) — it now falls back to a
 lenient `page_size`-only bootstrap and re-derives the header from the
 `Pager`'s WAL-aware read of page 1.
 
-bench: V6 WAL benchmarks (#391) — `tests/performance/v6.rs` (`make
+- V6 WAL benchmarks (#391) — `tests/performance/v6.rs` (`make
 bench-v6` / `cargo bench --bench v6`), four scenarios adapted from the
 ticket to what the codebase can measure honestly: `insert_batch_wal`
 (1000-row batch INSERT, journal vs WAL mode, driven through the real
@@ -661,11 +691,11 @@ the first arm ("table cte has an invalid root page (0)") — a
 compound-arm/CTE codegen gap, filed as #424. spend: roughly matched the
 issue's 1-day estimate.
 
-Also filed from this phase's work: #422 (`Pager` should recover, not
+- Also filed from this phase's work: #422 (`Pager` should recover, not
 error, when another connection's auto-checkpoint deletes `-wal`/`-shm`
 out from under it — found while building #390's interop tests).
 
-spend: V6.3 as a whole ran noticeably over its ~5-day estimate — #388
+- spend: V6.3 as a whole ran noticeably over its ~5-day estimate — #388
 also had to add a minimal PRAGMA parser (none existed), and #389 had to
 make `Pager::flush` genuinely WAL-aware (the write path was entirely
 rollback-journal-only beforehand) — both prerequisites the original
@@ -673,7 +703,9 @@ per-ticket estimates didn't account for.
 
 ## [0.16.1] - 2026-08-23
 
-fix: `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row
+### Fixed
+
+- `parse_insert_stmt` panicked via `expect()` if the first `VALUES` row
 were ever empty, even though that path was already unreachable
 (`expr_list` always seeds one element before any `Ok`, with `?`
 short-circuiting earlier failures). Replaced with the same safe fallback
@@ -688,19 +720,23 @@ Phase V6.2 of epic #354 (V6 Slim): the write half of the WAL format, the
 wal-index checkpoint-coordination pieces, PASSIVE checkpoint, and crash
 recovery / oracle-parity acceptance tests. Closes #383, #385, #386, #387.
 
-feat: WAL frame writer (`WalWriter`) and `WalHeader::new`/`serialize`,
+### Added
+
+- WAL frame writer (`WalWriter`) and `WalHeader::new`/`serialize`,
 completing the write side of the WAL file format alongside the existing
 `WalHeader::parse`/`committed_pages` read path.
 
-feat: wal-index (`-shm`) checkpoint coordination — `WAL_CKPT_LOCK`, a
+- wal-index (`-shm`) checkpoint coordination — `WAL_CKPT_LOCK`, a
 probe for which reader-mark slots are actually held (bounding checkpoint
 progress), and `nBackfill` read/publish.
 
-feat: `checkpoint_passive` — copies committed WAL frames into the main
+- `checkpoint_passive` — copies committed WAL frames into the main
 database file up to the oldest active reader's mark, without blocking on
 readers (FULL/RESTART deferred to V7).
 
-test: WAL crash recovery (torn-frame tolerance, checkpoint-mid-write
+### Changed
+
+- WAL crash recovery (torn-frame tolerance, checkpoint-mid-write
 consistency) and write-path oracle parity — a `-wal` file written by
 sqlite-rs recovers correctly through a real, pinned `sqlite3`.
 
@@ -709,18 +745,20 @@ sqlite-rs recovers correctly through a real, pinned `sqlite3`.
 Phase V6.1 of epic #354 (V6 Slim): non-recursive CTEs, `UNION`/`UNION ALL`
 compound `SELECT`, and `CREATE VIEW`/`DROP VIEW`.
 
-feat: `WITH` clause (non-recursive CTE) parsing and codegen materialization
+### Added
+
+- `WITH` clause (non-recursive CTE) parsing and codegen materialization
 — a CTE reference in `FROM`/`JOIN` is rewritten into the same
 `TableRefKind::Subquery` shape #257's subquery-in-FROM machinery already
 materializes and scans, including multi-CTE chaining, explicit `(col,
 ...)` lists, and self-joins. `WITH RECURSIVE` parses far enough to report
 a clean `Unsupported` rather than a syntax error. Closes #375, #376.
 
-feat: plain `UNION` compound `SELECT` (`UNION ALL` pre-existed via #240),
+- plain `UNION` compound `SELECT` (`UNION ALL` pre-existed via #240),
 deduplicated via a shared ephemeral-index cursor reusing `SELECT
 DISTINCT`'s guard shape. Closes #377, #378.
 
-feat: `CREATE VIEW`/`DROP VIEW` parsing, view storage in `sqlite_master`,
+- `CREATE VIEW`/`DROP VIEW` parsing, view storage in `sqlite_master`,
 and query expansion — a view reference in `FROM`/`JOIN` is rewritten the
 same way a CTE is, runs after CTE expansion so CTE-of-view and
 view-of-CTE both resolve, and detects direct/mutual view-definition
@@ -728,7 +766,9 @@ cycles with the same "view X is circularly defined" message stock
 SQLite reports. `DROP VIEW` parses but is not yet wired into codegen —
 cleanly rejected rather than panicking. Closes #379, #380.
 
-fix: `INSERT ... SELECT` was silently dropping compound-SELECT arms in
+### Fixed
+
+- `INSERT ... SELECT` was silently dropping compound-SELECT arms in
 codegen, and CTE/view materialization was silently scanning only the
 first arm of a compound-SELECT body — both real correctness gaps found
 while building this phase, now cleanly rejected instead of producing
@@ -740,7 +780,9 @@ feeding `INSERT`, single-quoted alias) that the new `WITH`/`UNION`
 parsing reached further into were reclassified from `Invalid` to
 `Unsupported`, lowering `SELECT_INVALID_BASELINE` from 8 to 3.
 
-test: oracle-diff parity coverage across `tests/corpus/{cte,union,
+### Changed
+
+- oracle-diff parity coverage across `tests/corpus/{cte,union,
 view}_test.rs` for all of the above, including circular/mutual view
 references, CTE shadowing a real table, and clean-rejection pins for
 every not-yet-supported combination (compound CTE/view bodies, compound
@@ -756,7 +798,9 @@ the eight merged V5 PRs (#353 comment thread). Patch release — no new
 features, no scope beyond closing gaps the review found in the V5 lock
 and transaction-control paths.
 
-fix: `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` parsed `TransactionMode` but
+### Fixed
+
+- `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE` parsed `TransactionMode` but
 `compile_begin` discarded it, so a concurrent writer was only blocked at
 `COMMIT` time (via `Pager::flush`'s EXCLUSIVE escalation), not at `BEGIN`
 as stock SQLite does. `Transaction`'s `P1` now carries the mode;
@@ -770,7 +814,7 @@ proves a compiled `BEGIN IMMEDIATE`/`EXCLUSIVE` visibly blocks a live
 stock `sqlite3` writer/reader, mirroring `lock_state_interop_test.rs`'s
 proof for the raw lock primitive. Closes #395.
 
-fix(pager): `Pager::flush` never used the 5-state lock ladder built for
+- `Pager::flush` never used the 5-state lock ladder built for
 hot-journal recovery — it only ever held the plain SHARED lock every
 `open()` takes, so two writers (or `sqlite-rs` racing a live stock
 `sqlite3` process) could both pass the SHARED check and interleave
@@ -780,16 +824,18 @@ before touching the journal or main file, and de-escalates back to
 SHARED afterward, mirroring `sqlite3PagerCommitPhaseOne`/`Two`. Closes
 #398 (Refs #353).
 
-fix: nested `BEGIN; BEGIN;` and a bare `COMMIT`/`ROLLBACK` with no open
+- nested `BEGIN; BEGIN;` and a bare `COMMIT`/`ROLLBACK` with no open
 transaction silently succeeded instead of erroring like stock SQLite —
 a divergence the V5 review flagged as untested. Both now return the
 matching stock-`sqlite3` error. Closes #396.
 
-fix(ci): `cargo-mvl-limit` install lacked `--force`, so `Swatinem/rust-cache`
+- `cargo-mvl-limit` install lacked `--force`, so `Swatinem/rust-cache`
 restoring a stale cached binary made the mvl-limit gate flaky in CI.
 Closes #394 (chore, CI-only).
 
-Spend: matched the review-fix estimate (see #353 review comment for the
+### Changed
+
+- Spend: matched the review-fix estimate (see #353 review comment for the
 combined analysis this closed out).
 
 ## [0.14.0] - 2026-08-22 — V5 Slim: Core Transactions
@@ -800,44 +846,37 @@ ladder, rollback-journal write path, hot-journal crash recovery, and the
 VDBE transaction opcodes that make it all executable. Spend: matched the
 epic's 2-3 week estimate.
 
-feat: parser support for `BEGIN`/`COMMIT`/`ROLLBACK` (`DEFERRED`/
+### Added
+
+- parser support for `BEGIN`/`COMMIT`/`ROLLBACK` (`DEFERRED`/
 `IMMEDIATE`/`EXCLUSIVE` transaction modes) as first-class statements.
 Closes #356.
 
-feat: `src/vdbe/control.rs` gains the transaction opcodes
+- `src/vdbe/control.rs` gains the transaction opcodes
 (`Transaction`/`AutoCommit`) that make compiled `BEGIN`/`COMMIT`/
 `ROLLBACK` actually run against the pager instead of just parsing.
 Closes #360.
 
-feat: `exec` CLI subcommand runs multi-statement scripts through a single
+- `exec` CLI subcommand runs multi-statement scripts through a single
 session, so a script's `BEGIN ... COMMIT` spans multiple statements
 against one connection instead of one-shot-per-statement. Closes #358.
 
-feat: minimal `repl` subcommand for interactive multi-statement
+- minimal `repl` subcommand for interactive multi-statement
 `BEGIN`/`COMMIT`/`ROLLBACK` sessions. Closes #365.
 
-test: crash torture test — a kill -9 loop mid-write against the rollback
-journal, verifying the database always recovers to a consistent state on
-restart. Discharges the epic's "power-cut torture test" acceptance gate.
-Closes #361.
+- `src/vfs/lock.rs` gains `LockLevel`/`FileLockState`, a full 5-state
+journal-mode lock ladder (UNLOCKED → SHARED → RESERVED → PENDING →
+EXCLUSIVE) built on byte-identical `fcntl` byte-range locks, matching
+`os_unix.c`'s `unixLock`/`unixUnlock` transition order and PENDING_BYTE
+probe semantics. Exposed from `sqlite_rs::vfs` for the follow-up `Pager`
+write-path wiring (#45); `Pager`/`VfsFile::lock_shared` are unchanged.
+Verified against a live stock `sqlite3` process in both directions
+(`tests/corpus/lock_state_interop_test.rs`). Closes #357. Spend:
+matched estimate.
 
-bench: `tests/performance/engine.rs` gains four transaction-batching
-benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
-`insert_batch_tx_1000`, `update_batch_tx`), each running a
-`BEGIN`/statement(s)/`COMMIT` session through `execute_transaction_step`
-(#360) against a fresh scratch copy of `bench_1mb.db` per iteration, with
-an `oracle` counterpart (`rusqlite::execute_batch`) alongside each —
-surfacing the per-statement journal/fsync overhead V5's rollback-journal
-path pays outside a transaction vs. amortizing it across a batch, and
-letting `make bench` check the issue's "within 5× of oracle" batch
-criterion directly. Current numbers (`bench_1mb.db`, `--quick`):
-`insert_single_tx` 16ms vs oracle 3ms (~5×), `insert_batch_tx_1000` 61ms
-vs oracle 4ms (~17×) — batching cuts our per-row cost far faster than
-linear, but the ratio to oracle isn't at 5× yet outside the single-row
-case; left as a follow-up rather than in scope here. Closes #373. Spend:
-matched the small estimate.
+### Fixed
 
-fix: `Pager::open` recovered a hot rollback journal from its header magic
+- `Pager::open` recovered a hot rollback journal from its header magic
 alone, with no check for a live second connection — a race against the
 oracle's own `hasHotJournal`/`sqlite3PagerSharedLock` (`os_unix.c`/
 `pager.c`) behavior. Now non-blocking-probes RESERVED before recovering
@@ -854,17 +893,30 @@ previously wired into nothing outside its own unit tests) now backs
 a duplicate of #172/ADR-0016). Spend: ~1 session, matched the rescoped
 1-day estimate.
 
-feat: `src/vfs/lock.rs` gains `LockLevel`/`FileLockState`, a full 5-state
-journal-mode lock ladder (UNLOCKED → SHARED → RESERVED → PENDING →
-EXCLUSIVE) built on byte-identical `fcntl` byte-range locks, matching
-`os_unix.c`'s `unixLock`/`unixUnlock` transition order and PENDING_BYTE
-probe semantics. Exposed from `sqlite_rs::vfs` for the follow-up `Pager`
-write-path wiring (#45); `Pager`/`VfsFile::lock_shared` are unchanged.
-Verified against a live stock `sqlite3` process in both directions
-(`tests/corpus/lock_state_interop_test.rs`). Closes #357. Spend:
-matched estimate.
+### Changed
 
-test: `src/vdbe/cursor.rs` was the largest coverage gap in the repo
+- crash torture test — a kill -9 loop mid-write against the rollback
+journal, verifying the database always recovers to a consistent state on
+restart. Discharges the epic's "power-cut torture test" acceptance gate.
+Closes #361.
+
+- `tests/performance/engine.rs` gains four transaction-batching
+benchmarks (`insert_single_tx`, `insert_batch_tx_100`,
+`insert_batch_tx_1000`, `update_batch_tx`), each running a
+`BEGIN`/statement(s)/`COMMIT` session through `execute_transaction_step`
+(#360) against a fresh scratch copy of `bench_1mb.db` per iteration, with
+an `oracle` counterpart (`rusqlite::execute_batch`) alongside each —
+surfacing the per-statement journal/fsync overhead V5's rollback-journal
+path pays outside a transaction vs. amortizing it across a batch, and
+letting `make bench` check the issue's "within 5× of oracle" batch
+criterion directly. Current numbers (`bench_1mb.db`, `--quick`):
+`insert_single_tx` 16ms vs oracle 3ms (~5×), `insert_batch_tx_1000` 61ms
+vs oracle 4ms (~17×) — batching cuts our per-row cost far faster than
+linear, but the ratio to oracle isn't at 5× yet outside the single-row
+case; left as a follow-up rather than in scope here. Closes #373. Spend:
+matched the small estimate.
+
+- `src/vdbe/cursor.rs` was the largest coverage gap in the repo
 (82.37% lines / 68.39% functions). Adds hand-assembled `Program` tests
 for opcodes no current codegen path emits (`Last`, `NullRow`, `IdxLE`)
 and for the `CursorTypeMismatch`/`MalformedInstruction` error arms that
@@ -874,7 +926,9 @@ after, repo TOTAL 90.91%. No production code changes. Part of epic #234
 
 ## [0.13.3] - 2026-08-22
 
-fix: 16 codegen call sites (INSERT/UPDATE/DELETE/SELECT/subquery)
+### Fixed
+
+- 16 codegen call sites (INSERT/UPDATE/DELETE/SELECT/subquery)
 defaulted an out-of-range `sqlite_master.rootpage` to `0` instead of
 rejecting it — `index_maintenance.rs::open_index_cursors` already had
 the correct `CodegenError::Unsupported` rejection for an index's root
@@ -887,21 +941,23 @@ two shared helpers (`valid_table_root_page`, `valid_index_root_page`)
 and applied them everywhere. Found via `make silent-swallow`'s #342
 audit (#349).
 
-fix: honor DISTINCT in aggregates and coerce TEXT/BLOB in sum()/avg()
+- honor DISTINCT in aggregates and coerce TEXT/BLOB in sum()/avg()
 — `count(DISTINCT x)`/`sum(DISTINCT x)`/`avg(DISTINCT x)` previously
 silently ignored `DISTINCT`, and `sum()`/`avg()` skipped TEXT/BLOB
 inputs instead of coercing them to their numeric-prefix value per
 SQLite's own text-coercion rule (R-29052-00975). Found via the
 vendored sqllogictest suite, which now passes in full (#348).
 
-perf: hoist uncorrelated WHERE-clause subquery in aggregate scan too
+### Performance
+
+- hoist uncorrelated WHERE-clause subquery in aggregate scan too
 (#322, #323) — extends #314's per-outer-value memoization/hoisting to
 the aggregate-scan codegen path, not just plain SELECTs.
 
-perf: UPDATE/DELETE rowid/index-equality seek fast path (#336) — point
+- UPDATE/DELETE rowid/index-equality seek fast path (#336) — point
 mutations no longer pay a full table/index scan to find the target row.
 
-perf: in-place leaf/index cell splice instead of collect-all/rewrite-all
+- in-place leaf/index cell splice instead of collect-all/rewrite-all
 on single-row mutation (#337) — single-row INSERT/UPDATE/DELETE on
 table and secondary-index leaf pages now splices the cell-pointer array
 in place (O(1) relative to the page's other cells) instead of decoding
@@ -913,7 +969,9 @@ O(1) path; `insert`/`update` fall back to the existing full-rebuild
 path when the page's contiguous gap is too small, which also
 defragments the page as a side effect.
 
-(#338, hash-based aggregation for unindexed GROUP BY, investigated and
+### Changed
+
+- (#338, hash-based aggregation for unindexed GROUP BY, investigated and
 closed as not applicable — stock sqlite3 has no hash-aggregation
 strategy either; it always sorts via a temporary B-tree for the
 unindexed case, so our existing sort-then-group codegen already
@@ -923,7 +981,9 @@ gap independently of the algorithm.)
 
 ## [0.13.2] - 2026-08-22
 
-fix: aggregate functions (`count`/`sum`/`avg`/`min`/`max`) combined
+### Fixed
+
+- aggregate functions (`count`/`sum`/`avg`/`min`/`max`) combined
 with a JOIN — `SELECT a.name, count(*) FROM a JOIN b ON ... GROUP BY
 a.name` previously failed with `unsupported: aggregate function
 count`, despite this exact combination being the V4 epic's (#234)
@@ -939,25 +999,9 @@ routed around the gap instead of testing it) and activates
 
 ## [0.13.1] - 2026-08-21
 
-chore: `make lint` now covers `[[test]] test = false` targets
-(`corpus`/`parity`/`sqllogictest`/`point_lookup_perf`) — the same
-convention that opts them out of the default `cargo test` run also
-opted them out of `cargo clippy --tests`/`cargo fmt`, letting compile
-errors and lint violations accumulate invisibly (a stale `FromClause`
-field reference in `sqllogictest/runner.rs` was one such compile
-error, fixed separately). Fixed the 23 accumulated violations this
-uncovered: `&PathBuf` parameters narrowed to `&Path` (9 sites across
-`tests/corpus/`, 1 in `tests/performance/point_lookup.rs`), two
-`indexing_slicing` sites in `point_lookup.rs` replaced with
-`.get()`/destructuring, a `type_complexity` violation in
-`tests/parity/{driver,v02}.rs` factored into a `QueryRunner` type
-alias, and three violations in `tests/sqllogictest/{runner,format}.rs`
-(`manual_split_once`, `unnecessary_sort_by`, `enum_variant_names`).
-`make lint` now runs `cargo clippy` against these four targets
-explicitly (named, not a wildcard — matching how `--tests` itself
-isn't one either).
+### Fixed
 
-fix: `tests/sqllogictest/runner.rs` failed to compile (`&FromClause`
+- `tests/sqllogictest/runner.rs` failed to compile (`&FromClause`
 has no `name` field — a stale reference left over from #276's
 `TableRef`/`FromClause` refactor, invisible to `cargo build
 --all-targets`/`make lint` since `sqllogictest` is a `test = false`
@@ -976,7 +1020,7 @@ committed `tools/sqllogictest-status.json` baseline had gone stale
 while this runner was broken, silently, since CI's own `sqllogictest`
 step is `continue-on-error: true` (informational, not a gate).
 
-fix: `LIMIT 0` returned every matching row instead of none. Every
+- `LIMIT 0` returned every matching row instead of none. Every
 scan shape's LIMIT counter (`src/codegen/select/limit_scan.rs`'s
 `emit_limit_guard`, reused by joins, aggregates, and the `SeekRowid`
 fast path) checked `DecrJumpZero` *after* emitting a row, so a `LIMIT
@@ -988,7 +1032,65 @@ only while positive, so a negative `LIMIT` (SQLite's "no limit"
 convention) still falls through unbounded exactly as before. Caught
 while benchmarking #129, unrelated to that ticket's sorter change.
 
-chore: cap ephemeral table/index materialization at 1M rows (#269).
+- EphemeralTable `Insert` decode uses the database's real text
+encoding (#266). `src/vdbe/cursor.rs`'s subquery-in-FROM materialization
+path hardcoded `TextEncoding::Utf8` instead of `db.header.text_encoding`
+like every other decode site in the file; a UTF-16 database queried
+with a subquery in FROM would misdecode text or surface a generic
+`MalformedInstruction`. Falls back to UTF-8 only when no db is attached
+(pure in-memory ephemeral use, e.g. DISTINCT). Regression test added
+directly against the opcode handler, since building a real UTF-16
+fixture through the SQL engine isn't possible yet — `MakeRecord`
+(`src/vdbe/result.rs`) still hardcodes UTF-8 on the encode side, a
+separate, wider-scope gap left for a follow-up ticket.
+
+- correlated subquery inside a `FROM`-subquery's own `SELECT` list
+(#289, #311). `materialize_from_subquery`'s single-table (non-join)
+path compiled the subquery's `SELECT` list against a `Scope` catalog
+limited to its own resolved `FROM` schema(s) instead of the full outer
+catalog, so any nested subquery referencing another table hit a
+catalog-visibility rejection — the already-correct joined-FROM path
+was unaffected. Spend: matched estimate (medium).
+
+- hoist uncorrelated `WHERE`-clause subquery out of the outer scan
+loop (#306, #315). A scalar or single-column `IN (SELECT ...)`
+subquery in a single-table `WHERE` clause was re-materialized on every
+outer row even when uncorrelated — severe enough to hit the 50M-step
+VDBE guard rail on large tables (#301's bench run). Adds a static,
+conservative correlation check (`subquery_is_correlated`/
+`walk_expr_for_correlation` — anything uncertain is treated as
+correlated, which only ever suppresses the optimization) plus a hoist
+pass: an uncorrelated top-level `WHERE` conjunct materializes once,
+before the scan's `Rewind`, via a new pointer-identity-keyed
+`Scope::hoisted` map, instead of inline per row. Deliberately narrow —
+only an exact `expr IN (SELECT ...)` or scalar-subquery comparison
+conjunct is recognized; `OR`/`NOT`/deeper nesting, multi-column `IN`,
+correlated subqueries, and the joined-query `WHERE` path all fall
+through unchanged. (A follow-up commit fixed an `unreachable!`-adjacent
+`make mvl-limit` gate violation the hoist's correlation-walk helper
+introduced.) Spend: roughly matched the ~200k token estimate.
+
+### Changed
+
+- `make lint` now covers `[[test]] test = false` targets
+(`corpus`/`parity`/`sqllogictest`/`point_lookup_perf`) — the same
+convention that opts them out of the default `cargo test` run also
+opted them out of `cargo clippy --tests`/`cargo fmt`, letting compile
+errors and lint violations accumulate invisibly (a stale `FromClause`
+field reference in `sqllogictest/runner.rs` was one such compile
+error, fixed separately). Fixed the 23 accumulated violations this
+uncovered: `&PathBuf` parameters narrowed to `&Path` (9 sites across
+`tests/corpus/`, 1 in `tests/performance/point_lookup.rs`), two
+`indexing_slicing` sites in `point_lookup.rs` replaced with
+`.get()`/destructuring, a `type_complexity` violation in
+`tests/parity/{driver,v02}.rs` factored into a `QueryRunner` type
+alias, and three violations in `tests/sqllogictest/{runner,format}.rs`
+(`manual_split_once`, `unnecessary_sort_by`, `enum_variant_names`).
+`make lint` now runs `cargo clippy` against these four targets
+explicitly (named, not a wildcard — matching how `--tests` itself
+isn't one either).
+
+- cap ephemeral table/index materialization at 1M rows (#269).
 `EphemeralTableState.rows`/`EphemeralState.entries` (`src/vdbe/cursor.rs`)
 backed a plain in-memory `Vec`/`BTreeMap` with no ceiling — a
 subquery-in-FROM (#257) or a correlated `IN (SELECT ...)` rebuilding its
@@ -998,7 +1100,7 @@ without limit. Adds `ExecError::EphemeralRowLimitExceeded` and a
 existing hardcoded-limit pattern (`MAX_REGISTERS`, `MAX_STEPS`) rather
 than a new configurable-limits mechanism.
 
-test: assert an aggregate in tier3's joins-and-aggregates stub (#267).
+- assert an aggregate in tier3's joins-and-aggregates stub (#267).
 `t3_multi_table_joins_and_aggregates` claimed aggregate coverage by name
 and ignore-reason but exercised only JOIN + ORDER BY/DISTINCT/
 `INSERT ... SELECT`. Added a `GROUP BY` + `count(*)` assertion; aggregate
@@ -1006,7 +1108,195 @@ functions combined with a JOIN aren't supported by codegen yet, so it
 runs against a single table rather than the joined query — tracked as a
 known coverage gap in #268.
 
-perf: bounded top-K sorter for `ORDER BY ... LIMIT N` (#129). The
+- consolidate aggregate codegen onto `AggStep`/`AggFinal` (#263,
+ADR-0019). `src/codegen/select/aggregate.rs`'s `GROUP BY`/plain-aggregate
+compilation (`compile_grouped_scan`) now emits `Opcode::AggStep`/
+`Opcode::AggFinal` — implemented since #241/#242 but never actually
+emitted by codegen (ADR-0018 tracked this gap) — instead of the
+`AggKind`/`AggSlot` hand-rolled register-arithmetic scheme (`reset_agg`/
+`accumulate_agg`), now retired. Surfaced two VM-side gaps along the
+way: `AggStep`'s `min`/`max` comparisons were hardcoded to `BINARY`
+collation (the same class of bug #265 just fixed in the old scheme —
+fixed here via a new `P4::AggFunc{name, arity, collation}` descriptor),
+and there was no way to reset an aggregate-context slot for a new
+`GROUP BY` group reusing the same slot number (fixed via `AggStep`'s
+previously-unused `P5` operand as a reset flag). See ADR-0019 for the
+full design and rejected alternatives (a dedicated reset opcode,
+threading comparison affinity through as well, folding in plain
+non-`GROUP BY` aggregate support).
+
+- aggregate/join/subquery edge-case coverage from the v0.13.0
+review (#268). Adds 11 tests across `tests/codegen/select_test.rs`,
+`tests/corpus/union_test.rs`, `tests/corpus/join_test.rs`, and
+`tests/corpus/subquery_test.rs`: HAVING-filters-all-groups, UNION ALL
+arm type/affinity mismatch (no coercion, verified), the LEFT/RIGHT/
+FULL JOIN `WHERE ... IS NULL` anti-join idiom, two-level-deep
+correlated subqueries, and multi-column `IN`/`NOT IN` subquery edge
+cases (zero-row result, NULL tuple component) — all against working
+functionality. Two sub-items turned out to be missing features, not
+test gaps, and are documented as clean `Unsupported` rejections rather
+than fixed here: aggregates with no `GROUP BY` at all (even
+`count(*)`), and `FULL JOIN` combined with `ORDER BY`/`DISTINCT`/
+`LIMIT`; also newly discovered, a correlated subquery nested inside a
+FROM-subquery's own SELECT list. Tracked as follow-on tickets rather
+than expanding this test-only ticket's scope.
+
+- tighten `src/btree` and `src/codegen` module layout (#273,
+#276). Pure module reorganization, no behavior change: `src/btree/`
+groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
+`table/`, and index write ops (`index_insert`/`index_delete`) under
+`index.rs` + `index/`, giving both write paths symmetric naming;
+`ddl.rs` renamed to `schema.rs`. `src/codegen/` groups DDL codegen
+(`create_table`/`drop_table`/`create_index`/`drop_index`) under
+`ddl.rs` + `ddl/`; `select.rs` (4033 lines) split into a facade plus
+9 sub-modules under `select/` (`entry`, `joins`, `join_full`, `eqp`,
+`join_access`, `order_by`, `projection`, `limit_scan`, `aggregate`),
+each ~1000 lines or fewer. Spec 006 `Implementation:`/`Tests:` path
+citations updated for the moved btree files.
+
+- split `src/bin/sqlite-rs.rs` into modules, move dispatch into
+the library (#292). `src/codegen/dispatch.rs`'s `compile_statement`/
+`leading_keywords` now return a library `DispatchError` instead of an
+`ExitCode`, so they're usable without depending on the binary crate;
+the CLI itself splits into per-command modules
+(`src/bin/sqlite-rs/{main,dump,tables,query,exec,common}.rs`) behind a
+thin `main.rs` dispatcher. No behavior change. Spend: matched estimate
+(small).
+
+- dedupe join/subquery codegen (#270, #308). Four independent,
+behavior-preserving extractions: `compile_join_level_traverse`
+(`src/codegen/select/joins.rs`) factors the shared nested-loop/
+outer-join traversal out of `compile_join_level` and
+`compile_join_level_for_sort` (#250's `ORDER BY`+JOIN sorted path),
+parameterized over row emission via a `leaf` closure;
+`compile_in_subquery` becomes a thin one-element wrapper around
+`compile_in_subquery_multi`; NATURAL/USING join-constraint synthesis is
+unified into one `resolve_join_constraint` helper shared by
+`compile_select_joined_scan` and `compile_full_join_two_table`.
+**Latent-bug fix surfaced along the way:** `compile_join_level_for_sort`
+had silently diverged from `compile_join_level` and never gained #243's
+seek optimization — a joined query with `ORDER BY` downgraded an
+otherwise-seekable `SeekRowid`/`SeekIndexEq` point lookup to a full
+`Rewind`/`Next` scan. Both paths now share one traversal, so the
+optimization applies unconditionally; verified via a new
+`EXPLAIN QUERY PLAN` regression test.
+
+- design note + benchmark for correlated-subquery
+rematerialization cost (#303, ADR-0021). ADR-0021 documents deferring
+a full coroutine rewrite in favor of a scoped follow-up (memoize a
+correlated subquery's result keyed on its outer-referenced value(s),
+reusing #306's correlation walk). Adds a `correlated_subquery` bench
+scenario to `tests/performance/engine.rs` demonstrating the current
+per-outer-row re-materialization cost, guarded to `bench_1mb.db` only —
+it blows the VDBE step cap against `bench_50mb.db`, itself evidence of
+the unbounded cost. No fix in this ticket, per its own acceptance
+criteria.
+
+- add V4 join/aggregate/subquery scenarios to the tier-1 engine
+bench (#301). Extends `tests/performance/engine.rs` with `join`,
+`group_by_agg`, and `subquery` scenarios now that V4 phase 1 landed
+(#235), plus a fixed-size `bench_lookup` dimension table and
+`bench_data.bucket` column in `gen_fixtures.sh --bench`.
+`compile_ours` now dispatches single-table vs `JOIN` the same way
+`src/bin/sqlite-rs/query.rs` does. First measured ratios
+(`bench-status.json`) surfaced two follow-ups, filed rather than fixed
+here per this ticket's scope: an uncorrelated subquery re-executed
+(and its ephemeral index rebuilt, for `IN`) on every outer row instead
+of once (#306), and `join`/`GROUP BY` ratios (14-26x) exceeding #111's
+1.5-3x calibration (#310). Spend: roughly matched the 120k token
+estimate.
+
+- ADR-0022 — profile #317's join ratio, find the missing page
+cache. #317's own scope was profiling, not fixing. Instrumenting
+(rather than accepting the provisional "per-row VDBE dispatch
+overhead" hypothesis from #310/#317) found the real cause:
+`Pager`/`VfsPageSource` have no page cache at all — every `read_page`
+does a fresh syscall + allocation, unconditionally, and `join`'s
+per-row `SeekRowid` re-descends the b-tree from the root on every
+outer row, re-reading the same root/interior pages hundreds of
+thousands of times on the 830k-row fixture. Ruled out the
+dispatch-overhead hypothesis via direct instruction-count comparison:
+`full_scan`'s per-row body has *more* instructions than `join`'s yet
+the *better* ratio (~3.4x vs ~14-16x). No code fix in this ticket
+(matches #317's own acceptance criteria); filed #320 as the scoped,
+fully-designed follow-up ("add a bounded page cache to `Pager`'s read
+path"). Spend: roughly matched the profiling-scope estimate.
+
+### Added
+
+- aggregates with no `GROUP BY` (#287, #313). `SELECT count(*)/sum/
+avg/min/max FROM t;` (no `GROUP BY`) now compiles and executes on both
+populated and empty tables, as a thin extension of the existing
+sort-then-group machinery (`compile_grouped_scan`): every row belongs
+to one synthetic implicit group, and a new `implicit_group: bool`
+parameter ensures a zero-row table still flushes exactly one result
+row (`count(*) = 0`, other aggregates `NULL`) rather than zero rows.
+`HAVING` without `GROUP BY` is now accepted too, filtering that single
+implicit group. `.openspec/grammar/sqlite.ebnf` corrected: `HAVING` is
+parse.y's own independent `having_opt`, not nested under
+`groupby_opt`. `total`/`group_concat` remain unsupported (no `AggState`
+accumulator yet); the joined-select path is untouched. Spend: matched
+estimate (medium).
+
+- aggregate function inside a scalar/correlated subquery (#304,
+#318). `SELECT (SELECT max(x) FROM t) FROM t LIMIT 1` (and the
+correlated form) previously failed with "unsupported: aggregate
+function max" — a scalar subquery's projected expression compiled
+through `compile_value`'s plain, aggregate-rejecting path instead of
+#287's aggregate machinery. `compile_scalar_subquery` now detects an
+aggregate call in the subquery's projection and routes through
+`compile_grouped_scan` as an implicit whole-table group, capturing the
+result via a `Copy` into the destination register;
+`compile_grouped_scan` gained an `outer_scope: Option<&Scope>`
+parameter so a correlated subquery's `WHERE` clause still resolves
+against the enclosing scope. **Bug fix found along the way:**
+`AggFinal` never cleared its `agg_contexts` slot after finalizing —
+invisible for a top-level query (compiled once), but a correlated
+aggregate subquery reuses the same slot per outer row, so a zero-row
+invocation finalized against the *previous* row's leftover accumulator
+instead of a fresh NULL/0 (`Vm::clear_agg_context` added). Spend:
+within estimate (medium).
+
+- `.tables [PATTERN]` shell parity for the `sqlite-rs tables` CLI
+subcommand (#177). Lists tables *and* views from `sqlite_master` (a new
+`read_table_and_view_names` schema reader, `src/schema/ddl_reader.rs`,
+bypasses `read_schema`'s DDL parsing entirely since `.tables` needs
+neither), excludes internal `sqlite_%` names, accepts an optional LIKE
+`PATTERN` argument (reusing `vdbe::like_match`), and renders in
+`sqlite3`'s multi-column, space-padded `.tables` layout — verified
+byte-for-byte against the pinned 3.53.4 oracle. `temp.`-prefixed temp
+tables remain deferred (needs the V3+ write path's temp-database
+support).
+
+- `ORDER BY` and `DISTINCT` combined with `FULL JOIN` (#288, #307).
+Extends `compile_full_join_two_table`'s two-pass emitter: `DISTINCT`
+threads a `distinct_cursor` through all three emission sites (matched,
+left-nulled, right-unmatched), reusing the existing ephemeral-index
+dedup guard; `ORDER BY` routes all three through a new
+`emit_full_join_sort_row`, buffering into a sorter cursor (mirroring
+the ordinary join tree's `compile_joined_sorted_scan` split) with a
+fourth pass draining the sorter and applying `LIMIT`/`OFFSET`
+post-sort. `DISTINCT` + `ORDER BY` together remains rejected, matching
+the ordinary join tree's existing restriction. Spend: ~2x estimate —
+needed sorter-buffering plumbing in the two-pass emitter rather than a
+config flag.
+
+### Performance
+
+- index-ordered scan for `ORDER BY ... LIMIT` (#296, #309,
+ADR-0020). `find_ordering_index` (`src/codegen/select/index_scan.rs`)
+looks for a single index on the FROM table whose column order is a
+prefix match (forward or exactly-reversed) for the requested `ORDER BY`
+terms — `BINARY` collation only, and an explicit `NULLS FIRST`/`LAST`
+must agree with the direction's default. When found,
+`try_compile_index_ordered_scan` walks the index directly (new
+`IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` opcodes + `IdxRowid` +
+`SeekRowid`) with `LIMIT`/`OFFSET` as an early-exit guard — no
+buffering, no sorter — ahead of the existing `compile_sorted_scan`
+fallback. `IndexCursor` gained `last()`/`prev()`, the mirror of its
+existing `first()`/`next()`.
+
+- bounded top-K sorter for `ORDER BY ... LIMIT N` (#129). The
 ephemeral sorter (`src/vdbe/sorter.rs`) previously buffered and sorted
 every matching row before `LIMIT` ever applied — a full `O(N log N)`
 sort regardless of how small `LIMIT` was. `SorterOpen` now accepts an
@@ -1026,213 +1316,7 @@ count)` — a genuine dead end worth noting for anyone revisiting this.
 Index-ordered scanning (skip the sorter entirely when an index matches
 the `ORDER BY` column) is a separate, larger follow-up — see #296.
 
-refactor: consolidate aggregate codegen onto `AggStep`/`AggFinal` (#263,
-ADR-0019). `src/codegen/select/aggregate.rs`'s `GROUP BY`/plain-aggregate
-compilation (`compile_grouped_scan`) now emits `Opcode::AggStep`/
-`Opcode::AggFinal` — implemented since #241/#242 but never actually
-emitted by codegen (ADR-0018 tracked this gap) — instead of the
-`AggKind`/`AggSlot` hand-rolled register-arithmetic scheme (`reset_agg`/
-`accumulate_agg`), now retired. Surfaced two VM-side gaps along the
-way: `AggStep`'s `min`/`max` comparisons were hardcoded to `BINARY`
-collation (the same class of bug #265 just fixed in the old scheme —
-fixed here via a new `P4::AggFunc{name, arity, collation}` descriptor),
-and there was no way to reset an aggregate-context slot for a new
-`GROUP BY` group reusing the same slot number (fixed via `AggStep`'s
-previously-unused `P5` operand as a reset flag). See ADR-0019 for the
-full design and rejected alternatives (a dedicated reset opcode,
-threading comparison affinity through as well, folding in plain
-non-`GROUP BY` aggregate support).
-
-fix: EphemeralTable `Insert` decode uses the database's real text
-encoding (#266). `src/vdbe/cursor.rs`'s subquery-in-FROM materialization
-path hardcoded `TextEncoding::Utf8` instead of `db.header.text_encoding`
-like every other decode site in the file; a UTF-16 database queried
-with a subquery in FROM would misdecode text or surface a generic
-`MalformedInstruction`. Falls back to UTF-8 only when no db is attached
-(pure in-memory ephemeral use, e.g. DISTINCT). Regression test added
-directly against the opcode handler, since building a real UTF-16
-fixture through the SQL engine isn't possible yet — `MakeRecord`
-(`src/vdbe/result.rs`) still hardcodes UTF-8 on the encode side, a
-separate, wider-scope gap left for a follow-up ticket.
-
-test: aggregate/join/subquery edge-case coverage from the v0.13.0
-review (#268). Adds 11 tests across `tests/codegen/select_test.rs`,
-`tests/corpus/union_test.rs`, `tests/corpus/join_test.rs`, and
-`tests/corpus/subquery_test.rs`: HAVING-filters-all-groups, UNION ALL
-arm type/affinity mismatch (no coercion, verified), the LEFT/RIGHT/
-FULL JOIN `WHERE ... IS NULL` anti-join idiom, two-level-deep
-correlated subqueries, and multi-column `IN`/`NOT IN` subquery edge
-cases (zero-row result, NULL tuple component) — all against working
-functionality. Two sub-items turned out to be missing features, not
-test gaps, and are documented as clean `Unsupported` rejections rather
-than fixed here: aggregates with no `GROUP BY` at all (even
-`count(*)`), and `FULL JOIN` combined with `ORDER BY`/`DISTINCT`/
-`LIMIT`; also newly discovered, a correlated subquery nested inside a
-FROM-subquery's own SELECT list. Tracked as follow-on tickets rather
-than expanding this test-only ticket's scope.
-
-refactor: tighten `src/btree` and `src/codegen` module layout (#273,
-#276). Pure module reorganization, no behavior change: `src/btree/`
-groups table b-tree write ops (`insert`/`delete`) under `table.rs` +
-`table/`, and index write ops (`index_insert`/`index_delete`) under
-`index.rs` + `index/`, giving both write paths symmetric naming;
-`ddl.rs` renamed to `schema.rs`. `src/codegen/` groups DDL codegen
-(`create_table`/`drop_table`/`create_index`/`drop_index`) under
-`ddl.rs` + `ddl/`; `select.rs` (4033 lines) split into a facade plus
-9 sub-modules under `select/` (`entry`, `joins`, `join_full`, `eqp`,
-`join_access`, `order_by`, `projection`, `limit_scan`, `aggregate`),
-each ~1000 lines or fewer. Spec 006 `Implementation:`/`Tests:` path
-citations updated for the moved btree files.
-
-feat: `.tables [PATTERN]` shell parity for the `sqlite-rs tables` CLI
-subcommand (#177). Lists tables *and* views from `sqlite_master` (a new
-`read_table_and_view_names` schema reader, `src/schema/ddl_reader.rs`,
-bypasses `read_schema`'s DDL parsing entirely since `.tables` needs
-neither), excludes internal `sqlite_%` names, accepts an optional LIKE
-`PATTERN` argument (reusing `vdbe::like_match`), and renders in
-`sqlite3`'s multi-column, space-padded `.tables` layout — verified
-byte-for-byte against the pinned 3.53.4 oracle. `temp.`-prefixed temp
-tables remain deferred (needs the V3+ write path's temp-database
-support).
-
-refactor: split `src/bin/sqlite-rs.rs` into modules, move dispatch into
-the library (#292). `src/codegen/dispatch.rs`'s `compile_statement`/
-`leading_keywords` now return a library `DispatchError` instead of an
-`ExitCode`, so they're usable without depending on the binary crate;
-the CLI itself splits into per-command modules
-(`src/bin/sqlite-rs/{main,dump,tables,query,exec,common}.rs`) behind a
-thin `main.rs` dispatcher. No behavior change. Spend: matched estimate
-(small).
-
-refactor: dedupe join/subquery codegen (#270, #308). Four independent,
-behavior-preserving extractions: `compile_join_level_traverse`
-(`src/codegen/select/joins.rs`) factors the shared nested-loop/
-outer-join traversal out of `compile_join_level` and
-`compile_join_level_for_sort` (#250's `ORDER BY`+JOIN sorted path),
-parameterized over row emission via a `leaf` closure;
-`compile_in_subquery` becomes a thin one-element wrapper around
-`compile_in_subquery_multi`; NATURAL/USING join-constraint synthesis is
-unified into one `resolve_join_constraint` helper shared by
-`compile_select_joined_scan` and `compile_full_join_two_table`.
-**Latent-bug fix surfaced along the way:** `compile_join_level_for_sort`
-had silently diverged from `compile_join_level` and never gained #243's
-seek optimization — a joined query with `ORDER BY` downgraded an
-otherwise-seekable `SeekRowid`/`SeekIndexEq` point lookup to a full
-`Rewind`/`Next` scan. Both paths now share one traversal, so the
-optimization applies unconditionally; verified via a new
-`EXPLAIN QUERY PLAN` regression test.
-
-perf: index-ordered scan for `ORDER BY ... LIMIT` (#296, #309,
-ADR-0020). `find_ordering_index` (`src/codegen/select/index_scan.rs`)
-looks for a single index on the FROM table whose column order is a
-prefix match (forward or exactly-reversed) for the requested `ORDER BY`
-terms — `BINARY` collation only, and an explicit `NULLS FIRST`/`LAST`
-must agree with the direction's default. When found,
-`try_compile_index_ordered_scan` walks the index directly (new
-`IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` opcodes + `IdxRowid` +
-`SeekRowid`) with `LIMIT`/`OFFSET` as an early-exit guard — no
-buffering, no sorter — ahead of the existing `compile_sorted_scan`
-fallback. `IndexCursor` gained `last()`/`prev()`, the mirror of its
-existing `first()`/`next()`.
-
-feat: `ORDER BY` and `DISTINCT` combined with `FULL JOIN` (#288, #307).
-Extends `compile_full_join_two_table`'s two-pass emitter: `DISTINCT`
-threads a `distinct_cursor` through all three emission sites (matched,
-left-nulled, right-unmatched), reusing the existing ephemeral-index
-dedup guard; `ORDER BY` routes all three through a new
-`emit_full_join_sort_row`, buffering into a sorter cursor (mirroring
-the ordinary join tree's `compile_joined_sorted_scan` split) with a
-fourth pass draining the sorter and applying `LIMIT`/`OFFSET`
-post-sort. `DISTINCT` + `ORDER BY` together remains rejected, matching
-the ordinary join tree's existing restriction. Spend: ~2x estimate —
-needed sorter-buffering plumbing in the two-pass emitter rather than a
-config flag.
-
-fix: correlated subquery inside a `FROM`-subquery's own `SELECT` list
-(#289, #311). `materialize_from_subquery`'s single-table (non-join)
-path compiled the subquery's `SELECT` list against a `Scope` catalog
-limited to its own resolved `FROM` schema(s) instead of the full outer
-catalog, so any nested subquery referencing another table hit a
-catalog-visibility rejection — the already-correct joined-FROM path
-was unaffected. Spend: matched estimate (medium).
-
-feat: aggregates with no `GROUP BY` (#287, #313). `SELECT count(*)/sum/
-avg/min/max FROM t;` (no `GROUP BY`) now compiles and executes on both
-populated and empty tables, as a thin extension of the existing
-sort-then-group machinery (`compile_grouped_scan`): every row belongs
-to one synthetic implicit group, and a new `implicit_group: bool`
-parameter ensures a zero-row table still flushes exactly one result
-row (`count(*) = 0`, other aggregates `NULL`) rather than zero rows.
-`HAVING` without `GROUP BY` is now accepted too, filtering that single
-implicit group. `.openspec/grammar/sqlite.ebnf` corrected: `HAVING` is
-parse.y's own independent `having_opt`, not nested under
-`groupby_opt`. `total`/`group_concat` remain unsupported (no `AggState`
-accumulator yet); the joined-select path is untouched. Spend: matched
-estimate (medium).
-
-bench: add V4 join/aggregate/subquery scenarios to the tier-1 engine
-bench (#301). Extends `tests/performance/engine.rs` with `join`,
-`group_by_agg`, and `subquery` scenarios now that V4 phase 1 landed
-(#235), plus a fixed-size `bench_lookup` dimension table and
-`bench_data.bucket` column in `gen_fixtures.sh --bench`.
-`compile_ours` now dispatches single-table vs `JOIN` the same way
-`src/bin/sqlite-rs/query.rs` does. First measured ratios
-(`bench-status.json`) surfaced two follow-ups, filed rather than fixed
-here per this ticket's scope: an uncorrelated subquery re-executed
-(and its ephemeral index rebuilt, for `IN`) on every outer row instead
-of once (#306), and `join`/`GROUP BY` ratios (14-26x) exceeding #111's
-1.5-3x calibration (#310). Spend: roughly matched the 120k token
-estimate.
-
-fix: hoist uncorrelated `WHERE`-clause subquery out of the outer scan
-loop (#306, #315). A scalar or single-column `IN (SELECT ...)`
-subquery in a single-table `WHERE` clause was re-materialized on every
-outer row even when uncorrelated — severe enough to hit the 50M-step
-VDBE guard rail on large tables (#301's bench run). Adds a static,
-conservative correlation check (`subquery_is_correlated`/
-`walk_expr_for_correlation` — anything uncertain is treated as
-correlated, which only ever suppresses the optimization) plus a hoist
-pass: an uncorrelated top-level `WHERE` conjunct materializes once,
-before the scan's `Rewind`, via a new pointer-identity-keyed
-`Scope::hoisted` map, instead of inline per row. Deliberately narrow —
-only an exact `expr IN (SELECT ...)` or scalar-subquery comparison
-conjunct is recognized; `OR`/`NOT`/deeper nesting, multi-column `IN`,
-correlated subqueries, and the joined-query `WHERE` path all fall
-through unchanged. (A follow-up commit fixed an `unreachable!`-adjacent
-`make mvl-limit` gate violation the hoist's correlation-walk helper
-introduced.) Spend: roughly matched the ~200k token estimate.
-
-chore: design note + benchmark for correlated-subquery
-rematerialization cost (#303, ADR-0021). ADR-0021 documents deferring
-a full coroutine rewrite in favor of a scoped follow-up (memoize a
-correlated subquery's result keyed on its outer-referenced value(s),
-reusing #306's correlation walk). Adds a `correlated_subquery` bench
-scenario to `tests/performance/engine.rs` demonstrating the current
-per-outer-row re-materialization cost, guarded to `bench_1mb.db` only —
-it blows the VDBE step cap against `bench_50mb.db`, itself evidence of
-the unbounded cost. No fix in this ticket, per its own acceptance
-criteria.
-
-feat: aggregate function inside a scalar/correlated subquery (#304,
-#318). `SELECT (SELECT max(x) FROM t) FROM t LIMIT 1` (and the
-correlated form) previously failed with "unsupported: aggregate
-function max" — a scalar subquery's projected expression compiled
-through `compile_value`'s plain, aggregate-rejecting path instead of
-#287's aggregate machinery. `compile_scalar_subquery` now detects an
-aggregate call in the subquery's projection and routes through
-`compile_grouped_scan` as an implicit whole-table group, capturing the
-result via a `Copy` into the destination register;
-`compile_grouped_scan` gained an `outer_scope: Option<&Scope>`
-parameter so a correlated subquery's `WHERE` clause still resolves
-against the enclosing scope. **Bug fix found along the way:**
-`AggFinal` never cleared its `agg_contexts` slot after finalizing —
-invisible for a top-level query (compiled once), but a correlated
-aggregate subquery reuses the same slot per outer row, so a zero-row
-invocation finalized against the *previous* row's leftover accumulator
-instead of a fresh NULL/0 (`Vm::clear_agg_context` added). Spend:
-within estimate (medium).
-
-perf: index-ordered scan for `GROUP BY` (#310, #316). `compile_grouped_scan`
+- index-ordered scan for `GROUP BY` (#310, #316). `compile_grouped_scan`
 always buffered the whole `WHERE`-matching table into a sorter before
 aggregating, even when the `GROUP BY` columns already had a covering
 index producing rows in the right order (#301's bench found 14-26x
@@ -1249,25 +1333,11 @@ branch had violated.) Closes the `group_by_agg` half of #310 only —
 the `join` per-row dispatch-overhead half is split into #317. Spend:
 roughly matched the ~150k token estimate.
 
-docs: ADR-0022 — profile #317's join ratio, find the missing page
-cache. #317's own scope was profiling, not fixing. Instrumenting
-(rather than accepting the provisional "per-row VDBE dispatch
-overhead" hypothesis from #310/#317) found the real cause:
-`Pager`/`VfsPageSource` have no page cache at all — every `read_page`
-does a fresh syscall + allocation, unconditionally, and `join`'s
-per-row `SeekRowid` re-descends the b-tree from the root on every
-outer row, re-reading the same root/interior pages hundreds of
-thousands of times on the 830k-row fixture. Ruled out the
-dispatch-overhead hypothesis via direct instruction-count comparison:
-`full_scan`'s per-row body has *more* instructions than `join`'s yet
-the *better* ratio (~3.4x vs ~14-16x). No code fix in this ticket
-(matches #317's own acceptance criteria); filed #320 as the scoped,
-fully-designed follow-up ("add a bounded page cache to `Pager`'s read
-path"). Spend: roughly matched the profiling-scope estimate.
-
 ## [0.13.0] - 2026-08-21
 
-feat: zero-arity scalar functions + FROM-less SELECT (#136, #260,
+### Added
+
+- zero-arity scalar functions + FROM-less SELECT (#136, #260,
 V4 phase 1 epic #235). Registers `sqlite_version()` as SQLite's real
 zero-arity scalar function, exercising codegen's previously-untested
 `FunctionCall` zero-arg branch through a real compiled query.
@@ -1281,7 +1351,7 @@ compound) is rejected as unsupported. Wired into the `sqlite-rs` CLI's
 `query` subcommand too, which previously hard-refused any FROM-less
 `SELECT` before ever reaching codegen.
 
-`UPDATE`/`DELETE` subquery catalog threading + multi-column `IN` (#251,
+- `UPDATE`/`DELETE` subquery catalog threading + multi-column `IN` (#251,
 V4 phase 1 epic #235): `compile_update`/`compile_delete` gained
 `_with_catalog` variants (mirroring `compile_select_with_catalog`'s
 shape) so a subquery in a `SET` value or `WHERE` clause that references
@@ -1297,22 +1367,7 @@ single-column `IN`'s ephemeral-index machinery to an N-column key.
 SQLite has never implemented that syntax (Postgres/MySQL/standard-SQL
 only); subqueries in `FROM` split off to a follow-up (#257).
 
-fix: two computed result columns collide (#141). `Copy` (`r[P2] =
-r[P1]`) harvested from the pinned oracle (`SELECT count(*), sum(price)
-FROM products`, alongside `AggStep`/`AggFinal` riding the same
-harvest — see ADR-0018) closes the gap `Opcode::Copy` was already
-hand-added for during #208 but never wired into `compile_row_values`'s
-contiguity check. `compile_row_values` (`src/codegen/select.rs`) now
-computes each result column first, and only reserves a fresh
-contiguous run + `Copy`s into it when the columns didn't land
-contiguously on their own — no more outright rejection of e.g.
-`SELECT i + 1, i - 1 FROM t` or `SELECT coalesce(i, -1), ifnull(s, 'z')
-FROM t`. `emit_branch_into` (`src/codegen/expr.rs`) now accepts
-arbitrary CASE branch expressions the same way, and `FunctionCall`
-argument compilation gained the identical reserve-and-copy fallback
-for the same underlying contiguity check under a different name.
-
-JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what
+- JOIN: remaining forms (#250, V4 phase 1 epic #235), closing out what
 #237 deferred. Parser: `NATURAL` joins, `RIGHT`/`FULL [OUTER] JOIN`,
 `USING (col, ...)`, and comma-style `FROM a, b` (parsed as CROSS-join
 sugar, which needed no codegen work — it already compiles through
@@ -1337,7 +1392,7 @@ gate for #250) is un-ignored. Spend: ran well past the ticket's
 two-pass tracking turned out to need real architectural generalization
 rather than a local tweak.
 
-Planner: join-level WHERE/`ON` equality index selection (#243, V4 phase
+- Planner: join-level WHERE/`ON` equality index selection (#243, V4 phase
 1 epic #235). An inner join table's `ON` equality against the outer
 table's rowid, or against a `UNIQUE` single-column index, now compiles
 to a `SeekRowid`/new `SeekIndexEq`+`IdxRowid`+`SeekRowid` point lookup
@@ -1358,7 +1413,7 @@ three pieces of missing infrastructure (index-seek opcode, EXPLAIN
 QUERY PLAN parsing, and the V7→V4 grammar pull-forward) beyond the
 issue's original "basic WHERE analysis" framing.
 
-Subqueries in `FROM` (#257, V4 phase 1 epic #235, split off from #251).
+- Subqueries in `FROM` (#257, V4 phase 1 epic #235, split off from #251).
 Parser: `table-ref` gains a `"(" select-stmt ")" AS identifier`
 alternative (`TableRef` is now `Name`/`Subquery`-shaped in the AST).
 Codegen: a `FROM`-subquery materializes into a new VDBE table-mode
@@ -1375,7 +1430,7 @@ table-mode cursor (Rewind/Next/Insert/Rowid over an in-memory row list)
 didn't exist yet and had to be added to the VDBE engine, beyond the
 issue's parser/codegen framing.
 
-`UNION ALL` compound `SELECT` (#240, V4 phase 1 epic #235): parser
+- `UNION ALL` compound `SELECT` (#240, V4 phase 1 epic #235): parser
 chains `SELECT ... UNION ALL SELECT ...` arms into `Select::compound`,
 with `ORDER BY`/`LIMIT` binding to the whole compound statement rather
 than any one arm. Codegen emits each arm's scan/`ResultRow` block back
@@ -1386,7 +1441,7 @@ column-count mismatch between arms is rejected at compile time. Plain
 and `ORDER BY`/`LIMIT` on the compound statement remain out of scope
 (deferred to V4 phase 2 or later).
 
-VDBE `AggStep`/`AggFinal` opcodes (#241/#242, V4 phase 1 epic #235): a
+- VDBE `AggStep`/`AggFinal` opcodes (#241/#242, V4 phase 1 epic #235): a
 `count`/`sum`/`avg`/`min`/`max` accumulator registry dispatched by a
 `"name(arity)"` P4 descriptor, mirroring the existing `Function`
 opcode's registry-dispatch shape, plus a per-slot aggregate-context
@@ -1401,7 +1456,7 @@ opcodes), so `AggStep`/`AggFinal` currently have no caller in
 `src/codegen/`; they stand as tested, spec-backed (spec 009 Requirement
 12) VM primitives for future use.
 
-`GROUP BY` / `HAVING` (#239, V4 phase 1 epic #235): parser accepts
+- `GROUP BY` / `HAVING` (#239, V4 phase 1 epic #235): parser accepts
 `GROUP BY` (single/multi-column, arbitrary expressions) and `HAVING`.
 Codegen groups via the existing `Sorter*` opcode machinery
 (sort-then-group, mirroring SQLite's own `select.c` shape) and
@@ -1415,7 +1470,26 @@ combined with `ORDER BY`/`DISTINCT` in the same `SELECT`, and
 aggregates beyond `count`/`sum`/`avg`/`min`/`max`, are out of scope for
 this ticket.
 
-Pre-tag `/review` of the full v0.12.3..v0.13.0 diff (epic #235) found no
+### Fixed
+
+- two computed result columns collide (#141). `Copy` (`r[P2] =
+r[P1]`) harvested from the pinned oracle (`SELECT count(*), sum(price)
+FROM products`, alongside `AggStep`/`AggFinal` riding the same
+harvest — see ADR-0018) closes the gap `Opcode::Copy` was already
+hand-added for during #208 but never wired into `compile_row_values`'s
+contiguity check. `compile_row_values` (`src/codegen/select.rs`) now
+computes each result column first, and only reserves a fresh
+contiguous run + `Copy`s into it when the columns didn't land
+contiguously on their own — no more outright rejection of e.g.
+`SELECT i + 1, i - 1 FROM t` or `SELECT coalesce(i, -1), ifnull(s, 'z')
+FROM t`. `emit_branch_into` (`src/codegen/expr.rs`) now accepts
+arbitrary CASE branch expressions the same way, and `FunctionCall`
+argument compilation gained the identical reserve-and-copy fallback
+for the same underlying contiguity check under a different name.
+
+### Changed
+
+- Pre-tag `/review` of the full v0.12.3..v0.13.0 diff (epic #235) found no
 tag-blocking issues; follow-ups filed as #265–#271 (MIN/MAX collation,
 subquery-in-FROM text-encoding, tier3 aggregate-stub gap, edge-case test
 coverage, ephemeral-materialization sizing, join/subquery codegen dedupe,
@@ -1423,7 +1497,9 @@ scope-gap tracking confirmation).
 
 ## [0.12.3] - 2026-08-20
 
-`ORDER BY` of a rowid-alias column crashed ("Rowid: cursor slot 2 is a
+### Fixed
+
+- `ORDER BY` of a rowid-alias column crashed ("Rowid: cursor slot 2 is a
 pseudo cursor, not a table cursor") — `emit_column_read` always emitted
 `Opcode::Rowid` for the rowid-alias column, valid only against a real
 table cursor, but `ORDER BY`'s second pass re-reads each row from a
@@ -1434,12 +1510,14 @@ cursor is the post-sort pseudo cursor. Found via a new full-lifecycle
 regression test (`tests/corpus/cli_write_test.rs`) exercising the CLI
 end to end: schema -> insert -> update -> delete -> select -> export.
 
-Also fixed a genuine compile break in `tests/sqllogictest/runner.rs`
+- Also fixed a genuine compile break in `tests/sqllogictest/runner.rs`
 (non-exhaustive `CodegenError` match missing the `RowShapeMismatch`
 variant #195 added) that meant `make sqllogictest` never actually
 built — fixing it let `select1.test` run for the first time.
 
-Assurance tooling: `make mutants` (cargo-mutants scoped to
+### Changed
+
+- Assurance tooling: `make mutants` (cargo-mutants scoped to
 `src/{record,btree,vdbe}/*.rs`, reporting to `target/mutants.out`) and
 `make verify` (`coverage-gate` + `deny` + `mvl-limit` + `mod-files`
 chained, recording the passing commit to `target/verify.json`) are now
@@ -1449,7 +1527,9 @@ mutation score and a commits-since-last-verify staleness signal, same
 
 ## [0.12.2] - 2026-08-20
 
-V03 write-path parity mirror (#72): `tests/parity/v03.rs`'s stub
+### Changed
+
+- V03 write-path parity mirror (#72): `tests/parity/v03.rs`'s stub
 replaced with real cases — INSERT/UPDATE/DELETE, `INSERT ... SELECT`,
 `ON CONFLICT IGNORE`/`REPLACE`, `CREATE`/`DROP TABLE`/`INDEX` — driven
 through the `sqlite-rs exec` CLI and diffed against the pinned
@@ -1462,12 +1542,16 @@ table-level constraint) — `compile_create_table` never auto-creates
 one, so UNIQUE enforcement only fires via an explicit
 `CREATE UNIQUE INDEX`. Filed as a follow-up, not fixed here.
 
-`sqlite-rs --version`/`-V`: reports `CARGO_PKG_VERSION` and exits 0 —
+### Added
+
+- `sqlite-rs --version`/`-V`: reports `CARGO_PKG_VERSION` and exits 0 —
 the CLI previously had no way to report its own version.
 
 ## [0.12.1] - 2026-08-20
 
-UNIQUE constraints on non-rowid columns (#207, split out of #195): new
+### Added
+
+- UNIQUE constraints on non-rowid columns (#207, split out of #195): new
 `Opcode::NoConflict` real-index seek+branch primitive
 (`src/vdbe/cursor.rs`, built on `IndexCursor::seek`) fills the gap
 `CursorSlot` had no read-capable real-index variant — `compile_insert`
@@ -1479,7 +1563,7 @@ on-disk index still isn't enforced (this codebase doesn't auto-create
 `sqlite_autoindex_*` entries yet) — a `CREATE TABLE`-side gap, not an
 INSERT-codegen one.
 
-`INSERT ... SELECT` codegen (#208, split out of #195): `compile_insert`
+- `INSERT ... SELECT` codegen (#208, split out of #195): `compile_insert`
 now drives `select.rs`'s scan/filter/project/ORDER BY/DISTINCT/LIMIT
 machinery (`compile_select_scan`, factored out of `compile_select`)
 with a pluggable per-row sink, feeding each projected row into the
@@ -1500,7 +1584,9 @@ correctly flagged this as `NUMERIC value in t.b`.
 
 ## [0.12.0] - 2026-08-19
 
-V3 exit gate (#217), closing epic #161: write-path CLI surface
+### Changed
+
+- V3 exit gate (#217), closing epic #161: write-path CLI surface
 (#215); corpus `PRAGMA integrity_check` cross-validation centralized
 into a single `assert_integrity_check_ok` oracle helper, replacing
 per-file duplicates across b-tree insert/delete, index maintenance,
@@ -1520,7 +1606,9 @@ phase (scoped as a V1 exit-gate deliverable, epic #5).
 
 ## [0.11.1] - 2026-08-19
 
-Fixes from a phase-level `/review` of V3 phase 3 (#161), found only by
+### Fixed
+
+- Fixes from a phase-level `/review` of V3 phase 3 (#161), found only by
 looking at #195/#210/#196 together: `INSERT OR REPLACE` left stale
 secondary-index entries for the row it displaced (#218); `UPDATE`
 never re-validated NOT NULL/CHECK constraints, letting an invalid
@@ -1533,7 +1621,9 @@ today's non-enforcing UNIQUE-index behavior (tracked separately, #207).
 
 ## [0.11.0] - 2026-08-19
 
-V3 phase 3 complete (#161): write codegen + VDBE. Auto-index
+### Added
+
+- V3 phase 3 complete (#161): write codegen + VDBE. Auto-index
 maintenance on write (#196) — `INSERT`/`DELETE`/`UPDATE` codegen now
 opens a write cursor per index and emits `IdxInsert`/`IdxDelete` pairs
 per row, keeping secondary indexes in sync with table data. `DESC`
