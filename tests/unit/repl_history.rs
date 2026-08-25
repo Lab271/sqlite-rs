@@ -5,11 +5,14 @@
     clippy::indexing_slicing
 )]
 
-//! REPL history persistence (#551): `~/.sqlite-rs_history` survives
-//! across sessions. Driven non-interactively via piped stdin, same
+//! REPL history persistence (#551, hand-rolled per #558):
+//! `$XDG_STATE_HOME/sqlite-rs/history` when set, else `~/.sqlite-rs_history`,
+//! survives across sessions. Driven non-interactively via piped stdin, same
 //! `Command`+`CARGO_BIN_EXE_sqlite-rs` pattern as
 //! `tests/unit/repl_dot_commands.rs`, with `$HOME` overridden to a
-//! scratch directory so the real user's history file is never touched.
+//! scratch directory (and `$XDG_STATE_HOME` explicitly removed unless a
+//! test is exercising it) so the real user's history file is never
+//! touched and ambient environment variables can't leak into the test.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,7 @@ fn run_repl_script(home: &Path, db: &Path, script: &str) {
         .arg("repl")
         .arg(db)
         .env("HOME", home)
+        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -95,6 +99,45 @@ fn history_persists_across_sessions() {
 }
 
 #[test]
+fn xdg_state_home_takes_precedence_over_home() {
+    let home = scratch_dir("xdg-home");
+    let xdg_state = scratch_dir("xdg-state");
+    let db = seed_db(&home);
+    let xdg_history_file = xdg_state.join("sqlite-rs").join("history");
+    let home_history_file = home.join(".sqlite-rs_history");
+
+    let mut child = Command::new(CLI)
+        .arg("repl")
+        .arg(&db)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawning {CLI} repl {}: {e}", db.display()));
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"SELECT 1;\n.quit\n")
+        .expect("writing repl script");
+    let out = child.wait_with_output().expect("waiting for repl");
+    assert!(out.status.success());
+
+    assert!(
+        xdg_history_file.exists(),
+        "expected {} to be written",
+        xdg_history_file.display()
+    );
+    assert!(
+        !home_history_file.exists(),
+        "history should not also land at {}",
+        home_history_file.display()
+    );
+}
+
+#[test]
 fn missing_home_does_not_fail_the_session() {
     let home = scratch_dir("no-home");
     let db = seed_db(&home);
@@ -102,6 +145,7 @@ fn missing_home_does_not_fail_the_session() {
         .arg("repl")
         .arg(&db)
         .env_remove("HOME")
+        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

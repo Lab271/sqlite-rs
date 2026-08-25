@@ -21,6 +21,7 @@ mod exec;
 mod mode;
 mod pragma_query;
 mod query;
+mod readline;
 mod repl;
 mod tables;
 
