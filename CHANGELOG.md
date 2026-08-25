@@ -8,6 +8,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Bare `EXPLAIN <stmt>` (#538): the parser accepted only `EXPLAIN QUERY
+  PLAN`, rejecting plain `EXPLAIN` even though the opcode/bytecode-
+  listing renderer it should produce (spec 009 Requirement 10) already
+  existed and was only reachable via the CLI's `-explain` flag.
+  `parse_explain_stmt` now accepts both forms identically; the `query`
+  binary renders the bytecode listing whenever the SQL text itself said
+  bare `EXPLAIN`, regardless of the `-explain` flag.
+
 - Predicate push-down into `FROM`-subqueries and views (#532): a
   safely-movable outer `WHERE` conjunct is now moved into a view's or
   derived table's own `WHERE` clause right after `expand_with_clause`/
