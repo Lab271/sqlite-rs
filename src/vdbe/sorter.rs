@@ -39,7 +39,9 @@
 
 use std::cmp::Ordering;
 
-use crate::record::{decode_record, TextEncoding, Value};
+#[cfg(test)]
+use crate::record::decode_record;
+use crate::record::{decode_record_upto, TextEncoding, Value};
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
@@ -64,6 +66,11 @@ pub(crate) struct SorterState {
     sorted: bool,
     pos: usize,
     bound: Option<usize>,
+    /// One past the highest `SortKeyColumn.index` across `keys` (#507) —
+    /// `SorterInsert` decodes only this many leading columns per row,
+    /// since `compare_rows` never reads past it. Computed once at
+    /// `SorterOpen` rather than per insert.
+    decode_upto: usize,
 }
 
 // Methods rather than free functions so the borrow of `self` elides: a free
@@ -128,6 +135,11 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             }
         }
     };
+    let decode_upto = keys
+        .iter()
+        .map(|k| k.index.saturating_add(1))
+        .max()
+        .unwrap_or(0);
     vm.set_cursor(
         instr.p1,
         CursorSlot::Sorter(SorterState {
@@ -136,6 +148,7 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             sorted: false,
             pos: 0,
             bound,
+            decode_upto,
         }),
     )?;
     Ok(Step::Next)
@@ -171,7 +184,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     match state.bound {
         Some(0) => {}
         Some(n) if state.buffer.len() >= n => {
-            let new_values = decode_bytes("SorterInsert", &blob)?;
+            let new_values = decode_bytes_upto("SorterInsert", &blob, state.decode_upto)?;
             let is_better = state.buffer.first().is_some_and(|(_, worst)| {
                 compare_rows(&new_values, worst, &state.keys) == Ordering::Less
             });
@@ -183,7 +196,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             }
         }
         _ => {
-            let values = decode_bytes("SorterInsert", &blob)?;
+            let values = decode_bytes_upto("SorterInsert", &blob, state.decode_upto)?;
             state.buffer.push((blob, values));
             if state.bound.is_some() {
                 let last = state.buffer.len().saturating_sub(1);
@@ -250,10 +263,24 @@ fn heap_sift_down(buf: &mut [SorterRow], mut i: usize, keys: &[SortKeyColumn]) {
     }
 }
 
-fn decode_bytes(opcode: &'static str, bytes: &[u8]) -> Result<Vec<Value>, ExecError> {
-    decode_record(bytes, TextEncoding::Utf8).map_err(|e| ExecError::MalformedInstruction {
-        opcode,
-        reason: e.to_string(),
+/// Only decodes the row's leading
+/// `max_columns` columns (#507) — `SorterInsert`'s comparisons never
+/// look past the sort key's highest column index, so decoding the rest
+/// of a wide row on every insert is wasted work. The raw bytes (not this
+/// partial `Vec<Value>`) are what `SorterData` ultimately hands back to
+/// the query, so skipping trailing columns here changes no observable
+/// output — only which columns are available for comparison, which is
+/// exactly `max_columns`' job to bound correctly.
+fn decode_bytes_upto(
+    opcode: &'static str,
+    bytes: &[u8],
+    max_columns: usize,
+) -> Result<Vec<Value>, ExecError> {
+    decode_record_upto(bytes, max_columns, TextEncoding::Utf8).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode,
+            reason: e.to_string(),
+        }
     })
 }
 
@@ -701,6 +728,94 @@ mod tests {
         assert_eq!(
             sorted_all(&mut vm, 0),
             vec![Value::Integer(10), Value::Integer(9), Value::Integer(8)]
+        );
+    }
+
+    #[test]
+    fn sort_key_past_column_zero_with_trailing_payload_columns_still_compares_correctly() {
+        // #507: SorterInsert now decodes only through the sort key's
+        // highest column index, computed at SorterOpen as
+        // `decode_upto`. Rows here carry a leading payload column (index
+        // 0, never read by the comparator), the sort key at index 1, and
+        // a trailing payload column (index 2, also never read) — this
+        // guards against `decode_upto` being miscomputed as "the first
+        // key's index" or "column 0" instead of the true max over every
+        // key, which would silently compare against the wrong column or
+        // panic on an out-of-bounds index.
+        let mut vm = Vm::new();
+        open_bounded_sorter(
+            &mut vm,
+            0,
+            vec![SortKeyColumn {
+                index: 1,
+                descending: false,
+                collation: Collation::Binary,
+                nulls_first: false,
+            }],
+            2,
+        );
+        insert_row(
+            &mut vm,
+            0,
+            &[
+                Value::Text("payload-a".into()),
+                Value::Integer(30),
+                Value::Text("trailing-a".into()),
+            ],
+        );
+        insert_row(
+            &mut vm,
+            0,
+            &[
+                Value::Text("payload-b".into()),
+                Value::Integer(10),
+                Value::Text("trailing-b".into()),
+            ],
+        );
+        insert_row(
+            &mut vm,
+            0,
+            &[
+                Value::Text("payload-c".into()),
+                Value::Integer(20),
+                Value::Text("trailing-c".into()),
+            ],
+        );
+
+        sorter_sort(&mut vm, &Instruction::new(Opcode::SorterSort, 0, 999, 0)).unwrap();
+        let mut seen = Vec::new();
+        loop {
+            sorter_data(&mut vm, &Instruction::new(Opcode::SorterData, 0, 5, 0)).unwrap();
+            let Value::Blob(bytes) = vm.register(5).unwrap() else {
+                panic!("expected a Blob");
+            };
+            let row = decode_record(bytes, TextEncoding::Utf8).unwrap();
+            seen.push(row);
+            match sorter_next(&mut vm, &Instruction::new(Opcode::SorterNext, 0, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+
+        // Sort key (index 1) ascending, bound 2: keeps rows 10 and 20,
+        // and every column of each surviving row — including the
+        // never-compared payload columns — must still round-trip intact
+        // from the full raw blob `SorterData` returns.
+        assert_eq!(
+            seen,
+            vec![
+                vec![
+                    Value::Text("payload-b".into()),
+                    Value::Integer(10),
+                    Value::Text("trailing-b".into()),
+                ],
+                vec![
+                    Value::Text("payload-c".into()),
+                    Value::Integer(20),
+                    Value::Text("trailing-c".into()),
+                ],
+            ]
         );
     }
 

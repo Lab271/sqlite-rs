@@ -48,6 +48,22 @@ architectural" note. `full_scan_1col`/`full_scan_3col`'s own remaining
 ResultRow-side gap is being addressed separately (agent-3, not part of
 this ticket). spend: matched estimate.
 
+perf: `SorterInsert` now decodes only through the `ORDER BY` key's
+highest column index instead of every selected column (#507) —
+`SorterState` computes `decode_upto` (one past the max
+`SortKeyColumn.index`) once at `SorterOpen`, and a new
+`decode_record_upto` (`src/record/decode.rs`, reusing `decode_column`'s
+header-walk-then-partial-decode pattern) replaces the prior full
+`decode_record` call on every candidate row. #506 had already fixed the
+double-copy half of this pattern (`Rc<[u8]>` reuse instead of
+`blob.to_vec()`); this closes the remaining full-row-decode half for
+the general-purpose sorter backing plain `ORDER BY ... LIMIT` (as
+opposed to #506's `GROUP BY`-specific codegen path). `order_by_limit`
+benchmark ratio vs the pinned oracle: ~3.2x-6.15x -> ~1.2x (37µs/30µs
+on the 1MB fixture, 43.5µs/36.4µs on 50MB) — beats the ticket's
+`<2x`-oracle target.
+spend: matched estimate (medium)
+
 fix: JOIN reordering now prefers a rowid/unique-index-seekable inner
 table over raw ANALYZE row-count ordering (#510) —
 `join_order::seekable_tables` flags a table whose `ON` equality is a

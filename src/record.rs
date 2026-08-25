@@ -8,7 +8,7 @@ mod error;
 mod value;
 mod varint;
 
-pub use decode::{decode_column, decode_record};
+pub use decode::{decode_column, decode_record, decode_record_upto};
 pub(crate) use decode::{decode_serial_value, parse_header_into};
 pub(crate) use encode::encode_varint;
 pub use encode::{encode_record, encode_record_into};
