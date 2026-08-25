@@ -6,8 +6,6 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-## [0.19.0] - 2026-08-25
-
 ### Added
 
 - Readline-style line editing and persistent history for the REPL
