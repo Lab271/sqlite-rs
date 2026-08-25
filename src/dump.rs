@@ -47,16 +47,7 @@ impl std::fmt::Display for DumpError {
     }
 }
 
-impl std::error::Error for DumpError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DumpError::Vfs(e) => Some(e),
-            DumpError::Header(e) => Some(e),
-            DumpError::Pager(e) => Some(e),
-            DumpError::Schema(e) => Some(e),
-        }
-    }
-}
+impl std::error::Error for DumpError {}
 
 impl From<VfsError> for DumpError {
     fn from(e: VfsError) -> Self {
@@ -313,14 +304,7 @@ impl std::fmt::Display for TableReadError {
     }
 }
 
-impl std::error::Error for TableReadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            TableReadError::Btree(e) => Some(e),
-            TableReadError::Record(e) => Some(e),
-        }
-    }
-}
+impl std::error::Error for TableReadError {}
 
 impl From<BtreeError> for TableReadError {
     fn from(e: BtreeError) -> Self {

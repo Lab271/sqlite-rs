@@ -89,11 +89,7 @@ impl std::fmt::Display for HeaderError {
     }
 }
 
-impl std::error::Error for HeaderError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for HeaderError {}
 
 /// Which header byte an [`HeaderError::InvalidFileFormatVersion`] refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

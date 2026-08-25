@@ -64,8 +64,4 @@ impl std::fmt::Display for RecordError {
     }
 }
 
-impl std::error::Error for RecordError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for RecordError {}

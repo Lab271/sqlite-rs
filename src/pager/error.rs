@@ -68,20 +68,7 @@ impl std::fmt::Display for PagerError {
     }
 }
 
-impl std::error::Error for PagerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PagerError::Journal(source) => Some(source),
-            PagerError::Wal { source, .. } => Some(source),
-            PagerError::Page(source) => Some(source),
-            PagerError::Vfs(source) => Some(source),
-            PagerError::Freelist(source) => Some(source),
-            PagerError::HotJournal { .. }
-            | PagerError::PendingTransaction
-            | PagerError::CheckpointIncomplete => None,
-        }
-    }
-}
+impl std::error::Error for PagerError {}
 
 impl From<PageError> for PagerError {
     fn from(source: PageError) -> Self {

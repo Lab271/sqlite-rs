@@ -61,11 +61,7 @@ impl std::fmt::Display for FunctionError {
     }
 }
 
-impl std::error::Error for FunctionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for FunctionError {}
 
 /// Renders `v` the way `CAST(v AS TEXT)` would, for `length()`/`hex()` on
 /// non-blob arguments — an integer/real's *text* representation, not its

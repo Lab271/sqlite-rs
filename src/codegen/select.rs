@@ -122,11 +122,7 @@ impl std::fmt::Display for CodegenError {
     }
 }
 
-impl std::error::Error for CodegenError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for CodegenError {}
 
 const TABLE_CURSOR: i32 = 0;
 const SORT_CURSOR: i32 = 1;

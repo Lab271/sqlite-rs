@@ -62,14 +62,7 @@ impl std::fmt::Display for DispatchError {
     }
 }
 
-impl std::error::Error for DispatchError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DispatchError::Codegen(source) => Some(source),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for DispatchError {}
 
 impl From<CodegenError> for DispatchError {
     fn from(source: CodegenError) -> Self {

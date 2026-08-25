@@ -35,11 +35,7 @@ impl std::fmt::Display for FreelistError {
     }
 }
 
-impl std::error::Error for FreelistError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for FreelistError {}
 
 /// Reads a big-endian `u32` at `offset` in `buf`, never panicking on a
 /// truncated/corrupt page.

@@ -49,15 +49,7 @@ impl std::fmt::Display for DdlError {
     }
 }
 
-impl std::error::Error for DdlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DdlError::Btree(e) => Some(e),
-            DdlError::Record(e) => Some(e),
-            DdlError::MalformedRow(_) => None,
-        }
-    }
-}
+impl std::error::Error for DdlError {}
 
 impl From<BtreeError> for DdlError {
     fn from(e: BtreeError) -> Self {

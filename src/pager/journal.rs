@@ -66,14 +66,7 @@ impl std::fmt::Display for JournalError {
     }
 }
 
-impl std::error::Error for JournalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            JournalError::Vfs(source) => Some(source),
-            JournalError::HeaderTooShort(_) | JournalError::RecordTruncated { .. } => None,
-        }
-    }
-}
+impl std::error::Error for JournalError {}
 
 impl From<VfsError> for JournalError {
     fn from(source: VfsError) -> Self {

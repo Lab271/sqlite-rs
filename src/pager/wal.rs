@@ -109,14 +109,7 @@ impl std::fmt::Display for WalError {
     }
 }
 
-impl std::error::Error for WalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WalError::Vfs(source) => Some(source),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for WalError {}
 
 impl From<VfsError> for WalError {
     fn from(source: VfsError) -> Self {

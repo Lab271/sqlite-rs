@@ -234,17 +234,7 @@ impl std::fmt::Display for BtreeError {
     }
 }
 
-impl std::error::Error for BtreeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            BtreeError::InvalidKeyRecord(source) => Some(source),
-            BtreeError::PageSource { source, .. } => Some(source),
-            BtreeError::InvalidCellVarint { source, .. } => Some(source),
-            BtreeError::Pager(source) => Some(source),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for BtreeError {}
 
 impl From<RecordError> for BtreeError {
     fn from(source: RecordError) -> Self {
