@@ -182,7 +182,18 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
         .is_some_and(|head| head.eq_ignore_ascii_case("explain"));
     let (select, eqp_mode) = if starts_with_explain {
         match parse_explain(&sql) {
-            ParseOutcome::Accepted(explain) => (*explain.select, explain.query_plan),
+            ParseOutcome::Accepted(explain) => {
+                // #538: bare `EXPLAIN` (query_plan == false) renders as
+                // an opcode/bytecode listing — the same rendering the
+                // `-explain` CLI flag already produces — rather than
+                // running the query, so it forces `explain_flag` on for
+                // this invocation regardless of whether `-explain` was
+                // passed.
+                if !explain.query_plan {
+                    explain_flag = true;
+                }
+                (*explain.select, explain.query_plan)
+            }
             ParseOutcome::Unsupported { message, span } => {
                 return fatal(
                     path,

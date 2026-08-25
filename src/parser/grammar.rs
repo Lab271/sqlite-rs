@@ -978,9 +978,11 @@ impl Parser {
 
     /// `explain-stmt` (#243, grammar V4): `EXPLAIN [QUERY PLAN]
     /// select-stmt`. Only a `SELECT` body is supported — wrapping any
-    /// other statement kind (or bare `EXPLAIN` with no `QUERY PLAN`, the
-    /// oracle's raw-opcode-dump mode already served by the CLI's
-    /// `-explain` flag) is `Unsupported` rather than silently accepted.
+    /// other statement kind is `Unsupported` rather than silently
+    /// accepted. Bare `EXPLAIN` (#538) and `EXPLAIN QUERY PLAN` share
+    /// this same parse; the caller distinguishes them via `query_plan`
+    /// and renders bare `EXPLAIN` as an opcode/bytecode listing (spec
+    /// 009 Requirement 10) rather than a query-plan summary.
     pub(super) fn parse_explain_stmt(&mut self) -> PResult<Explain> {
         self.expect_kw(Keyword::EXPLAIN)?;
         let query_plan = if self.eat_kw(Keyword::QUERY) {
@@ -989,11 +991,6 @@ impl Parser {
         } else {
             false
         };
-        if !query_plan {
-            return self.unsupported(
-                "bare EXPLAIN (opcode dump) not supported here — use the CLI's -explain flag",
-            );
-        }
         let select = self.parse_select_stmt()?;
         Ok(Explain {
             query_plan,
