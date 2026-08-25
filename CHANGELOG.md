@@ -6,6 +6,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+feat: track and apply column-declared `COLLATE` across schema and
+comparisons (#500) — `TableSchema`/`IndexedColumn`
+(`src/schema/ddl_reader.rs`) now capture each column's/index-column's
+declared `COLLATE` (default `Binary`), previously parsed and
+discarded. A new `expr_collation()` (`src/codegen/expr/value.rs`) falls
+back to a bare column's declared collation whenever the query has no
+explicit `COLLATE`, wired into WHERE/IN comparisons, `ORDER BY`,
+`GROUP BY`, and `min`/`max` aggregate comparisons — an explicit
+query-side `COLLATE` still wins. `SeekIndexEq`'s probe and the
+#450/#492 duplicate-key recheck now carry the leading index column's
+collation via a new `P4::SeekKey` payload instead of hardcoding
+`Binary`. `Collation`/`compare_text` moved from `src/vdbe` to
+`src/record` to keep `schema`'s Tier 0 layer isolation intact. `SELECT
+DISTINCT`'s ephemeral-index dedup (byte-equality on encoded records,
+never calling `compare()`) is a separate mechanism and was filed as a
+follow-up (#518) rather than folded in here.
+
 perf: trim `run()`'s per-instruction dispatch overhead (#509) —
 `checked_add`+`.ok_or` on the step counter and the program-counter
 increment are replaced with `saturating_add` (both are backstops
