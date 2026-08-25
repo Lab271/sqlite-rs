@@ -6,6 +6,29 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+
+- 9 read-only introspection `PRAGMA`s (#489): `table_info`,
+`table_list`, `index_list`, `index_info`, `database_list`,
+`schema_version`, `user_version`, `page_size`, `page_count`. Recognized
+by a hand-rolled parser (`src/bin/sqlite-rs/pragma_query.rs`)
+deliberately outside the main grammar/AST/codegen/VDBE pipeline —
+these are synthetic in-memory result sets built directly from
+already-loaded schema/header data (the `EXPLAIN QUERY PLAN` precedent,
+not the `journal_mode` write-pragma path), so they never touch a
+`Pager` transaction or compile to bytecode. Wired into both the
+`query` subcommand and `repl`; a `PRAGMA` outside these 9 names (e.g.
+`journal_mode`) falls through to existing behavior unchanged.
+`schema::column_defs`/`column_type` (`src/schema/ddl_reader.rs`) are
+now `pub` (were `pub(crate)`) so the CLI-layer pragma module can reuse
+them instead of re-deriving column-definition splitting. Scope cuts:
+`index_list`/`index_info` only report explicit `CREATE INDEX` entries
+(`origin` is always `c`) — auto-indexes for inline `PRIMARY
+KEY`/`UNIQUE` constraints are already dropped by
+`schema::read_schema` and not re-derived here; `table_list` omits the
+internal `sqlite_schema`/`sqlite_temp_schema` rows stock `sqlite3`
+lists (no temp-db support). Tests: `tests/unit/introspection_pragmas.rs`.
+
 ## [0.18.2] - 2026-08-25
 
 ### Fixed

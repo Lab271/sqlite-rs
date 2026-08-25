@@ -26,6 +26,7 @@ use sqlite_rs::vdbe::{execute_with_db, explain, Program};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 use crate::common::{fatal, CSV_ROW_TERMINATOR};
+use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
 
 /// What [`compile_select_program`] produced: either `EXPLAIN QUERY
 /// PLAN`'s rows (nothing further to compile — there's no bytecode to
@@ -152,6 +153,19 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
         return crate::common::usage_error("query [-csv] [-explain] <file> \"<SQL>\"");
     };
     let path = Path::new(&path);
+
+    // #489: the 9 read-only introspection pragmas (`table_info`,
+    // `table_list`, `index_list`, `index_info`, `database_list`,
+    // `schema_version`, `user_version`, `page_size`, `page_count`) are
+    // recognized by a hand-rolled parser entirely separate from
+    // `parse_select`/`parse_explain` — checked first so a `PRAGMA`
+    // statement never gets fed into either. A `PRAGMA` that isn't one
+    // of these 9 (e.g. `journal_mode`, the `#388` write-pragma path)
+    // falls through unrecognized here and hits the ordinary
+    // `parse_select` error path below, same as before this existed.
+    if let Some(pragma) = parse_pragma_query(&sql) {
+        return run_pragma_query(path, &pragma);
+    }
 
     // #243: `EXPLAIN QUERY PLAN <select>` is parsed by a dedicated entry
     // point (`parse_explain`, grammar V4) rather than `parse_select` —
@@ -283,6 +297,61 @@ fn finish_query(
         return fatal(path, &e);
     }
     ExitCode::SUCCESS
+}
+
+/// Opens `path` fresh (a one-shot `query` invocation has no shared
+/// session `Pager`, unlike the repl's), loads schemas/views/header, and
+/// executes an already-recognized introspection `PRAGMA` end to end —
+/// used only by `run_query`. `repl.rs` loads schemas/views/header
+/// itself each statement (its existing per-statement pattern) and
+/// calls [`execute_pragma_query`] directly against its session's
+/// already-open shared `Pager`, reusing the same execution/rendering
+/// logic without this fresh-open step.
+fn run_pragma_query(path: &Path, pragma: &crate::pragma_query::PragmaQuery) -> ExitCode {
+    let (header, pager) = match dump::open(&UnixVfs, path) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
+    let source: Rc<dyn PageSource> = Rc::new(pager);
+    let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
+        Ok(s) => s,
+        Err(e) => return fatal(path, &e),
+    };
+    let mut view_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
+    let views = match read_views(&mut view_cursor, header.text_encoding) {
+        Ok(v) => v,
+        Err(e) => return fatal(path, &e),
+    };
+    print_pragma_rows(path, pragma, &schemas, &views, &header)
+}
+
+/// Executes `pragma` against already-loaded `schemas`/`views`/`header`
+/// and prints its rows pipe-delimited via [`write_list_row`], the same
+/// rendering `SelectOutcome::Eqp` and ordinary query rows use.
+pub(crate) fn print_pragma_rows(
+    path: &Path,
+    pragma: &crate::pragma_query::PragmaQuery,
+    schemas: &[TableSchema],
+    views: &[ViewSchema],
+    header: &sqlite_rs::header::DatabaseHeader,
+) -> ExitCode {
+    match execute_pragma_query(pragma, schemas, views, header, path) {
+        Ok(rows) => {
+            let mut stdout = io::BufWriter::new(io::stdout().lock());
+            for row in rows {
+                let rendered: Vec<Vec<u8>> = row.into_iter().map(String::into_bytes).collect();
+                if let Err(e) = write_list_row(&mut stdout, &rendered) {
+                    return fatal(path, &e);
+                }
+            }
+            if let Err(e) = stdout.flush() {
+                return fatal(path, &e);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fatal(path, &e),
+    }
 }
 
 pub(crate) fn write_list_row(out: &mut impl Write, values: &[Vec<u8>]) -> io::Result<()> {

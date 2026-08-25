@@ -17,6 +17,7 @@
 mod common;
 mod dump;
 mod exec;
+mod pragma_query;
 mod query;
 mod repl;
 mod tables;

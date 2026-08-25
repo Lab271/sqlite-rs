@@ -562,7 +562,7 @@ fn column_name(def: &str) -> String {
 /// (datatype3.html §3.1), which may span several words (`DOUBLE
 /// PRECISION`, `UNSIGNED BIG INT`). Empty when the column has no type
 /// (`CREATE TABLE t(x)`).
-pub(crate) fn column_type(def: &str) -> String {
+pub fn column_type(def: &str) -> String {
     const CONSTRAINT_KEYWORDS: [&str; 8] = [
         "PRIMARY",
         "NOT",
@@ -592,7 +592,7 @@ pub(crate) fn column_type(def: &str) -> String {
 /// type text, and [`rowid_alias_column`] needs its full constraint
 /// text. Shares [`split_top_level_commas`] and [`is_table_constraint`]
 /// with [`parse_create_table`], so the two column lists cannot drift.
-pub(crate) fn column_defs(schema: &TableSchema) -> Vec<&str> {
+pub fn column_defs(schema: &TableSchema) -> Vec<&str> {
     all_defs(schema)
         .into_iter()
         .filter(|def| !is_table_constraint(def))
