@@ -1,7 +1,7 @@
 # 0022: `Pager` has no page cache — repeated-seek workloads pay full I/O every row
 
 Date: 2026-08-21
-Status: Accepted
+Status: Superseded by [0028](0028-pager-page-cache-landed.md)
 
 ## Context
 

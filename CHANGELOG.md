@@ -6,6 +6,8 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-25
+
 fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
 `compile_grouped_scan`'s pass 1 now only serializes columns actually
 referenced by the `GROUP BY` key, aggregate arguments, or plain
@@ -22,6 +24,24 @@ oracle's own sort-then-group behavior. `group_by_agg` benchmark:
 ticket's `<3x`-oracle target — the residual gap looks architectural
 (VDBE per-instruction dispatch, the sort pipeline's inherent
 double-decode), out of this ticket's scope. spend: ~2-3x estimate.
+
+perf: `TableCursor::seek` (backing the `SeekRowid` opcode) now binary
+searches a page's cell-pointer array instead of scanning it linearly,
+on both leaf pages (rowid comparison) and interior pages (separator-key
+comparison) (#508). Repeated seeks against the same table — the `join`
+tier-1 benchmark's dominant cost, one `SeekRowid` per outer row — no
+longer pay an O(cells-per-page) decode-and-compare loop per call; the
+`join` benchmark's ratio against the pinned oracle dropped from ~7.4x
+to ~2.3x (14.07ms→4.5ms on the 1MB fixture, 1.16s→284ms on 50MB). This
+was misattributed for a time to ADR-0022's missing-`Pager`-page-cache
+gap, which had already been closed by #320/#457/#459 — see ADR-0028,
+which supersedes ADR-0022's now-stale problem statement. ANALYZE and
+join-ordering/access-selection were independently confirmed unaffected
+(`EXPLAIN QUERY PLAN` is identical before and after, on both oracle and
+ours: `SCAN bench_data` / `SEARCH bench_lookup USING INTEGER PRIMARY
+KEY`) — the gap was purely in `seek`'s own per-page search algorithm,
+not query planning.
+spend: matched estimate (medium)
 
 ## [0.18.0] - 2026-08-25 — V7 Performance & Planner
 

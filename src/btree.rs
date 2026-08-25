@@ -310,23 +310,36 @@ impl<P: PageSource> TableCursor<P> {
             match page_type {
                 LEAF_TABLE => {
                     let cell_ptr_base = header_start.saturating_add(8);
-                    for i in 0..num_cells {
+                    // Leaf cells are stored in rowid-ascending order by
+                    // pointer-array index (see the module's ordering
+                    // invariant), so a binary search over `i` decodes only
+                    // O(log n) cells instead of scanning every cell on the
+                    // page — this matters a lot for repeated seeks (e.g. a
+                    // join probing the same small table per outer row).
+                    let mut lo = 0usize;
+                    let mut hi = num_cells;
+                    while lo < hi {
+                        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
                         let cell_start = read_cell_pointer(
                             &page,
-                            cell_ptr_offset(cell_ptr_base, i),
+                            cell_ptr_offset(cell_ptr_base, mid),
                             page_num,
-                            i,
+                            mid,
                         )?;
                         let (rowid, payload_len, tail_start) =
                             decode_cell_head(&page, cell_start, page_num)?;
-                        if rowid == target_rowid {
-                            self.current = Some(CurrentCell {
-                                page: Rc::clone(&page),
-                                page_num,
-                                tail_start,
-                                payload_len,
-                            });
-                            return Ok(Some(rowid));
+                        match rowid.cmp(&target_rowid) {
+                            std::cmp::Ordering::Equal => {
+                                self.current = Some(CurrentCell {
+                                    page: Rc::clone(&page),
+                                    page_num,
+                                    tail_start,
+                                    payload_len,
+                                });
+                                return Ok(Some(rowid));
+                            }
+                            std::cmp::Ordering::Less => lo = mid.saturating_add(1),
+                            std::cmp::Ordering::Greater => hi = mid,
                         }
                     }
                     return Ok(None);
@@ -335,23 +348,36 @@ impl<P: PageSource> TableCursor<P> {
                     require_interior_header(&page, header_start, page_num)?;
                     let cell_ptr_base = header_start.saturating_add(12);
                     let rightmost = read_u32(&page, header_start.saturating_add(8), page_num)?;
+                    // Interior separator keys are ascending by pointer-array
+                    // index too; binary search for the leftmost `i` with
+                    // `target_rowid <= key(i)` (the child to descend into),
+                    // falling back to `rightmost` when none qualifies —
+                    // same semantics as the old early-break linear scan.
+                    let mut lo = 0usize;
+                    let mut hi = num_cells;
                     let mut next_page = rightmost;
-                    for i in 0..num_cells {
+                    while lo < hi {
+                        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
                         let cell_start = read_cell_pointer(
                             &page,
-                            cell_ptr_offset(cell_ptr_base, i),
+                            cell_ptr_offset(cell_ptr_base, mid),
                             page_num,
-                            i,
+                            mid,
                         )?;
-                        let child = read_u32(&page, cell_start, page_num)?;
-                        let key_bytes = page
-                            .get(cell_start.saturating_add(4)..)
-                            .ok_or(BtreeError::InvalidCellPointer { page_num, index: i })?;
+                        let key_bytes = page.get(cell_start.saturating_add(4)..).ok_or(
+                            BtreeError::InvalidCellPointer {
+                                page_num,
+                                index: mid,
+                            },
+                        )?;
                         let (key, _) = decode_varint(key_bytes)
                             .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
                         if target_rowid <= key as i64 {
+                            let child = read_u32(&page, cell_start, page_num)?;
                             next_page = child;
-                            break;
+                            hi = mid;
+                        } else {
+                            lo = mid.saturating_add(1);
                         }
                     }
                     page_num = next_page;
@@ -1650,6 +1676,50 @@ mod tests {
 
         assert!(cursor.seek_row(0).unwrap().is_none());
         assert!(cursor.seek_row(3001).unwrap().is_none());
+    }
+
+    #[test]
+    fn table_multipage_seek_binary_search_matches_every_rowid_and_gaps() {
+        // #508: TableCursor::seek switched from a linear cell scan to binary
+        // search on both leaf and interior pages. Exhaustively check every
+        // rowid in range (exercises every leaf split point) plus the
+        // boundary immediately below/above each hundred (exercises interior
+        // separator-key edges) to guard against an off-by-one in either
+        // binary search's `lo`/`hi`/`mid` bookkeeping.
+        let mut cursor = open_cursor("table_multipage.db");
+        for rowid in 1..=3000i64 {
+            let row = cursor.seek_row(rowid).unwrap().unwrap_or_else(|| {
+                panic!("expected rowid {rowid} to be found");
+            });
+            assert_eq!(row.rowid, rowid);
+        }
+        for boundary in [0i64, 3001] {
+            assert!(cursor.seek_row(boundary).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn table_single_page_seek_binary_search_on_small_leaf() {
+        // #508: a single-leaf-page tree exercises binary search's smallest
+        // cases (0, 1, and a handful of cells) without any interior page
+        // involved at all.
+        let mut cursor = open_cursor("table_single_page.db");
+        let all = {
+            let mut c = open_cursor("table_single_page.db");
+            let mut rowids = Vec::new();
+            let mut row = c.first_row().unwrap();
+            while let Some(r) = row {
+                rowids.push(r.rowid);
+                row = c.next_row().unwrap();
+            }
+            rowids
+        };
+        assert!(!all.is_empty());
+        for &rowid in &all {
+            assert_eq!(cursor.seek_row(rowid).unwrap().unwrap().rowid, rowid);
+        }
+        assert!(cursor.seek_row(all[0] - 1).unwrap().is_none());
+        assert!(cursor.seek_row(all[all.len() - 1] + 1).unwrap().is_none());
     }
 
     #[test]

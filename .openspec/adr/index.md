@@ -31,3 +31,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0025](0025-passive-only-checkpoint-linear-frame-scan.md) | PASSIVE-only checkpoint, single non-blocking lock, linear frame scan | 2026-08-23 |
 | [0026](0026-wal-writer-reopens-and-rescans-per-flush.md) | WAL writer reopens and rescans the `-wal` file on every flush | 2026-08-23 |
 | [0027](0027-correlated-subquery-seek-not-cache.md) | Correlated scalar subquery equality compiles to a seek, not a cache lookup | 2026-08-23 |
+| [0028](0028-pager-page-cache-landed.md) | `Pager` page cache landed — supersedes ADR-0022's problem statement | 2026-08-25 |
