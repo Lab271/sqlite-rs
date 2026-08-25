@@ -123,6 +123,29 @@ pub fn decode_column(
     }
 }
 
+/// Decodes only the first `max_columns` columns of a record's payload —
+/// the header entries (serial types) for every column are walked to
+/// compute body offsets, but only the requested prefix's bodies are
+/// decoded/allocated, unlike [`decode_record`]. Used by `SorterInsert`
+/// (#507) so a bounded top-K sorter's per-row comparison never pays to
+/// decode payload columns past the sort key. `max_columns` beyond the
+/// record's actual column count is clamped, matching [`decode_column`]'s
+/// out-of-range convention rather than erroring.
+pub fn decode_record_upto(
+    payload: &[u8],
+    max_columns: usize,
+    encoding: TextEncoding,
+) -> Result<Vec<Value>, RecordError> {
+    let entries = parse_header(payload)?;
+    let n = max_columns.min(entries.len());
+    let mut values = Vec::with_capacity(n);
+    for &(serial_type, offset) in entries.iter().take(n) {
+        let (value, _) = decode_serial_value(serial_type, payload, offset, encoding)?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
 /// Number of body bytes a serial type occupies, without decoding the
 /// value it holds — lets [`decode_column`] skip past columns before the
 /// requested index using only the (cheap) header entries, never touching
@@ -588,6 +611,45 @@ mod tests {
                 Ok(expected.clone())
             );
         }
+    }
+
+    #[test]
+    fn decode_record_upto_matches_decode_record_prefix() {
+        let payload = record_bytes(&[
+            (1, &[42]),
+            (0, &[]),
+            (13 + 2 * 5, b"hello"),
+            (7, &2.5f64.to_be_bytes()),
+        ]);
+        let full = decode_record(&payload, TextEncoding::Utf8).unwrap();
+        for n in 0..=full.len() {
+            assert_eq!(
+                decode_record_upto(&payload, n, TextEncoding::Utf8).unwrap(),
+                full[..n]
+            );
+        }
+    }
+
+    #[test]
+    fn decode_record_upto_beyond_column_count_clamps_like_decode_record() {
+        let payload = record_bytes(&[(1, &[42]), (0, &[])]);
+        let full = decode_record(&payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(
+            decode_record_upto(&payload, 100, TextEncoding::Utf8).unwrap(),
+            full
+        );
+    }
+
+    #[test]
+    fn decode_record_upto_header_errors_still_surface() {
+        let payload = vec![0x80, 0x00]; // header_len = 0 via 2-byte varint
+        assert_eq!(
+            decode_record_upto(&payload, 1, TextEncoding::Utf8),
+            Err(RecordError::HeaderTooShort {
+                declared: 0,
+                varint_len: 2
+            })
+        );
     }
 
     #[test]
