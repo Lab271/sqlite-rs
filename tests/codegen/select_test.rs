@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 //! SELECT->bytecode acceptance (spec 009, the codegen convergence
 //! ticket #91): the V2 query corpus
@@ -48,6 +53,77 @@ fn explain_query_plan_rejects_schema_count_mismatch() {
     assert!(
         matches!(err, CodegenError::Unsupported { .. }),
         "got {err:?}"
+    );
+}
+
+fn bare_table(name: &str) -> TableSchema {
+    TableSchema {
+        name: name.to_string(),
+        root_page: 0,
+        columns: vec!["a".to_string()],
+        column_types: vec![String::new()],
+        column_collations: vec![sqlite_rs::record::Collation::Binary],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    }
+}
+
+/// #539: `EXPLAIN QUERY PLAN` on a `UNION`/`UNION ALL` compound reports
+/// each arm's own plan nested under a `COMPOUND QUERY` root (matching
+/// the oracle's own EQP shape: `COMPOUND QUERY` -> `LEFT-MOST SUBQUERY`
+/// plus one `UNION`/`UNION ALL` child per arm), rather than only the
+/// left-most arm's plan.
+#[test]
+fn explain_query_plan_reports_each_union_arm() {
+    let select = accepted_select("SELECT * FROM t1 UNION SELECT * FROM t2");
+    let catalog = vec![bare_table("t1"), bare_table("t2")];
+    let rows = explain_query_plan(
+        &select,
+        &catalog[..1],
+        &std::collections::HashMap::new(),
+        &catalog,
+    )
+    .expect("compound EQP should succeed");
+
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert_eq!(rows[0].detail, "COMPOUND QUERY");
+    assert_eq!(rows[0].parent, 0);
+    assert_eq!(rows[1].detail, "LEFT-MOST SUBQUERY");
+    assert_eq!(rows[1].parent, rows[0].id);
+    assert_eq!(rows[2].detail, "SCAN t1");
+    assert_eq!(rows[2].parent, rows[1].id);
+    assert_eq!(rows[3].detail, "UNION USING TEMP B-TREE");
+    assert_eq!(rows[3].parent, rows[0].id);
+    assert_eq!(rows[4].detail, "SCAN t2");
+    assert_eq!(rows[4].parent, rows[3].id);
+}
+
+/// #539: `UNION ALL` keeps every row (no dedup step), so its EQP text
+/// omits the `USING TEMP B-TREE` annotation plain `UNION` carries.
+#[test]
+fn explain_query_plan_reports_union_all_arm_without_temp_btree() {
+    let select = accepted_select("SELECT * FROM t1 UNION ALL SELECT * FROM t2");
+    let catalog = vec![bare_table("t1"), bare_table("t2")];
+    let rows = explain_query_plan(
+        &select,
+        &catalog[..1],
+        &std::collections::HashMap::new(),
+        &catalog,
+    )
+    .expect("compound EQP should succeed");
+
+    assert_eq!(
+        rows.iter().map(|r| r.detail.as_str()).collect::<Vec<_>>(),
+        vec![
+            "COMPOUND QUERY",
+            "LEFT-MOST SUBQUERY",
+            "SCAN t1",
+            "UNION ALL",
+            "SCAN t2",
+        ]
     );
 }
 

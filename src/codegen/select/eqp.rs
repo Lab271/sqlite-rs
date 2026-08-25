@@ -79,6 +79,15 @@ pub fn explain_query_plan(
     stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
     catalog: &[TableSchema],
 ) -> Result<Vec<EqpRow>, CodegenError> {
+    // #539: a `UNION`/`UNION ALL` compound reports each arm's own plan
+    // nested under a synthetic `COMPOUND QUERY` root, matching the
+    // oracle's own EQP shape -- `schemas` (already resolved by the
+    // caller for `select`'s own `FROM`) only covers the left-most arm;
+    // every other arm resolves its own `FROM` against `catalog` here,
+    // the same way the subquery recursion below does.
+    if !select.compound.is_empty() {
+        return explain_compound_query_plan(select, schemas, stats_by_table, catalog);
+    }
     let Some(from) = &select.from else {
         return Err(CodegenError::NoFromClause);
     };
@@ -355,4 +364,124 @@ pub fn explain_query_plan(
         }
     }
     Ok(rows)
+}
+
+/// A `CompoundSelect` arm carries the same core fields as a `Select`
+/// (columns/from/where/group-by/having) but none of the whole-statement
+/// ones (`with_clause`/further `compound`/`order_by`/`limit`) -- this
+/// rebuilds a plain `Select` from an arm so [`explain_query_plan`] can
+/// analyze it exactly like a top-level `SELECT`.
+fn compound_arm_as_select(arm: &CompoundSelect) -> Select {
+    Select {
+        with_clause: None,
+        distinct: arm.distinct,
+        columns: arm.columns.clone(),
+        from: arm.from.clone(),
+        where_clause: arm.where_clause.clone(),
+        group_by: arm.group_by.clone(),
+        having: arm.having.clone(),
+        compound: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        span: arm.span,
+    }
+}
+
+/// Oracle sqlite3's own compound-operator EQP text, confirmed
+/// empirically (sqlite3 3.51.0): plain `UNION` dedups via an ephemeral
+/// index (matching #377/#378's actual codegen), so its EQP text calls
+/// that out; `UNION ALL` keeps every row and needs no such step.
+fn compound_op_label(op: CompoundOp) -> &'static str {
+    match op {
+        CompoundOp::Union => "UNION USING TEMP B-TREE",
+        CompoundOp::UnionAll => "UNION ALL",
+    }
+}
+
+/// #539: `explain_query_plan`'s compound-select branch -- one
+/// `COMPOUND QUERY` root row, a `LEFT-MOST SUBQUERY` child holding
+/// `select`'s own (non-compound) plan, then one `UNION`/`UNION ALL`
+/// child per arm holding that arm's plan. Every nested tree's ids are
+/// offset so they stay unique across the whole result, the same
+/// offsetting scheme the `FROM`-subquery recursion above uses.
+fn explain_compound_query_plan(
+    select: &Select,
+    schemas: &[TableSchema],
+    stats_by_table: &std::collections::HashMap<String, crate::planner::Stats>,
+    catalog: &[TableSchema],
+) -> Result<Vec<EqpRow>, CodegenError> {
+    let mut rows = Vec::new();
+    let mut next_id: i32 = 0;
+
+    let compound_id = next_id;
+    next_id = next_id.saturating_add(1);
+    rows.push(EqpRow {
+        id: compound_id,
+        parent: 0,
+        notused: 0,
+        detail: "COMPOUND QUERY".to_string(),
+    });
+
+    let leftmost_id = next_id;
+    next_id = next_id.saturating_add(1);
+    rows.push(EqpRow {
+        id: leftmost_id,
+        parent: compound_id,
+        notused: 0,
+        detail: "LEFT-MOST SUBQUERY".to_string(),
+    });
+    let leftmost = Select {
+        compound: Vec::new(),
+        ..select.clone()
+    };
+    let leftmost_rows = explain_query_plan(&leftmost, schemas, stats_by_table, catalog)?;
+    graft_child_plan(&mut rows, &mut next_id, leftmost_id, leftmost_rows);
+
+    for arm in &select.compound {
+        let op_id = next_id;
+        next_id = next_id.saturating_add(1);
+        rows.push(EqpRow {
+            id: op_id,
+            parent: compound_id,
+            notused: 0,
+            detail: compound_op_label(arm.op).to_string(),
+        });
+
+        let arm_select = compound_arm_as_select(arm);
+        let arm_schemas: Vec<TableSchema> = match &arm.from {
+            Some(arm_from) => std::iter::once(&arm_from.first)
+                .chain(arm_from.joins.iter().map(|j| &j.table))
+                .map(|table_ref| resolve_from_table_schema(table_ref, catalog))
+                .collect::<Result<Vec<_>, CodegenError>>()?,
+            None => Vec::new(),
+        };
+        let arm_rows = explain_query_plan(&arm_select, &arm_schemas, stats_by_table, catalog)?;
+        graft_child_plan(&mut rows, &mut next_id, op_id, arm_rows);
+    }
+
+    Ok(rows)
+}
+
+/// Appends `child_rows` (a nested `explain_query_plan` result) into
+/// `rows` under `parent_id`, offsetting every id by `*next_id` so ids
+/// stay unique across the whole tree -- the same offsetting scheme the
+/// `FROM`-subquery recursion in [`explain_query_plan`] uses.
+fn graft_child_plan(
+    rows: &mut Vec<EqpRow>,
+    next_id: &mut i32,
+    parent_id: i32,
+    child_rows: Vec<EqpRow>,
+) {
+    let offset = *next_id;
+    for mut row in child_rows {
+        let was_top_level = row.parent == 0;
+        row.id = row.id.saturating_add(offset);
+        row.parent = if was_top_level {
+            parent_id
+        } else {
+            row.parent.saturating_add(offset)
+        };
+        *next_id = (*next_id).max(row.id.saturating_add(1));
+        rows.push(row);
+    }
 }
