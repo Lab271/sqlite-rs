@@ -154,6 +154,31 @@ pub fn estimate_index_cost(index_name: &str, stats: &Stats) -> PlanCost {
     }
 }
 
+/// #545: the smallest `ANALYZE`-recorded row count a join level's inner
+/// table must clear before building a transient automatic index for an
+/// otherwise-unindexed equality join column is estimated cheaper than
+/// the plain nested-loop scan it replaces (sqlite.org/optoverview.html
+/// #autoindex) — building the index costs one full scan of the table up
+/// front, so it only pays for itself once the table is big enough that
+/// repeatedly nested-loop-scanning it (once per outer row) would cost
+/// more overall. Mirrors [`MIN_ROWS_TO_BLOOM`]-style thresholds
+/// elsewhere in this codebase (`codegen::select::join_access`): a small
+/// table's full scan is already cheap, so skip the extra machinery.
+const MIN_ROWS_TO_AUTO_INDEX: u64 = 25;
+
+/// Whether building a transient automatic index (#545) for `stats`'
+/// table is estimated worthwhile in place of a plain nested-loop scan:
+/// `true` only when `ANALYZE` has recorded at least
+/// [`MIN_ROWS_TO_AUTO_INDEX`] rows — a stats-free database (no
+/// `ANALYZE` has ever run) never triggers this optimization, matching
+/// [`is_skip_scan_worthwhile`]'s own "no stats, no optimization"
+/// default.
+pub fn is_automatic_index_worthwhile(stats: &Stats) -> bool {
+    stats
+        .table_rows()
+        .is_some_and(|rows| rows >= MIN_ROWS_TO_AUTO_INDEX)
+}
+
 /// Reads every table's `sqlite_stat1` rows in one pass and returns a
 /// `table name -> Stats` map — empty if `sqlite_stat1` isn't in
 /// `schemas` at all (no `ANALYZE` has ever run against this database),
@@ -326,5 +351,33 @@ mod tests {
     fn skip_scan_never_worthwhile_without_analyze_stats() {
         let stats = Stats::default();
         assert!(!is_skip_scan_worthwhile("idx", &stats));
+    }
+
+    /// #545: a table below the row-count threshold isn't worth building
+    /// a transient automatic index for.
+    #[test]
+    fn automatic_index_not_worthwhile_below_threshold() {
+        let stats = Stats::from_stat1_rows(vec![(None, "24".to_string())]);
+        assert!(!is_automatic_index_worthwhile(&stats));
+    }
+
+    /// #545: at/above the row-count threshold, a transient automatic
+    /// index is judged worthwhile.
+    #[test]
+    fn automatic_index_worthwhile_at_and_above_threshold() {
+        let stats = Stats::from_stat1_rows(vec![(None, "25".to_string())]);
+        assert!(is_automatic_index_worthwhile(&stats));
+
+        let stats = Stats::from_stat1_rows(vec![(None, "10000".to_string())]);
+        assert!(is_automatic_index_worthwhile(&stats));
+    }
+
+    /// #545: without `ANALYZE` having ever recorded a row count, the
+    /// automatic index is never chosen — same "no stats, no
+    /// optimization" default as [`is_skip_scan_worthwhile`].
+    #[test]
+    fn automatic_index_never_worthwhile_without_analyze_stats() {
+        let stats = Stats::default();
+        assert!(!is_automatic_index_worthwhile(&stats));
     }
 }

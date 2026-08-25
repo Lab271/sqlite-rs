@@ -150,6 +150,10 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::IdxLast => "IdxLast",
         Opcode::IdxNext => "IdxNext",
         Opcode::IdxPrev => "IdxPrev",
+        Opcode::AutoIndexInsert => "AutoIndexInsert",
+        Opcode::AutoIndexSeek => "AutoIndexSeek",
+        Opcode::AutoIndexRowid => "AutoIndexRowid",
+        Opcode::AutoIndexNext => "AutoIndexNext",
         Opcode::NullRow => "NullRow",
         Opcode::Sequence => "Sequence",
         Opcode::Found => "Found",
@@ -262,6 +266,14 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::IdxLast => format!("cursor {p1} to last index entry, jump {p2} if empty"),
         Opcode::IdxNext => format!("cursor {p1} index next, jump {p2} if entry found"),
         Opcode::IdxPrev => format!("cursor {p1} index prev, jump {p2} if entry found"),
+        Opcode::AutoIndexInsert => {
+            format!("cursor {p1} auto-index insert key r[{p2}] rowid r[{p3}]")
+        }
+        Opcode::AutoIndexSeek => {
+            format!("cursor {p1} auto-index seek key at r[{p3}..], jump {p2} if miss")
+        }
+        Opcode::AutoIndexRowid => format!("r[{p2}] = cursor {p1} auto-index rowid"),
+        Opcode::AutoIndexNext => format!("cursor {p1} auto-index next, jump {p2} if row found"),
         Opcode::Insert => format!("cursor {p1} insert rowid r[{p2}] record r[{p3}]"),
         Opcode::NewRowid => format!("r[{p2}] = cursor {p1} new rowid"),
         Opcode::Delete => format!("cursor {p1} delete current row"),
@@ -345,6 +357,10 @@ mod tests {
             (Opcode::Count, "Count"),
             (Opcode::NoConflict, "NoConflict"),
             (Opcode::IdxLE, "IdxLE"),
+            (Opcode::AutoIndexInsert, "AutoIndexInsert"),
+            (Opcode::AutoIndexSeek, "AutoIndexSeek"),
+            (Opcode::AutoIndexRowid, "AutoIndexRowid"),
+            (Opcode::AutoIndexNext, "AutoIndexNext"),
             (Opcode::Delete, "Delete"),
             (Opcode::Insert, "Insert"),
             (Opcode::NewRowid, "NewRowid"),

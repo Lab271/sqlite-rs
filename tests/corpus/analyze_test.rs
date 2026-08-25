@@ -337,13 +337,15 @@ fn join_order_prefers_seekable_inner_over_smaller_outer() {
 /// #464 (spec 011): once `ANALYZE` shows a join level's table has
 /// enough rows and no rowid/unique-index seek is structurally
 /// available, the compiled program prefaces that level's nested-loop
-/// scan with a one-time `FilterAdd` pre-pass and a per-outer-row
-/// `Filter` check -- and the join still returns the same rows as the
-/// oracle.
+/// scan -- since #545, a transient automatic index (`OpenEphemeral` +
+/// `AutoIndexSeek`) rather than a `FilterAdd`/`Filter` Bloom pre-pass,
+/// since an automatic index makes both hits and misses cheap and so is
+/// tried first (see `join_access::choose_auto_index_probe`) -- and the
+/// join still returns the same rows as the oracle.
 #[test]
-fn bloom_filter_prefaces_unindexed_join_level_once_analyzed() {
-    let Some(db) = seed_db("bloom-filter") else {
-        return skip_no_oracle("bloom_filter_prefaces_unindexed_join_level_once_analyzed");
+fn automatic_index_prefaces_unindexed_join_level_once_analyzed() {
+    let Some(db) = seed_db("auto-index") else {
+        return skip_no_oracle("automatic_index_prefaces_unindexed_join_level_once_analyzed");
     };
     exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
     exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
@@ -353,8 +355,9 @@ fn bloom_filter_prefaces_unindexed_join_level_once_analyzed() {
     exec_ok(&db, "ANALYZE");
 
     let plan = explain(&db, "SELECT * FROM t1 JOIN t2 ON t1.a = t2.x");
-    assert!(plan.contains("FilterAdd"), "got: {plan}");
-    assert!(plan.contains("Filter|"), "got: {plan}");
+    assert!(plan.contains("OpenEphemeral"), "got: {plan}");
+    assert!(plan.contains("AutoIndexSeek"), "got: {plan}");
+    assert!(!plan.contains("FilterAdd"), "got: {plan}");
 
     let rows = run_query(
         &db,
@@ -365,6 +368,38 @@ fn bloom_filter_prefaces_unindexed_join_level_once_analyzed() {
         &db,
         "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a",
     );
+}
+
+/// #545: a transient automatic index also handles duplicate join-key
+/// values on the outer probe side correctly -- every outer row sharing
+/// a key must still find every matching inner row, exercising the
+/// `SeekIndexEq` + recheck-then-`IdxNext` walk-while-still-equal loop
+/// beyond its first match.
+#[test]
+fn automatic_index_handles_duplicate_join_keys() {
+    let Some(db) = seed_db("auto-index-dupes") else {
+        return skip_no_oracle("automatic_index_handles_duplicate_join_keys");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    let values: Vec<String> = (1..=40).map(|n| format!("({n})")).collect();
+    exec_ok(&db, &format!("INSERT INTO t1 VALUES {}", values.join(", ")));
+    // t1 now has three rows valued 5 (one from the 1..=40 range, two
+    // explicit) and one valued 37; t2 has two rows valued 5 and one
+    // valued 37 -- 3*2 + 1*1 = 7 matching pairs total.
+    exec_ok(&db, "INSERT INTO t1 VALUES (5), (5)");
+    exec_ok(&db, "INSERT INTO t2 VALUES (5), (5), (37)");
+    exec_ok(&db, "ANALYZE");
+
+    let rows = run_query(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a, t2.x",
+    );
+    assert_matches_analyze_oracle(
+        &db,
+        "SELECT t1.a, t2.x FROM t1 JOIN t2 ON t1.a = t2.x ORDER BY t1.a, t2.x",
+    );
+    assert_eq!(rows.lines().count(), 3 * 2 + 1, "got: {rows}");
 }
 
 /// #464 (spec 011): below [`join_access::MIN_ROWS_TO_BLOOM`]'s

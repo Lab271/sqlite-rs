@@ -124,6 +124,63 @@ pub(in crate::codegen) fn choose_join_access(
     })
 }
 
+/// #545: a transient automatic index for a join level whose nested-loop
+/// scan [`choose_join_access`] couldn't turn into a seek against a real
+/// index — see [`choose_auto_index_probe`].
+pub(in crate::codegen) struct AutoIndexProbe {
+    /// The expression to seek the ephemeral index with, each time this
+    /// level's join loop would otherwise start (`prior_bindings` only —
+    /// see [`expr_is_safe_join_probe`]).
+    pub(in crate::codegen) probe: Expr,
+    /// `binding`'s own column the ephemeral index is built from (one
+    /// `IdxInsert` per row, in a one-time pre-pass over `binding`'s
+    /// cursor, keyed on this column plus the row's rowid).
+    pub(in crate::codegen) key_column: usize,
+}
+
+/// Picks a transient automatic-index build for join level `binding`
+/// (#545, sqlite.org/optoverview.html#autoindex) once
+/// [`choose_join_access`] has already ruled out a structural seek
+/// against a real index — same top-level-equality shape (a single
+/// `binding.column = <safe probe>` `ON` clause) as that function and
+/// [`choose_bloom_probe`], additionally gated on
+/// [`crate::planner::is_automatic_index_worthwhile`] judging `binding`'s
+/// `ANALYZE` stats large enough that building the transient index once
+/// beats repeatedly nested-loop-scanning the table — no stats at all,
+/// or too few rows, and this returns `None` (same "stats-free database
+/// is byte-for-byte unaffected" guarantee [`choose_bloom_probe`] and
+/// [`choose_join_access`] both make).
+pub(in crate::codegen) fn choose_auto_index_probe(
+    binding: &TableBinding,
+    on_expr: &Expr,
+    prior_bindings: &[TableBinding],
+) -> Option<AutoIndexProbe> {
+    if !crate::planner::is_automatic_index_worthwhile(&binding.stats) {
+        return None;
+    }
+    let (lhs, rhs) = top_level_equality_operands(on_expr)?;
+    let (this_side, other_side) = if matches!(&lhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (lhs, rhs)
+    } else if matches!(&rhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
+    {
+        (rhs, lhs)
+    } else {
+        return None;
+    };
+    if !expr_is_safe_join_probe(other_side, prior_bindings) {
+        return None;
+    }
+    let ExprKind::Column { name, .. } = &this_side.kind else {
+        return None;
+    };
+    let key_column = column_index(&binding.schema, name)?;
+    Some(AutoIndexProbe {
+        probe: other_side.clone(),
+        key_column,
+    })
+}
+
 /// #464 (spec 011): the smallest table size an `ANALYZE`-recorded row
 /// count must clear before a level's nested-loop scan is worth
 /// prefacing with a Bloom-filter pre-pass — below this, the pre-pass's

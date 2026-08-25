@@ -1,5 +1,5 @@
 use super::super::join_access::{
-    choose_bloom_probe, choose_join_access, emit_join_row, JoinAccess,
+    choose_auto_index_probe, choose_bloom_probe, choose_join_access, emit_join_row, JoinAccess,
 };
 use super::super::limit_scan::{emit_limit_guard, emit_offset_guard, LimitState};
 use super::super::*;
@@ -237,12 +237,31 @@ where
         _ => None,
     };
 
+    // #545: when no structural seek exists for this level's single
+    // check, building a transient automatic index over `binding`'s join
+    // column can turn this level's scan into a seek, same as a real
+    // index would — see [`choose_auto_index_probe`]'s gating (`ANALYZE`
+    // stats required). Tried before the Bloom pre-check below: an
+    // automatic index makes both hits *and* misses cheap, so it
+    // strictly subsumes what the Bloom filter buys a plain full scan.
+    let auto_index_probe = if single_check_access.is_none() {
+        match plan.checks.as_slice() {
+            [check] => check.constraint.as_ref().and_then(|constraint| {
+                let prior = exec_bindings.get(..level)?;
+                choose_auto_index_probe(binding, constraint, prior)
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // #464 (spec 011): when no structural seek exists for this level's
     // single check, a Bloom-filter pre-check can still let a per-outer
     // row that's a guaranteed miss skip this level's `Rewind`/`Next`
     // scan entirely — see [`choose_bloom_probe`]'s gating (`ANALYZE`
     // stats required, so a stats-free database emits none of this).
-    let bloom_probe = if single_check_access.is_none() {
+    let bloom_probe = if single_check_access.is_none() && auto_index_probe.is_none() {
         match plan.checks.as_slice() {
             [check] => check.constraint.as_ref().and_then(|constraint| {
                 let prior = exec_bindings.get(..level)?;
@@ -326,6 +345,143 @@ where
                 leaf,
             )?;
             em.place(miss);
+        }
+        None if auto_index_probe.is_some() => {
+            // #545: build a transient automatic index over `binding`'s
+            // join column (a one-time `Once`-guarded pre-pass, same
+            // guard shape as the Bloom pre-pass below), then probe it
+            // instead of a `Rewind`/`Next` full scan. Unlike a real
+            // index's `SeekIndexEq` + recheck-then-`IdxNext` shape
+            // (#450), the `AutoIndexSeek`/`AutoIndexRowid`/
+            // `AutoIndexNext` primitives are an exact-key multi-map, so
+            // there's no leading-column recheck loop needed — every
+            // rowid `AutoIndexNext` yields already shares the seeked
+            // key by construction.
+            //
+            // The match arm's own guard already established
+            // `auto_index_probe.is_some()`; a nested `match` (rather
+            // than an `unreachable!` else-branch) keeps that fact
+            // encoded in the type system instead of a runtime panic
+            // path, which this crate's macro-vocabulary gate (`make
+            // mvl-limit`) doesn't allow outside its curated allowlist.
+            let probe = match &auto_index_probe {
+                Some(probe) => probe,
+                None => {
+                    return Err(CodegenError::Unsupported {
+                        reason: "unreachable: guarded by the match arm's own is_some() condition"
+                            .to_string(),
+                    })
+                }
+            };
+            let rewind_end = em.new_label();
+            let eph_cursor = reg.alloc_cursor();
+
+            let once_addr = em.emit(Instruction::new(Opcode::Once, 0, 0, 0));
+            let after_build = em.new_label();
+            let mut open_instr = Instruction::new(Opcode::OpenEphemeral, eph_cursor, 0, 0);
+            open_instr.p5 = 2;
+            em.emit(open_instr);
+            let build_end = em.new_label();
+            let build_rewind = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
+            em.patch_p2(build_rewind, build_end);
+            let build_loop = em.new_label();
+            em.place(build_loop);
+            let key_reg = reg.alloc();
+            emit_column_read(em, &binding.schema, cursor, probe.key_column, key_reg)?;
+            let build_rowid_reg = reg.alloc();
+            em.emit(Instruction::new(Opcode::Rowid, cursor, build_rowid_reg, 0));
+            let leading_collation = binding
+                .schema
+                .column_collations
+                .get(probe.key_column)
+                .copied()
+                .unwrap_or(Collation::Binary);
+            em.emit(Instruction::with_p4(
+                Opcode::AutoIndexInsert,
+                eph_cursor,
+                key_reg,
+                build_rowid_reg,
+                P4::SeekKey(vec![leading_collation]),
+            ));
+            let build_next = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
+            em.patch_p2(build_next, build_loop);
+            em.place(build_end);
+            em.place(after_build);
+            em.patch_p2(once_addr, after_build);
+
+            let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+            let probe_reg = compile_value(em, reg, &scope, &probe.probe)?;
+            let seek_addr = em.emit(Instruction::with_p4(
+                Opcode::AutoIndexSeek,
+                eph_cursor,
+                0,
+                probe_reg,
+                P4::SeekKey(vec![leading_collation]),
+            ));
+            em.patch_p2(seek_addr, rewind_end);
+
+            let loop_start = em.new_label();
+            em.place(loop_start);
+
+            let skip = em.new_label();
+            let idx_rowid_reg = reg.alloc();
+            em.emit(Instruction::new(
+                Opcode::AutoIndexRowid,
+                eph_cursor,
+                idx_rowid_reg,
+                0,
+            ));
+            let table_seek_addr = em.emit(Instruction::new(
+                Opcode::SeekRowid,
+                cursor,
+                0,
+                idx_rowid_reg,
+            ));
+            em.patch_p2(table_seek_addr, skip);
+
+            for check in &plan.checks {
+                if let Some(constraint) = &check.constraint {
+                    let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
+                    compile_cond(
+                        em,
+                        reg,
+                        &scope,
+                        constraint,
+                        CondTargets::null_is_false(Target::Fallthrough, Target::Jump(skip)),
+                    )?;
+                }
+                if let Some(outer_level) = check.sets_matched {
+                    let target = matched_regs
+                        .get(outer_level)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| CodegenError::Unsupported {
+                            reason: "join level plan referenced an unallocated matched register"
+                                .to_string(),
+                        })?;
+                    em.emit(Instruction::new(Opcode::Integer, 1, target, 0));
+                }
+            }
+            let next_level = level.saturating_add(1);
+            compile_join_level_traverse(
+                em,
+                reg,
+                exec_bindings,
+                orig_bindings,
+                pos_of,
+                levels,
+                dedup_star,
+                null_mask,
+                matched_regs,
+                next_level,
+                catalog,
+                leaf,
+            )?;
+
+            em.place(skip);
+            let next_addr = em.emit(Instruction::new(Opcode::AutoIndexNext, eph_cursor, 0, 0));
+            em.patch_p2(next_addr, loop_start);
+            em.place(rewind_end);
         }
         None => {
             let rewind_end = em.new_label();
