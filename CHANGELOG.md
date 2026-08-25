@@ -21,8 +21,6 @@ where the smaller table's row count previously won it the outer scan
 slot, forcing a full scan on the larger table's join column instead of
 a `SeekRowid` on the smaller one. spend: matched estimate.
 
-## [0.18.1] - 2026-08-25
-
 fix: unindexed `GROUP BY` aggregate sort-pipeline overhead (#506) —
 `compile_grouped_scan`'s pass 1 now only serializes columns actually
 referenced by the `GROUP BY` key, aggregate arguments, or plain
