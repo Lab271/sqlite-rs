@@ -6,6 +6,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-08-25
+
+### Fixed
+
+- CLI `exec` failed to bootstrap a brand-new database file (#448):
+  `sqlite-rs exec <file> "<sql>"` required the target file to already
+  have a valid SQLite header, unlike stock `sqlite3 <file> "<sql>"`
+  which creates the file lazily on first write. Added
+  `DatabaseHeader::new_empty_page1` (`src/header.rs`) to build a valid
+  empty-database page 1, written by `run_exec`
+  (`src/bin/sqlite-rs/exec.rs`) before opening whenever the target path
+  doesn't exist yet.
+
 ## [0.18.1] - 2026-08-25
 
 ### Added

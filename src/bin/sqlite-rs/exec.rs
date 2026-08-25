@@ -25,14 +25,31 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::compile_statement;
 use sqlite_rs::dump;
+use sqlite_rs::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
 use sqlite_rs::parser::split_statements;
 use sqlite_rs::schema::{read_schema, read_views};
 use sqlite_rs::vdbe::execute_transaction_step;
-use sqlite_rs::vfs::UnixVfs;
+use sqlite_rs::vfs::{UnixVfs, Vfs};
 
 use crate::common::fatal;
 
 pub fn run_exec(path: &Path, sql: &str) -> ExitCode {
+    // Unlike `query`/`dump`/`tables`, `exec` is a bootstrap surface: a
+    // script's first statement may be the `CREATE TABLE` that gives the
+    // target file its very first byte, matching stock `sqlite3 <file>
+    // "<sql>"`'s lazy file creation. Write a valid empty-database page 1
+    // up front so `dump::open` below has a header it can actually parse.
+    if !matches!(UnixVfs.exists(path), Ok(true)) {
+        let file = match UnixVfs.create_or_open_write(path) {
+            Ok(f) => f,
+            Err(e) => return fatal(path, &e),
+        };
+        let page1 = DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE);
+        if let Err(e) = file.write_at(&page1, 0) {
+            return fatal(path, &e);
+        }
+    }
+
     let (header, pager) = match dump::open(&UnixVfs, path) {
         Ok(v) => v,
         Err(e) => return fatal(path, &e),
