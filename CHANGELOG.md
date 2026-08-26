@@ -6,6 +6,13 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+
+- `.color on|off` dot-command for the REPL: toggles ANSI syntax
+  highlighting of the in-progress input line
+  (`src/bin/sqlite-rs/readline.rs`'s `Readline::set_color`), alongside
+  the existing `.headers`/`.mode` toggles. Query output is unaffected.
+
 ### Changed
 
 - Vendored the `nix` crate's `fcntl`/`termios` FFI into `src/sys/`

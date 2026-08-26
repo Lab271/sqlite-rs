@@ -26,6 +26,7 @@ use crate::tables::print_table_names;
 /// handlers live in `repl.rs`, so `.help` stays the one place that
 /// enumerates the whole surface.
 const HELP_ENTRIES: &[(&str, &str)] = &[
+    (".color on|off", "Turn syntax-highlighted input on or off"),
     (".databases", "List attached databases"),
     (".dump [TABLE]", "Render the database (or one TABLE) as SQL"),
     (".exit", "Exit this program"),

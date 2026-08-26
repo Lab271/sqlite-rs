@@ -28,12 +28,14 @@
 //!
 //! Dot-commands (#478, #495): `.quit`/`.exit`/`.tables` plus `.help`,
 //! `.version`, `.schema`, `.dump`, `.headers`, `.mode`, `.databases`,
-//! `.indices` — all `sqlite3`-style prefix-matched (`.t`..`.tables`,
+//! `.indices`, `.color` — all `sqlite3`-style prefix-matched (`.t`..`.tables`,
 //! `.q`..`.quit`, etc.), dispatched from the `if let Some(rest) =
 //! trimmed.strip_prefix('.')` block below. `.headers`/`.mode` flip
 //! `ReplState` fields the query-result printer (`mode.rs::print_rows`)
-//! reads on every subsequent `SELECT`; the rest read from the database
-//! (via `dot_commands.rs`) and print immediately.
+//! reads on every subsequent `SELECT`; `.color` flips
+//! [`crate::readline::Readline::set_color`] instead, since it only
+//! affects the in-progress input line, not query output; the rest read
+//! from the database (via `dot_commands.rs`) and print immediately.
 
 use std::cell::RefCell;
 use std::io::{self, Write};
@@ -187,6 +189,14 @@ pub fn run_repl(path: &Path) -> ExitCode {
                     match arg.and_then(OutputMode::parse) {
                         Some(m) => state.mode = m,
                         None => eprintln!("Error: usage: .mode csv|column|line|list"),
+                    }
+                    continue;
+                }
+                if !cmd.is_empty() && "color".starts_with(cmd) {
+                    match arg.map(str::to_ascii_lowercase).as_deref() {
+                        Some("on") => editor.set_color(true),
+                        Some("off") => editor.set_color(false),
+                        _ => eprintln!("Error: usage: .color on|off"),
                     }
                     continue;
                 }

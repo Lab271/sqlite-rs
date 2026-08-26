@@ -48,6 +48,7 @@ impl std::fmt::Display for ReadlineError {
 pub struct Readline {
     history: History,
     tty: bool,
+    color: bool,
 }
 
 impl Readline {
@@ -55,7 +56,14 @@ impl Readline {
         Ok(Readline {
             history: History::new(),
             tty: is_tty(),
+            color: true,
         })
+    }
+
+    /// `.color on|off`: toggles ANSI syntax highlighting of the
+    /// in-progress input line. Doesn't affect anything already printed.
+    pub fn set_color(&mut self, enabled: bool) {
+        self.color = enabled;
     }
 
     pub fn load_history(&mut self, path: &Path) {
@@ -96,7 +104,7 @@ impl Readline {
         schemas: &[TableSchema],
     ) -> Result<String, ReadlineError> {
         let mut editor = LineEditor::new();
-        redraw(prompt, &editor);
+        redraw(prompt, &editor, self.color);
 
         loop {
             let byte = term::read_byte().map_err(ReadlineError::Io)?;
@@ -116,7 +124,7 @@ impl Readline {
                     apply_escape_action(&mut editor, action, &mut self.history)
                 }
             }
-            redraw(prompt, &editor);
+            redraw(prompt, &editor, self.color);
         }
     }
 
@@ -298,9 +306,13 @@ fn read_utf8_continuation(
         .and_then(|s| s.chars().next()))
 }
 
-fn redraw(prompt: &str, editor: &LineEditor) {
+fn redraw(prompt: &str, editor: &LineEditor, color: bool) {
     let line = editor.as_str();
-    let highlighted = highlight::highlight(&line);
+    let highlighted = if color {
+        highlight::highlight(&line)
+    } else {
+        line.clone()
+    };
     let out = format!(
         "\r{}{}{}{}",
         prompt,
