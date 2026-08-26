@@ -455,13 +455,13 @@ fn eqp_reports_predicate_pushed_into_view_uses_index() {
     run_exec_ok(&db, "CREATE VIEW v AS SELECT x FROM t");
     let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM v WHERE x = 15");
     let output = String::from_utf8_lossy(&output.stdout);
+    // #566: a plain single-table view like this one is now flattened
+    // away entirely rather than materialized-then-pushed-into, so the
+    // plan collapses to one direct row against the base table instead
+    // of a nested `SCAN (subquery) AS v` / `SEARCH t` pair.
     assert!(
-        output.contains("SCAN (subquery) AS v"),
-        "expected the outer row to report scanning the materialized view, got: {output}"
-    );
-    assert!(
-        output.contains("SEARCH t USING") && output.contains("INDEX t_x"),
-        "expected a nested SEARCH row naming the pushed-down index t_x, got: {output}"
+        output.contains("SEARCH t AS v USING") && output.contains("INDEX t_x"),
+        "expected a single flattened SEARCH row naming index t_x, got: {output}"
     );
 }
 
@@ -477,13 +477,12 @@ fn eqp_reports_predicate_pushed_into_star_view_uses_covering_index() {
     run_exec_ok(&db, "CREATE VIEW v AS SELECT * FROM t");
     let output = run_query(&db, "EXPLAIN QUERY PLAN SELECT * FROM v WHERE x = 15");
     let output = String::from_utf8_lossy(&output.stdout);
+    // #566: flattened away entirely (see the sibling non-star test's
+    // comment above) — one direct covering-index row against `t`
+    // instead of a nested materialized-view pair.
     assert!(
-        output.contains("SCAN (subquery) AS v"),
-        "expected the outer row to report scanning the materialized view, got: {output}"
-    );
-    assert!(
-        output.contains("SEARCH t USING COVERING INDEX t_x"),
-        "expected a nested covering-index SEARCH row for t_x, got: {output}"
+        output.contains("SEARCH t AS v USING COVERING INDEX t_x"),
+        "expected a single flattened covering-index SEARCH row for t_x, got: {output}"
     );
 }
 
