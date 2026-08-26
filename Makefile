@@ -10,9 +10,12 @@
 #   - src/vfs/ is the designated `dyn` boundary (its `Vfs`/`VfsFile`/
 #     `SharedLockGuard` trait objects): exclude exactly that module here so
 #     the claim stays explicit — everything above the VFS is in the
-#     qualified subset. It no longer needs `unsafe` (#66): `fcntl`/`-shm`
-#     access goes through safe `nix`/`std` APIs, and the crate is
-#     `#![forbid(unsafe_code)]` with no local override anywhere.
+#     qualified subset. It no longer needs `unsafe` itself (#66): `fcntl`/
+#     `-shm` access goes through the safe wrappers in `src/sys/` (#563,
+#     vendored FFI — the crate's sole `#![allow(unsafe_code)]` carve-out;
+#     see .openspec/adr/0031-vendor-nix-subset.md). `src/lib.rs` is
+#     `#![deny(unsafe_code)]` everywhere else, with no override possible
+#     outside `src/sys/`.
 #   - src/vdbe/exec.rs and src/vdbe/cursor.rs carry that same VFS boundary
 #     one level up, as `Rc<dyn PageSource>` (#90, permanent per ADR-0013,
 #     #114 considered and rejected). The erasure is the point:
@@ -32,7 +35,7 @@
 # precisely so the file stays limit-clean (and so the check survives into
 # release builds).
 MVL_LIMIT ?= cargo-mvl-limit
-MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/memory.rs src/vfs/unix.rs src/vfs/page_source.rs src/vdbe/exec.rs src/vdbe/cursor.rs src/bin/*
+MVL_LIMIT_EXCLUDE := src/vfs.rs src/vfs/memory.rs src/vfs/unix.rs src/vfs/page_source.rs src/vdbe/exec.rs src/vdbe/cursor.rs src/bin/* src/sys.rs src/sys/*
 
 COVERAGE_MIN := 80
 
@@ -189,7 +192,7 @@ vendor: ## Supply-chain: cargo vendor vendor/ for local inspection of exact upst
 grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict
 
-mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; the 4 files with genuine dyn Vfs/VfsFile/SharedLockGuard trait objects, the 2 VDBE files with the Rc<dyn PageSource> boundary (#90, #114), and src/bin (stdout/stderr CLI I/O boundary), exempt — #66 removed the unsafe rationale from src/vfs/lock.rs, shm.rs, test_lock_probe.rs, so those are back in the qualified subset)
+mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; the 4 files with genuine dyn Vfs/VfsFile/SharedLockGuard trait objects, the 2 VDBE files with the Rc<dyn PageSource> boundary (#90, #114), src/bin (stdout/stderr CLI I/O boundary), and src/sys/ (vendored fcntl/termios FFI, #563 — the crate's sole unsafe carve-out, see .openspec/adr/0031-vendor-nix-subset.md), exempt — #66 removed the unsafe rationale from src/vfs/lock.rs, shm.rs, test_lock_probe.rs, so those are back in the qualified subset)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
 	  echo "error: $(MVL_LIMIT) not found."; \
 	  echo "install: cargo install cargo-mvl  (or build from mvl-lang/mvl-rust:"; \

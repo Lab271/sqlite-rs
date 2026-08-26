@@ -6,7 +6,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use nix::libc;
+use crate::sys::fcntl::{EACCES, EAGAIN};
 
 use super::{companion_path, lock, shm, FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
 
@@ -272,7 +272,7 @@ fn to_vfs_error(path: &Path, source: std::io::Error) -> VfsError {
 /// this lock" from an ordinary I/O failure.
 fn to_lock_error(path: &Path, source: std::io::Error) -> VfsError {
     match source.raw_os_error() {
-        Some(libc::EAGAIN) | Some(libc::EACCES) => VfsError::Locked {
+        Some(EAGAIN) | Some(EACCES) => VfsError::Locked {
             path: path.display().to_string(),
         },
         _ => to_vfs_error(path, source),

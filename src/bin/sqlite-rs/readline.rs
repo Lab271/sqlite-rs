@@ -1,5 +1,6 @@
 //! Hand-rolled line editor (#558), replacing `rustyline` (#551) so the
-//! CLI binary depends on nothing but `nix`. Public surface mirrors what
+//! CLI binary depends on nothing but `sqlite_rs::sys` (vendored terminal
+//! FFI, #563). Public surface mirrors what
 //! `repl.rs` used from `rustyline::DefaultEditor`: [`Readline::new`],
 //! [`Readline::read_line`], [`Readline::add_history_entry`],
 //! [`Readline::load_history`]/[`Readline::save_history`].
@@ -246,7 +247,7 @@ fn is_tty() -> bool {
     // (`tcgetattr` fails on a non-tty); this just short-circuits before
     // touching the terminal at all when stdin is obviously piped.
     use std::os::fd::AsFd;
-    nix::unistd::isatty(io::stdin().as_fd()).unwrap_or(false)
+    sqlite_rs::sys::termios::is_tty(io::stdin().as_fd())
 }
 
 fn read_line_plain(prompt: &str) -> Result<String, ReadlineError> {

@@ -1,9 +1,10 @@
-//! Journal-mode SHARED byte-range locking via `nix::fcntl` (safe wrapper
-//! over POSIX `fcntl(F_SETLK)`). `src/vfs/` used to be the crate's sole
+//! Journal-mode SHARED byte-range locking via `crate::sys::fcntl` (a
+//! vendored safe wrapper over POSIX `fcntl(F_SETLK)`, #563 — previously
+//! `nix::fcntl`). `src/vfs/` used to be the crate's sole
 //! `#![allow(unsafe_code)]` carve-out (see the Makefile's `mvl-limit`
 //! boundary-policy comment); with this module's `unsafe fcntl`/`mmap`/
-//! `fork` calls replaced by safe `nix`/`std` APIs, `src/lib.rs` now
-//! `#![forbid(unsafe_code)]` crate-wide (#66).
+//! `fork` calls replaced by safe `nix`/`std` APIs (#66), that carve-out
+//! moved to `src/sys/` — see `.openspec/adr/0031-vendor-nix-subset.md`.
 //!
 //! Byte offsets verified against SQLite's own source (`os_unix.c`) by
 //! spike 005 (`tests/spike/005_locking_interop/findings.md`) — not
@@ -14,8 +15,7 @@
 use std::fs::File;
 use std::io;
 
-use nix::fcntl::{fcntl, FcntlArg};
-use nix::libc::{self, off_t};
+use crate::sys::fcntl::{fcntl_call, off_t, FcntlArg, F_RDLCK, F_UNLCK, F_WRLCK};
 
 /// SQLite's `PENDING_BYTE` (`os_unix.c`): base of the reserved lock-byte
 /// page.
@@ -127,21 +127,21 @@ impl FileLockState {
                 // new reader must explicitly probe PENDING_BYTE first —
                 // that's what actually stops a new SHARED lock from
                 // starting once a writer is mid-ladder.
-                fcntl_lock(&self.file, libc::F_RDLCK, PENDING_BYTE, 1)?;
-                fcntl_lock(&self.file, libc::F_UNLCK, PENDING_BYTE, 1)?;
-                fcntl_lock(&self.file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
+                fcntl_lock(&self.file, F_RDLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, F_UNLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
                 self.level = LockLevel::Shared;
             }
             LockLevel::Shared => {
-                fcntl_lock(&self.file, libc::F_WRLCK, RESERVED_BYTE, 1)?;
+                fcntl_lock(&self.file, F_WRLCK, RESERVED_BYTE, 1)?;
                 self.level = LockLevel::Reserved;
             }
             LockLevel::Reserved => {
-                fcntl_lock(&self.file, libc::F_WRLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, F_WRLCK, PENDING_BYTE, 1)?;
                 self.level = LockLevel::Pending;
             }
             LockLevel::Pending => {
-                fcntl_lock(&self.file, libc::F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
+                fcntl_lock(&self.file, F_WRLCK, SHARED_FIRST, SHARED_SIZE)?;
                 self.level = LockLevel::Exclusive;
             }
             LockLevel::Exclusive => {}
@@ -155,19 +155,19 @@ impl FileLockState {
                 // Downgrade the SHARED range back to a read lock rather
                 // than dropping it — PENDING is still held below, so this
                 // stays a real ladder level (Pending), not a gap.
-                fcntl_lock(&self.file, libc::F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
+                fcntl_lock(&self.file, F_RDLCK, SHARED_FIRST, SHARED_SIZE)?;
                 self.level = LockLevel::Pending;
             }
             LockLevel::Pending => {
-                fcntl_lock(&self.file, libc::F_UNLCK, PENDING_BYTE, 1)?;
+                fcntl_lock(&self.file, F_UNLCK, PENDING_BYTE, 1)?;
                 self.level = LockLevel::Reserved;
             }
             LockLevel::Reserved => {
-                fcntl_lock(&self.file, libc::F_UNLCK, RESERVED_BYTE, 1)?;
+                fcntl_lock(&self.file, F_UNLCK, RESERVED_BYTE, 1)?;
                 self.level = LockLevel::Shared;
             }
             LockLevel::Shared => {
-                fcntl_lock(&self.file, libc::F_UNLCK, SHARED_FIRST, SHARED_SIZE)?;
+                fcntl_lock(&self.file, F_UNLCK, SHARED_FIRST, SHARED_SIZE)?;
                 self.level = LockLevel::Unlocked;
             }
             LockLevel::Unlocked => {}
@@ -189,44 +189,34 @@ impl Drop for FileLockState {
 /// If this process itself already holds the byte, `F_GETLK` reports
 /// `F_UNLCK` (a process never conflicts with its own lock), which is
 /// exactly the "am I clear to escalate" answer callers need.
+/// `SEEK_SET`: shares the same numeric value (0) on macOS and Linux.
+const SEEK_SET: i16 = 0;
+
 fn check_reserved_lock(file: &File) -> io::Result<bool> {
-    let mut fl = libc::flock {
-        l_type: libc::F_WRLCK as _,
-        l_whence: libc::SEEK_SET as _,
+    let mut fl = crate::sys::fcntl::flock {
+        l_type: F_WRLCK,
+        l_whence: SEEK_SET,
         l_start: RESERVED_BYTE,
         l_len: 1,
         l_pid: 0,
     };
-    fcntl(file, FcntlArg::F_GETLK(&mut fl)).map_err(io::Error::from)?;
-    Ok(fl.l_type != libc::F_UNLCK as _)
+    fcntl_call(file, FcntlArg::F_GETLK(&mut fl))?;
+    Ok(fl.l_type != F_UNLCK)
 }
 
 /// Generic byte-range `fcntl(F_SETLK)` primitive — used both for the
 /// journal-mode SHARED lock above and (via `pub(crate)`) for the WAL
 /// `-shm` reader-mark lock bytes in `src/vfs/shm.rs`; the underlying
 /// syscall is identical, only the byte offsets differ.
-pub(crate) fn fcntl_lock(
-    file: &File,
-    kind: impl Into<i32>,
-    start: off_t,
-    len: off_t,
-) -> io::Result<()> {
-    // `libc::F_RDLCK`/`F_WRLCK`/`F_UNLCK` are `i16` on macOS but already
-    // `i32` on Linux glibc — `Into<i32>` normalizes both without an `as`
-    // cast or `i32::from` call visible at any call site, which clippy
-    // would otherwise flag as redundant on whichever platform the
-    // constant is already `i32`.
-    let kind: i32 = kind.into();
-    let fl = libc::flock {
-        l_type: kind as _,
-        l_whence: libc::SEEK_SET as _,
+pub(crate) fn fcntl_lock(file: &File, kind: i16, start: off_t, len: off_t) -> io::Result<()> {
+    let fl = crate::sys::fcntl::flock {
+        l_type: kind,
+        l_whence: SEEK_SET,
         l_start: start,
         l_len: len,
         l_pid: 0,
     };
-    fcntl(file, FcntlArg::F_SETLK(&fl))
-        .map(|_| ())
-        .map_err(io::Error::from)
+    fcntl_call(file, FcntlArg::F_SETLK(&fl)).map(|_| ())
 }
 
 /// Test-only: whether a non-blocking EXCLUSIVE lock on `path`'s SHARED-lock

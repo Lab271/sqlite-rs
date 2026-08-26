@@ -6,6 +6,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Changed
+
+- Vendored the `nix` crate's `fcntl`/`termios` FFI into `src/sys/`
+  (#563): hand-written `unsafe extern "C"` bindings and per-platform
+  (macOS/Linux) ABI structs for POSIX byte-range file locking
+  (`src/vfs/lock.rs`'s cross-process database locking) and raw-mode
+  terminal control (the CLI readline, #558). `nix` is removed from
+  `Cargo.toml` — **sqlite-rs now has zero external dependencies**.
+  `src/lib.rs`'s `#![forbid(unsafe_code)]` (ADR-0009) is narrowed to
+  `#![deny(unsafe_code)]` with a single scoped `#![allow(unsafe_code)]`
+  in `src/sys/`; every other module stays unsafe-free. See
+  [ADR-0031](.openspec/adr/0031-vendor-nix-subset.md).
+
 ### Added
 
 - Automatic index for unindexed equality join columns (#545): when a

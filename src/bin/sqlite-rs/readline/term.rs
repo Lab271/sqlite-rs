@@ -6,7 +6,7 @@
 use std::io::{self, Read, Write};
 use std::os::fd::BorrowedFd;
 
-use nix::sys::termios::{self, SetArg, Termios};
+use sqlite_rs::sys::termios::{self, termios as Termios, SetArg};
 
 /// stdin's file descriptor is always 0 on POSIX; borrowing it directly
 /// (rather than through `io::stdin()`) avoids taking ownership of — and
@@ -25,13 +25,13 @@ impl RawMode {
     /// case, same as the old `rustyline` behavior.
     pub fn enable() -> io::Result<Option<Self>> {
         let fd = unsafe { BorrowedFd::borrow_raw(STDIN_FD) };
-        let original = match termios::tcgetattr(fd) {
+        let original = match termios::tcgetattr_call(fd) {
             Ok(t) => t,
             Err(_) => return Ok(None), // not a tty
         };
-        let mut raw = original.clone();
-        termios::cfmakeraw(&mut raw);
-        termios::tcsetattr(fd, SetArg::TCSAFLUSH, &raw).map_err(io::Error::from)?;
+        let mut raw = original;
+        termios::cfmakeraw_call(&mut raw);
+        termios::tcsetattr_call(fd, SetArg::TCSAFLUSH, &raw)?;
         Ok(Some(RawMode { original }))
     }
 }
@@ -39,7 +39,7 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let fd = unsafe { BorrowedFd::borrow_raw(STDIN_FD) };
-        termios::tcsetattr(fd, SetArg::TCSAFLUSH, &self.original).ok();
+        termios::tcsetattr_call(fd, SetArg::TCSAFLUSH, &self.original).ok();
     }
 }
 

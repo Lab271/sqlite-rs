@@ -1,6 +1,11 @@
 # 0009 — Zero unsafe: safe syscall wrappers and pread over mmap
 
-**Status:** Accepted · **Date:** 2026-08-15 (supersedes the fenced-boundary policy of 0.3.0)
+**Status:** Partially superseded by [ADR-0031](0031-vendor-nix-subset.md)
+(2026-08-26) — that ADR reintroduces one narrow `unsafe` boundary in
+`src/sys/` to vendor `nix`'s FFI for supply-chain reasons; this ADR's
+`src/vfs/lock.rs`/`shm.rs`/`test_lock_probe.rs` subject matter (getting
+`unsafe` out of the *locking logic*) still stands unchanged. ·
+**Date:** 2026-08-15 (supersedes the fenced-boundary policy of 0.3.0)
 
 *(Generalizes ADR-0001, which records the `-shm` pread-not-mmap sub-decision in detail.)*
 

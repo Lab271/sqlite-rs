@@ -19,18 +19,20 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 
-use nix::fcntl::{fcntl, FcntlArg};
-use nix::libc::{self, off_t};
+use sqlite_rs::sys::fcntl::{fcntl_call, flock, off_t, FcntlArg, F_RDLCK, F_WRLCK};
 
-fn flock_for(kind: &str, start: off_t, len: off_t) -> libc::flock {
+/// `SEEK_SET`: shares the same numeric value (0) on macOS and Linux.
+const SEEK_SET: i16 = 0;
+
+fn flock_for(kind: &str, start: off_t, len: off_t) -> flock {
     let l_type = match kind {
-        "rdlock" => libc::F_RDLCK,
-        "wrlock" => libc::F_WRLCK,
+        "rdlock" => F_RDLCK,
+        "wrlock" => F_WRLCK,
         other => panic!("unknown lock kind: {other}"),
     };
-    libc::flock {
-        l_type: l_type as _,
-        l_whence: libc::SEEK_SET as _,
+    flock {
+        l_type,
+        l_whence: SEEK_SET,
         l_start: start,
         l_len: len,
         l_pid: 0,
@@ -64,11 +66,11 @@ fn main() {
 
     match mode.as_str() {
         "trylock" => {
-            let ok = fcntl(&file, FcntlArg::F_SETLK(&fl)).is_ok();
+            let ok = fcntl_call(&file, FcntlArg::F_SETLK(&fl)).is_ok();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "holdlock" => {
-            fcntl(&file, FcntlArg::F_SETLKW(&fl)).expect("blocking lock");
+            fcntl_call(&file, FcntlArg::F_SETLKW(&fl)).expect("blocking lock");
             println!("locked");
             std::io::stdout().flush().expect("flush stdout");
             let mut line = String::new();

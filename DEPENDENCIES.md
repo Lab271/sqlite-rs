@@ -4,9 +4,11 @@ sqlite-rs targets security-sensitive contexts (forensics, FRANK). Minimal
 dependencies is a deliberate stance, not an oversight: every dependency is
 a trust boundary, and proc macros in particular execute arbitrary code at
 build time. As of #553, production code has **zero proc-macro
-dependencies**; as of #558, the CLI's line editor is also hand-rolled,
-leaving `nix` as the sole production dependency (see
-[ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md)).
+dependencies**; as of #558, the CLI's line editor is also hand-rolled; as
+of #563, the `nix` crate's `fcntl`/`termios` FFI is vendored into
+`src/sys/` (see [ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md)
+and [ADR-0031](.openspec/adr/0031-vendor-nix-subset.md)). **sqlite-rs now
+has zero production dependencies.**
 
 This file is the audit trail for that stance — every direct dependency,
 why it's here, and what was considered instead. Supply-chain policy
@@ -17,14 +19,19 @@ database). Both run in CI's `lint-and-supply-chain` job.
 
 ## Production dependencies
 
-| Crate | Version | License | Purpose | Maintenance | Alternatives considered |
-|-------|---------|---------|---------|-------------|--------------------------|
-| [`nix`](https://crates.io/crates/nix) | 0.31 | MIT | POSIX file locking (`flock`, via the `fs` feature) for `src/vfs/lock.rs`'s cross-process database locking, and raw-mode termios (`term` feature) for the CLI's hand-rolled readline (#558) | Actively maintained, ~150 contributors, widely used across the Rust ecosystem | Hand-rolling raw `libc::flock`/termios FFI — rejected: `nix` gives safe wrappers over the same syscalls with no proc-macro cost and no meaningful trust-surface increase over `libc` itself |
+None. `sqlite-rs` has zero external production dependencies.
 
-`nix` is now the sole production dependency; it pulls in no proc-macro
-dependency of its own (verify with `cargo tree -e features` if that ever
-changes). `rustyline` (formerly listed here, #551) was replaced by a
-hand-rolled readline in `src/bin/sqlite-rs/readline/` (#558) — see
+POSIX byte-range file locking (`src/vfs/lock.rs`'s cross-process database
+locking) and raw-mode termios (the CLI's hand-rolled readline, #558) both
+need syscalls no pure-Rust/`std` API covers. Rather than depend on `nix`
+(safe wrappers) or `libc` (raw FFI + ABI structs) for those, #563 vendors
+the ~180 lines actually needed — hand-written `unsafe extern "C"` bindings
+plus the per-platform `struct flock`/`struct termios` ABI layouts (macOS
+and Linux, verified against each platform's own headers) — into
+`src/sys/`. See [ADR-0031](.openspec/adr/0031-vendor-nix-subset.md) for
+the rationale and what was rejected. `rustyline` (formerly listed here,
+#551) was replaced by a hand-rolled readline in
+`src/bin/sqlite-rs/readline/` (#558) — see
 [ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md).
 
 ## Development-only dependencies

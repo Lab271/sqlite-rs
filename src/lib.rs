@@ -7,11 +7,15 @@
 //! `include_str!` can't pull the README in directly here: `src/` is a
 //! qualified Rust subset checked by `make mvl-limit` (mvl-rust rust-limit),
 //! which doesn't allowlist that macro.
-// Crate-wide, with no local override possible: `src/vfs/lock.rs` and
-// `src/vfs/shm.rs` used to need a scoped `#![allow(unsafe_code)]` for raw
-// `fcntl`/`mmap`/`fork` calls (#50); both are now safe `nix`/`std` APIs
-// (#66), so nothing in this crate needs `unsafe` anymore.
-#![forbid(unsafe_code)]
+// `src/vfs/lock.rs` and `src/vfs/shm.rs` used to need a scoped
+// `#![allow(unsafe_code)]` for raw `fcntl`/`mmap`/`fork` calls (#50), then
+// went unsafe-free entirely under `nix`/`std` (#66). Vendoring `nix`'s
+// `fcntl`/`termios` FFI (#563) reintroduces one, deliberately narrow,
+// carve-out: `src/sys/` — see `.openspec/adr/0031-vendor-nix-subset.md`.
+// `deny` (rather than `forbid`) is what makes that local
+// `#![allow(unsafe_code)]` possible; every other module is still held to
+// zero `unsafe` by this crate-wide default.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod btree;
@@ -25,5 +29,6 @@ pub mod parser;
 pub mod planner;
 pub mod record;
 pub mod schema;
+pub mod sys;
 pub mod vdbe;
 pub mod vfs;
