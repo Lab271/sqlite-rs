@@ -36,6 +36,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   key", never a range. Supersedes the existing Bloom-filter join
   pre-pass (#464) whenever both are eligible for the same level.
 
+- Hash join for equi-joins (#547): #545's automatic-index multi-map now
+  backs onto a `HashMap` instead of a `BTreeMap` — true O(1) amortized
+  build/probe (nothing ever walked it in key order). `EXPLAIN QUERY
+  PLAN` also now reports this path (`SEARCH t USING AUTOMATIC COVERING
+  INDEX (col=?)`, matching real sqlite3's own wording) instead of
+  silently falling through to a plain `SCAN` in the human-readable
+  plan while the compiled program used the index at runtime.
+
 - Readline-style line editing and persistent history for the REPL
   (#551), hand-rolled from scratch rather than depending on `rustyline`
   (#558, superseding #551's original `rustyline`-based approach before
