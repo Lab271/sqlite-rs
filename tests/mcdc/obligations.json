@@ -1,0 +1,4763 @@
+[
+  {
+    "id": "btree_81",
+    "file": "src/btree.rs",
+    "line": 81,
+    "decision": "match self {\n            #[allow(\n                clippy::indexing_slicing,\n                reason = \"start/len are computed from a validated in-bounds slice at construction (reassemble_payload)\"\n            )]\n            Payload::Local { page, start, len } => &page[*start..start.saturating_add(*len)],\n            Payload::Owned(bytes) => bytes,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_238",
+    "file": "src/btree.rs",
+    "line": 238,
+    "decision": "!self.positioned_reverse",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_297",
+    "file": "src/btree.rs",
+    "line": 297,
+    "decision": "visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_310",
+    "file": "src/btree.rs",
+    "line": 310,
+    "decision": "match page_type {\n                LEAF_TABLE => {\n                    let cell_ptr_base = header_start.saturating_add(8);\n                    // Leaf cells are stored in rowid-ascending order by\n                    // pointer-array index (see the module's ordering\n                    // invariant), so a binary search over `i` decodes only\n                    // O(log n) cells instead of scanning every cell on the\n                    // page — this matters a lot for repeated seeks (e.g. a\n                    // join probing the same small table per outer row).\n                    let mut lo = 0usize;\n                    let mut hi = num_cells;\n                    while lo < hi {\n                        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);\n                        let cell_start = read_cell_pointer(\n                            &page,\n                            cell_ptr_offset(cell_ptr_base, mid),\n                            page_num,\n                            mid,\n                        )?;\n                        let (rowid, payload_len, tail_start) =\n                            decode_cell_head(&page, cell_start, page_num)?;\n                        match rowid.cmp(&target_rowid) {\n                            std::cmp::Ordering::Equal => {\n                                self.current = Some(CurrentCell {\n                                    page: Rc::clone(&page),\n                                    page_num,\n                                    tail_start,\n                                    payload_len,\n                                });\n                                return Ok(Some(rowid));\n                            }\n                            std::cmp::Ordering::Less => lo = mid.saturating_add(1),\n                            std::cmp::Ordering::Greater => hi = mid,\n                        }\n                    }\n                    return Ok(None);\n                }\n                INTERIOR_TABLE => {\n                    require_interior_header(&page, header_start, page_num)?;\n                    let cell_ptr_base = header_start.saturating_add(12);\n                    let rightmost = read_u32(&page, header_start.saturating_add(8), page_num)?;\n                    // Interior separator keys are ascending by pointer-array\n                    // index too; binary search for the leftmost `i` with\n                    // `target_rowid <= key(i)` (the child to descend into),\n                    // falling back to `rightmost` when none qualifies —\n                    // same semantics as the old early-break linear scan.\n                    let mut lo = 0usize;\n                    let mut hi = num_cells;\n                    let mut next_page = rightmost;\n                    while lo < hi {\n                        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);\n                        let cell_start = read_cell_pointer(\n                            &page,\n                            cell_ptr_offset(cell_ptr_base, mid),\n                            page_num,\n                            mid,\n                        )?;\n                        let key_bytes = page.get(cell_start.saturating_add(4)..).ok_or(\n                            BtreeError::InvalidCellPointer {\n                                page_num,\n                                index: mid,\n                            },\n                        )?;\n                        let (key, _) = decode_varint(key_bytes)\n                            .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;\n                        if target_rowid <= key as i64 {\n                            let child = read_u32(&page, cell_start, page_num)?;\n                            next_page = child;\n                            hi = mid;\n                        } else {\n                            lo = mid.saturating_add(1);\n                        }\n                    }\n                    page_num = next_page;\n                }\n                other => {\n                    return Err(BtreeError::UnexpectedPageType {\n                        page_num,\n                        page_type: other,\n                    })\n                }\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_321",
+    "file": "src/btree.rs",
+    "line": 321,
+    "decision": "lo < hi",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_331",
+    "file": "src/btree.rs",
+    "line": 331,
+    "decision": "match rowid.cmp(&target_rowid) {\n                            std::cmp::Ordering::Equal => {\n                                self.current = Some(CurrentCell {\n                                    page: Rc::clone(&page),\n                                    page_num,\n                                    tail_start,\n                                    payload_len,\n                                });\n                                return Ok(Some(rowid));\n                            }\n                            std::cmp::Ordering::Less => lo = mid.saturating_add(1),\n                            std::cmp::Ordering::Greater => hi = mid,\n                        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_359",
+    "file": "src/btree.rs",
+    "line": 359,
+    "decision": "lo < hi",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_375",
+    "file": "src/btree.rs",
+    "line": 375,
+    "decision": "target_rowid <= key as i64",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_407",
+    "file": "src/btree.rs",
+    "line": 407,
+    "decision": "self.pages_visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_427",
+    "file": "src/btree.rs",
+    "line": 427,
+    "decision": "match page_type {\n            LEAF_TABLE => false,\n            INTERIOR_TABLE => true,\n            other => {\n                return Err(BtreeError::UnexpectedPageType {\n                    page_num,\n                    page_type: other,\n                })\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_437",
+    "file": "src/btree.rs",
+    "line": 437,
+    "decision": "is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_441",
+    "file": "src/btree.rs",
+    "line": 441,
+    "decision": "is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_454",
+    "file": "src/btree.rs",
+    "line": 454,
+    "decision": "reverse",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_468",
+    "file": "src/btree.rs",
+    "line": 468,
+    "decision": "match self.stack.len() {\n                0 => {\n                    self.current = None;\n                    return Ok(None);\n                }\n                n => n.saturating_sub(1),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_486",
+    "file": "src/btree.rs",
+    "line": 486,
+    "decision": "!is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_487",
+    "file": "src/btree.rs",
+    "line": 487,
+    "decision": "next_cell >= num_cells",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_495",
+    "file": "src/btree.rs",
+    "line": 495,
+    "decision": "next_cell < num_cells",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_499",
+    "file": "src/btree.rs",
+    "line": 499,
+    "decision": "!rightmost_done",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_526",
+    "file": "src/btree.rs",
+    "line": 526,
+    "decision": "match self.stack.len() {\n                0 => {\n                    self.current = None;\n                    return Ok(None);\n                }\n                n => n.saturating_sub(1),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_538",
+    "file": "src/btree.rs",
+    "line": 538,
+    "decision": "!is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_539",
+    "file": "src/btree.rs",
+    "line": 539,
+    "decision": "next_cell == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_548",
+    "file": "src/btree.rs",
+    "line": 548,
+    "decision": "!rightmost_done",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_551",
+    "file": "src/btree.rs",
+    "line": 551,
+    "decision": "next_cell > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_615",
+    "file": "src/btree.rs",
+    "line": 615,
+    "decision": "payload_len <= max_local",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_626",
+    "file": "src/btree.rs",
+    "line": 626,
+    "decision": "k <= max_local",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_641",
+    "file": "src/btree.rs",
+    "line": 641,
+    "decision": "payload_len > MAX_PAYLOAD_LEN",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_654",
+    "file": "src/btree.rs",
+    "line": 654,
+    "decision": "local_size as u64 == payload_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_684",
+    "file": "src/btree.rs",
+    "line": 684,
+    "decision": "remaining > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_685",
+    "file": "src/btree.rs",
+    "line": 685,
+    "decision": "overflow_page == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_688",
+    "file": "src/btree.rs",
+    "line": 688,
+    "decision": "!visited_overflow_pages.insert(overflow_page)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_695",
+    "file": "src/btree.rs",
+    "line": 695,
+    "decision": "hops > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_735",
+    "file": "src/btree.rs",
+    "line": 735,
+    "decision": "visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_745",
+    "file": "src/btree.rs",
+    "line": 745,
+    "decision": "page_type == LEAF_TABLE",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_747",
+    "file": "src/btree.rs",
+    "line": 747,
+    "decision": "page_type == INTERIOR_TABLE",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_752",
+    "file": "src/btree.rs",
+    "line": 752,
+    "decision": "rowid <= *key",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_800",
+    "file": "src/btree.rs",
+    "line": 800,
+    "decision": "*visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_810",
+    "file": "src/btree.rs",
+    "line": 810,
+    "decision": "match page_type {\n        LEAF_TABLE => {}\n        INTERIOR_TABLE => {\n            let (entries, rightmost) = collect_interior_entries(&buf, header_start, page_num)?;\n            for (child, _) in &entries {\n                free_btree_pages_inner(pager, *child, usable_size, encoding, visited)?;\n            }\n            free_btree_pages_inner(pager, rightmost, usable_size, encoding, visited)?;\n        }\n        t if t == index::LEAF_INDEX => {}\n        t if t == index::INTERIOR_INDEX => {\n            let (entries, rightmost) = index::collect_index_interior_entries(\n                &*pager,\n                &buf,\n                header_start,\n                page_num,\n                usable_size,\n                encoding,\n            )?;\n            for (child, _, _) in &entries {\n                free_btree_pages_inner(pager, *child, usable_size, encoding, visited)?;\n            }\n            free_btree_pages_inner(pager, rightmost, usable_size, encoding, visited)?;\n        }\n        _ => {\n            return Err(BtreeError::UnexpectedPageType {\n                page_num,\n                page_type,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_819",
+    "file": "src/btree.rs",
+    "line": 819,
+    "decision": "t == index::LEAF_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_820",
+    "file": "src/btree.rs",
+    "line": 820,
+    "decision": "t == index::INTERIOR_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_867",
+    "file": "src/btree.rs",
+    "line": 867,
+    "decision": "*visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_877",
+    "file": "src/btree.rs",
+    "line": 877,
+    "decision": "match page_type {\n        LEAF_TABLE => {\n            let num_cells = read_num_cells(&buf, header_start, page_num)?;\n            #[allow(\n                clippy::cast_possible_wrap,\n                reason = \"num_cells is a page's cell count, always <= u16::MAX by file-format construction\"\n            )]\n            let num_cells = num_cells as i64;\n            *total = total.saturating_add(num_cells);\n        }\n        INTERIOR_TABLE => {\n            let (entries, rightmost) = collect_interior_entries(&buf, header_start, page_num)?;\n            for (child, _) in &entries {\n                count_table_rows_inner(source, *child, visited, total)?;\n            }\n            count_table_rows_inner(source, rightmost, visited, total)?;\n        }\n        _ => {\n            return Err(BtreeError::UnexpectedPageType {\n                page_num,\n                page_type,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_926",
+    "file": "src/btree.rs",
+    "line": 926,
+    "decision": "has_overflow",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1076",
+    "file": "src/btree.rs",
+    "line": 1076,
+    "decision": "*off >= 65536",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1095",
+    "file": "src/btree.rs",
+    "line": 1095,
+    "decision": "content_end >= 65536",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1152",
+    "file": "src/btree.rs",
+    "line": 1152,
+    "decision": "v == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1161",
+    "file": "src/btree.rs",
+    "line": 1161,
+    "decision": "value >= 65536",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1208",
+    "file": "src/btree.rs",
+    "line": 1208,
+    "decision": "off != 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1210",
+    "file": "src/btree.rs",
+    "line": 1210,
+    "decision": "n > MAX_FREEBLOCKS",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1254",
+    "file": "src/btree.rs",
+    "line": 1254,
+    "decision": "insert_pos > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1256",
+    "file": "src/btree.rs",
+    "line": 1256,
+    "decision": "prev_off.saturating_add(prev_size) == new_start",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1265",
+    "file": "src/btree.rs",
+    "line": 1265,
+    "decision": "new_start.saturating_add(new_size) == next_off",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1296",
+    "file": "src/btree.rs",
+    "line": 1296,
+    "decision": "content_start < ptr_end || content_start.saturating_sub(ptr_end) < needed",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1340",
+    "file": "src/btree.rs",
+    "line": 1340,
+    "decision": "index >= num_cells",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1348",
+    "file": "src/btree.rs",
+    "line": 1348,
+    "decision": "has_rowid",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1358",
+    "file": "src/btree.rs",
+    "line": 1358,
+    "decision": "has_overflow",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1375",
+    "file": "src/btree.rs",
+    "line": 1375,
+    "decision": "cell_start == content_start",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1384",
+    "file": "src/btree.rs",
+    "line": 1384,
+    "decision": "cell_len < MIN_FREEBLOCK_SIZE",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1401",
+    "file": "src/btree.rs",
+    "line": 1401,
+    "decision": "page_num == 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1439",
+    "file": "src/btree.rs",
+    "line": 1439,
+    "decision": "page.len() < header_start.saturating_add(12)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_1576",
+    "file": "src/btree.rs",
+    "line": 1576,
+    "decision": "match v {\n            Value::Text(s) => s,\n            other => panic!(\"expected text, got {other:?}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_1583",
+    "file": "src/btree.rs",
+    "line": 1583,
+    "decision": "match v {\n            Value::Integer(i) => *i,\n            other => panic!(\"expected integer, got {other:?}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_1590",
+    "file": "src/btree.rs",
+    "line": 1590,
+    "decision": "match v {\n            Value::Blob(b) => b,\n            other => panic!(\"expected blob, got {other:?}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "btree_1868",
+    "file": "src/btree.rs",
+    "line": 1868,
+    "decision": "msg.len() % 64 != 56",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_2075",
+    "file": "src/btree.rs",
+    "line": 2075,
+    "decision": "value < 0x80",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_2083",
+    "file": "src/btree.rs",
+    "line": 2083,
+    "decision": "value == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_2089",
+    "file": "src/btree.rs",
+    "line": 2089,
+    "decision": "i + 1 == chunks.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "btree_2180",
+    "file": "src/btree.rs",
+    "line": 2180,
+    "decision": "match &row.payload {\n            Payload::Local { page, .. } => {\n                assert!(\n                    Rc::strong_count(page) >= 2,\n                    \"expected the row to share the page's Rc, not hold the only reference\"\n                );\n            }\n            Payload::Owned(_) => panic!(\"expected a borrowed Local payload, got an Owned copy\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "error_151",
+    "file": "src/btree/error.rs",
+    "line": 151,
+    "decision": "match self {\n            BtreeError::InvalidKeyRecord(source) => write!(f, \"decoding a key record: {source}\"),\n            BtreeError::PageSource { page_num, source } => {\n                write!(f, \"reading page {page_num}: {source}\")\n            }\n            BtreeError::PageTooShort { page_num, len } => write!(\n                f,\n                \"page {page_num} is too short ({len} bytes) to contain a b-tree page header\"\n            ),\n            BtreeError::CursorNotPositioned {\n                operation,\n                required,\n            } => write!(\n                f,\n                \"{operation} called on a cursor that was never positioned by {required}\"\n            ),\n            BtreeError::UnexpectedPageType {\n                page_num,\n                page_type,\n            } => write!(\n                f,\n                \"page {page_num} has unexpected b-tree page type {page_type:#x}\"\n            ),\n            BtreeError::InvalidCellPointer { page_num, index } => write!(\n                f,\n                \"page {page_num} cell pointer at index {index} is out of bounds\"\n            ),\n            BtreeError::InvalidCellVarint { page_num, source } => {\n                write!(f, \"page {page_num} cell varint decode failed: {source}\")\n            }\n            BtreeError::PayloadTooShort { page_num } => write!(\n                f,\n                \"page {page_num} cell payload is shorter than its declared local size\"\n            ),\n            BtreeError::PayloadTooLarge {\n                page_num,\n                payload_len,\n            } => write!(\n                f,\n                \"page {page_num} declares an implausible payload length {payload_len}\"\n            ),\n            BtreeError::OverflowChainTooLong { page_num, max } => write!(\n                f,\n                \"overflow chain from page {page_num} exceeded {max} pages (possible cycle)\"\n            ),\n            BtreeError::OverflowChainCycle {\n                page_num,\n                revisited_page,\n            } => write!(\n                f,\n                \"overflow chain from page {page_num} revisited page {revisited_page} (cycle)\"\n            ),\n            BtreeError::OverflowChainTruncated { page_num } => write!(\n                f,\n                \"overflow chain from page {page_num} ended before all payload bytes were read\"\n            ),\n            BtreeError::TraversalTooLong { max } => write!(\n                f,\n                \"b-tree traversal visited more than {max} pages (possible cycle)\"\n            ),\n            BtreeError::Pager(source) => write!(f, \"pager error: {source}\"),\n            BtreeError::DuplicateRowid { rowid } => {\n                write!(f, \"cannot insert duplicate rowid {rowid}\")\n            }\n            BtreeError::MissingChildRoute { page_num, child } => write!(\n                f,\n                \"interior page {page_num} has no routing entry for child page {child}\"\n            ),\n            BtreeError::RowidNotFound { rowid } => {\n                write!(f, \"cannot delete rowid {rowid}: no such row\")\n            }\n            BtreeError::DuplicateKey => write!(f, \"cannot insert duplicate index key\"),\n            BtreeError::KeyNotFound => write!(f, \"cannot delete index key: no such entry\"),\n            BtreeError::InvalidRootPage { name, rootpage } => write!(\n                f,\n                \"sqlite_master entry {name:?} has out-of-range rootpage {rootpage}\"\n            ),\n            BtreeError::MasterEntryNotFound { name } => write!(\n                f,\n                \"cannot delete sqlite_master entry {name:?}: no such entry\"\n            ),\n            BtreeError::Internal(msg) => write!(f, \"internal invariant violated: {msg}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_146",
+    "file": "src/btree/index.rs",
+    "line": 146,
+    "decision": "compare_keys(&key, target) != Ordering::Less",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_156",
+    "file": "src/btree/index.rs",
+    "line": 156,
+    "decision": "self.pages_visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_170",
+    "file": "src/btree/index.rs",
+    "line": 170,
+    "decision": "match page_type {\n            LEAF_INDEX => false,\n            INTERIOR_INDEX => true,\n            other => {\n                return Err(BtreeError::UnexpectedPageType {\n                    page_num,\n                    page_type: other,\n                })\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_180",
+    "file": "src/btree/index.rs",
+    "line": 180,
+    "decision": "is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_184",
+    "file": "src/btree/index.rs",
+    "line": 184,
+    "decision": "is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_210",
+    "file": "src/btree/index.rs",
+    "line": 210,
+    "decision": "match self.stack.len() {\n                0 => return Ok(None),\n                n => n.saturating_sub(1),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_219",
+    "file": "src/btree/index.rs",
+    "line": 219,
+    "decision": "!is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_220",
+    "file": "src/btree/index.rs",
+    "line": 220,
+    "decision": "step >= num_cells",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_229",
+    "file": "src/btree/index.rs",
+    "line": 229,
+    "decision": "step > total_steps",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_234",
+    "file": "src/btree/index.rs",
+    "line": 234,
+    "decision": "step == total_steps",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_236",
+    "file": "src/btree/index.rs",
+    "line": 236,
+    "decision": "step % 2 == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_258",
+    "file": "src/btree/index.rs",
+    "line": 258,
+    "decision": "frame.is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_284",
+    "file": "src/btree/index.rs",
+    "line": 284,
+    "decision": "match self.stack.len() {\n                0 => return Ok(None),\n                n => n.saturating_sub(1),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_293",
+    "file": "src/btree/index.rs",
+    "line": 293,
+    "decision": "!is_interior",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_294",
+    "file": "src/btree/index.rs",
+    "line": 294,
+    "decision": "step == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_303",
+    "file": "src/btree/index.rs",
+    "line": 303,
+    "decision": "step == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_309",
+    "file": "src/btree/index.rs",
+    "line": 309,
+    "decision": "a % 2 == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_311",
+    "file": "src/btree/index.rs",
+    "line": 311,
+    "decision": "child_index == num_cells",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_415",
+    "file": "src/btree/index.rs",
+    "line": 415,
+    "decision": "match v {\n        Value::Null => 0,\n        Value::Integer(_) | Value::Real(_) => 1,\n        Value::Text(_) => 2,\n        Value::Blob(_) => 3,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_425",
+    "file": "src/btree/index.rs",
+    "line": 425,
+    "decision": "ra != rb",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_428",
+    "file": "src/btree/index.rs",
+    "line": 428,
+    "decision": "match (a, b) {\n        (Value::Null, Value::Null) => Ordering::Equal,\n        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),\n        (Value::Real(x), Value::Real(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),\n        (Value::Integer(x), Value::Real(y)) => {\n            (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)\n        }\n        (Value::Real(x), Value::Integer(y)) => {\n            x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)\n        }\n        (Value::Text(x), Value::Text(y)) => x.as_bytes().cmp(y.as_bytes()),\n        (Value::Blob(x), Value::Blob(y)) => x.cmp(y),\n        _ => Ordering::Equal, // unreachable: value_rank already separated these\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_449",
+    "file": "src/btree/index.rs",
+    "line": 449,
+    "decision": "c != Ordering::Equal",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_530",
+    "file": "src/btree/index.rs",
+    "line": 530,
+    "decision": "has_overflow",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_598",
+    "file": "src/btree/index.rs",
+    "line": 598,
+    "decision": "visited > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_608",
+    "file": "src/btree/index.rs",
+    "line": 608,
+    "decision": "page_type == LEAF_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_613",
+    "file": "src/btree/index.rs",
+    "line": 613,
+    "decision": "page_type == INTERIOR_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_639",
+    "file": "src/btree/index.rs",
+    "line": 639,
+    "decision": "compare_keys(key, entry_key) == Ordering::Less",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "index_712",
+    "file": "src/btree/index.rs",
+    "line": 712,
+    "decision": "match v {\n            Value::Text(s) => s,\n            other => panic!(\"expected text, got {other:?}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_719",
+    "file": "src/btree/index.rs",
+    "line": 719,
+    "decision": "match v {\n            Value::Integer(i) => *i,\n            other => panic!(\"expected integer, got {other:?}\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "index_864",
+    "file": "src/btree/index.rs",
+    "line": 864,
+    "decision": "idx < expect_order.len() && text(&key[0]) == expect_order[idx]",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "index_885",
+    "file": "src/btree/index.rs",
+    "line": 885,
+    "decision": "match &row.payload {\n            Payload::Local { page, .. } => {\n                assert!(\n                    Rc::strong_count(page) >= 2,\n                    \"expected the row to share the page's Rc, not hold the only reference\"\n                );\n            }\n            Payload::Owned(_) => panic!(\"expected a borrowed Local payload, got an Owned copy\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "master_120",
+    "file": "src/btree/master.rs",
+    "line": 120,
+    "decision": "s.as_ref() == key",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_224",
+    "file": "src/btree/master.rs",
+    "line": 224,
+    "decision": "n.as_ref() == name",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_229",
+    "file": "src/btree/master.rs",
+    "line": 229,
+    "decision": "rootpage == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_264",
+    "file": "src/btree/master.rs",
+    "line": 264,
+    "decision": "n.as_ref() == table_name",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_272",
+    "file": "src/btree/master.rs",
+    "line": 272,
+    "decision": "match existing {\n        None => {\n            let next_rowid = max_rowid(pager, header, seq_root)?\n                .unwrap_or(0)\n                .saturating_add(1);\n            let values = [Value::Text(table_name.into()), Value::Integer(rowid)];\n            let payload = encode_record(&values, header.text_encoding);\n            super::insert_row(pager, header, seq_root, next_rowid, &payload)?;\n        }\n        Some((row_rowid, current_seq)) if rowid > current_seq => {\n            super::delete_row(pager, header, seq_root, row_rowid)?;\n            let values = [Value::Text(table_name.into()), Value::Integer(rowid)];\n            let payload = encode_record(&values, header.text_encoding);\n            super::insert_row(pager, header, seq_root, row_rowid, &payload)?;\n        }\n        Some(_) => {}\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "master_281",
+    "file": "src/btree/master.rs",
+    "line": 281,
+    "decision": "rowid > current_seq",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_348",
+    "file": "src/btree/master.rs",
+    "line": 348,
+    "decision": "tbl.as_ref() == table_name",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "master_373",
+    "file": "src/btree/master.rs",
+    "line": 373,
+    "decision": "match idx {\n        Some(name) => Value::Text(name.into()),\n        None => Value::Null,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_62",
+    "file": "src/btree/table/delete.rs",
+    "line": 62,
+    "decision": "cells.len() > 1 || ancestors.is_empty()",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_90",
+    "file": "src/btree/table/delete.rs",
+    "line": 90,
+    "decision": "(local_size as u64) >= payload_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_105",
+    "file": "src/btree/table/delete.rs",
+    "line": 105,
+    "decision": "page_num != 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_106",
+    "file": "src/btree/table/delete.rs",
+    "line": 106,
+    "decision": "!visited.insert(page_num)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_143",
+    "file": "src/btree/table/delete.rs",
+    "line": 143,
+    "decision": "match entries.iter().position(|(child, _)| *child == emptied_page) {\n        Some(idx) => {\n            entries.remove(idx);\n        }\n        None if rightmost == emptied_page => {\n            let Some((last_child, _)) = entries.pop() else {\n                return Err(BtreeError::Internal(\n                    \"interior page's rightmost pointer was emptied but it has no routing entries to promote\",\n                ));\n            };\n            rightmost = last_child;\n        }\n        None => {\n            return Err(BtreeError::MissingChildRoute {\n                page_num: parent_page,\n                child: emptied_page,\n            });\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_147",
+    "file": "src/btree/table/delete.rs",
+    "line": 147,
+    "decision": "rightmost == emptied_page",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_163",
+    "file": "src/btree/table/delete.rs",
+    "line": 163,
+    "decision": "!entries.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_184",
+    "file": "src/btree/table/delete.rs",
+    "line": 184,
+    "decision": "parent_page == root_page",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_214",
+    "file": "src/btree/table/delete.rs",
+    "line": 214,
+    "decision": "match entries.iter_mut().find(|(child, _)| *child == old_child) {\n        Some(entry) => entry.0 = new_child,\n        None if rightmost == old_child => rightmost = new_child,\n        None => {\n            return Err(BtreeError::MissingChildRoute {\n                page_num: parent_page,\n                child: old_child,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_216",
+    "file": "src/btree/table/delete.rs",
+    "line": 216,
+    "decision": "rightmost == old_child",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_249",
+    "file": "src/btree/table/delete.rs",
+    "line": 249,
+    "decision": "match page_type {\n        LEAF_TABLE => {\n            let cells = collect_leaf_cells(&content, child_header_start, only_child, usable_size)?;\n            let dest = pager.get_page_mut(root_page)?;\n            write_leaf_page(dest, root_header_start, root_page, &cell_bytes(cells))?;\n        }\n        INTERIOR_TABLE => {\n            let (entries, rightmost) =\n                collect_interior_entries(&content, child_header_start, only_child)?;\n            let cells: Vec<Vec<u8>> = entries\n                .iter()\n                .map(|(child, key)| build_interior_cell(*child, *key))\n                .collect();\n            let dest = pager.get_page_mut(root_page)?;\n            write_interior_page(dest, root_header_start, root_page, &cells, rightmost)?;\n        }\n        other => {\n            return Err(BtreeError::UnexpectedPageType {\n                page_num: only_child,\n                page_type: other,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_530",
+    "file": "src/btree/table/delete.rs",
+    "line": 530,
+    "decision": "page_type == LEAF_TABLE",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_76",
+    "file": "src/btree/table/insert.rs",
+    "line": 76,
+    "decision": "!overflow_bytes.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_95",
+    "file": "src/btree/table/insert.rs",
+    "line": 95,
+    "decision": "!rest.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_138",
+    "file": "src/btree/table/insert.rs",
+    "line": 138,
+    "decision": "*existing_rowid == rowid",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_141",
+    "file": "src/btree/table/insert.rs",
+    "line": 141,
+    "decision": "*existing_rowid > rowid",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_154",
+    "file": "src/btree/table/insert.rs",
+    "line": 154,
+    "decision": "needed <= page_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_160",
+    "file": "src/btree/table/insert.rs",
+    "line": 160,
+    "decision": "!splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)?",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_224",
+    "file": "src/btree/table/insert.rs",
+    "line": 224,
+    "decision": "match entries.iter().position(|(child, _)| *child == old_page) {\n        Some(idx) => {\n            entries.insert(idx, (old_page, divider));\n            let successor = entries\n                .get_mut(idx.saturating_add(1))\n                .ok_or(BtreeError::Internal(\n                    \"split successor entry must exist right after insertion\",\n                ))?;\n            successor.0 = new_page;\n        }\n        None if rightmost == old_page => {\n            entries.push((old_page, divider));\n            rightmost = new_page;\n        }\n        None => {\n            return Err(BtreeError::MissingChildRoute {\n                page_num: parent_page,\n                child: old_page,\n            });\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_234",
+    "file": "src/btree/table/insert.rs",
+    "line": 234,
+    "decision": "rightmost == old_page",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_256",
+    "file": "src/btree/table/insert.rs",
+    "line": 256,
+    "decision": "needed <= page_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_325",
+    "file": "src/btree/table/insert.rs",
+    "line": 325,
+    "decision": "match page_type {\n        LEAF_TABLE => {\n            let cells = collect_leaf_cells(&content, header_start_root, root_page, usable_size)?;\n            let dest = pager.get_page_mut(relocated)?;\n            write_leaf_page(dest, 0, relocated, &cell_bytes(cells))?;\n        }\n        INTERIOR_TABLE => {\n            let (entries, rightmost) =\n                collect_interior_entries(&content, header_start_root, root_page)?;\n            let cells: Vec<Vec<u8>> = entries\n                .iter()\n                .map(|(child, key)| build_interior_cell(*child, *key))\n                .collect();\n            let dest = pager.get_page_mut(relocated)?;\n            write_interior_page(dest, 0, relocated, &cells, rightmost)?;\n        }\n        other => {\n            return Err(BtreeError::UnexpectedPageType {\n                page_num: root_page,\n                page_type: other,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_385",
+    "file": "src/btree/table/insert.rs",
+    "line": 385,
+    "decision": "page_type == LEAF_TABLE",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_65",
+    "file": "src/btree/index/delete.rs",
+    "line": 65,
+    "decision": "match descend_index_tree(pager, root_page, usable_size, key, encoding)? {\n        IndexDescent::Leaf { leaf_page, .. } => {\n            delete_from_leaf(pager, usable_size, leaf_page, key, encoding)\n        }\n        IndexDescent::InteriorMatch {\n            interior_page,\n            entry_child,\n        } => delete_via_predecessor_swap(pager, usable_size, interior_page, entry_child, encoding),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_110",
+    "file": "src/btree/index/delete.rs",
+    "line": 110,
+    "decision": "match extract_max_entry(pager, usable_size, entry_child, encoding, 0)? {\n        Some(predecessor_bytes) => {\n            let header_start = page1_header_start(interior_page);\n            let buf = pager.get_page_mut(interior_page)?.clone();\n            let (mut entries, rightmost) = collect_index_interior_entries(\n                pager,\n                &buf,\n                header_start,\n                interior_page,\n                usable_size,\n                encoding,\n            )?;\n            let entry = entries\n                .iter_mut()\n                .find(|(child, _, _)| *child == entry_child)\n                .ok_or(BtreeError::Internal(\n                    \"entry_child's routing entry must still exist in interior_page\",\n                ))?;\n            entry.2 = predecessor_bytes;\n            let cell_bytes: Vec<Vec<u8>> = entries\n                .iter()\n                .map(|(child, _, value_bytes)| build_index_interior_cell(*child, value_bytes))\n                .collect();\n            let buf = pager.get_page_mut(interior_page)?;\n            write_index_interior_page(buf, header_start, interior_page, &cell_bytes, rightmost)\n        }\n        None => {\n            // `entry_child`'s entire subtree is drained (nothing left to\n            // swap in) — the matched entry is deleted outright, since\n            // there is nothing left to preserve.\n            pager.deallocate_page(entry_child)?;\n            remove_entry_by_child(pager, usable_size, interior_page, entry_child, encoding)\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "delete_169",
+    "file": "src/btree/index/delete.rs",
+    "line": 169,
+    "decision": "depth > MAX_PAGES_VISITED",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_178",
+    "file": "src/btree/index/delete.rs",
+    "line": 178,
+    "decision": "page_type == LEAF_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_189",
+    "file": "src/btree/index/delete.rs",
+    "line": 189,
+    "decision": "page_type != INTERIOR_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_425",
+    "file": "src/btree/index/delete.rs",
+    "line": 425,
+    "decision": "page_type != INTERIOR_INDEX",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "delete_449",
+    "file": "src/btree/index/delete.rs",
+    "line": 449,
+    "decision": "trunk != 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_49",
+    "file": "src/btree/index/insert.rs",
+    "line": 49,
+    "decision": "match descend_index_tree(pager, root_page, usable_size, key, encoding)? {\n            IndexDescent::Leaf {\n                ancestors,\n                leaf_page,\n            } => (ancestors, leaf_page),\n            IndexDescent::InteriorMatch { .. } => return Err(BtreeError::DuplicateKey),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_91",
+    "file": "src/btree/index/insert.rs",
+    "line": 91,
+    "decision": "!overflow_bytes.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_110",
+    "file": "src/btree/index/insert.rs",
+    "line": 110,
+    "decision": "!rest.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_156",
+    "file": "src/btree/index/insert.rs",
+    "line": 156,
+    "decision": "match compare_keys(key, existing_key) {\n            std::cmp::Ordering::Equal => return Err(BtreeError::DuplicateKey),\n            std::cmp::Ordering::Less => {\n                insert_pos = i;\n                break;\n            }\n            std::cmp::Ordering::Greater => {}\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_175",
+    "file": "src/btree/index/insert.rs",
+    "line": 175,
+    "decision": "needed <= page_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_180",
+    "file": "src/btree/index/insert.rs",
+    "line": 180,
+    "decision": "!splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)?",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_261",
+    "file": "src/btree/index/insert.rs",
+    "line": 261,
+    "decision": "match entries.iter().position(|(child, _, _)| *child == old_page) {\n        Some(idx) => {\n            entries.insert(idx, (old_page, promoted_key.to_vec(), promoted_bytes));\n            let successor = entries\n                .get_mut(idx.saturating_add(1))\n                .ok_or(BtreeError::Internal(\n                    \"split successor entry must exist right after insertion\",\n                ))?;\n            successor.0 = new_page;\n        }\n        None if rightmost == old_page => {\n            entries.push((old_page, promoted_key.to_vec(), promoted_bytes));\n            rightmost = new_page;\n        }\n        None => {\n            return Err(BtreeError::MissingChildRoute {\n                page_num: parent_page,\n                child: old_page,\n            });\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_271",
+    "file": "src/btree/index/insert.rs",
+    "line": 271,
+    "decision": "rightmost == old_page",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_293",
+    "file": "src/btree/index/insert.rs",
+    "line": 293,
+    "decision": "needed <= page_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "insert_365",
+    "file": "src/btree/index/insert.rs",
+    "line": 365,
+    "decision": "match page_type {\n        LEAF_INDEX => {\n            let cells = collect_index_leaf_cells(\n                pager,\n                &content,\n                header_start_root,\n                root_page,\n                usable_size,\n                encoding,\n            )?;\n            let dest = pager.get_page_mut(relocated)?;\n            write_index_leaf_page(dest, 0, relocated, &cell_bytes(cells))?;\n        }\n        INTERIOR_INDEX => {\n            let (entries, rightmost) = collect_index_interior_entries(\n                pager,\n                &content,\n                header_start_root,\n                root_page,\n                usable_size,\n                encoding,\n            )?;\n            let cells: Vec<Vec<u8>> = entries\n                .iter()\n                .map(|(child, _, value_bytes)| build_index_interior_cell(*child, value_bytes))\n                .collect();\n            let dest = pager.get_page_mut(relocated)?;\n            write_index_interior_page(dest, 0, relocated, &cells, rightmost)?;\n        }\n        other => {\n            return Err(BtreeError::UnexpectedPageType {\n                page_num: root_page,\n                page_type: other,\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "insert_520",
+    "file": "src/btree/index/insert.rs",
+    "line": 520,
+    "decision": "match &k[0] {\n                Value::Text(s) => s.as_ref(),\n                _ => panic!(\"expected text\"),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_52",
+    "file": "src/vdbe/functions.rs",
+    "line": 52,
+    "decision": "match self {\n            FunctionError::Unknown { name, arity } => {\n                write!(f, \"unknown function {name} with {arity} argument(s)\")\n            }\n            FunctionError::WrongArity { name } => {\n                write!(f, \"wrong number of arguments to function {name}()\")\n            }\n            FunctionError::IntegerOverflow => write!(f, \"integer overflow\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_70",
+    "file": "src/vdbe/functions.rs",
+    "line": 70,
+    "decision": "match v {\n        Value::Null => String::new(),\n        Value::Integer(i) => i.to_string(),\n        Value::Real(r) => format_real(*r),\n        Value::Text(s) => s.to_string(),\n        Value::Blob(b) => String::from_utf8_lossy(b).into_owned(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_80",
+    "file": "src/vdbe/functions.rs",
+    "line": 80,
+    "decision": "match &args[0] {\n        Value::Null => Value::Null,\n        Value::Blob(b) => Value::Integer(b.len() as i64),\n        Value::Text(s) => Value::Integer(s.chars().count() as i64),\n        other => Value::Integer(as_text(other).chars().count() as i64),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_89",
+    "file": "src/vdbe/functions.rs",
+    "line": 89,
+    "decision": "match &args[0] {\n        Value::Null => Value::Null,\n        Value::Text(s) => Value::Text(s.to_ascii_uppercase().into()),\n        other => other.clone(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_97",
+    "file": "src/vdbe/functions.rs",
+    "line": 97,
+    "decision": "match &args[0] {\n        Value::Null => Value::Null,\n        Value::Text(s) => Value::Text(s.to_ascii_lowercase().into()),\n        other => other.clone(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_106",
+    "file": "src/vdbe/functions.rs",
+    "line": 106,
+    "decision": "match v {\n        Value::Integer(i) => *i,\n        Value::Real(r) => *r as i64,\n        Value::Text(_) => crate::vdbe::coerce::cast_to_integer(v),\n        Value::Null | Value::Blob(_) => 0,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_119",
+    "file": "src/vdbe/functions.rs",
+    "line": 119,
+    "decision": "matches!(args[1], Value::Null) || args.get(2).is_some_and(|v| matches!(v, Value::Null))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_122",
+    "file": "src/vdbe/functions.rs",
+    "line": 122,
+    "decision": "matches!(args[0], Value::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_126",
+    "file": "src/vdbe/functions.rs",
+    "line": 126,
+    "decision": "match args.get(2) {\n        Some(z) => {\n            let raw = value_int(z);\n            if raw < 0 {\n                (raw.saturating_neg(), true)\n            } else {\n                (raw, false)\n            }\n        }\n        None => (i64::MAX / 2, false),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_129",
+    "file": "src/vdbe/functions.rs",
+    "line": 129,
+    "decision": "raw < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_138",
+    "file": "src/vdbe/functions.rs",
+    "line": 138,
+    "decision": "match &args[0] {\n        Value::Blob(b) => Some(b),\n        _ => None,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_144",
+    "file": "src/vdbe/functions.rs",
+    "line": 144,
+    "decision": "p1 < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_150",
+    "file": "src/vdbe/functions.rs",
+    "line": 150,
+    "decision": "p1 < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_152",
+    "file": "src/vdbe/functions.rs",
+    "line": 152,
+    "decision": "p1 < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_154",
+    "file": "src/vdbe/functions.rs",
+    "line": 154,
+    "decision": "p2 < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_159",
+    "file": "src/vdbe/functions.rs",
+    "line": 159,
+    "decision": "p1 > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_161",
+    "file": "src/vdbe/functions.rs",
+    "line": 161,
+    "decision": "p2 > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_165",
+    "file": "src/vdbe/functions.rs",
+    "line": 165,
+    "decision": "neg_p2",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_167",
+    "file": "src/vdbe/functions.rs",
+    "line": 167,
+    "decision": "p1 < 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_196",
+    "file": "src/vdbe/functions.rs",
+    "line": 196,
+    "decision": "match &args[0] {\n        Value::Null => Value::Null,\n        Value::Integer(i) => Value::Integer(i.checked_abs().ok_or(FunctionError::IntegerOverflow)?),\n        Value::Real(r) => Value::Real(r.abs()),\n        // Text/blob arguments always coerce through the REAL path — even\n        // a clean integer-looking string like '5' yields REAL 5.0, per\n        // the oracle (abs() does not attempt the INTEGER-preserving path\n        // for non-numeric-typed inputs).\n        other => Value::Real(value_f64(other).abs()),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_218",
+    "file": "src/vdbe/functions.rs",
+    "line": 218,
+    "decision": "matches!(a, Value::Null) || matches!(b, Value::Null)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_221",
+    "file": "src/vdbe/functions.rs",
+    "line": 221,
+    "decision": "compare(a, b, Collation::Binary) == Ordering::Equal",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_229",
+    "file": "src/vdbe/functions.rs",
+    "line": 229,
+    "decision": "match &args[0] {\n        Value::Null => \"null\",\n        Value::Integer(_) => \"integer\",\n        Value::Real(_) => \"real\",\n        Value::Text(_) => \"text\",\n        Value::Blob(_) => \"blob\",\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_240",
+    "file": "src/vdbe/functions.rs",
+    "line": 240,
+    "decision": "match &args[0] {\n        Value::Blob(b) => b.to_vec(),\n        other => as_text(other).into_bytes(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_252",
+    "file": "src/vdbe/functions.rs",
+    "line": 252,
+    "decision": "match c {\n        b'0'..=b'9' => Some(c.saturating_sub(b'0')),\n        b'a'..=b'f' => Some(c.saturating_sub(b'a').saturating_add(10)),\n        b'A'..=b'F' => Some(c.saturating_sub(b'A').saturating_add(10)),\n        _ => None,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_261",
+    "file": "src/vdbe/functions.rs",
+    "line": 261,
+    "decision": "matches!(args[0], Value::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_266",
+    "file": "src/vdbe/functions.rs",
+    "line": 266,
+    "decision": "!bytes.len().is_multiple_of(2)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_283",
+    "file": "src/vdbe/functions.rs",
+    "line": 283,
+    "decision": "c == '\\''",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_293",
+    "file": "src/vdbe/functions.rs",
+    "line": 293,
+    "decision": "match &args[0] {\n        Value::Null => \"NULL\".to_string().into(),\n        Value::Integer(i) => i.to_string().into(),\n        Value::Real(r) => format_real(*r).into(),\n        Value::Text(s) => sql_quote_text(s).into(),\n        Value::Blob(b) => format_blob(b).into(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_303",
+    "file": "src/vdbe/functions.rs",
+    "line": 303,
+    "decision": "args.iter().any(|v| matches!(v, Value::Null))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_314",
+    "file": "src/vdbe/functions.rs",
+    "line": 314,
+    "decision": "args.iter().any(|v| matches!(v, Value::Null))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_325",
+    "file": "src/vdbe/functions.rs",
+    "line": 325,
+    "decision": "match v {\n        Value::Integer(i) => *i as f64,\n        Value::Real(r) => *r,\n        Value::Text(s) => match crate::vdbe::coerce::coerce_text_to_numeric(s) {\n            Value::Integer(i) => i as f64,\n            Value::Real(r) => r,\n            _ => 0.0,\n        },\n        Value::Null | Value::Blob(_) => 0.0,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_328",
+    "file": "src/vdbe/functions.rs",
+    "line": 328,
+    "decision": "match crate::vdbe::coerce::coerce_text_to_numeric(s) {\n            Value::Integer(i) => i as f64,\n            Value::Real(r) => r,\n            _ => 0.0,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_341",
+    "file": "src/vdbe/functions.rs",
+    "line": 341,
+    "decision": "matches!(args[0], Value::Null) || matches!(args.get(1), Some(Value::Null))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_349",
+    "file": "src/vdbe/functions.rs",
+    "line": 349,
+    "decision": "scaled >= 0.0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_358",
+    "file": "src/vdbe/functions.rs",
+    "line": 358,
+    "decision": "match &args[0] {\n        Value::Null => Value::Null,\n        other => {\n            let n = value_f64(other);\n            Value::Integer(if n > 0.0 {\n                1\n            } else if n < 0.0 {\n                -1\n            } else {\n                0\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_362",
+    "file": "src/vdbe/functions.rs",
+    "line": 362,
+    "decision": "n > 0.0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_364",
+    "file": "src/vdbe/functions.rs",
+    "line": 364,
+    "decision": "n < 0.0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_374",
+    "file": "src/vdbe/functions.rs",
+    "line": 374,
+    "decision": "matches!(args[0], Value::Null) || matches!(args[1], Value::Null)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_378",
+    "file": "src/vdbe/functions.rs",
+    "line": 378,
+    "decision": "match &args[1] {\n            Value::Blob(b) => find_bytes(hay, b),\n            other => find_bytes(hay, as_text(other).as_bytes()),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_397",
+    "file": "src/vdbe/functions.rs",
+    "line": 397,
+    "decision": "needle.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_408",
+    "file": "src/vdbe/functions.rs",
+    "line": 408,
+    "decision": "matches!(args[0], Value::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_419",
+    "file": "src/vdbe/functions.rs",
+    "line": 419,
+    "decision": "matches!(args[0], Value::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_432",
+    "file": "src/vdbe/functions.rs",
+    "line": 432,
+    "decision": "matches!(args[0], Value::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_445",
+    "file": "src/vdbe/functions.rs",
+    "line": 445,
+    "decision": "args.iter().any(|v| matches!(v, Value::Null))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_451",
+    "file": "src/vdbe/functions.rs",
+    "line": 451,
+    "decision": "from.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_469",
+    "file": "src/vdbe/functions.rs",
+    "line": 469,
+    "decision": "match &args[0] {\n        Value::Null => false,\n        Value::Integer(i) => *i != 0,\n        Value::Real(r) => *r != 0.0,\n        Value::Text(s) => match crate::vdbe::coerce::coerce_text_to_numeric(s) {\n            Value::Integer(i) => i != 0,\n            Value::Real(r) => r != 0.0,\n            _ => false,\n        },\n        Value::Blob(_) => false,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_473",
+    "file": "src/vdbe/functions.rs",
+    "line": 473,
+    "decision": "match crate::vdbe::coerce::coerce_text_to_numeric(s) {\n            Value::Integer(i) => i != 0,\n            Value::Real(r) => r != 0.0,\n            _ => false,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_480",
+    "file": "src/vdbe/functions.rs",
+    "line": 480,
+    "decision": "cond",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_498",
+    "file": "src/vdbe/functions.rs",
+    "line": 498,
+    "decision": "pi == p.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_502",
+    "file": "src/vdbe/functions.rs",
+    "line": 502,
+    "decision": "Some(pc) == escape && pi.saturating_add(1) < p.len()",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_504",
+    "file": "src/vdbe/functions.rs",
+    "line": 504,
+    "decision": "ti >= t.len() || !ascii_eq(t[ti], literal)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_511",
+    "file": "src/vdbe/functions.rs",
+    "line": 511,
+    "decision": "match pc {\n            '%' => {\n                // Collapse consecutive '%' (a run behaves as one).\n                while pi < p.len() && p[pi] == '%' {\n                    pi = pi.saturating_add(1);\n                }\n                if pi == p.len() {\n                    return true;\n                }\n                for start in ti..=t.len() {\n                    if like_rec(t, p, escape, start, pi) {\n                        return true;\n                    }\n                }\n                return false;\n            }\n            '_' => {\n                if ti >= t.len() {\n                    return false;\n                }\n                ti = ti.saturating_add(1);\n                pi = pi.saturating_add(1);\n            }\n            _ => {\n                if ti >= t.len() || !ascii_eq(t[ti], pc) {\n                    return false;\n                }\n                ti = ti.saturating_add(1);\n                pi = pi.saturating_add(1);\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_514",
+    "file": "src/vdbe/functions.rs",
+    "line": 514,
+    "decision": "pi < p.len() && p[pi] == '%'",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_517",
+    "file": "src/vdbe/functions.rs",
+    "line": 517,
+    "decision": "pi == p.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_521",
+    "file": "src/vdbe/functions.rs",
+    "line": 521,
+    "decision": "like_rec(t, p, escape, start, pi)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_528",
+    "file": "src/vdbe/functions.rs",
+    "line": 528,
+    "decision": "ti >= t.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_535",
+    "file": "src/vdbe/functions.rs",
+    "line": 535,
+    "decision": "ti >= t.len() || !ascii_eq(t[ti], pc)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_559",
+    "file": "src/vdbe/functions.rs",
+    "line": 559,
+    "decision": "pi == p.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_562",
+    "file": "src/vdbe/functions.rs",
+    "line": 562,
+    "decision": "match p[pi] {\n            '*' => {\n                while pi < p.len() && p[pi] == '*' {\n                    pi = pi.saturating_add(1);\n                }\n                if pi == p.len() {\n                    return true;\n                }\n                for start in ti..=t.len() {\n                    if glob_rec(t, p, start, pi) {\n                        return true;\n                    }\n                }\n                return false;\n            }\n            '?' => {\n                if ti >= t.len() {\n                    return false;\n                }\n                ti = ti.saturating_add(1);\n                pi = pi.saturating_add(1);\n            }\n            '[' => {\n                let Some((matches, next_pi)) = glob_class(p, pi, t.get(ti).copied()) else {\n                    return false;\n                };\n                if ti >= t.len() || !matches {\n                    return false;\n                }\n                ti = ti.saturating_add(1);\n                pi = next_pi;\n            }\n            c => {\n                if ti >= t.len() || t[ti] != c {\n                    return false;\n                }\n                ti = ti.saturating_add(1);\n                pi = pi.saturating_add(1);\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_564",
+    "file": "src/vdbe/functions.rs",
+    "line": 564,
+    "decision": "pi < p.len() && p[pi] == '*'",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_567",
+    "file": "src/vdbe/functions.rs",
+    "line": 567,
+    "decision": "pi == p.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_571",
+    "file": "src/vdbe/functions.rs",
+    "line": 571,
+    "decision": "glob_rec(t, p, start, pi)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_578",
+    "file": "src/vdbe/functions.rs",
+    "line": 578,
+    "decision": "ti >= t.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_588",
+    "file": "src/vdbe/functions.rs",
+    "line": 588,
+    "decision": "ti >= t.len() || !matches",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_595",
+    "file": "src/vdbe/functions.rs",
+    "line": 595,
+    "decision": "ti >= t.len() || t[ti] != c",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_610",
+    "file": "src/vdbe/functions.rs",
+    "line": 610,
+    "decision": "negate",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_616",
+    "file": "src/vdbe/functions.rs",
+    "line": 616,
+    "decision": "i >= p.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_619",
+    "file": "src/vdbe/functions.rs",
+    "line": 619,
+    "decision": "p[i] == ']' && i > class_start",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_623",
+    "file": "src/vdbe/functions.rs",
+    "line": 623,
+    "decision": "i.saturating_add(2) < p.len()\n            && p[i.saturating_add(1)] == '-'\n            && p[i.saturating_add(2)] != ']'",
+    "conditions": 3,
+    "vectors_required": 4,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_629",
+    "file": "src/vdbe/functions.rs",
+    "line": 629,
+    "decision": "c >= lo && c <= hi",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_635",
+    "file": "src/vdbe/functions.rs",
+    "line": 635,
+    "decision": "Some(p[i]) == c",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_647",
+    "file": "src/vdbe/functions.rs",
+    "line": 647,
+    "decision": "args.iter().any(|v| matches!(v, Value::Null))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_650",
+    "file": "src/vdbe/functions.rs",
+    "line": 650,
+    "decision": "match args.get(2) {\n        Some(e) => as_text(e).chars().next(),\n        None => None,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_663",
+    "file": "src/vdbe/functions.rs",
+    "line": 663,
+    "decision": "args.iter().any(|v| matches!(v, Value::Null))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_677",
+    "file": "src/vdbe/functions.rs",
+    "line": 677,
+    "decision": "match (name.to_ascii_lowercase().as_str(), arity) {\n        (\"length\", 1) => Some(length),\n        (\"upper\", 1) => Some(upper),\n        (\"lower\", 1) => Some(lower),\n        (\"substr\", 2 | 3) => Some(substr),\n        (\"sqlite_version\", 0) => Some(sqlite_version),\n        (\"abs\", 1) => Some(abs),\n        (\"coalesce\", n) if n >= 2 => Some(coalesce),\n        (\"ifnull\", 2) => Some(coalesce),\n        (\"nullif\", 2) => Some(nullif),\n        (\"typeof\", 1) => Some(typeof_fn),\n        (\"hex\", 1) => Some(hex),\n        (\"unhex\", 1) => Some(unhex),\n        (\"quote\", 1) => Some(quote),\n        (\"min\", n) if n >= 1 => Some(scalar_min),\n        (\"max\", n) if n >= 1 => Some(scalar_max),\n        (\"round\", 1 | 2) => Some(round_fn),\n        (\"sign\", 1) => Some(sign),\n        (\"instr\", 2) => Some(instr),\n        (\"trim\", 1 | 2) => Some(trim_fn),\n        (\"ltrim\", 1 | 2) => Some(ltrim_fn),\n        (\"rtrim\", 1 | 2) => Some(rtrim_fn),\n        (\"replace\", 3) => Some(replace_fn),\n        (\"zeroblob\", 1) => Some(zeroblob),\n        (\"iif\", 3) => Some(iif),\n        (\"like\", 2 | 3) => Some(like_fn),\n        (\"glob\", 2) => Some(glob_fn),\n        _ => None,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "functions_684",
+    "file": "src/vdbe/functions.rs",
+    "line": 684,
+    "decision": "n >= 2",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_691",
+    "file": "src/vdbe/functions.rs",
+    "line": 691,
+    "decision": "n >= 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_692",
+    "file": "src/vdbe/functions.rs",
+    "line": 692,
+    "decision": "n >= 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "functions_706",
+    "file": "src/vdbe/functions.rs",
+    "line": 706,
+    "decision": "match f {\n        Some(f) => f(args),\n        None => Err(FunctionError::Unknown {\n            name: name.to_string(),\n            arity,\n        }),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_69",
+    "file": "src/parser/grammar.rs",
+    "line": 69,
+    "decision": "self.depth > MAX_EXPR_DEPTH",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_105",
+    "file": "src/parser/grammar.rs",
+    "line": 105,
+    "decision": "!matches!(tok.kind, TokenKind::Eof)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_116",
+    "file": "src/parser/grammar.rs",
+    "line": 116,
+    "decision": "self.at_kw(kw)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_125",
+    "file": "src/parser/grammar.rs",
+    "line": 125,
+    "decision": "self.at_kw(kw)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_137",
+    "file": "src/parser/grammar.rs",
+    "line": 137,
+    "decision": "&self.peek().kind == kind",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_146",
+    "file": "src/parser/grammar.rs",
+    "line": 146,
+    "decision": "self.peek().kind == kind",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_174",
+    "file": "src/parser/grammar.rs",
+    "line": 174,
+    "decision": "self.eat_punct(&TokenKind::Semicolon)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_175",
+    "file": "src/parser/grammar.rs",
+    "line": 175,
+    "decision": "match &self.peek().kind {\n            TokenKind::Eof => Ok(()),\n            TokenKind::Keyword(Keyword::UNION)\n            | TokenKind::Keyword(Keyword::INTERSECT)\n            | TokenKind::Keyword(Keyword::EXCEPT) => {\n                self.unsupported(\"compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported\")\n            }\n            other => {\n                let tok = other.clone();\n                Err(ParseFail::Invalid {\n                    message: format!(\"unexpected trailing token {tok:?}\"),\n                    span: self.peek().span,\n                })\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_193",
+    "file": "src/parser/grammar.rs",
+    "line": 193,
+    "decision": "match self.peek().kind.clone() {\n            TokenKind::Identifier(name) => {\n                let span = self.advance().span;\n                Ok((name, span))\n            }\n            _ => {\n                let tok = self.peek().clone();\n                Err(ParseFail::Invalid {\n                    message: format!(\"expected identifier, found {:?}\", tok.kind),\n                    span: tok.span,\n                })\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_212",
+    "file": "src/parser/grammar.rs",
+    "line": 212,
+    "decision": "self.eat_kw(Keyword::OR)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_220",
+    "file": "src/parser/grammar.rs",
+    "line": 220,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_222",
+    "file": "src/parser/grammar.rs",
+    "line": 222,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_231",
+    "file": "src/parser/grammar.rs",
+    "line": 231,
+    "decision": "self.eat_kw(Keyword::DEFAULT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_234",
+    "file": "src/parser/grammar.rs",
+    "line": 234,
+    "decision": "self.eat_kw(Keyword::VALUES)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_238",
+    "file": "src/parser/grammar.rs",
+    "line": 238,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_246",
+    "file": "src/parser/grammar.rs",
+    "line": 246,
+    "decision": "self.at_kw(Keyword::SELECT) || self.at_kw(Keyword::WITH)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_269",
+    "file": "src/parser/grammar.rs",
+    "line": 269,
+    "decision": "self.eat_kw(Keyword::WHERE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_285",
+    "file": "src/parser/grammar.rs",
+    "line": 285,
+    "decision": "self.eat_kw(Keyword::REPLACE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_287",
+    "file": "src/parser/grammar.rs",
+    "line": 287,
+    "decision": "self.eat_kw(Keyword::IGNORE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_289",
+    "file": "src/parser/grammar.rs",
+    "line": 289,
+    "decision": "self.eat_kw(Keyword::ABORT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_291",
+    "file": "src/parser/grammar.rs",
+    "line": 291,
+    "decision": "self.eat_kw(Keyword::ROLLBACK)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_293",
+    "file": "src/parser/grammar.rs",
+    "line": 293,
+    "decision": "self.eat_kw(Keyword::FAIL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_314",
+    "file": "src/parser/grammar.rs",
+    "line": 314,
+    "decision": "self.eat_kw(Keyword::OR)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_325",
+    "file": "src/parser/grammar.rs",
+    "line": 325,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_329",
+    "file": "src/parser/grammar.rs",
+    "line": 329,
+    "decision": "self.eat_kw(Keyword::WHERE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_355",
+    "file": "src/parser/grammar.rs",
+    "line": 355,
+    "decision": "matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_358",
+    "file": "src/parser/grammar.rs",
+    "line": 358,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_363",
+    "file": "src/parser/grammar.rs",
+    "line": 363,
+    "decision": "!matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_367",
+    "file": "src/parser/grammar.rs",
+    "line": 367,
+    "decision": "self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_372",
+    "file": "src/parser/grammar.rs",
+    "line": 372,
+    "decision": "values.len() != columns.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_397",
+    "file": "src/parser/grammar.rs",
+    "line": 397,
+    "decision": "self.eat_kw(Keyword::IF)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_407",
+    "file": "src/parser/grammar.rs",
+    "line": 407,
+    "decision": "self.eat_kw(Keyword::IF)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_419",
+    "file": "src/parser/grammar.rs",
+    "line": 419,
+    "decision": "matches!(&self.peek().kind, TokenKind::Identifier(id) if id.eq_ignore_ascii_case(word))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_430",
+    "file": "src/parser/grammar.rs",
+    "line": 430,
+    "decision": "matches!(self.peek().kind, TokenKind::Dot)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_440",
+    "file": "src/parser/grammar.rs",
+    "line": 440,
+    "decision": "self.at_kw(Keyword::ON)\n            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::CONFLICT))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_450",
+    "file": "src/parser/grammar.rs",
+    "line": 450,
+    "decision": "self.at_kw(Keyword::TEMP) || self.at_kw(Keyword::TEMPORARY)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_453",
+    "file": "src/parser/grammar.rs",
+    "line": 453,
+    "decision": "self.at_kw(Keyword::VIRTUAL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_460",
+    "file": "src/parser/grammar.rs",
+    "line": 460,
+    "decision": "self.at_kw(Keyword::AS)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_467",
+    "file": "src/parser/grammar.rs",
+    "line": 467,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_468",
+    "file": "src/parser/grammar.rs",
+    "line": 468,
+    "decision": "self.at_table_constraint_start()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_470",
+    "file": "src/parser/grammar.rs",
+    "line": 470,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_481",
+    "file": "src/parser/grammar.rs",
+    "line": 481,
+    "decision": "self.eat_kw(Keyword::WITHOUT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_482",
+    "file": "src/parser/grammar.rs",
+    "line": 482,
+    "decision": "!self.eat_contextual_kw(\"ROWID\")",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_490",
+    "file": "src/parser/grammar.rs",
+    "line": 490,
+    "decision": "matches!(&self.peek().kind, TokenKind::Identifier(id) if id.eq_ignore_ascii_case(\"STRICT\"))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_517",
+    "file": "src/parser/grammar.rs",
+    "line": 517,
+    "decision": "matches!(self.peek().kind, TokenKind::Identifier(_))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_535",
+    "file": "src/parser/grammar.rs",
+    "line": 535,
+    "decision": "named",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_538",
+    "file": "src/parser/grammar.rs",
+    "line": 538,
+    "decision": "self.eat_kw(Keyword::NOT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_543",
+    "file": "src/parser/grammar.rs",
+    "line": 543,
+    "decision": "matches!(self.peek().kind, TokenKind::Null)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_546",
+    "file": "src/parser/grammar.rs",
+    "line": 546,
+    "decision": "self.eat_kw(Keyword::PRIMARY)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_548",
+    "file": "src/parser/grammar.rs",
+    "line": 548,
+    "decision": "self.eat_kw(Keyword::ASC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_550",
+    "file": "src/parser/grammar.rs",
+    "line": 550,
+    "decision": "self.eat_kw(Keyword::DESC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_562",
+    "file": "src/parser/grammar.rs",
+    "line": 562,
+    "decision": "self.eat_kw(Keyword::UNIQUE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_566",
+    "file": "src/parser/grammar.rs",
+    "line": 566,
+    "decision": "self.eat_kw(Keyword::CHECK)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_572",
+    "file": "src/parser/grammar.rs",
+    "line": 572,
+    "decision": "self.eat_kw(Keyword::DEFAULT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_575",
+    "file": "src/parser/grammar.rs",
+    "line": 575,
+    "decision": "self.eat_kw(Keyword::COLLATE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_579",
+    "file": "src/parser/grammar.rs",
+    "line": 579,
+    "decision": "self.at_kw(Keyword::REFERENCES)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_583",
+    "file": "src/parser/grammar.rs",
+    "line": 583,
+    "decision": "self.at_kw(Keyword::GENERATED)\n            || (self.at_kw(Keyword::AS) && matches!(self.peek_at(1).kind, TokenKind::LParen))",
+    "conditions": 3,
+    "vectors_required": 4,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_588",
+    "file": "src/parser/grammar.rs",
+    "line": 588,
+    "decision": "named",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_595",
+    "file": "src/parser/grammar.rs",
+    "line": 595,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_600",
+    "file": "src/parser/grammar.rs",
+    "line": 600,
+    "decision": "matches!(self.peek().kind, TokenKind::Plus | TokenKind::Minus)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_601",
+    "file": "src/parser/grammar.rs",
+    "line": 601,
+    "decision": "matches!(self.peek().kind, TokenKind::Minus)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_624",
+    "file": "src/parser/grammar.rs",
+    "line": 624,
+    "decision": "match tok.kind {\n            TokenKind::Integer(v) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Integer(v)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Float(v) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Float(v)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::String(s) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Str(s)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Blob(b) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Blob(b)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Null => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Null),\n                    span: tok.span,\n                })\n            }\n            TokenKind::True => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::True),\n                    span: tok.span,\n                })\n            }\n            TokenKind::False => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::False),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Keyword(Keyword::CURRENT_TIME)\n            | TokenKind::Keyword(Keyword::CURRENT_DATE)\n            | TokenKind::Keyword(Keyword::CURRENT_TIMESTAMP) => {\n                self.unsupported(\"CURRENT_TIME/CURRENT_DATE/CURRENT_TIMESTAMP not yet supported\")\n            }\n            _ => self.invalid(\"expected literal value after DEFAULT\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_684",
+    "file": "src/parser/grammar.rs",
+    "line": 684,
+    "decision": "self.eat_kw(Keyword::CONSTRAINT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_687",
+    "file": "src/parser/grammar.rs",
+    "line": 687,
+    "decision": "self.eat_kw(Keyword::PRIMARY)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_693",
+    "file": "src/parser/grammar.rs",
+    "line": 693,
+    "decision": "self.eat_kw(Keyword::UNIQUE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_698",
+    "file": "src/parser/grammar.rs",
+    "line": 698,
+    "decision": "self.eat_kw(Keyword::CHECK)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_704",
+    "file": "src/parser/grammar.rs",
+    "line": 704,
+    "decision": "self.at_kw(Keyword::FOREIGN)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_713",
+    "file": "src/parser/grammar.rs",
+    "line": 713,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_722",
+    "file": "src/parser/grammar.rs",
+    "line": 722,
+    "decision": "self.eat_kw(Keyword::ASC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_724",
+    "file": "src/parser/grammar.rs",
+    "line": 724,
+    "decision": "self.eat_kw(Keyword::DESC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_747",
+    "file": "src/parser/grammar.rs",
+    "line": 747,
+    "decision": "self.eat_kw(Keyword::WHERE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_769",
+    "file": "src/parser/grammar.rs",
+    "line": 769,
+    "decision": "self.at_kw(Keyword::TEMP) || self.at_kw(Keyword::TEMPORARY)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_777",
+    "file": "src/parser/grammar.rs",
+    "line": 777,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_779",
+    "file": "src/parser/grammar.rs",
+    "line": 779,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_870",
+    "file": "src/parser/grammar.rs",
+    "line": 870,
+    "decision": "self.at_kw(Keyword::COMMIT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_895",
+    "file": "src/parser/grammar.rs",
+    "line": 895,
+    "decision": "self.at_kw(kw)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_914",
+    "file": "src/parser/grammar.rs",
+    "line": 914,
+    "decision": "name.eq_ignore_ascii_case(\"integrity_check\") || name.eq_ignore_ascii_case(\"quick_check\")",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_920",
+    "file": "src/parser/grammar.rs",
+    "line": 920,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_928",
+    "file": "src/parser/grammar.rs",
+    "line": 928,
+    "decision": "!name.eq_ignore_ascii_case(\"journal_mode\")",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_935",
+    "file": "src/parser/grammar.rs",
+    "line": 935,
+    "decision": "!self.eat_punct(&TokenKind::Eq)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_952",
+    "file": "src/parser/grammar.rs",
+    "line": 952,
+    "decision": "match self.peek().kind.clone() {\n            TokenKind::Identifier(text) if text.eq_ignore_ascii_case(\"wal\") => {\n                let span = self.advance().span;\n                Ok((PragmaJournalMode::Wal, span))\n            }\n            TokenKind::Keyword(Keyword::DELETE) => {\n                let span = self.advance().span;\n                Ok((PragmaJournalMode::Delete, span))\n            }\n            _ => self.unsupported(\"unsupported journal_mode value (only WAL/DELETE are supported)\"),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_953",
+    "file": "src/parser/grammar.rs",
+    "line": 953,
+    "decision": "text.eq_ignore_ascii_case(\"wal\")",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_977",
+    "file": "src/parser/grammar.rs",
+    "line": 977,
+    "decision": "matches!(self.peek().kind, TokenKind::Identifier(_))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_980",
+    "file": "src/parser/grammar.rs",
+    "line": 980,
+    "decision": "self.eat_punct(&TokenKind::Dot)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1002",
+    "file": "src/parser/grammar.rs",
+    "line": 1002,
+    "decision": "self.eat_kw(Keyword::QUERY)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1016",
+    "file": "src/parser/grammar.rs",
+    "line": 1016,
+    "decision": "self.at_kw(Keyword::WITH)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1021",
+    "file": "src/parser/grammar.rs",
+    "line": 1021,
+    "decision": "self.at_kw(Keyword::VALUES)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1030",
+    "file": "src/parser/grammar.rs",
+    "line": 1030,
+    "decision": "with_clause.is_some()\n            && (self.at_kw(Keyword::INSERT)\n                || self.at_kw(Keyword::UPDATE)\n                || self.at_kw(Keyword::DELETE))",
+    "conditions": 4,
+    "vectors_required": 5,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1040",
+    "file": "src/parser/grammar.rs",
+    "line": 1040,
+    "decision": "self.eat_kw(Keyword::DISTINCT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1042",
+    "file": "src/parser/grammar.rs",
+    "line": 1042,
+    "decision": "self.eat_kw(Keyword::ALL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1049",
+    "file": "src/parser/grammar.rs",
+    "line": 1049,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1053",
+    "file": "src/parser/grammar.rs",
+    "line": 1053,
+    "decision": "self.eat_kw(Keyword::FROM)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1059",
+    "file": "src/parser/grammar.rs",
+    "line": 1059,
+    "decision": "self.at_kw(Keyword::WINDOW)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1063",
+    "file": "src/parser/grammar.rs",
+    "line": 1063,
+    "decision": "self.eat_kw(Keyword::WHERE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1071",
+    "file": "src/parser/grammar.rs",
+    "line": 1071,
+    "decision": "self.eat_kw(Keyword::GROUP)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1074",
+    "file": "src/parser/grammar.rs",
+    "line": 1074,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1077",
+    "file": "src/parser/grammar.rs",
+    "line": 1077,
+    "decision": "self.eat_kw(Keyword::HAVING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1080",
+    "file": "src/parser/grammar.rs",
+    "line": 1080,
+    "decision": "self.eat_kw(Keyword::HAVING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1089",
+    "file": "src/parser/grammar.rs",
+    "line": 1089,
+    "decision": "self.at_kw(Keyword::INTERSECT) || self.at_kw(Keyword::EXCEPT)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1092",
+    "file": "src/parser/grammar.rs",
+    "line": 1092,
+    "decision": "!self.at_kw(Keyword::UNION)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1096",
+    "file": "src/parser/grammar.rs",
+    "line": 1096,
+    "decision": "self.eat_kw(Keyword::ALL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1105",
+    "file": "src/parser/grammar.rs",
+    "line": 1105,
+    "decision": "self.eat_kw(Keyword::ORDER)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1108",
+    "file": "src/parser/grammar.rs",
+    "line": 1108,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1113",
+    "file": "src/parser/grammar.rs",
+    "line": 1113,
+    "decision": "self.eat_kw(Keyword::LIMIT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1115",
+    "file": "src/parser/grammar.rs",
+    "line": 1115,
+    "decision": "self.eat_kw(Keyword::OFFSET) || self.eat_punct(&TokenKind::Comma)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1152",
+    "file": "src/parser/grammar.rs",
+    "line": 1152,
+    "decision": "self.at_kw(Keyword::RECURSIVE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1156",
+    "file": "src/parser/grammar.rs",
+    "line": 1156,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1170",
+    "file": "src/parser/grammar.rs",
+    "line": 1170,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1172",
+    "file": "src/parser/grammar.rs",
+    "line": 1172,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1186",
+    "file": "src/parser/grammar.rs",
+    "line": 1186,
+    "decision": "self.at_kw(Keyword::MATERIALIZED)\n            || (self.at_kw(Keyword::NOT)\n                && matches!(\n                    self.peek_at(1).kind,\n                    TokenKind::Keyword(Keyword::MATERIALIZED)\n                ))",
+    "conditions": 3,
+    "vectors_required": 4,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1216",
+    "file": "src/parser/grammar.rs",
+    "line": 1216,
+    "decision": "self.at_kw(Keyword::VALUES)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1221",
+    "file": "src/parser/grammar.rs",
+    "line": 1221,
+    "decision": "self.eat_kw(Keyword::DISTINCT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1223",
+    "file": "src/parser/grammar.rs",
+    "line": 1223,
+    "decision": "self.eat_kw(Keyword::ALL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1230",
+    "file": "src/parser/grammar.rs",
+    "line": 1230,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1234",
+    "file": "src/parser/grammar.rs",
+    "line": 1234,
+    "decision": "self.eat_kw(Keyword::FROM)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1240",
+    "file": "src/parser/grammar.rs",
+    "line": 1240,
+    "decision": "self.at_kw(Keyword::WINDOW)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1244",
+    "file": "src/parser/grammar.rs",
+    "line": 1244,
+    "decision": "self.eat_kw(Keyword::WHERE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1252",
+    "file": "src/parser/grammar.rs",
+    "line": 1252,
+    "decision": "self.eat_kw(Keyword::GROUP)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1255",
+    "file": "src/parser/grammar.rs",
+    "line": 1255,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1258",
+    "file": "src/parser/grammar.rs",
+    "line": 1258,
+    "decision": "self.eat_kw(Keyword::HAVING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1261",
+    "file": "src/parser/grammar.rs",
+    "line": 1261,
+    "decision": "self.at_kw(Keyword::HAVING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1282",
+    "file": "src/parser/grammar.rs",
+    "line": 1282,
+    "decision": "self.eat_punct(&TokenKind::Star)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1288",
+    "file": "src/parser/grammar.rs",
+    "line": 1288,
+    "decision": "matches!(self.peek_at(1).kind, TokenKind::Dot)\n                && matches!(self.peek_at(2).kind, TokenKind::Star)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1305",
+    "file": "src/parser/grammar.rs",
+    "line": 1305,
+    "decision": "self.eat_kw(Keyword::AS)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1313",
+    "file": "src/parser/grammar.rs",
+    "line": 1313,
+    "decision": "matches!(self.peek().kind, TokenKind::String(_))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1334",
+    "file": "src/parser/grammar.rs",
+    "line": 1334,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1356",
+    "file": "src/parser/grammar.rs",
+    "line": 1356,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1363",
+    "file": "src/parser/grammar.rs",
+    "line": 1363,
+    "decision": "self.eat_kw(Keyword::ON)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1365",
+    "file": "src/parser/grammar.rs",
+    "line": 1365,
+    "decision": "self.at_kw(Keyword::USING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1387",
+    "file": "src/parser/grammar.rs",
+    "line": 1387,
+    "decision": "self.at_kw(Keyword::OUTER)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1391",
+    "file": "src/parser/grammar.rs",
+    "line": 1391,
+    "decision": "self.eat_kw(Keyword::CROSS)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1393",
+    "file": "src/parser/grammar.rs",
+    "line": 1393,
+    "decision": "natural",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1397",
+    "file": "src/parser/grammar.rs",
+    "line": 1397,
+    "decision": "self.at_kw(Keyword::ON)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1400",
+    "file": "src/parser/grammar.rs",
+    "line": 1400,
+    "decision": "self.at_kw(Keyword::USING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1413",
+    "file": "src/parser/grammar.rs",
+    "line": 1413,
+    "decision": "self.eat_kw(Keyword::LEFT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1417",
+    "file": "src/parser/grammar.rs",
+    "line": 1417,
+    "decision": "self.eat_kw(Keyword::RIGHT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1421",
+    "file": "src/parser/grammar.rs",
+    "line": 1421,
+    "decision": "self.eat_kw(Keyword::FULL)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1425",
+    "file": "src/parser/grammar.rs",
+    "line": 1425,
+    "decision": "self.eat_kw(Keyword::INNER)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1428",
+    "file": "src/parser/grammar.rs",
+    "line": 1428,
+    "decision": "self.eat_kw(Keyword::JOIN)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1434",
+    "file": "src/parser/grammar.rs",
+    "line": 1434,
+    "decision": "natural",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1440",
+    "file": "src/parser/grammar.rs",
+    "line": 1440,
+    "decision": "natural",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1452",
+    "file": "src/parser/grammar.rs",
+    "line": 1452,
+    "decision": "self.at_kw(Keyword::USING)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1471",
+    "file": "src/parser/grammar.rs",
+    "line": 1471,
+    "decision": "!self.at_kw(Keyword::ON)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1495",
+    "file": "src/parser/grammar.rs",
+    "line": 1495,
+    "decision": "matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1498",
+    "file": "src/parser/grammar.rs",
+    "line": 1498,
+    "decision": "!self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1520",
+    "file": "src/parser/grammar.rs",
+    "line": 1520,
+    "decision": "matches!(self.peek().kind, TokenKind::Dot)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1525",
+    "file": "src/parser/grammar.rs",
+    "line": 1525,
+    "decision": "end",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1536",
+    "file": "src/parser/grammar.rs",
+    "line": 1536,
+    "decision": "self.at_kw(Keyword::INDEXED)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1539",
+    "file": "src/parser/grammar.rs",
+    "line": 1539,
+    "decision": "self.at_kw(Keyword::NOT)\n            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::INDEXED))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1544",
+    "file": "src/parser/grammar.rs",
+    "line": 1544,
+    "decision": "matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1557",
+    "file": "src/parser/grammar.rs",
+    "line": 1557,
+    "decision": "self.eat_kw(Keyword::ASC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1559",
+    "file": "src/parser/grammar.rs",
+    "line": 1559,
+    "decision": "self.eat_kw(Keyword::DESC)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1564",
+    "file": "src/parser/grammar.rs",
+    "line": 1564,
+    "decision": "self.eat_kw(Keyword::NULLS)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1565",
+    "file": "src/parser/grammar.rs",
+    "line": 1565,
+    "decision": "self.eat_kw(Keyword::FIRST)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1567",
+    "file": "src/parser/grammar.rs",
+    "line": 1567,
+    "decision": "self.eat_kw(Keyword::LAST)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1601",
+    "file": "src/parser/grammar.rs",
+    "line": 1601,
+    "decision": "self.at_kw(Keyword::AND)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1602",
+    "file": "src/parser/grammar.rs",
+    "line": 1602,
+    "decision": "min_prec > 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1607",
+    "file": "src/parser/grammar.rs",
+    "line": 1607,
+    "decision": "self.at_kw(Keyword::OR)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1608",
+    "file": "src/parser/grammar.rs",
+    "line": 1608,
+    "decision": "min_prec > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1622",
+    "file": "src/parser/grammar.rs",
+    "line": 1622,
+    "decision": "this.at_kw(Keyword::NOT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1624",
+    "file": "src/parser/grammar.rs",
+    "line": 1624,
+    "decision": "this.at_kw(Keyword::EXISTS)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1648",
+    "file": "src/parser/grammar.rs",
+    "line": 1648,
+    "decision": "match self.peek().kind.clone() {\n                TokenKind::Eq => {\n                    self.advance();\n                    let rhs = self.binary_expr(1)?;\n                    bin(BinaryOp::Eq, lhs, rhs)\n                }\n                TokenKind::Ne => {\n                    self.advance();\n                    let rhs = self.binary_expr(1)?;\n                    bin(BinaryOp::Ne, lhs, rhs)\n                }\n                TokenKind::Keyword(Keyword::IS) => {\n                    self.advance();\n                    let negated = self.eat_kw(Keyword::NOT);\n                    let rhs = self.binary_expr(1)?;\n                    let span = join_span(lhs.span, rhs.span);\n                    Expr {\n                        kind: ExprKind::Is {\n                            lhs: Box::new(lhs),\n                            rhs: Box::new(rhs),\n                            negated,\n                        },\n                        span,\n                    }\n                }\n                TokenKind::Keyword(Keyword::ISNULL) => {\n                    let end = self.advance().span;\n                    let span = join_span(lhs.span, end);\n                    Expr {\n                        kind: ExprKind::IsNull {\n                            expr: Box::new(lhs),\n                            negated: false,\n                        },\n                        span,\n                    }\n                }\n                TokenKind::Keyword(Keyword::NOTNULL) => {\n                    let end = self.advance().span;\n                    let span = join_span(lhs.span, end);\n                    Expr {\n                        kind: ExprKind::IsNull {\n                            expr: Box::new(lhs),\n                            negated: true,\n                        },\n                        span,\n                    }\n                }\n                TokenKind::Keyword(Keyword::BETWEEN) => {\n                    self.advance();\n                    let (lo, hi) = self.between_tail()?;\n                    let span = join_span(lhs.span, hi.span);\n                    Expr {\n                        kind: ExprKind::Between {\n                            expr: Box::new(lhs),\n                            lo: Box::new(lo),\n                            hi: Box::new(hi),\n                            negated: false,\n                        },\n                        span,\n                    }\n                }\n                TokenKind::Keyword(Keyword::IN) => {\n                    self.advance();\n                    self.in_tail(lhs, false)?\n                }\n                TokenKind::Keyword(Keyword::LIKE) | TokenKind::Keyword(Keyword::GLOB) => {\n                    let glob = self.at_kw(Keyword::GLOB);\n                    self.advance();\n                    self.like_tail(lhs, glob, false)?\n                }\n                TokenKind::Keyword(Keyword::NOT) => match self.peek_at(1).kind.clone() {\n                    TokenKind::Null => {\n                        self.advance();\n                        let end = self.advance().span;\n                        let span = join_span(lhs.span, end);\n                        Expr {\n                            kind: ExprKind::IsNull {\n                                expr: Box::new(lhs),\n                                negated: true,\n                            },\n                            span,\n                        }\n                    }\n                    TokenKind::Keyword(Keyword::BETWEEN) => {\n                        self.advance();\n                        self.advance();\n                        let (lo, hi) = self.between_tail()?;\n                        let span = join_span(lhs.span, hi.span);\n                        Expr {\n                            kind: ExprKind::Between {\n                                expr: Box::new(lhs),\n                                lo: Box::new(lo),\n                                hi: Box::new(hi),\n                                negated: true,\n                            },\n                            span,\n                        }\n                    }\n                    TokenKind::Keyword(Keyword::IN) => {\n                        self.advance();\n                        self.advance();\n                        self.in_tail(lhs, true)?\n                    }\n                    TokenKind::Keyword(Keyword::LIKE) | TokenKind::Keyword(Keyword::GLOB) => {\n                        let glob =\n                            matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::GLOB));\n                        self.advance();\n                        self.advance();\n                        self.like_tail(lhs, glob, true)?\n                    }\n                    _ => break,\n                },\n                _ => break,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_1718",
+    "file": "src/parser/grammar.rs",
+    "line": 1718,
+    "decision": "match self.peek_at(1).kind.clone() {\n                    TokenKind::Null => {\n                        self.advance();\n                        let end = self.advance().span;\n                        let span = join_span(lhs.span, end);\n                        Expr {\n                            kind: ExprKind::IsNull {\n                                expr: Box::new(lhs),\n                                negated: true,\n                            },\n                            span,\n                        }\n                    }\n                    TokenKind::Keyword(Keyword::BETWEEN) => {\n                        self.advance();\n                        self.advance();\n                        let (lo, hi) = self.between_tail()?;\n                        let span = join_span(lhs.span, hi.span);\n                        Expr {\n                            kind: ExprKind::Between {\n                                expr: Box::new(lhs),\n                                lo: Box::new(lo),\n                                hi: Box::new(hi),\n                                negated: true,\n                            },\n                            span,\n                        }\n                    }\n                    TokenKind::Keyword(Keyword::IN) => {\n                        self.advance();\n                        self.advance();\n                        self.in_tail(lhs, true)?\n                    }\n                    TokenKind::Keyword(Keyword::LIKE) | TokenKind::Keyword(Keyword::GLOB) => {\n                        let glob =\n                            matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::GLOB));\n                        self.advance();\n                        self.advance();\n                        self.like_tail(lhs, glob, true)?\n                    }\n                    _ => break,\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_1780",
+    "file": "src/parser/grammar.rs",
+    "line": 1780,
+    "decision": "!self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1784",
+    "file": "src/parser/grammar.rs",
+    "line": 1784,
+    "decision": "matches!(\n            self.peek().kind,\n            TokenKind::Keyword(Keyword::UNION)\n                | TokenKind::Keyword(Keyword::INTERSECT)\n                | TokenKind::Keyword(Keyword::EXCEPT)\n        )",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1819",
+    "file": "src/parser/grammar.rs",
+    "line": 1819,
+    "decision": "match self.tokens.get(idx) {\n                Some(t) => &t.kind,\n                None => return false,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_1823",
+    "file": "src/parser/grammar.rs",
+    "line": 1823,
+    "decision": "match kind {\n                TokenKind::Eof => return false,\n                TokenKind::LParen => depth = depth.saturating_add(1),\n                TokenKind::RParen => {\n                    if depth == 0 {\n                        let after_in = matches!(\n                            self.tokens.get(idx.saturating_add(1)).map(|t| &t.kind),\n                            Some(TokenKind::Keyword(Keyword::IN))\n                        );\n                        let after_not_in = matches!(\n                            self.tokens.get(idx.saturating_add(1)).map(|t| &t.kind),\n                            Some(TokenKind::Keyword(Keyword::NOT))\n                        ) && matches!(\n                            self.tokens.get(idx.saturating_add(2)).map(|t| &t.kind),\n                            Some(TokenKind::Keyword(Keyword::IN))\n                        );\n                        return saw_top_comma && (after_in || after_not_in);\n                    }\n                    depth = depth.saturating_sub(1);\n                }\n                TokenKind::Comma if depth == 0 => saw_top_comma = true,\n                _ => {}\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_1843",
+    "file": "src/parser/grammar.rs",
+    "line": 1843,
+    "decision": "depth == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1827",
+    "file": "src/parser/grammar.rs",
+    "line": 1827,
+    "decision": "depth == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1862",
+    "file": "src/parser/grammar.rs",
+    "line": 1862,
+    "decision": "!matches!(self.peek().kind, TokenKind::LParen) || !self.looks_like_tuple_in()",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1868",
+    "file": "src/parser/grammar.rs",
+    "line": 1868,
+    "decision": "match self.expr_list() {\n            Ok(list) => list,\n            Err(_) => {\n                self.pos = start_pos;\n                return Ok(None);\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_1875",
+    "file": "src/parser/grammar.rs",
+    "line": 1875,
+    "decision": "self.expect_punct(TokenKind::RParen, \"')'\").is_err()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1879",
+    "file": "src/parser/grammar.rs",
+    "line": 1879,
+    "decision": "self.at_kw(Keyword::IN)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1882",
+    "file": "src/parser/grammar.rs",
+    "line": 1882,
+    "decision": "self.at_kw(Keyword::NOT)\n            && matches!(self.peek_at(1).kind, TokenKind::Keyword(Keyword::IN))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1892",
+    "file": "src/parser/grammar.rs",
+    "line": 1892,
+    "decision": "list.len() < 2",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1897",
+    "file": "src/parser/grammar.rs",
+    "line": 1897,
+    "decision": "!self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1902",
+    "file": "src/parser/grammar.rs",
+    "line": 1902,
+    "decision": "matches!(\n            self.peek().kind,\n            TokenKind::Keyword(Keyword::UNION)\n                | TokenKind::Keyword(Keyword::INTERSECT)\n                | TokenKind::Keyword(Keyword::EXCEPT)\n        )",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1923",
+    "file": "src/parser/grammar.rs",
+    "line": 1923,
+    "decision": "!matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1927",
+    "file": "src/parser/grammar.rs",
+    "line": 1927,
+    "decision": "self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1929",
+    "file": "src/parser/grammar.rs",
+    "line": 1929,
+    "decision": "matches!(\n                self.peek().kind,\n                TokenKind::Keyword(Keyword::UNION)\n                    | TokenKind::Keyword(Keyword::INTERSECT)\n                    | TokenKind::Keyword(Keyword::EXCEPT)\n            )",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1949",
+    "file": "src/parser/grammar.rs",
+    "line": 1949,
+    "decision": "matches!(self.peek().kind, TokenKind::RParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_1969",
+    "file": "src/parser/grammar.rs",
+    "line": 1969,
+    "decision": "self.eat_kw(Keyword::ESCAPE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2005",
+    "file": "src/parser/grammar.rs",
+    "line": 2005,
+    "decision": "prec < min_prec",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2016",
+    "file": "src/parser/grammar.rs",
+    "line": 2016,
+    "decision": "match kind {\n            TokenKind::Lt => (BinaryOp::Lt, 1),\n            TokenKind::Le => (BinaryOp::Le, 1),\n            TokenKind::Gt => (BinaryOp::Gt, 1),\n            TokenKind::Ge => (BinaryOp::Ge, 1),\n            TokenKind::BitAnd => (BinaryOp::BitAnd, 2),\n            TokenKind::BitOr => (BinaryOp::BitOr, 2),\n            TokenKind::Shl => (BinaryOp::Shl, 2),\n            TokenKind::Shr => (BinaryOp::Shr, 2),\n            TokenKind::Plus => (BinaryOp::Add, 3),\n            TokenKind::Minus => (BinaryOp::Sub, 3),\n            TokenKind::Star => (BinaryOp::Mul, 4),\n            TokenKind::Slash => (BinaryOp::Div, 4),\n            TokenKind::Percent => (BinaryOp::Mod, 4),\n            TokenKind::Concat => (BinaryOp::Concat, 5),\n            _ => return None,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2040",
+    "file": "src/parser/grammar.rs",
+    "line": 2040,
+    "decision": "matches!(self.peek().kind, TokenKind::Arrow | TokenKind::ArrowArrow)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2048",
+    "file": "src/parser/grammar.rs",
+    "line": 2048,
+    "decision": "self.eat_kw(Keyword::COLLATE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2064",
+    "file": "src/parser/grammar.rs",
+    "line": 2064,
+    "decision": "match this.peek().kind {\n                TokenKind::Plus => Some(UnaryOp::Plus),\n                TokenKind::Minus => Some(UnaryOp::Minus),\n                TokenKind::BitNot => Some(UnaryOp::BitNot),\n                _ => None,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2079",
+    "file": "src/parser/grammar.rs",
+    "line": 2079,
+    "decision": "matches!(op, UnaryOp::Minus)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2081",
+    "file": "src/parser/grammar.rs",
+    "line": 2081,
+    "decision": "f == 9_223_372_036_854_775_808.0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2103",
+    "file": "src/parser/grammar.rs",
+    "line": 2103,
+    "decision": "match tok.kind {\n            TokenKind::Integer(v) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Integer(v)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Float(v) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Float(v)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::String(s) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Str(s)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Blob(b) => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Blob(b)),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Null => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::Null),\n                    span: tok.span,\n                })\n            }\n            TokenKind::True => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::True),\n                    span: tok.span,\n                })\n            }\n            TokenKind::False => {\n                self.advance();\n                Ok(Expr {\n                    kind: ExprKind::Literal(Literal::False),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Param(p) => {\n                self.advance();\n                let kind = match p {\n                    Param::Anonymous => ParamKind::Anonymous,\n                    Param::Numbered(n) => ParamKind::Numbered(n),\n                    Param::Colon(s) => ParamKind::Colon(s),\n                    Param::At(s) => ParamKind::At(s),\n                    Param::Dollar(s) => ParamKind::Dollar(s),\n                };\n                Ok(Expr {\n                    kind: ExprKind::Param(kind),\n                    span: tok.span,\n                })\n            }\n            TokenKind::Keyword(Keyword::CURRENT_TIME)\n            | TokenKind::Keyword(Keyword::CURRENT_DATE)\n            | TokenKind::Keyword(Keyword::CURRENT_TIMESTAMP) => {\n                self.unsupported(\"CURRENT_TIME/CURRENT_DATE/CURRENT_TIMESTAMP not yet supported\")\n            }\n            TokenKind::Keyword(Keyword::CASE) => self.case_expr(),\n            TokenKind::Keyword(Keyword::CAST) => self.cast_expr(),\n            TokenKind::Keyword(Keyword::EXISTS) => {\n                let start = tok.span;\n                self.advance();\n                self.exists_tail(start, false)\n            }\n            TokenKind::Identifier(name) => {\n                self.advance();\n                if matches!(self.peek().kind, TokenKind::LParen) {\n                    return self.function_call(name, tok.span);\n                }\n                let mut parts = vec![name];\n                while matches!(self.peek().kind, TokenKind::Dot) && parts.len() < 3 {\n                    self.advance();\n                    let (part, _) = self.identifier()?;\n                    parts.push(part);\n                }\n                let end = self\n                    .tokens\n                    .get(self.pos.saturating_sub(1))\n                    .map_or(tok.span, |t| t.span);\n                let span = join_span(tok.span, end);\n                let mut parts = parts.into_iter();\n                let kind = match parts.len() {\n                    1 => ExprKind::Column {\n                        table: None,\n                        catalog: None,\n                        name: parts.next().unwrap_or_default(),\n                    },\n                    2 => ExprKind::Column {\n                        catalog: None,\n                        table: Some(parts.next().unwrap_or_default()),\n                        name: parts.next().unwrap_or_default(),\n                    },\n                    _ => ExprKind::Column {\n                        catalog: Some(parts.next().unwrap_or_default()),\n                        table: Some(parts.next().unwrap_or_default()),\n                        name: parts.next().unwrap_or_default(),\n                    },\n                };\n                Ok(Expr { kind, span })\n            }\n            // SQLite treats most keywords as usable function names when\n            // followed by `(` (e.g. `replace(...)`, `glob(...)`) — only\n            // the handful matched above (CASE/CAST/EXISTS/CURRENT_*)\n            // are true reserved words in expression position.\n            TokenKind::Keyword(kw) if matches!(self.peek_at(1).kind, TokenKind::LParen) => {\n                self.advance();\n                self.function_call(format!(\"{kw:?}\"), tok.span)\n            }\n            TokenKind::LParen => {\n                self.advance();\n                if self.at_kw(Keyword::SELECT) {\n                    let subquery = self.parse_select_stmt()?;\n                    if matches!(\n                        self.peek().kind,\n                        TokenKind::Keyword(Keyword::UNION)\n                            | TokenKind::Keyword(Keyword::INTERSECT)\n                            | TokenKind::Keyword(Keyword::EXCEPT)\n                    ) {\n                        return self.unsupported(\n                            \"compound SELECT (UNION/INTERSECT/EXCEPT) not yet supported\",\n                        );\n                    }\n                    let end = self.expect_punct(TokenKind::RParen, \"')' to close subquery\")?;\n                    let span = join_span(tok.span, end);\n                    return Ok(Expr {\n                        kind: ExprKind::Subquery(Box::new(subquery)),\n                        span,\n                    });\n                }\n                let inner = self.expr()?;\n                let end = self.expect_punct(TokenKind::RParen, \"')' to close expression\")?;\n                let span = join_span(tok.span, end);\n                Ok(Expr {\n                    kind: ExprKind::Paren(Box::new(inner)),\n                    span,\n                })\n            }\n            other => Err(ParseFail::Invalid {\n                message: format!(\"expected column or expression, found {other:?}\"),\n                span: tok.span,\n            }),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2219",
+    "file": "src/parser/grammar.rs",
+    "line": 2219,
+    "decision": "matches!(self.peek_at(1).kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2155",
+    "file": "src/parser/grammar.rs",
+    "line": 2155,
+    "decision": "match p {\n                    Param::Anonymous => ParamKind::Anonymous,\n                    Param::Numbered(n) => ParamKind::Numbered(n),\n                    Param::Colon(s) => ParamKind::Colon(s),\n                    Param::At(s) => ParamKind::At(s),\n                    Param::Dollar(s) => ParamKind::Dollar(s),\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2181",
+    "file": "src/parser/grammar.rs",
+    "line": 2181,
+    "decision": "matches!(self.peek().kind, TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2185",
+    "file": "src/parser/grammar.rs",
+    "line": 2185,
+    "decision": "matches!(self.peek().kind, TokenKind::Dot) && parts.len() < 3",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2196",
+    "file": "src/parser/grammar.rs",
+    "line": 2196,
+    "decision": "match parts.len() {\n                    1 => ExprKind::Column {\n                        table: None,\n                        catalog: None,\n                        name: parts.next().unwrap_or_default(),\n                    },\n                    2 => ExprKind::Column {\n                        catalog: None,\n                        table: Some(parts.next().unwrap_or_default()),\n                        name: parts.next().unwrap_or_default(),\n                    },\n                    _ => ExprKind::Column {\n                        catalog: Some(parts.next().unwrap_or_default()),\n                        table: Some(parts.next().unwrap_or_default()),\n                        name: parts.next().unwrap_or_default(),\n                    },\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2225",
+    "file": "src/parser/grammar.rs",
+    "line": 2225,
+    "decision": "self.at_kw(Keyword::SELECT)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2227",
+    "file": "src/parser/grammar.rs",
+    "line": 2227,
+    "decision": "matches!(\n                        self.peek().kind,\n                        TokenKind::Keyword(Keyword::UNION)\n                            | TokenKind::Keyword(Keyword::INTERSECT)\n                            | TokenKind::Keyword(Keyword::EXCEPT)\n                    )",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2262",
+    "file": "src/parser/grammar.rs",
+    "line": 2262,
+    "decision": "self.eat_punct(&TokenKind::Star)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2264",
+    "file": "src/parser/grammar.rs",
+    "line": 2264,
+    "decision": "matches!(self.peek().kind, TokenKind::RParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2270",
+    "file": "src/parser/grammar.rs",
+    "line": 2270,
+    "decision": "self.at_kw(Keyword::OVER) || self.at_kw(Keyword::FILTER)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2289",
+    "file": "src/parser/grammar.rs",
+    "line": 2289,
+    "decision": "self.at_kw(Keyword::WHEN)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2295",
+    "file": "src/parser/grammar.rs",
+    "line": 2295,
+    "decision": "self.eat_kw(Keyword::WHEN)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2301",
+    "file": "src/parser/grammar.rs",
+    "line": 2301,
+    "decision": "whens.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2304",
+    "file": "src/parser/grammar.rs",
+    "line": 2304,
+    "decision": "self.eat_kw(Keyword::ELSE)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2345",
+    "file": "src/parser/grammar.rs",
+    "line": 2345,
+    "decision": "self.eat_punct(&TokenKind::LParen)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2349",
+    "file": "src/parser/grammar.rs",
+    "line": 2349,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "grammar_2361",
+    "file": "src/parser/grammar.rs",
+    "line": 2361,
+    "decision": "match self.peek().kind.clone() {\n            TokenKind::Integer(v) => {\n                self.advance();\n                Ok(v.to_string())\n            }\n            other => {\n                let span = self.peek().span;\n                Err(ParseFail::Invalid {\n                    message: format!(\"expected number, found {other:?}\"),\n                    span,\n                })\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "grammar_2378",
+    "file": "src/parser/grammar.rs",
+    "line": 2378,
+    "decision": "self.eat_punct(&TokenKind::Comma)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_587",
+    "file": "src/parser/tokenizer.rs",
+    "line": 587,
+    "decision": "match upper.as_str() {\n        \"NULL\" => return TokenKind::Null,\n        \"TRUE\" => return TokenKind::True,\n        \"FALSE\" => return TokenKind::False,\n        _ => {}\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_593",
+    "file": "src/parser/tokenizer.rs",
+    "line": 593,
+    "decision": "match KEYWORDS.binary_search_by(|(text, _)| (*text).cmp(upper.as_str())) {\n        // `Ok(idx)` proves `idx` is in bounds, so `.get` never hits the\n        // `unwrap_or_else` fallback; it's written this way (rather than\n        // indexing) because the qualified subset denies\n        // `clippy::indexing_slicing`/`unwrap_used`/`expect_used`.\n        Ok(idx) => KEYWORDS\n            .get(idx)\n            .map(|(_, kw)| TokenKind::Keyword(*kw))\n            .unwrap_or_else(|| TokenKind::Identifier(word.to_string())),\n        Err(_) => TokenKind::Identifier(word.to_string()),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_638",
+    "file": "src/parser/tokenizer.rs",
+    "line": 638,
+    "decision": "is_eof",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_664",
+    "file": "src/parser/tokenizer.rs",
+    "line": 664,
+    "decision": "c == '\\n'",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_692",
+    "file": "src/parser/tokenizer.rs",
+    "line": 692,
+    "decision": "match self.peek_char() {\n                Some(c) if c.is_whitespace() => {\n                    self.bump();\n                }\n                Some('-') => {\n                    // Lookahead for `--` line comment without consuming\n                    // a lone `-` (the Minus operator).\n                    if self.peek_at(1) == Some('-') {\n                        self.bump();\n                        self.bump();\n                        while let Some(c) = self.peek_char() {\n                            if c == '\\n' {\n                                break;\n                            }\n                            self.bump();\n                        }\n                        continue;\n                    }\n                    break;\n                }\n                Some('/') => {\n                    if self.peek_at(1) == Some('*') {\n                        self.bump();\n                        self.bump();\n                        loop {\n                            match self.peek_char() {\n                                None => {\n                                    return Some(\"unterminated block comment\".to_string());\n                                }\n                                Some('*') => {\n                                    self.bump();\n                                    if self.peek_char() == Some('/') {\n                                        self.bump();\n                                        break;\n                                    }\n                                }\n                                Some(_) => {\n                                    self.bump();\n                                }\n                            }\n                        }\n                        continue;\n                    }\n                    break;\n                }\n                _ => break,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_693",
+    "file": "src/parser/tokenizer.rs",
+    "line": 693,
+    "decision": "c.is_whitespace()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_699",
+    "file": "src/parser/tokenizer.rs",
+    "line": 699,
+    "decision": "self.peek_at(1) == Some('-')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_703",
+    "file": "src/parser/tokenizer.rs",
+    "line": 703,
+    "decision": "c == '\\n'",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_713",
+    "file": "src/parser/tokenizer.rs",
+    "line": 713,
+    "decision": "self.peek_at(1) == Some('*')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_717",
+    "file": "src/parser/tokenizer.rs",
+    "line": 717,
+    "decision": "match self.peek_char() {\n                                None => {\n                                    return Some(\"unterminated block comment\".to_string());\n                                }\n                                Some('*') => {\n                                    self.bump();\n                                    if self.peek_char() == Some('/') {\n                                        self.bump();\n                                        break;\n                                    }\n                                }\n                                Some(_) => {\n                                    self.bump();\n                                }\n                            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_723",
+    "file": "src/parser/tokenizer.rs",
+    "line": 723,
+    "decision": "self.peek_char() == Some('/')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_764",
+    "file": "src/parser/tokenizer.rs",
+    "line": 764,
+    "decision": "match c {\n            '0'..='9' => self.scan_number(),\n            '.' => {\n                // Lookahead: `.5` is a float; a lone `.` is Dot.\n                if matches!(self.peek_at(1), Some('0'..='9')) {\n                    self.scan_number()\n                } else {\n                    self.bump();\n                    TokenKind::Dot\n                }\n            }\n            '\\'' => self.scan_string(),\n            '\"' => self.scan_quoted_identifier('\"', '\"'),\n            '[' => self.scan_quoted_identifier('[', ']'),\n            '`' => self.scan_quoted_identifier('`', '`'),\n            '?' => self.scan_param_question(),\n            ':' => self.scan_param_named(':'),\n            '@' => self.scan_param_named('@'),\n            '$' => self.scan_param_named('$'),\n            c if c == 'x' || c == 'X' => self.scan_maybe_blob(c),\n            c if is_ident_start(c) => self.scan_identifier_or_keyword(),\n            _ => self.scan_operator(),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_783",
+    "file": "src/parser/tokenizer.rs",
+    "line": 783,
+    "decision": "c == 'x' || c == 'X'",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_784",
+    "file": "src/parser/tokenizer.rs",
+    "line": 784,
+    "decision": "is_ident_start(c)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_768",
+    "file": "src/parser/tokenizer.rs",
+    "line": 768,
+    "decision": "matches!(self.peek_at(1), Some('0'..='9'))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_797",
+    "file": "src/parser/tokenizer.rs",
+    "line": 797,
+    "decision": "is_ident_continue(c)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_810",
+    "file": "src/parser/tokenizer.rs",
+    "line": 810,
+    "decision": "self.peek_at(1) == Some('\\'')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_815",
+    "file": "src/parser/tokenizer.rs",
+    "line": 815,
+    "decision": "match self.peek_char() {\n                    None => {\n                        return TokenKind::Error(format!(\n                            \"unterminated blob literal starting with {x}'\"\n                        ));\n                    }\n                    Some('\\'') => {\n                        self.bump();\n                        break;\n                    }\n                    Some(c) => {\n                        hex.push(c);\n                        self.bump();\n                    }\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_831",
+    "file": "src/parser/tokenizer.rs",
+    "line": 831,
+    "decision": "!hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit())",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_837",
+    "file": "src/parser/tokenizer.rs",
+    "line": 837,
+    "decision": "match u8::from_str_radix(pair, 16) {\n                    Ok(b) => bytes.push(b),\n                    Err(_) => return TokenKind::Error(format!(\"invalid blob byte: {pair:?}\")),\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_852",
+    "file": "src/parser/tokenizer.rs",
+    "line": 852,
+    "decision": "match self.peek_char() {\n                None => return TokenKind::Error(\"unterminated string literal\".to_string()),\n                Some('\\'') => {\n                    self.bump();\n                    if self.peek_char() == Some('\\'') {\n                        value.push('\\'');\n                        self.bump();\n                    } else {\n                        break;\n                    }\n                }\n                Some(c) => {\n                    value.push(c);\n                    self.bump();\n                }\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_856",
+    "file": "src/parser/tokenizer.rs",
+    "line": 856,
+    "decision": "self.peek_char() == Some('\\'')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_880",
+    "file": "src/parser/tokenizer.rs",
+    "line": 880,
+    "decision": "match self.peek_char() {\n                None => {\n                    return TokenKind::Error(format!(\n                        \"unterminated quoted identifier starting with {open:?}\"\n                    ));\n                }\n                Some(c) if c == close => {\n                    self.bump();\n                    if escapes && self.peek_char() == Some(close) {\n                        value.push(close);\n                        self.bump();\n                    } else {\n                        break;\n                    }\n                }\n                Some(c) => {\n                    value.push(c);\n                    self.bump();\n                }\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_886",
+    "file": "src/parser/tokenizer.rs",
+    "line": 886,
+    "decision": "c == close",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_888",
+    "file": "src/parser/tokenizer.rs",
+    "line": 888,
+    "decision": "escapes && self.peek_char() == Some(close)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_911",
+    "file": "src/parser/tokenizer.rs",
+    "line": 911,
+    "decision": "digits.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_914",
+    "file": "src/parser/tokenizer.rs",
+    "line": 914,
+    "decision": "match digits.parse::<u32>() {\n                Ok(n) => TokenKind::Param(Param::Numbered(n)),\n                Err(_) => TokenKind::Error(format!(\"parameter number out of range: {digits}\")),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_925",
+    "file": "src/parser/tokenizer.rs",
+    "line": 925,
+    "decision": "is_ident_continue(c)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_932",
+    "file": "src/parser/tokenizer.rs",
+    "line": 932,
+    "decision": "name.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_935",
+    "file": "src/parser/tokenizer.rs",
+    "line": 935,
+    "decision": "match sigil {\n            ':' => TokenKind::Param(Param::Colon(name)),\n            '@' => TokenKind::Param(Param::At(name)),\n            '$' => TokenKind::Param(Param::Dollar(name)),\n            _ => TokenKind::Error(format!(\"unsupported parameter sigil {sigil:?}\")),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_947",
+    "file": "src/parser/tokenizer.rs",
+    "line": 947,
+    "decision": "self.peek_char() == Some('0') && matches!(self.peek_at(1), Some('x' | 'X'))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_952",
+    "file": "src/parser/tokenizer.rs",
+    "line": 952,
+    "decision": "c.is_ascii_hexdigit()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_959",
+    "file": "src/parser/tokenizer.rs",
+    "line": 959,
+    "decision": "hex.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_966",
+    "file": "src/parser/tokenizer.rs",
+    "line": 966,
+    "decision": "match i64::from_str_radix(&hex, 16) {\n                Ok(n) => TokenKind::Integer(n),\n                Err(_) => match u64::from_str_radix(&hex, 16) {\n                    Ok(n) => TokenKind::Integer(n as i64),\n                    Err(e) => TokenKind::Error(format!(\"invalid hex literal: {e}\")),\n                },\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_968",
+    "file": "src/parser/tokenizer.rs",
+    "line": 968,
+    "decision": "match u64::from_str_radix(&hex, 16) {\n                    Ok(n) => TokenKind::Integer(n as i64),\n                    Err(e) => TokenKind::Error(format!(\"invalid hex literal: {e}\")),\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_980",
+    "file": "src/parser/tokenizer.rs",
+    "line": 980,
+    "decision": "self.peek_char() == Some('.')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_990",
+    "file": "src/parser/tokenizer.rs",
+    "line": 990,
+    "decision": "matches!(self.peek_char(), Some('e' | 'E'))",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_992",
+    "file": "src/parser/tokenizer.rs",
+    "line": 992,
+    "decision": "sign_char",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_994",
+    "file": "src/parser/tokenizer.rs",
+    "line": 994,
+    "decision": "has_exp_digits",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_997",
+    "file": "src/parser/tokenizer.rs",
+    "line": 997,
+    "decision": "sign_char",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1007",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1007,
+    "decision": "is_float",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1008",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1008,
+    "decision": "match text.parse::<f64>() {\n                Ok(f) => TokenKind::Float(f),\n                Err(e) => TokenKind::Error(format!(\"invalid float literal {text:?}: {e}\")),\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1013",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1013,
+    "decision": "match text.parse::<i64>() {\n                Ok(n) => TokenKind::Integer(n),\n                Err(_) => match text.parse::<f64>() {\n                    Ok(f) => TokenKind::Float(f),\n                    Err(e) => TokenKind::Error(format!(\"invalid integer literal {text:?}: {e}\")),\n                },\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1015",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1015,
+    "decision": "match text.parse::<f64>() {\n                    Ok(f) => TokenKind::Float(f),\n                    Err(e) => TokenKind::Error(format!(\"invalid integer literal {text:?}: {e}\")),\n                }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1024",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1024,
+    "decision": "match self.bump() {\n            Some(c) => c,\n            None => return TokenKind::Eof,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1028",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1028,
+    "decision": "match c {\n            '*' => TokenKind::Star,\n            ',' => TokenKind::Comma,\n            ';' => TokenKind::Semicolon,\n            '(' => TokenKind::LParen,\n            ')' => TokenKind::RParen,\n            '+' => TokenKind::Plus,\n            '/' => TokenKind::Slash,\n            '%' => TokenKind::Percent,\n            '~' => TokenKind::BitNot,\n            '-' => {\n                if self.peek_char() == Some('>') {\n                    self.bump();\n                    if self.peek_char() == Some('>') {\n                        self.bump();\n                        TokenKind::ArrowArrow\n                    } else {\n                        TokenKind::Arrow\n                    }\n                } else {\n                    TokenKind::Minus\n                }\n            }\n            '=' => {\n                if self.peek_char() == Some('=') {\n                    self.bump();\n                }\n                TokenKind::Eq\n            }\n            '!' => {\n                if self.peek_char() == Some('=') {\n                    self.bump();\n                    TokenKind::Ne\n                } else {\n                    TokenKind::Error(\"expected '=' after '!'\".to_string())\n                }\n            }\n            '<' => match self.peek_char() {\n                Some('=') => {\n                    self.bump();\n                    TokenKind::Le\n                }\n                Some('>') => {\n                    self.bump();\n                    TokenKind::Ne\n                }\n                Some('<') => {\n                    self.bump();\n                    TokenKind::Shl\n                }\n                _ => TokenKind::Lt,\n            },\n            '>' => match self.peek_char() {\n                Some('=') => {\n                    self.bump();\n                    TokenKind::Ge\n                }\n                Some('>') => {\n                    self.bump();\n                    TokenKind::Shr\n                }\n                _ => TokenKind::Gt,\n            },\n            '|' => {\n                if self.peek_char() == Some('|') {\n                    self.bump();\n                    TokenKind::Concat\n                } else {\n                    TokenKind::BitOr\n                }\n            }\n            '&' => TokenKind::BitAnd,\n            other => TokenKind::Error(format!(\"unexpected character {other:?}\")),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1039",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1039,
+    "decision": "self.peek_char() == Some('>')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1041",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1041,
+    "decision": "self.peek_char() == Some('>')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1052",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1052,
+    "decision": "self.peek_char() == Some('=')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1058",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1058,
+    "decision": "self.peek_char() == Some('=')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1065",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1065,
+    "decision": "match self.peek_char() {\n                Some('=') => {\n                    self.bump();\n                    TokenKind::Le\n                }\n                Some('>') => {\n                    self.bump();\n                    TokenKind::Ne\n                }\n                Some('<') => {\n                    self.bump();\n                    TokenKind::Shl\n                }\n                _ => TokenKind::Lt,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1080",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1080,
+    "decision": "match self.peek_char() {\n                Some('=') => {\n                    self.bump();\n                    TokenKind::Ge\n                }\n                Some('>') => {\n                    self.bump();\n                    TokenKind::Shr\n                }\n                _ => TokenKind::Gt,\n            }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1092",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1092,
+    "decision": "self.peek_char() == Some('|')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "tokenizer_1131",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1131,
+    "decision": "match tok.kind {\n            TokenKind::Semicolon => {\n                let end = tok.span.offset as usize;\n                push_trimmed(&mut statements, &sql[start..end]);\n                start = (tok.span.offset as usize).saturating_add(tok.span.len as usize);\n            }\n            TokenKind::Eof => {\n                push_trimmed(&mut statements, &sql[start..]);\n            }\n            _ => {}\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "tokenizer_1148",
+    "file": "src/parser/tokenizer.rs",
+    "line": 1148,
+    "decision": "!trimmed.is_empty()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_146",
+    "file": "src/vdbe/exec.rs",
+    "line": 146,
+    "decision": "match self {\n            ExecError::RegisterOutOfRange { opcode, index } => {\n                write!(f, \"{opcode}: register index {index} is out of range\")\n            }\n            ExecError::RegisterRangeTooLarge { opcode, count } => write!(\n                f,\n                \"{opcode}: register range count {count} exceeds the maximum ({MAX_REGISTERS})\"\n            ),\n            ExecError::TypeMismatch { opcode, found } => {\n                write!(\n                    f,\n                    \"{opcode}: expected a different value type, found {found}\"\n                )\n            }\n            ExecError::MustBeInt => write!(\n                f,\n                \"MustBeInt: value cannot be converted to an integer without data loss\"\n            ),\n            ExecError::MalformedInstruction { opcode, reason } => {\n                write!(f, \"{opcode}: malformed instruction ({reason})\")\n            }\n            ExecError::Unimplemented { opcode } => {\n                write!(f, \"opcode {opcode:?} is not yet implemented by this VM\")\n            }\n            ExecError::CursorNotOpen { slot } => write!(f, \"cursor slot {slot} is not open\"),\n            ExecError::CursorTypeMismatch {\n                opcode,\n                slot,\n                found,\n                expected,\n            } => write!(\n                f,\n                \"{opcode}: cursor slot {slot} is a {found}, not a {expected}\"\n            ),\n            ExecError::NoDatabase { opcode } => write!(\n                f,\n                \"{opcode} requires a database attached to this VM (see Vm::with_db)\"\n            ),\n            ExecError::ProgramCounterOutOfRange { pc } => {\n                write!(f, \"program counter {pc} is out of range\")\n            }\n            ExecError::StepLimitExceeded => write!(\n                f,\n                \"program exceeded the maximum step count ({MAX_STEPS}) without halting\"\n            ),\n            ExecError::EphemeralRowLimitExceeded { opcode, limit } => write!(\n                f,\n                \"{opcode}: ephemeral table/index exceeded the maximum row count ({limit})\"\n            ),\n            ExecError::Halted { code, message } => write!(\n                f,\n                \"statement halted with SQLite result code {code}{}\",\n                message\n                    .as_deref()\n                    .map(|m| format!(\": {m}\"))\n                    .unwrap_or_default()\n            ),\n            ExecError::FlushFailed(e) => {\n                write!(f, \"failed to flush pending writes on statement commit: {e}\")\n            }\n            ExecError::TransactionAlreadyActive => {\n                write!(f, \"cannot start a transaction within a transaction\")\n            }\n            ExecError::NoActiveTransactionToCommit => {\n                write!(f, \"cannot commit - no transaction is active\")\n            }\n            ExecError::NoActiveTransactionToRollback => {\n                write!(f, \"cannot rollback - no transaction is active\")\n            }\n            ExecError::JournalModeChangeDuringTransaction => {\n                write!(f, \"cannot change journal_mode within a transaction\")\n            }\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_224",
+    "file": "src/vdbe/exec.rs",
+    "line": 224,
+    "decision": "match self {\n            ExecError::FlushFailed(e) => Some(e),\n            _ => None,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_453",
+    "file": "src/vdbe/exec.rs",
+    "line": 453,
+    "decision": "reg < 0 || reg as usize > MAX_REGISTERS",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_463",
+    "file": "src/vdbe/exec.rs",
+    "line": 463,
+    "decision": "!(0..=MAX_REGISTERS as i32).contains(&count)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_482",
+    "file": "src/vdbe/exec.rs",
+    "line": 482,
+    "decision": "idx >= self.registers.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_515",
+    "file": "src/vdbe/exec.rs",
+    "line": 515,
+    "decision": "match self.registers.get_mut(idx) {\n            Some(slot) => std::mem::replace(slot, Value::Null),\n            None => Value::Null,\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_548",
+    "file": "src/vdbe/exec.rs",
+    "line": 548,
+    "decision": "idx >= self.cursors.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_582",
+    "file": "src/vdbe/exec.rs",
+    "line": 582,
+    "decision": "idx >= self.agg_contexts.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_616",
+    "file": "src/vdbe/exec.rs",
+    "line": 616,
+    "decision": "idx >= self.filters.len()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_669",
+    "file": "src/vdbe/exec.rs",
+    "line": 669,
+    "decision": "matches!(a, Value::Null) || matches!(b, Value::Null)",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_672",
+    "file": "src/vdbe/exec.rs",
+    "line": 672,
+    "decision": "match &instr.p4 {\n        P4::CollSeq {\n            collation,\n            affinity,\n        } => (*collation, Affinity::from_p4_byte(*affinity)),\n        _ => (Collation::Binary, Affinity::Blob),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_684",
+    "file": "src/vdbe/exec.rs",
+    "line": 684,
+    "decision": "matches!(affinity, Affinity::Blob)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_693",
+    "file": "src/vdbe/exec.rs",
+    "line": 693,
+    "decision": "holds(ord)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_740",
+    "file": "src/vdbe/exec.rs",
+    "line": 740,
+    "decision": "match instr.opcode {\n        Init => control::init(instr),\n        Goto => control::goto(instr),\n        Once => control::once(vm, pc, instr),\n        BeginSubrtn => control::begin_subrtn(),\n        Return => control::r#return(vm, instr),\n        Halt => control::halt(instr),\n        Transaction => control::transaction(vm, instr),\n        AutoCommit => control::auto_commit(vm, instr),\n        SetJournalMode => pragma::set_journal_mode(vm, instr),\n        IntegrityCheck => pragma::integrity_check(vm, instr),\n        IfNot => control::if_not(vm, instr),\n        IfNotZero => control::if_not_zero(vm, instr),\n        IfPos => control::if_pos(vm, instr),\n        DecrJumpZero => control::decr_jump_zero(vm, instr),\n        IsNull => control::is_null(vm, instr),\n        NotNull => control::not_null(vm, instr),\n        MustBeInt => control::must_be_int(vm, instr),\n        OffsetLimit => control::offset_limit(vm, instr),\n\n        Eq => compare_jump(vm, instr, |o| o == Ordering::Equal),\n        Ge => compare_jump(vm, instr, |o| o != Ordering::Less),\n        Gt => compare_jump(vm, instr, |o| o == Ordering::Greater),\n        Le => compare_jump(vm, instr, |o| o != Ordering::Greater),\n        Lt => compare_jump(vm, instr, |o| o == Ordering::Less),\n        RealAffinity => real_affinity(vm, instr),\n        Cast => cast(vm, instr),\n\n        Add => arithmetic::add(vm, instr),\n        Subtract => arithmetic::subtract(vm, instr),\n        Multiply => arithmetic::multiply(vm, instr),\n        Divide => arithmetic::divide(vm, instr),\n        Remainder => arithmetic::remainder(vm, instr),\n        Not => arithmetic::not(vm, instr),\n        BitAnd => arithmetic::bit_and(vm, instr),\n        BitOr => arithmetic::bit_or(vm, instr),\n        ShiftLeft => arithmetic::shift_left(vm, instr),\n        ShiftRight => arithmetic::shift_right(vm, instr),\n        BitNot => arithmetic::bit_not(vm, instr),\n        Concat => arithmetic::concat(vm, instr),\n\n        Integer => result::integer(vm, instr),\n        Int64 => result::int64(vm, instr),\n        Real => result::real(vm, instr),\n        Blob => result::blob(vm, instr),\n        Null => result::null(vm, instr),\n        String8 => result::string8(vm, instr),\n        Variable => result::variable(vm, instr),\n        MakeRecord => result::make_record(vm, instr),\n        ResultRow => result::result_row(vm, instr),\n        Copy => result::copy(vm, instr),\n\n        OpenRead => cursor::open_read(vm, instr),\n        OpenWrite => cursor::open_write(vm, instr),\n        OpenEphemeral => cursor::open_ephemeral(vm, instr),\n        OpenDup => cursor::open_dup(vm, instr),\n        OpenPseudo => cursor::open_pseudo(vm, instr),\n        Rewind => cursor::rewind(vm, instr),\n        Last => cursor::last(vm, instr),\n        Next => cursor::next(vm, instr),\n        Column => cursor::column(vm, instr),\n        Rowid => cursor::rowid(vm, instr),\n        SeekRowid => cursor::seek_rowid(vm, instr),\n        SeekIndexEq => cursor::seek_index_eq(vm, instr),\n        IdxRowid => cursor::idx_rowid(vm, instr),\n        IdxRewind => cursor::idx_rewind(vm, instr),\n        IdxLast => cursor::idx_last(vm, instr),\n        IdxNext => cursor::idx_next(vm, instr),\n        IdxPrev => cursor::idx_prev(vm, instr),\n        NullRow => cursor::null_row(vm, instr),\n        Sequence => cursor::sequence(vm, instr),\n        Found => cursor::found(vm, instr),\n        IdxInsert => cursor::idx_insert(vm, instr),\n        IdxDelete => cursor::idx_delete(vm, instr),\n        Count => cursor::count(vm, instr),\n        AutoIndexInsert => cursor::auto_index_insert(vm, instr),\n        AutoIndexSeek => cursor::auto_index_seek(vm, instr),\n        AutoIndexRowid => cursor::auto_index_rowid(vm, instr),\n        AutoIndexNext => cursor::auto_index_next(vm, instr),\n        IdxLE => cursor::idx_le(vm, instr),\n        NoConflict => cursor::no_conflict(vm, instr),\n        Delete => cursor::delete(vm, instr),\n        Insert => cursor::insert(vm, instr),\n        NewRowid => cursor::new_rowid(vm, instr),\n        CreateTable => cursor::create_table(vm, instr),\n        CreateView => cursor::create_view(vm, instr),\n        DropTable => cursor::drop_table(vm, instr),\n        CreateIndex => cursor::create_index(vm, instr),\n        DropIndex => cursor::drop_index(vm, instr),\n        Analyze => cursor::analyze(vm, instr),\n\n        SorterOpen => sorter::sorter_open(vm, instr),\n        SorterInsert => sorter::sorter_insert(vm, instr),\n        SorterSort | Sort => sorter::sorter_sort(vm, instr),\n        SorterNext => sorter::sorter_next(vm, instr),\n        SorterData => sorter::sorter_data(vm, instr),\n\n        Function => function(vm, instr),\n        AggStep => agg_step(vm, instr),\n        AggFinal => agg_final(vm, instr),\n\n        FilterAdd => filter_add(vm, instr),\n        Filter => filter_check(vm, instr),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_850",
+    "file": "src/vdbe/exec.rs",
+    "line": 850,
+    "decision": "match &instr.p4 {\n        P4::Int(n) => u64::try_from(*n).unwrap_or(0),\n        _ => 0,\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_864",
+    "file": "src/vdbe/exec.rs",
+    "line": 864,
+    "decision": "vm.filter_might_contain(instr.p1, &value)?",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_878",
+    "file": "src/vdbe/exec.rs",
+    "line": 878,
+    "decision": "match &instr.p4 {\n        P4::Str(s) => s.as_str(),\n        other => {\n            return Err(ExecError::MalformedInstruction {\n                opcode: \"Function\",\n                reason: format!(\"expected a \\\"name(arity)\\\" string P4, got {other:?}\"),\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_930",
+    "file": "src/vdbe/exec.rs",
+    "line": 930,
+    "decision": "match &instr.p4 {\n        P4::AggFunc {\n            name,\n            arity,\n            collation,\n        } => (name.as_str(), *arity, *collation),\n        other => {\n            return Err(ExecError::MalformedInstruction {\n                opcode: \"AggStep\",\n                reason: format!(\"expected an AggFunc P4, got {other:?}\"),\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_959",
+    "file": "src/vdbe/exec.rs",
+    "line": 959,
+    "decision": "instr.p5 == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_994",
+    "file": "src/vdbe/exec.rs",
+    "line": 994,
+    "decision": "match &instr.p4 {\n        P4::Str(s) => s.as_str(),\n        other => {\n            return Err(ExecError::MalformedInstruction {\n                opcode: \"AggFinal\",\n                reason: format!(\"expected a \\\"name(arity)\\\" string P4, got {other:?}\"),\n            })\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_1024",
+    "file": "src/vdbe/exec.rs",
+    "line": 1024,
+    "decision": "!descriptor.ends_with(')')",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_1137",
+    "file": "src/vdbe/exec.rs",
+    "line": 1137,
+    "decision": "steps > MAX_STEPS",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "exec_1143",
+    "file": "src/vdbe/exec.rs",
+    "line": 1143,
+    "decision": "match dispatch(&mut vm, pc, instr)? {\n            Step::Next => {\n                pc = pc.saturating_add(1);\n            }\n            Step::Jump(target) => pc = target,\n            Step::Halt { code: 0, .. } => {\n                // A program with no explicit `Transaction` (#194's\n                // original behavior, unchanged) treats a successful\n                // `Halt` as an implicit commit, flushing any pending\n                // write-opcode changes before returning. A `Vm::with_db`\n                // (read-only) or a writable `Vm` that never actually\n                // wrote anything both take the cheap\n                // `writer.is_none()`/`dirty.is_empty()` no-op path.\n                //\n                // #360: a program that opened an explicit transaction\n                // (`Transaction` opcode, `vm.autocommit == false`) and\n                // hasn't reached a matching `AutoCommit` yet does\n                // neither — one SQL statement is one `Program`/`Vm`\n                // (see `execute_transaction_step`), so `BEGIN`'s own\n                // `Halt` running with `autocommit == false` is the\n                // normal, expected case: the transaction stays open,\n                // `vm.autocommit` carries that forward to whichever\n                // `Vm` runs the next statement on this same `Pager`.\n                if let Some(db) = &vm.db {\n                    if vm.autocommit {\n                        if let Some(writer) = &db.writer {\n                            writer.borrow_mut().flush()?;\n                        }\n                    }\n                }\n                return Ok((vm.rows, vm.autocommit));\n            }\n            Step::Halt { code, message } => return Err(ExecError::Halted { code, message }),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "exec_1167",
+    "file": "src/vdbe/exec.rs",
+    "line": 1167,
+    "decision": "vm.autocommit",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_15",
+    "file": "src/record/encode.rs",
+    "line": 15,
+    "decision": "value < (1u64 << 56)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_17",
+    "file": "src/record/encode.rs",
+    "line": 17,
+    "decision": "groups < 8 && value >= (1u64 << (7 * groups))",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_25",
+    "file": "src/record/encode.rs",
+    "line": 25,
+    "decision": "i != groups - 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_56",
+    "file": "src/record/encode.rs",
+    "line": 56,
+    "decision": "i == 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_58",
+    "file": "src/record/encode.rs",
+    "line": 58,
+    "decision": "i == 1",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_60",
+    "file": "src/record/encode.rs",
+    "line": 60,
+    "decision": "i8::try_from(i).is_ok()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_62",
+    "file": "src/record/encode.rs",
+    "line": 62,
+    "decision": "i16::try_from(i).is_ok()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_64",
+    "file": "src/record/encode.rs",
+    "line": 64,
+    "decision": "(I24_MIN..=I24_MAX).contains(&i)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_66",
+    "file": "src/record/encode.rs",
+    "line": 66,
+    "decision": "i32::try_from(i).is_ok()",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_68",
+    "file": "src/record/encode.rs",
+    "line": 68,
+    "decision": "(I48_MIN..=I48_MAX).contains(&i)",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "encode_76",
+    "file": "src/record/encode.rs",
+    "line": 76,
+    "decision": "match serial_type {\n        1 => vec![i as u8],\n        2 => (i as i16).to_be_bytes().to_vec(),\n        3 => {\n            let b = i.to_be_bytes();\n            b[5..8].to_vec()\n        }\n        4 => (i as i32).to_be_bytes().to_vec(),\n        5 => {\n            let b = i.to_be_bytes();\n            b[2..8].to_vec()\n        }\n        6 => i.to_be_bytes().to_vec(),\n        _ => Vec::new(), // 8/9: zero-byte constants\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "encode_94",
+    "file": "src/record/encode.rs",
+    "line": 94,
+    "decision": "match encoding {\n        TextEncoding::Utf8 => s.as_bytes().to_vec(),\n        TextEncoding::Utf16Le => s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect(),\n        TextEncoding::Utf16Be => s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect(),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "encode_114",
+    "file": "src/record/encode.rs",
+    "line": 114,
+    "decision": "match value {\n        Value::Null => (0, Vec::new()),\n        Value::Integer(i) => {\n            let st = integer_serial_type(*i);\n            (st, integer_body(*i, st))\n        }\n        Value::Real(r) => (7, r.to_be_bytes().to_vec()),\n        Value::Blob(b) => (blob_serial_type(b.len()), b.to_vec()),\n        Value::Text(s) => {\n            let body = encode_text(s, encoding);\n            (text_serial_type(body.len()), body)\n        }\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "encode_164",
+    "file": "src/record/encode.rs",
+    "line": 164,
+    "decision": "hl_bytes.len().saturating_add(serial_type_bytes.len()) == header_len",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  }
+]
