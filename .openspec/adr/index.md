@@ -33,3 +33,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0027](0027-correlated-subquery-seek-not-cache.md) | Correlated scalar subquery equality compiles to a seek, not a cache lookup | 2026-08-23 |
 | [0028](0028-pager-page-cache-landed.md) | `Pager` page cache landed — supersedes ADR-0022's problem statement | 2026-08-25 |
 | [0029](0029-introspection-pragmas-outside-vdbe.md) | Read-only introspection pragmas live outside the VDBE, as CLI-layer synthetic result sets | 2026-08-25 |
+| [0030](0030-zero-proc-macro-dependencies.md) | Zero proc-macro dependencies: hand-rolled errors and readline | 2026-08-26 |

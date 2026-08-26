@@ -27,3 +27,6 @@ AGENTS.md
 # Python bytecode from tools/*.py
 __pycache__/
 *.pyc
+
+# make vendor output (on-demand supply-chain inspection, not built from by default)
+/vendor/
