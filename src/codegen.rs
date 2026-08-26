@@ -32,8 +32,8 @@ pub use stmt::insert::compile_insert;
 pub use stmt::update::{compile_update, compile_update_with_catalog};
 pub use stmt::{delete, insert, update};
 pub use subquery::{
-    expand_views, expand_with_clause, push_down_where_predicates, resolve_from_table_schema,
-    resolve_views, ResolvedView,
+    expand_views, expand_with_clause, flatten_from_subqueries, push_down_where_predicates,
+    resolve_from_table_schema, resolve_views, ResolvedView,
 };
 pub use transaction::{compile_begin, compile_commit, compile_rollback};
 

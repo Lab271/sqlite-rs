@@ -799,6 +799,79 @@ fn predicate_pushdown_skips_from_subquery_with_own_join_matches_oracle() {
     );
 }
 
+// #566: subquery flattening — a simple single-table FROM-subquery is
+// merged directly into the enclosing query rather than materialized,
+// so a base-table index (or a sibling join) stays visible. Correctness
+// is checked via oracle diff below; `eqp_reports_flattened_from_subquery_uses_index`
+// checks the resulting plan shape directly.
+
+/// The textbook flattening shape from #566 itself: an inner filter and
+/// an outer filter on a bare single-table FROM-subquery both end up
+/// applied to the same base-table scan.
+#[test]
+fn flatten_from_subquery_matches_oracle() {
+    let db = subquery_fixture_db("flatten_from_subquery");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT * FROM t WHERE x > 10) AS sub WHERE sub.id > 1 ORDER BY sub.id",
+        "flatten_from_subquery_matches_oracle",
+    );
+}
+
+/// The explicit-column-list projection form (`ColumnMap::Explicit`
+/// rather than `Wildcard`), including a renamed output column, still
+/// flattens correctly.
+#[test]
+fn flatten_from_subquery_with_renamed_column_matches_oracle() {
+    let db = subquery_fixture_db("flatten_from_subquery_renamed");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT id, x AS y FROM t) AS sub WHERE sub.y > 15 ORDER BY sub.id",
+        "flatten_from_subquery_with_renamed_column_matches_oracle",
+    );
+}
+
+/// A joined outer query: flattening must re-qualify the subquery's
+/// projected columns against the outer alias rather than leave them
+/// bare, since an unqualified reference would otherwise risk becoming
+/// ambiguous against the join partner.
+#[test]
+fn flatten_from_subquery_joined_outer_matches_oracle() {
+    let db = subquery_fixture_db("flatten_from_subquery_joined_outer");
+    assert_matches_oracle(
+        &db,
+        "SELECT sub.id, other.a_id FROM (SELECT id, x FROM t WHERE x > 10) AS sub \
+         JOIN other ON other.a_id = sub.id WHERE sub.x > 15 ORDER BY sub.id",
+        "flatten_from_subquery_joined_outer_matches_oracle",
+    );
+}
+
+/// A subquery whose own `FROM` is itself a `JOIN` isn't flattened (no
+/// single base table to collapse into) — correctness must still hold,
+/// with materialization simply staying in place.
+#[test]
+fn flatten_skips_from_subquery_with_own_join_matches_oracle() {
+    let db = subquery_fixture_db("flatten_skips_own_join");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT t.id, other.a_id FROM t JOIN other ON other.a_id = t.id) AS sub \
+         WHERE sub.id > 1 ORDER BY sub.id",
+        "flatten_skips_from_subquery_with_own_join_matches_oracle",
+    );
+}
+
+/// A `DISTINCT` subquery isn't flattened — filtering ahead of the
+/// dedup would change which rows survive.
+#[test]
+fn flatten_skips_distinct_from_subquery_matches_oracle() {
+    let db = subquery_fixture_db("flatten_skips_distinct");
+    assert_matches_oracle(
+        &db,
+        "SELECT * FROM (SELECT DISTINCT x FROM t) AS sub WHERE sub.x > 10 ORDER BY sub.x",
+        "flatten_skips_distinct_from_subquery_matches_oracle",
+    );
+}
+
 // #314: correlated scalar subquery memoized per distinct value of the
 // single outer column it's correlated against (ADR-0021's follow-up
 // from #303/#306). `catalog`'s `category` column repeats only 4
@@ -1240,5 +1313,24 @@ fn correlated_subquery_seek_on_rowid_compiles_to_seek_not_scan() {
     assert!(
         first_opcode_line(&program, "SeekRowid").is_some(),
         "expected a SeekRowid opcode (the inner subquery's point lookup) in program:\n{program}"
+    );
+}
+
+/// #566's plan-shape counterpart to the correctness tests above:
+/// flattening a single-table FROM-subquery must expose the base
+/// table's own index to the planner, not leave it hidden behind a
+/// materialized-subquery scan.
+#[test]
+fn eqp_reports_flattened_from_subquery_uses_index() {
+    let db = subquery_fixture_db("flatten_eqp");
+    assert!(run_exec(&db, "CREATE INDEX t_x ON t(x)").status.success());
+    let output = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM (SELECT * FROM t) AS sub WHERE sub.x = 20",
+    );
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.contains("SEARCH t AS sub USING") && output.contains("INDEX t_x"),
+        "expected a single flattened SEARCH row naming index t_x, got: {output}"
     );
 }

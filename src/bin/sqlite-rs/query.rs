@@ -15,7 +15,8 @@ use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog,
     compile_select_with_catalog_and_stats, expand_views, expand_with_clause, explain_query_plan,
-    push_down_where_predicates, resolve_from_table_schema, resolve_views, CodegenError, EqpRow,
+    flatten_from_subqueries, push_down_where_predicates, resolve_from_table_schema, resolve_views,
+    CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{format_csv_value, format_query_value};
@@ -70,10 +71,14 @@ pub(crate) fn compile_select_program(
     // `SELECT`, matching how it already shadows a same-named real table.
     let resolved_views = resolve_views(views);
     let mut expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
-    // #532: push safely-movable outer WHERE conjuncts into the views/
-    // derived-tables `expand_views`/`expand_with_clause` just rewrote
-    // into `TableRefKind::Subquery`, so their own materialization scan
-    // (below) can filter before scanning.
+    // #566: flatten a simple FROM-subquery/view/CTE directly into the
+    // enclosing query first — eliminating it outright makes any base-
+    // table index it hides visible to the planner, which a mere
+    // predicate push-down (below) can't do.
+    flatten_from_subqueries(&mut expanded);
+    // #532: push safely-movable outer WHERE conjuncts into whatever
+    // views/derived-tables flattening didn't eliminate, so their own
+    // materialization scan (below) can filter before scanning.
     push_down_where_predicates(&mut expanded);
     let select = &expanded;
 

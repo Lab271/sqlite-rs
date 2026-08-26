@@ -38,7 +38,10 @@ use crate::parser::ast::{
 
 /// How a `FROM`-subquery's projection maps an output column name back to
 /// the underlying expression a pushed predicate should reference instead.
-enum ColumnMap {
+/// Shared with [`super::flatten`], which needs the identical projection-
+/// shape eligibility check when rewriting the *rest* of the enclosing
+/// query's references to a flattened subquery's alias.
+pub(super) enum ColumnMap {
     /// `SELECT * FROM t` — any bare name passes through unchanged.
     Wildcard,
     /// `SELECT a, b AS c, ... FROM t` — each output name (its alias, or
@@ -140,7 +143,7 @@ fn subquery_pushdown_safe(inner: &Select) -> bool {
         .is_some_and(|from| from.joins.is_empty())
 }
 
-fn subquery_column_map(inner: &Select) -> Option<ColumnMap> {
+pub(super) fn subquery_column_map(inner: &Select) -> Option<ColumnMap> {
     if let [ResultColumn::Star] = inner.columns.as_slice() {
         return Some(ColumnMap::Wildcard);
     }
