@@ -54,6 +54,7 @@ pub fn flatten_from_subqueries(select: &mut Select) {
     recurse_into_from_subqueries(select);
 }
 
+#[derive(Clone, Copy)]
 enum TableRefSlot {
     First,
     Join(usize),
@@ -85,13 +86,10 @@ fn try_flatten_one(select: &mut Select) -> bool {
     false
 }
 
-fn table_ref_at<'a>(
-    from: &'a crate::parser::ast::FromClause,
-    slot: &TableRefSlot,
-) -> Option<&'a TableRef> {
+fn table_ref_at(from: &crate::parser::ast::FromClause, slot: TableRefSlot) -> Option<&TableRef> {
     match slot {
         TableRefSlot::First => Some(&from.first),
-        TableRefSlot::Join(i) => from.joins.get(*i).map(|j| &j.table),
+        TableRefSlot::Join(i) => from.joins.get(i).map(|j| &j.table),
     }
 }
 
@@ -104,7 +102,7 @@ fn try_flatten_table_ref_at(select: &mut Select, slot: TableRefSlot) -> bool {
     let Some(from) = select.from.as_ref() else {
         return false;
     };
-    let Some(table_ref) = table_ref_at(from, &slot) else {
+    let Some(table_ref) = table_ref_at(from, slot) else {
         return false;
     };
     let TableRefKind::Subquery(inner) = &table_ref.kind else {
