@@ -489,10 +489,13 @@ The compatibility contract has **two halves**: the file format (static — what 
 
 ## Dependencies
 
+Aspirational list from early planning — stale; see `DEPENDENCIES.md` for the
+actual current dependency set, and [ADR-0030](adr/0030-zero-proc-macro-dependencies.md)
+for why `thiserror` was dropped in favor of hand-rolled error impls.
+
 ```toml
 [dependencies]
 lemon-rs = "0.x"        # Parser generator (or lalrpop)
-thiserror = "1"         # Error handling
 memmap2 = "0.x"         # Memory-mapped I/O for VFS
 parking_lot = "0.x"     # Faster mutexes for pager
 

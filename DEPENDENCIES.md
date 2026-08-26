@@ -4,7 +4,9 @@ sqlite-rs targets security-sensitive contexts (forensics, FRANK). Minimal
 dependencies is a deliberate stance, not an oversight: every dependency is
 a trust boundary, and proc macros in particular execute arbitrary code at
 build time. As of #553, production code has **zero proc-macro
-dependencies**.
+dependencies**; as of #558, the CLI's line editor is also hand-rolled,
+leaving `nix` as the sole production dependency (see
+[ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md)).
 
 This file is the audit trail for that stance — every direct dependency,
 why it's here, and what was considered instead. Supply-chain policy
@@ -17,11 +19,13 @@ database). Both run in CI's `lint-and-supply-chain` job.
 
 | Crate | Version | License | Purpose | Maintenance | Alternatives considered |
 |-------|---------|---------|---------|-------------|--------------------------|
-| [`nix`](https://crates.io/crates/nix) | 0.31 | MIT | POSIX file locking (`flock`, via the `fs` feature) for `src/vfs/lock.rs`'s cross-process database locking | Actively maintained, ~150 contributors, widely used across the Rust ecosystem | Hand-rolling raw `libc::flock` FFI — rejected: `nix` gives safe wrappers over the same syscalls with no proc-macro cost and no meaningful trust-surface increase over `libc` itself |
-| [`rustyline`](https://crates.io/crates/rustyline) | 14 | MIT | REPL line editing and persistent history (#551) | Actively maintained, the de facto standard readline replacement in the Rust ecosystem | Hand-rolling raw terminal input handling — rejected as a large maintenance burden for a CLI convenience feature, not core engine functionality; a `--no-repl` build isolating this dependency was considered but the REPL is a first-class deliverable, not optional |
+| [`nix`](https://crates.io/crates/nix) | 0.31 | MIT | POSIX file locking (`flock`, via the `fs` feature) for `src/vfs/lock.rs`'s cross-process database locking, and raw-mode termios (`term` feature) for the CLI's hand-rolled readline (#558) | Actively maintained, ~150 contributors, widely used across the Rust ecosystem | Hand-rolling raw `libc::flock`/termios FFI — rejected: `nix` gives safe wrappers over the same syscalls with no proc-macro cost and no meaningful trust-surface increase over `libc` itself |
 
-Neither crate pulls in a proc-macro dependency of its own (verify with
-`cargo tree -e features` if that ever changes).
+`nix` is now the sole production dependency; it pulls in no proc-macro
+dependency of its own (verify with `cargo tree -e features` if that ever
+changes). `rustyline` (formerly listed here, #551) was replaced by a
+hand-rolled readline in `src/bin/sqlite-rs/readline/` (#558) — see
+[ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md).
 
 ## Development-only dependencies
 
@@ -47,5 +51,12 @@ by `make deny`/`make audit`.
 - **Vendored/pinned supply-chain audit trail:** `cargo vet` (see
   `supply-chain/`), enforced in CI. Notably audited the transitive
   dependencies `rustyline` pulled in (#551).
+- **Reviewed lockfile updates:** `make update` runs `cargo update`, then
+  re-runs `make deny`/`make audit` against the new `Cargo.lock` before you
+  commit it, so a bad transitive bump surfaces before merge, not after.
+- **Local vendor inspection:** `make vendor` runs `cargo vendor vendor/`
+  for reading the exact upstream source of every dependency (including
+  transitive ones) on disk; `vendor/` is gitignored and not built from by
+  default — this is an inspection aid, not the build's source of truth.
 - Updating this file is part of the review for any PR that adds, removes,
   or upgrades a direct dependency.

@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -166,6 +166,25 @@ audit: ## Supply-chain gate: fail on known RUSTSEC vulnerabilities (cargo-audit)
 	  echo "install: cargo install cargo-audit"; \
 	  exit 1; }
 	cargo audit
+
+update: ## Supply-chain: cargo update, then re-run deny+audit against the new lockfile before you commit it
+	@cp Cargo.lock Cargo.lock.before-update
+	cargo update
+	@echo ""; \
+	if diff -q Cargo.lock.before-update Cargo.lock >/dev/null 2>&1; then \
+	  echo "Cargo.lock unchanged."; \
+	else \
+	  echo "Cargo.lock changes:"; \
+	  diff -u Cargo.lock.before-update Cargo.lock | grep -E '^[+-]name = |^[+-]version = ' | paste -d' ' - - || true; \
+	fi
+	@rm -f Cargo.lock.before-update
+	@echo ""; echo "Re-checking updated lockfile:"
+	@$(MAKE) deny
+	@$(MAKE) audit
+	@echo ""; echo "Lockfile updated and re-vetted — review the diff above, then commit Cargo.lock if it looks right."
+
+vendor: ## Supply-chain: cargo vendor vendor/ for local inspection of exact upstream source (gitignored, not built from by default)
+	cargo vendor vendor
 
 grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict
