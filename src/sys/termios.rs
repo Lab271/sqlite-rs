@@ -146,6 +146,16 @@ pub fn cfmakeraw_call(t: &mut termios) {
 mod tests {
     use super::*;
 
+    // `ICANON`/`ECHO` (`c_lflag` bits `cfmakeraw` must clear) are at
+    // different bit positions on macOS/BSD vs. Linux — `ECHO` happens to
+    // coincide (0x0008) but `ICANON` does not, so this is `cfg`-gated
+    // rather than one shared constant.
+    #[cfg(target_os = "macos")]
+    const ICANON: u64 = 0x0100;
+    #[cfg(target_os = "linux")]
+    const ICANON: u64 = 0x0002;
+    const ECHO: u64 = 0x0008;
+
     // `tcgetattr`/`tcsetattr` need a real tty; `cfmakeraw` needs neither,
     // so it is the one primitive here testable without one (CI has no
     // controlling tty).
@@ -154,9 +164,7 @@ mod tests {
         let mut t: termios = unsafe { std::mem::zeroed() };
         t.c_lflag = 0xFFFF_FFFF_FFFF_FFFFu64 as _;
         cfmakeraw_call(&mut t);
-        // ICANON (0x0100) and ECHO (0x0008) are set on every platform this
-        // crate targets; raw mode must clear both.
-        assert_eq!(t.c_lflag & 0x0100, 0, "ICANON must be cleared");
-        assert_eq!(t.c_lflag & 0x0008, 0, "ECHO must be cleared");
+        assert_eq!(t.c_lflag as u64 & ICANON, 0, "ICANON must be cleared");
+        assert_eq!(t.c_lflag as u64 & ECHO, 0, "ECHO must be cleared");
     }
 }
