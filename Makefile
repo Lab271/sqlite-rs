@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor sbom sbom-dev supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -200,6 +200,46 @@ update: ## Supply-chain: cargo update, then re-run deny+audit against the new lo
 
 vendor: ## Supply-chain: cargo vendor vendor/ for local inspection of exact upstream source (gitignored, not built from by default)
 	cargo vendor vendor
+
+# `--describe crate` (the default) walks the production dependency graph
+# only — dev-dependencies never ship, so they're out of scope for an SBOM
+# describing the trust boundary a downstream consumer inherits (same split
+# DEPENDENCIES.md draws). SOURCE_DATE_EPOCH pinned to HEAD's commit time
+# makes the output byte-reproducible (no timestamp/serialNumber churn) so
+# `git diff` only shows real dependency changes, not regeneration noise.
+sbom: ## Regenerate the CycloneDX SBOM (sqlite-rs.cdx.json) from the production dependency graph
+	@command -v cargo-cyclonedx >/dev/null 2>&1 || { \
+	  echo "error: cargo-cyclonedx not found."; \
+	  echo "install: cargo install cargo-cyclonedx"; \
+	  exit 1; }
+	SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct) cargo cyclonedx --format json --describe crate --spec-version 1.5
+	@# cargo-cyclonedx bakes the absolute checkout path into every
+	@# `bom-ref` (its `purl`s already correctly use relative `file://.`);
+	@# an absolute, machine-/checkout-specific path in a committed file
+	@# is both a reproducibility and a minor privacy leak (local
+	@# username), so normalize it to the same relative form the tool
+	@# itself uses for purls.
+	@python3 -c "\
+	import pathlib; \
+	p = pathlib.Path('sqlite-rs.cdx.json'); \
+	root = str(pathlib.Path.cwd()); \
+	text = p.read_text().replace('path+file://' + root, 'path+file://.'); \
+	p.write_text(text)"
+	@echo "wrote sqlite-rs.cdx.json — commit it alongside any production dependency change"
+
+# `cargo-cyclonedx` structurally excludes dev-dependencies from every
+# describe mode it has (verified: --describe all-cargo-targets still
+# omits them) — there's no flag to include them, scope-tagged or
+# otherwise. Build-time code execution (a malicious build.rs, a
+# compromised test harness) is a real attack vector independent of what
+# ships, so tools/gen_dev_sbom.py reads `cargo metadata` directly and
+# emits the full Cargo.lock closure instead, with each component's
+# `scope` computed from whether it's reachable from the root by a chain
+# of only normal-kind edges (`required`) or only via a dev/build edge
+# somewhere in the chain (`optional`) — currently all 116 non-root
+# packages are `optional`, matching zero production dependencies.
+sbom-dev: ## Regenerate the dev-inclusive CycloneDX SBOM (sqlite-rs-dev.cdx.json) covering the full Cargo.lock closure
+	python3 tools/gen_dev_sbom.py
 
 supply-chain: deny audit ## Both supply-chain gates (deny + audit), cached to target/supply-chain.json for `make assurance` staleness reporting
 	@mkdir -p target
