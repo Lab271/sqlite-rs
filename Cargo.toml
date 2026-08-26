@@ -33,6 +33,10 @@ name = "unit_layer_isolation"
 path = "tests/unit/layer_isolation.rs"
 
 [[test]]
+name = "unit_supply_chain_gates"
+path = "tests/unit/supply_chain_gates.rs"
+
+[[test]]
 name = "unit_header"
 path = "tests/unit/header.rs"
 

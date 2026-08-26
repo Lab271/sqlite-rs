@@ -406,11 +406,13 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 **Tests:** `tests/unit/parser.rs::test_accept_union_all`, `tests/unit/parser.rs::test_accept_multiple_union_all_arms`, `tests/unit/parser.rs::test_accept_union_all_with_trailing_order_by_limit`, `tests/unit/parser.rs::test_accept_union`, `tests/unit/parser.rs::test_accept_multiple_union_arms`, `tests/unit/parser.rs::test_accept_mixed_union_and_union_all_arms`, `tests/unit/parser.rs::test_union_inside_subquery_parses`, `tests/unit/parser.rs::test_unsupported_compound_select`, `tests/unit/parser.rs::test_compound_select_inside_subquery_is_unsupported_not_invalid`, `tests/unit/parser.rs::test_multi_column_in_rejects_compound_subquery`, `tests/corpus/parser_oracle_test.rs::parser_matches_oracle_three_way_outcome`
 
-#### Scenario: Accept window function
+#### Scenario: Window function is a deliberate Unsupported, not Invalid
 
-- GIVEN `SELECT row_number() OVER (ORDER BY x) FROM t`
+- GIVEN `SELECT row_number() OVER (ORDER BY x) FROM t` (this scenario's original title, "Accept window function," described a not-yet-built V9 capability and is stale — window functions are deferred, not accepted, per `tests/tiers/tier3.rs`'s drop-order 4)
 - WHEN parsed
-- THEN parse succeeds with window function in result column
+- THEN parse returns `Unsupported` (not `Invalid`) naming the window-function construct — the same not-yet-implemented-but-recognized pattern as compound SELECT's deferred `INTERSECT`/`EXCEPT`
+
+**Tests:** `tests/unit/parser.rs::test_unsupported_window_function`
 
 #### Scenario: Reject trailing comma
 

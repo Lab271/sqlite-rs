@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -188,6 +188,11 @@ update: ## Supply-chain: cargo update, then re-run deny+audit against the new lo
 
 vendor: ## Supply-chain: cargo vendor vendor/ for local inspection of exact upstream source (gitignored, not built from by default)
 	cargo vendor vendor
+
+supply-chain: deny audit ## Both supply-chain gates (deny + audit), cached to target/supply-chain.json for `make assurance` staleness reporting
+	@mkdir -p target
+	@echo "{\"commit\": \"$$(git rev-parse HEAD)\", \"timestamp\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > target/supply-chain.json
+	@echo "make supply-chain: deny + audit passed, recorded at $$(git rev-parse --short HEAD)"
 
 grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict

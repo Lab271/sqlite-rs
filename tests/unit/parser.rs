@@ -665,6 +665,17 @@ fn test_unsupported_compound_select() {
     assert!(msg.contains("compound"), "message: {msg}");
 }
 
+/// Window functions (`OVER`/`FILTER`) are deferred to V9 (drop-order 4,
+/// see `tests/tiers/tier3.rs::t3_modern_sql_upsert_returning_windows`) —
+/// deliberately `Unsupported`, not `Invalid`, matching the same
+/// not-yet-implemented-but-syntactically-known pattern as compound
+/// SELECT's `INTERSECT`/`EXCEPT` above.
+#[test]
+fn test_unsupported_window_function() {
+    let msg = unsupported("SELECT row_number() OVER (ORDER BY x) FROM t");
+    assert!(msg.contains("window"), "message: {msg}");
+}
+
 #[test]
 fn test_having_without_group_by_is_accepted() {
     // #287: `HAVING` with no `GROUP BY` now filters the implicit
