@@ -9,6 +9,20 @@ use super::value::{TextEncoding, Value};
     reason = "groups/i/shift all range over the compile-time-constant 0..8, so these additions and the 7x multiply never overflow"
 )]
 pub(crate) fn encode_varint(value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_varint_into(value, &mut out);
+    out
+}
+
+/// Like [`encode_varint`], but appends directly to a caller-owned buffer
+/// instead of allocating a fresh `Vec<u8>` per call — the hot encode path
+/// (`encode_record_into`) calls this once per column and once for the
+/// header length, so avoiding a per-call allocation here matters.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "groups/i/shift all range over the compile-time-constant 0..8, so these additions and the 7x multiply never overflow"
+)]
+pub(crate) fn write_varint_into(value: u64, out: &mut Vec<u8>) {
     // The 9-byte form only kicks in once the value needs more than 56
     // bits (8 groups of 7): the decoder's own threshold (it reads 8
     // 7-bit groups, then an unconditional 9th full-byte group).
@@ -17,30 +31,44 @@ pub(crate) fn encode_varint(value: u64) -> Vec<u8> {
         while groups < 8 && value >= (1u64 << (7 * groups)) {
             groups += 1;
         }
-        (0..groups)
-            .map(|i| {
-                let shift = 7 * (groups - 1 - i);
-                #[allow(clippy::cast_possible_truncation)]
-                let mut byte = ((value >> shift) & 0x7f) as u8;
-                if i != groups - 1 {
-                    byte |= 0x80;
-                }
-                byte
-            })
-            .collect()
+        for i in 0..groups {
+            let shift = 7 * (groups - 1 - i);
+            #[allow(clippy::cast_possible_truncation)]
+            let mut byte = ((value >> shift) & 0x7f) as u8;
+            if i != groups - 1 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+        }
     } else {
         let top56 = value >> 8;
-        let mut out: Vec<u8> = (0..8)
-            .map(|i| {
-                let shift = 7 * (7 - i);
-                #[allow(clippy::cast_possible_truncation)]
-                let byte = (((top56 >> shift) & 0x7f) as u8) | 0x80;
-                byte
-            })
-            .collect();
+        for i in 0..8 {
+            let shift = 7 * (7 - i);
+            #[allow(clippy::cast_possible_truncation)]
+            let byte = (((top56 >> shift) & 0x7f) as u8) | 0x80;
+            out.push(byte);
+        }
         #[allow(clippy::cast_possible_truncation)]
         out.push((value & 0xff) as u8);
-        out
+    }
+}
+
+/// The number of bytes [`write_varint_into`] would emit for `value`,
+/// without emitting them — used to size the record header without a
+/// trial-encode loop.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "groups ranges over the compile-time-constant 0..8, so this addition never overflows"
+)]
+fn varint_len(value: u64) -> usize {
+    if value < (1u64 << 56) {
+        let mut groups = 1u32;
+        while groups < 8 && value >= (1u64 << (7 * groups)) {
+            groups += 1;
+        }
+        groups as usize
+    } else {
+        9
     }
 }
 
@@ -72,29 +100,48 @@ fn integer_serial_type(i: i64) -> u64 {
     }
 }
 
-fn integer_body(i: i64, serial_type: u64) -> Vec<u8> {
+fn integer_body_len(serial_type: u64) -> usize {
     match serial_type {
-        1 => vec![i as u8],
-        2 => (i as i16).to_be_bytes().to_vec(),
-        3 => {
-            let b = i.to_be_bytes();
-            b[5..8].to_vec()
-        }
-        4 => (i as i32).to_be_bytes().to_vec(),
-        5 => {
-            let b = i.to_be_bytes();
-            b[2..8].to_vec()
-        }
-        6 => i.to_be_bytes().to_vec(),
-        _ => Vec::new(), // 8/9: zero-byte constants
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => 5,
+        6 => 8,
+        _ => 0, // 8/9: zero-byte constants
     }
 }
 
-fn encode_text(s: &str, encoding: TextEncoding) -> Vec<u8> {
+fn write_integer_body_into(i: i64, serial_type: u64, out: &mut Vec<u8>) {
+    match serial_type {
+        1 => out.push(i as u8),
+        2 => out.extend_from_slice(&(i as i16).to_be_bytes()),
+        3 => out.extend_from_slice(&i.to_be_bytes()[5..8]),
+        4 => out.extend_from_slice(&(i as i32).to_be_bytes()),
+        5 => out.extend_from_slice(&i.to_be_bytes()[2..8]),
+        6 => out.extend_from_slice(&i.to_be_bytes()),
+        _ => {} // 8/9: zero-byte constants
+    }
+}
+
+/// Byte length of `s` once encoded under `encoding`, without allocating
+/// the encoded bytes — used to size a TEXT column's serial type.
+fn encoded_text_len(s: &str, encoding: TextEncoding) -> usize {
     match encoding {
-        TextEncoding::Utf8 => s.as_bytes().to_vec(),
-        TextEncoding::Utf16Le => s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect(),
-        TextEncoding::Utf16Be => s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect(),
+        TextEncoding::Utf8 => s.len(),
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be => s.encode_utf16().count().saturating_mul(2),
+    }
+}
+
+fn write_text_body_into(s: &str, encoding: TextEncoding, out: &mut Vec<u8>) {
+    match encoding {
+        TextEncoding::Utf8 => out.extend_from_slice(s.as_bytes()),
+        TextEncoding::Utf16Le => {
+            out.extend(s.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        }
+        TextEncoding::Utf16Be => {
+            out.extend(s.encode_utf16().flat_map(|u| u.to_be_bytes()));
+        }
     }
 }
 
@@ -106,23 +153,34 @@ fn text_serial_type(len: usize) -> u64 {
     13u64.saturating_add(2u64.saturating_mul(len as u64))
 }
 
-/// Returns a value's serial type and encoded body, per the record-format
-/// doc: the smallest integer width that losslessly holds an INTEGER, the
-/// 8-byte IEEE-754 form for REAL, and the `12+2*len`/`13+2*len` scheme for
-/// BLOB/TEXT.
-fn serial_type_and_body(value: &Value, encoding: TextEncoding) -> (u64, Vec<u8>) {
+/// Returns a value's serial type and encoded body length, per the
+/// record-format doc: the smallest integer width that losslessly holds an
+/// INTEGER, the 8-byte IEEE-754 form for REAL, and the `12+2*len`/
+/// `13+2*len` scheme for BLOB/TEXT. Body bytes are written separately (by
+/// [`write_body_into`]) so this stays allocation-free.
+fn serial_type_and_body_len(value: &Value, encoding: TextEncoding) -> (u64, usize) {
     match value {
-        Value::Null => (0, Vec::new()),
+        Value::Null => (0, 0),
         Value::Integer(i) => {
             let st = integer_serial_type(*i);
-            (st, integer_body(*i, st))
+            (st, integer_body_len(st))
         }
-        Value::Real(r) => (7, r.to_be_bytes().to_vec()),
-        Value::Blob(b) => (blob_serial_type(b.len()), b.to_vec()),
+        Value::Real(_) => (7, 8),
+        Value::Blob(b) => (blob_serial_type(b.len()), b.len()),
         Value::Text(s) => {
-            let body = encode_text(s, encoding);
-            (text_serial_type(body.len()), body)
+            let len = encoded_text_len(s, encoding);
+            (text_serial_type(len), len)
         }
+    }
+}
+
+fn write_body_into(value: &Value, serial_type: u64, encoding: TextEncoding, out: &mut Vec<u8>) {
+    match value {
+        Value::Null => {}
+        Value::Integer(i) => write_integer_body_into(*i, serial_type, out),
+        Value::Real(r) => out.extend_from_slice(&r.to_be_bytes()),
+        Value::Blob(b) => out.extend_from_slice(b),
+        Value::Text(s) => write_text_body_into(s, encoding, out),
     }
 }
 
@@ -142,41 +200,45 @@ pub fn encode_record(values: &[Value], encoding: TextEncoding) -> Vec<u8> {
 /// allocating a fresh `Vec<u8>`. `out` is cleared first; callers that reuse
 /// the same buffer across calls (e.g. once per row in a hot loop) amortize
 /// its capacity instead of paying a `realloc` per row.
+///
+/// Computes each column's serial type/body-length up front (no per-column
+/// `Vec<u8>` allocation — only fixed-size ints and lengths), then writes
+/// the header and bodies directly into `out` in two passes. This avoids
+/// the allocator churn of building a `Vec<(u64, Vec<u8>)>` of per-column
+/// bodies plus a separate serial-type-bytes buffer per row, which
+/// dominated `SorterInsert`/`MakeRecord` profiles under GROUP BY/ORDER BY
+/// workloads (#572).
 pub fn encode_record_into(values: &[Value], encoding: TextEncoding, out: &mut Vec<u8>) {
     out.clear();
 
-    let parts: Vec<(u64, Vec<u8>)> = values
+    let serial_types: Vec<(u64, usize)> = values
         .iter()
-        .map(|v| serial_type_and_body(v, encoding))
+        .map(|v| serial_type_and_body_len(v, encoding))
         .collect();
 
-    let mut serial_type_bytes = Vec::new();
-    for (st, _) in &parts {
-        serial_type_bytes.extend(encode_varint(*st));
+    let mut header_body_len = 0usize;
+    let mut bodies_len = 0usize;
+    for (st, len) in &serial_types {
+        header_body_len = header_body_len.saturating_add(varint_len(*st));
+        bodies_len = bodies_len.saturating_add(*len);
     }
 
     // header_len includes its own varint's length; grow until the
     // varint's own encoded size is consistent with the declared length.
-    let mut header_len = serial_type_bytes.len().saturating_add(1);
-    let header_len_varint = loop {
-        #[allow(clippy::cast_possible_truncation)]
-        let hl_bytes = encode_varint(header_len as u64);
-        if hl_bytes.len().saturating_add(serial_type_bytes.len()) == header_len {
-            break hl_bytes;
-        }
+    let mut header_len = header_body_len.saturating_add(1);
+    #[allow(clippy::cast_possible_truncation)]
+    while varint_len(header_len as u64).saturating_add(header_body_len) != header_len {
         header_len = header_len.saturating_add(1);
-    };
+    }
 
-    out.reserve(
-        header_len_varint
-            .len()
-            .saturating_add(serial_type_bytes.len())
-            .saturating_add(parts.iter().map(|(_, b)| b.len()).sum()),
-    );
-    out.extend(&header_len_varint);
-    out.extend(&serial_type_bytes);
-    for (_, body) in &parts {
-        out.extend(body);
+    out.reserve(header_len.saturating_add(bodies_len));
+    #[allow(clippy::cast_possible_truncation)]
+    write_varint_into(header_len as u64, out);
+    for (st, _) in &serial_types {
+        write_varint_into(*st, out);
+    }
+    for (value, (st, _)) in values.iter().zip(&serial_types) {
+        write_body_into(value, *st, encoding, out);
     }
 }
 
@@ -225,7 +287,7 @@ mod tests {
             (i64::MIN, 6),
         ];
         for (v, expected_st) in cases {
-            let (st, _) = serial_type_and_body(&Value::Integer(*v), TextEncoding::Utf8);
+            let (st, _) = serial_type_and_body_len(&Value::Integer(*v), TextEncoding::Utf8);
             assert_eq!(
                 st, *expected_st,
                 "value {v} expected serial type {expected_st}"

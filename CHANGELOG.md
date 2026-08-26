@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Changed
+
+- `encode_record_into` (`src/record/encode.rs`) no longer allocates a
+  `Vec<u8>` per column plus a serial-type-bytes buffer per call: serial
+  types/body lengths are computed up front without allocating, then the
+  header and column bodies are written directly into the caller's
+  reused output buffer (#572). Profiling (spike #449) found this
+  per-row record re-encoding was the dominant cost in `GROUP BY`'s
+  sort-based path, not the sort algorithm itself — `group_by_agg`
+  improves ~2.2-2.6x (12.1x/9.5x slower than sqlite3 -> 5.4x/3.8x on the
+  1MB/50MB fixtures).
+
 ### Added
 
 - `.color on|off` dot-command for the REPL: toggles ANSI syntax
