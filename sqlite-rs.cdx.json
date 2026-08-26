@@ -1,0 +1,81 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-26T10:09:49.000000000Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "path+file://.#sqlite-rs@0.18.2",
+      "name": "sqlite-rs",
+      "version": "0.18.2",
+      "description": "A binary-compatible Rust replication of SQLite",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/sqlite-rs@0.18.2?download_url=file://.",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/sqlite-rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/iheitlager/sqlite-rs"
+        }
+      ],
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file://.#sqlite-rs@0.18.2 bin-target-0",
+          "name": "sqlite_rs",
+          "version": "0.18.2",
+          "purl": "pkg:cargo/sqlite-rs@0.18.2?download_url=file://.#src/lib.rs"
+        },
+        {
+          "type": "application",
+          "bom-ref": "path+file://.#sqlite-rs@0.18.2 bin-target-1",
+          "name": "lock_probe",
+          "version": "0.18.2",
+          "purl": "pkg:cargo/sqlite-rs@0.18.2?download_url=file://.#tests/helpers/lock_probe.rs"
+        },
+        {
+          "type": "application",
+          "bom-ref": "path+file://.#sqlite-rs@0.18.2 bin-target-2",
+          "name": "sqlite-rs",
+          "version": "0.18.2",
+          "purl": "pkg:cargo/sqlite-rs@0.18.2?download_url=file://.#src/bin/sqlite-rs/main.rs"
+        },
+        {
+          "type": "application",
+          "bom-ref": "path+file://.#sqlite-rs@0.18.2 bin-target-3",
+          "name": "write_loop_probe",
+          "version": "0.18.2",
+          "purl": "pkg:cargo/sqlite-rs@0.18.2?download_url=file://.#tests/helpers/write_loop_probe.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "aarch64-apple-darwin"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [
+    {
+      "ref": "path+file://.#sqlite-rs@0.18.2"
+    }
+  ]
+}
