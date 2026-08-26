@@ -2511,6 +2511,39 @@ mod tests {
             .is_err());
     }
 
+    /// MC/DC vector (obligation `grammar_769`, `parse_create_view_stmt`'s
+    /// decision `self.at_kw(TEMP) || self.at_kw(TEMPORARY)` — same shape
+    /// as `grammar_450`'s, at a distinct call site for CREATE VIEW): leaf
+    /// A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_769__v1_temp() {
+        assert!(parser("CREATE TEMP VIEW v AS SELECT 1")
+            .parse_create_view_stmt()
+            .is_err());
+    }
+
+    /// MC/DC vector (obligation `grammar_769`): both leaves false.
+    /// Independence pair for A against `mcdc__grammar_769__v1_temp`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_769__v2_neither() {
+        assert!(parser("CREATE VIEW v AS SELECT 1")
+            .parse_create_view_stmt()
+            .is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_769`): leaf B true, leaf A
+    /// false. Independence pair for B against
+    /// `mcdc__grammar_769__v2_neither`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_769__v3_temporary() {
+        assert!(parser("CREATE TEMPORARY VIEW v AS SELECT 1")
+            .parse_create_view_stmt()
+            .is_err());
+    }
+
     /// #368 tagged MC/DC vector (obligation `grammar_583`,
     /// `opt_column_constraint`'s `GENERATED ALWAYS AS` decision, 3
     /// leaves / 4 required vectors): leaf A (`GENERATED`) true.
@@ -2548,6 +2581,110 @@ mod tests {
     #[allow(non_snake_case)]
     fn mcdc__grammar_583__v4_as_with_paren() {
         assert!(parser("AS (1)").opt_column_constraint().is_err());
+    }
+
+    /// MC/DC vector (obligation `grammar_914`, `parse_pragma_stmt`'s
+    /// decision `name.eq_ignore_ascii_case("integrity_check") ||
+    /// name.eq_ignore_ascii_case("quick_check")`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_914__v1_integrity_check() {
+        assert!(parser("PRAGMA integrity_check").parse_pragma_stmt().is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_914`): both leaves false.
+    /// Independence pair for A against
+    /// `mcdc__grammar_914__v1_integrity_check`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_914__v2_neither() {
+        assert!(parser("PRAGMA journal_mode = WAL")
+            .parse_pragma_stmt()
+            .is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_914`): leaf B true, leaf A
+    /// false. Independence pair for B against
+    /// `mcdc__grammar_914__v2_neither`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_914__v3_quick_check() {
+        assert!(parser("PRAGMA quick_check").parse_pragma_stmt().is_ok());
+    }
+
+    /// MC/DC vectors (obligation `grammar_1030`, `parse_select_stmt`'s
+    /// `WITH ... INSERT/UPDATE/DELETE` decision `with_clause.is_some()
+    /// && (self.at_kw(INSERT) || self.at_kw(UPDATE) ||
+    /// self.at_kw(DELETE))`, 4 leaves / 5 required vectors): baseline,
+    /// all four leaves false (`WITH` present, next token `SELECT`) —
+    /// parses cleanly. Distinguishing `ParseFail::Unsupported` (this
+    /// decision true) from `ParseFail::Invalid` (false, falling through
+    /// to `expect_kw(SELECT)`) matters here: whenever the leading-token
+    /// leaf (B/C/D) is true, the statement errors either way — as
+    /// `Unsupported` if this decision is true, or as a generic `Invalid`
+    /// "expected SELECT" if `with_clause` is `None` — so `is_err()`
+    /// alone can't witness any leaf's effect; only the variant can.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1030__v1_with_then_select() {
+        assert!(parser("WITH cte AS (SELECT 1) SELECT 1")
+            .parse_select_stmt()
+            .is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_1030`): leaf B true, leaf A
+    /// (`with_clause.is_some()`) false — no `WITH` at all, so this
+    /// falls through to `expect_kw(SELECT)` and fails as `Invalid`
+    /// (not `Unsupported`), unlike `mcdc__grammar_1030__v3_with_insert`
+    /// below where only leaf A differs.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1030__v2_bare_insert_no_with() {
+        assert!(matches!(
+            parser("INSERT INTO t VALUES (1)").parse_select_stmt(),
+            Err(ParseFail::Invalid { .. })
+        ));
+    }
+
+    /// MC/DC vector (obligation `grammar_1030`): leaves A and B both
+    /// true. Independence pair for A against
+    /// `mcdc__grammar_1030__v2_bare_insert_no_with` (only A differs,
+    /// `Invalid` -> `Unsupported`) and for B against
+    /// `mcdc__grammar_1030__v1_with_then_select` (only B differs, `Ok`
+    /// -> `Unsupported`).
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1030__v3_with_insert() {
+        assert!(matches!(
+            parser("WITH cte AS (SELECT 1) INSERT INTO t VALUES (1)").parse_select_stmt(),
+            Err(ParseFail::Unsupported { .. })
+        ));
+    }
+
+    /// MC/DC vector (obligation `grammar_1030`): leaves A and C both
+    /// true. Independence pair for C against
+    /// `mcdc__grammar_1030__v1_with_then_select` (only C differs, `Ok`
+    /// -> `Unsupported`).
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1030__v4_with_update() {
+        assert!(matches!(
+            parser("WITH cte AS (SELECT 1) UPDATE t SET x = 1").parse_select_stmt(),
+            Err(ParseFail::Unsupported { .. })
+        ));
+    }
+
+    /// MC/DC vector (obligation `grammar_1030`): leaves A and D both
+    /// true. Independence pair for D against
+    /// `mcdc__grammar_1030__v1_with_then_select` (only D differs, `Ok`
+    /// -> `Unsupported`).
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1030__v5_with_delete() {
+        assert!(matches!(
+            parser("WITH cte AS (SELECT 1) DELETE FROM t").parse_select_stmt(),
+            Err(ParseFail::Unsupported { .. })
+        ));
     }
 
     /// #368 tagged MC/DC vector (obligation `grammar_1089`,
@@ -2608,6 +2745,64 @@ mod tests {
     #[allow(non_snake_case)]
     fn mcdc__grammar_1115__v3_comma_offset() {
         assert!(parser("SELECT 1 LIMIT 5, 2").parse_select_stmt().is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_1186`,
+    /// `parse_common_table_expr`'s `[NOT] MATERIALIZED` decision
+    /// `self.at_kw(MATERIALIZED) || (self.at_kw(NOT) &&
+    /// matches!(peek_at(1).kind, Keyword(MATERIALIZED)))`): leaf A true.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1186__v1_materialized() {
+        assert!(parser("cte AS MATERIALIZED (SELECT 1)")
+            .parse_common_table_expr()
+            .is_err());
+    }
+
+    /// MC/DC vector (obligation `grammar_1186`): all three leaves false
+    /// (no MATERIALIZED hint at all). Independence pair for A against
+    /// `mcdc__grammar_1186__v1_materialized`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1186__v2_neither_materialized_nor_not() {
+        assert!(parser("cte AS (SELECT 1)")
+            .parse_common_table_expr()
+            .is_ok());
+    }
+
+    /// MC/DC vector (obligation `grammar_1186`): leaves B and C both
+    /// true (`NOT MATERIALIZED`), leaf A false. `at_kw` only peeks the
+    /// current token, so B (current == NOT) and C (the *next* token ==
+    /// MATERIALIZED) are only jointly reachable together here — with A
+    /// pinned false by construction (the current token is NOT, not
+    /// MATERIALIZED), there is no reachable input isolating just B or
+    /// just C from the other; this vector documents the one reachable
+    /// true/true combination rather than claiming an unreachable
+    /// independent split (same convention as `grammar_1647`/
+    /// `mcdc__grammar_1882__v1_not_in`'s note elsewhere in this file).
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1186__v3_not_materialized() {
+        assert!(parser("cte AS NOT MATERIALIZED (SELECT 1)")
+            .parse_common_table_expr()
+            .is_err());
+    }
+
+    /// MC/DC vector (obligation `grammar_1186`): leaf B true, leaf C
+    /// false (`NOT` not followed by `MATERIALIZED`), leaf A false. The
+    /// overall decision is false here too (same as v2's all-false case)
+    /// — `self.expect_punct(LParen)` then fails on the un-consumed `NOT`
+    /// token via a distinct, generic parse error, so this and v2 are
+    /// not distinguishable purely by `is_err()`; recorded anyway as
+    /// reachable-input coverage of the B=true/C=false combination,
+    /// same "not independently observable, documented rather than
+    /// defeated" spirit as v3 above.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__grammar_1186__v4_not_without_materialized() {
+        assert!(parser("cte AS NOT (SELECT 1)")
+            .parse_common_table_expr()
+            .is_err());
     }
 
     /// #368 tagged MC/DC vector (obligation `grammar_1288`,
