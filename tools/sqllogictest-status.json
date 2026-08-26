@@ -1,6 +1,6 @@
 {
   "files": [
-    {"file": "in1.test", "pass": 0, "skip": 187, "suspect": 0, "fail": 0},
+    {"file": "in1.test", "pass": 39, "skip": 148, "suspect": 0, "fail": 0},
     {"file": "in2.test", "pass": 44, "skip": 1, "suspect": 0, "fail": 0},
     {"file": "slt_lang_aggfunc.test", "pass": 46, "skip": 21, "suspect": 0, "fail": 0},
     {"file": "slt_lang_createtrigger.test", "pass": 0, "skip": 0, "suspect": 0, "fail": 0},
@@ -15,5 +15,5 @@
     {"file": "select1.test", "pass": 585, "skip": 415, "suspect": 0, "fail": 0},
     {"file": "select2.test", "pass": 586, "skip": 414, "suspect": 0, "fail": 0}
   ],
-  "total": {"pass": 1278, "skip": 1040, "suspect": 0, "fail": 0, "queries": 2318, "attempted": 1278, "pass_rate": 1.0000, "coverage": 0.5513}
+  "total": {"pass": 1317, "skip": 1001, "suspect": 0, "fail": 0, "queries": 2318, "attempted": 1317, "pass_rate": 1.0000, "coverage": 0.5682}
 }

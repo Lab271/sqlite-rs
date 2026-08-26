@@ -26,8 +26,8 @@ use sqlite_rs::dump;
 use sqlite_rs::format::{format_blob, format_real};
 use sqlite_rs::parser::{parse_select, ParseOutcome};
 use sqlite_rs::record::Value;
-use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::{execute_with_db, ExecError};
+use sqlite_rs::schema::{read_schema, TableSchema};
+use sqlite_rs::vdbe::{execute, execute_with_db, ExecError};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 use crate::format::{Expected, QueryRecord, Record, SortMode};
@@ -209,13 +209,46 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
             return Outcome::Suspect(format!("parser rejected oracle-valid SQL: {message}"))
         }
     };
-    let Some(from) = &select.from else {
-        return Outcome::Skip;
-    };
-    if !from.joins.is_empty() {
-        // Multi-table FROM is out-of-slice for V2 — see this module's
-        // doc comment ("multi-table/view FROM" is a skip, not a fail).
-        return Outcome::Skip;
+    if let Some(from) = &select.from {
+        if !from.joins.is_empty() {
+            // Multi-table FROM is out-of-slice for V2 — see this
+            // module's doc comment ("multi-table/view FROM" is a skip,
+            // not a fail).
+            return Outcome::Skip;
+        }
+    }
+
+    // A FROM-less `SELECT <expr>` (e.g. `SELECT 1 IN (2,3)`) needs no
+    // table, no schema, and — unlike every other branch here — no
+    // fixture db file either: some vendored files (`in1.test`) open
+    // with bare-expression queries and no preceding `statement ok`, so
+    // the db file genuinely doesn't exist yet at that point. `execute`
+    // (vs. `execute_with_db`) runs a program with no page source at
+    // all, which `compile_select_no_from`'s program never touches.
+    if select.from.is_none() {
+        // `compile_select` dispatches to `compile_select_no_from`
+        // internally for this case, which never reads `schema` at all
+        // — this dummy only satisfies the function's signature.
+        let no_from_schema = TableSchema {
+            name: String::new(),
+            root_page: 0,
+            columns: vec![],
+            without_rowid: false,
+            strict: false,
+            column_types: vec![],
+            column_collations: vec![],
+            is_virtual: false,
+            sql: String::new(),
+            indexes: vec![],
+        };
+        let program = match compile_select(&select, &no_from_schema) {
+            Ok(p) => p,
+            Err(_) => return Outcome::Skip,
+        };
+        return match execute(&program) {
+            Ok(rows) => finish(record, &rows),
+            Err(e) => Outcome::Fail(format!("executing: {e}")),
+        };
     }
 
     let (header, pager) = match dump::open(&UnixVfs, db_path) {
@@ -224,6 +257,9 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
     };
     let source: Rc<dyn PageSource> = Rc::new(pager);
 
+    let Some(from) = &select.from else {
+        unreachable!("select.from.is_none() already returned above")
+    };
     let mut schema_cursor = TableCursor::new(Rc::clone(&source), &header, 1);
     let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
         Ok(s) => s,
@@ -284,9 +320,18 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
         Err(e) => return Outcome::Fail(format!("executing: {e}")),
     };
 
+    finish(record, &rows)
+}
+
+/// Renders `rows` per `record.type_string`, sorts per `record.sort_mode`,
+/// and scores against `record.expected` (literal values or an md5
+/// digest) — shared by every `run_query` exit path once it has rows in
+/// hand, regardless of how they were produced (with or without a real
+/// table/db).
+fn finish(record: &QueryRecord, rows: &[Vec<Value>]) -> Outcome {
     let type_chars: Vec<char> = record.type_string.chars().collect();
     let mut rendered_rows = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         if row.len() != type_chars.len() {
             return Outcome::Fail(format!(
                 "row has {} columns, type string {:?} declares {}",
