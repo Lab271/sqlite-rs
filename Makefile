@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
+.PHONY: help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -93,20 +93,32 @@ MCDC_FILES := src/btree.rs src/btree/*.rs src/btree/table/*.rs src/btree/index/*
 	src/vdbe/functions.rs src/parser/grammar.rs src/parser/tokenizer.rs \
 	src/vdbe/exec.rs src/record/encode.rs
 
-test-mcdc: ## MC/DC dashboard for the scanned file set (VERBOSE=1 for per-obligation detail — #52, #368)
+# Committed obligations snapshot (tests/mcdc/obligations.json), analogous
+# to the corpus fixtures (spec 004): checked into git so
+# `unit_mcdc_discharge`'s tagged-test-vs-real-obligation check runs at
+# normal `cargo test` time with no external tool — cargo-mvl-mcdc is only
+# needed to *regenerate* the snapshot, same "committed evidence,
+# regenerable on demand" split as `make fixtures`/`tools/gen_fixtures.sh`.
+# Regenerate whenever a code change shifts a decision's line number
+# (obligation ids are `<file>_<line>`) — `unit_mcdc_discharge` fails
+# loudly, naming the stale id, if a tagged test's id no longer resolves.
+mcdc-obligations: ## Regenerate the committed MC/DC obligations snapshot (tests/mcdc/obligations.json)
 	@command -v cargo-mvl-mcdc >/dev/null 2>&1 || { \
 		echo "cargo-mvl-mcdc not found — install with:"; \
 		echo "  cargo install --git https://github.com/mvl-lang/mvl-rust rust-mcdc --bin cargo-mvl-mcdc"; \
 		exit 1; \
 	}
-	@mkdir -p target/mcdc
-	cargo-mvl-mcdc scan -o target/mcdc/obligations.json $(MCDC_FILES)
+	@mkdir -p tests/mcdc
+	cargo-mvl-mcdc scan -o tests/mcdc/obligations.json $(MCDC_FILES)
+	@echo "wrote tests/mcdc/obligations.json — commit it alongside the source change that shifted line numbers"
+
+test-mcdc: mcdc-obligations ## MC/DC dashboard for the scanned file set (VERBOSE=1 for per-obligation detail — #52, #368)
 	# `harvest` re-runs `cargo test` itself and joins on tagged test names
 	# regardless of overall suite pass/fail (per-test outcome, not exit
 	# status) — the tagged tests are ordinary #[test] fns already run
 	# under `make test`/`make test-lib`; this target is an additional
 	# coverage *view*, not a separate test run.
-	cargo-mvl-mcdc harvest --obligations=target/mcdc/obligations.json --run-dir=. 2>/dev/null \
+	cargo-mvl-mcdc harvest --obligations=tests/mcdc/obligations.json --run-dir=. 2>/dev/null \
 		| python3 tools/mcdc_report.py $(if $(filter 1,$(VERBOSE)),--verbose,)
 
 verification: test ## Verification level of the assurance case (alias for `make test`)

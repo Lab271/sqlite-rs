@@ -37,6 +37,10 @@ name = "unit_supply_chain_gates"
 path = "tests/unit/supply_chain_gates.rs"
 
 [[test]]
+name = "unit_mcdc_discharge"
+path = "tests/unit/mcdc_discharge_test.rs"
+
+[[test]]
 name = "unit_header"
 path = "tests/unit/header.rs"
 
