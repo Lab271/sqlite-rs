@@ -402,6 +402,41 @@ fn automatic_index_handles_duplicate_join_keys() {
     assert_eq!(rows.lines().count(), 3 * 2 + 1, "got: {rows}");
 }
 
+/// #547: `EXPLAIN QUERY PLAN` must actually report the transient
+/// automatic index #545/#464 build when it fires, matching real
+/// sqlite3's own wording (`SEARCH t USING AUTOMATIC COVERING INDEX
+/// (col=?)`, confirmed empirically, sqlite3 3.51.0) — before this fix,
+/// `explain_query_plan` never consulted `choose_auto_index_probe` at
+/// all, so this level silently fell through to a blanket `SCAN` in the
+/// human-readable plan even while the compiled program (per
+/// `automatic_index_prefaces_unindexed_join_level_once_analyzed` above)
+/// genuinely built and probed the index at runtime.
+#[test]
+fn eqp_reports_automatic_index_once_analyzed() {
+    let Some(db) = seed_db("auto-index-eqp") else {
+        return skip_no_oracle("eqp_reports_automatic_index_once_analyzed");
+    };
+    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
+    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
+    let values: Vec<String> = (1..=40).map(|n| format!("({n})")).collect();
+    exec_ok(&db, &format!("INSERT INTO t1 VALUES {}", values.join(", ")));
+    exec_ok(&db, "INSERT INTO t2 VALUES (5), (37)");
+    exec_ok(&db, "ANALYZE");
+
+    let plan = run_query(
+        &db,
+        "EXPLAIN QUERY PLAN SELECT * FROM t1 JOIN t2 ON t1.a = t2.x",
+    );
+    // t2 (2 rows) sorts outermost by `join_order.rs`'s own "smallest
+    // table outermost" heuristic, so t1 (40 rows) is the inner level
+    // whose scan this level's automatic index replaces.
+    assert!(
+        plan.contains("SEARCH t1 USING AUTOMATIC COVERING INDEX (a=?)"),
+        "got: {plan}"
+    );
+    assert!(!plan.contains("SCAN t1"), "got: {plan}");
+}
+
 /// #464 (spec 011): below [`join_access::MIN_ROWS_TO_BLOOM`]'s
 /// threshold (or without `ANALYZE` at all), no `FilterAdd`/`Filter`
 /// opcode is emitted -- the pre-pass's overhead isn't worth it for a

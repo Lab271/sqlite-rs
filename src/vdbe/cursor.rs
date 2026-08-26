@@ -47,7 +47,7 @@
 //!   recently probed/inserted on this cursor.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor};
@@ -349,9 +349,15 @@ pub(crate) struct EphemeralState {
 /// `IdxNext`, #450) — a join level only ever asks "which rows share
 /// this exact key", never a range, so there's no need to reproduce a
 /// real index's ordering semantics or byte-order key encoding at all.
+/// #547: `HashMap` rather than a `BTreeMap` for exactly that reason —
+/// no caller of this map ever walks it in key order (only exact-key
+/// `get`/`entry`), so there's nothing to give up by trading the
+/// `BTreeMap`'s O(log n) per op for `HashMap`'s O(1) amortized, which
+/// is what actually makes this a hash join (build once, probe each
+/// outer row in O(1)) rather than build-once-probe-with-a-binary-search.
 #[derive(Debug, Default)]
 pub(crate) struct AutoIndexState {
-    entries: BTreeMap<Vec<u8>, Vec<i64>>,
+    entries: HashMap<Vec<u8>, Vec<i64>>,
     /// The key and within-key position `AutoIndexSeek`/`AutoIndexNext`
     /// most recently positioned on, read by `AutoIndexRowid` — `None`
     /// before any seek, on a miss, or once exhausted.
