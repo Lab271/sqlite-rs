@@ -1,4 +1,4 @@
-use super::join_access::{choose_join_access, JoinAccess};
+use super::join_access::{choose_auto_index_probe, choose_join_access, AutoIndexProbe, JoinAccess};
 use super::limit_scan::{
     find_covering_index, find_skip_scan_index, is_rowid_reference, top_level_equality_operands,
 };
@@ -230,6 +230,16 @@ pub fn explain_query_plan(
         } else {
             on_expr.and_then(|e| choose_join_access(binding, e, prior_bindings))
         };
+        // #545/#547: when no structural seek exists for this level,
+        // report the transient automatic index `choose_auto_index_probe`
+        // would build instead of falling through to a blanket `SCAN` --
+        // mirrors `joins/level.rs`'s own precedence (tried only once
+        // `access` above comes up empty).
+        let auto_index_probe = if access.is_none() {
+            on_expr.and_then(|e| choose_auto_index_probe(binding, e, prior_bindings))
+        } else {
+            None
+        };
         // #444: a covering-index scan only applies to the outermost
         // table's own `WHERE` clause (like the rowid-seek check above),
         // and only when `access` didn't already find a rowid seek --
@@ -299,7 +309,23 @@ pub fn explain_query_plan(
                     parts.join(" AND ")
                 )
             }
-            (None, None, None) => format!("SCAN {}", eqp_display_name(table_ref)),
+            // #545/#547: this level builds a transient automatic index
+            // rather than falling back to a plain scan -- real sqlite3's
+            // own wording for the equivalent case (confirmed empirically,
+            // sqlite3 3.51.0): `SEARCH t USING AUTOMATIC COVERING INDEX
+            // (col=?)`, no index name (it has none).
+            (None, None, None) => match &auto_index_probe {
+                Some(AutoIndexProbe { key_column, .. }) => format!(
+                    "SEARCH {} USING AUTOMATIC COVERING INDEX ({}=?)",
+                    eqp_display_name(table_ref),
+                    binding
+                        .schema
+                        .columns
+                        .get(*key_column)
+                        .map_or_else(String::new, |c| c.clone())
+                ),
+                None => format!("SCAN {}", eqp_display_name(table_ref)),
+            },
             (Some(JoinAccess::Rowid(_)), None, _) => format!(
                 "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
                 eqp_display_name(table_ref)
