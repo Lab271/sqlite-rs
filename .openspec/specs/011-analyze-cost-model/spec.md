@@ -252,15 +252,28 @@ program.
 `src/codegen/select/join_access.rs::choose_bloom_probe`,
 `src/codegen/select/joins/level.rs::compile_join_level_traverse`
 
-#### Scenario: Unindexed join level gets a Bloom pre-check once ANALYZE has run
+#### Scenario: Bloom pre-check is superseded by automatic indexing, not reachable today
 
 - GIVEN `ANALYZE` stats recording a table with more rows than
-  `MIN_ROWS_TO_BLOOM`, joined on a plain (non-indexed) equality
+  `MIN_ROWS_TO_BLOOM`, joined on a plain (non-indexed) equality (this
+  scenario's original title, "Unindexed join level gets a Bloom pre-check
+  once ANALYZE has run," assumed the Bloom path would actually compile in
+  — since #545 that's no longer true)
 - WHEN that join is compiled
-- THEN the program contains a `FilterAdd` and a `Filter` opcode for that
-  level, and the join still returns the same rows as the oracle
+- THEN `compile_join_level_traverse` tries `choose_auto_index_probe`
+  first (`src/codegen/select/joins/level.rs`); because it gates on the
+  same structural equality shape and the same row threshold as
+  `choose_bloom_probe` (`MIN_ROWS_TO_AUTO_INDEX == MIN_ROWS_TO_BLOOM ==
+  25`), any input that would satisfy the Bloom pre-check's conditions
+  satisfies the automatic-index probe's conditions first — the program
+  contains `OpenEphemeral`/`AutoIndexSeek`, never `FilterAdd`/`Filter`,
+  for this exact case. The Bloom codegen path (`choose_bloom_probe`,
+  `crate::vdbe::filter`) is retained as a defensive fallback — it would
+  activate if the two thresholds or gating conditions ever diverged —
+  but is not exercised by any reachable input today, so no scenario
+  claims it "fires" in the current build.
 
-**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_prefaces_unindexed_join_level_once_analyzed`
+**Tests:** `tests/corpus/analyze_test.rs::automatic_index_prefaces_unindexed_join_level_once_analyzed`
 
 #### Scenario: Small or stats-free tables never get a Bloom pre-check
 

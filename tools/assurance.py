@@ -622,21 +622,21 @@ def _get_mutation_score():
         return None
 
 
-def _get_verify_status():
-    """Read `make verify`'s cached commit (target/verify.json) and report
-    how many commits have landed on HEAD since that gate run — coverage/
-    deny/mvl-limit/mod-files aren't re-checked between full `make verify`
-    runs, so this is a staleness signal, not a pass/fail re-check.
+def _get_gate_status(json_name, rerun_hint):
+    """Read a cached gate-run commit (target/<json_name>) and report how
+    many commits have landed on HEAD since that run — the gate itself
+    isn't re-checked between runs, so this is a staleness signal, not a
+    pass/fail re-check.
 
-    Returns None if never run (no target/verify.json), else a string;
-    never runs `make verify` itself, same discipline as coverage/mutation.
+    Returns None if never run (no target/<json_name>), else a string;
+    never runs the gate itself, same discipline as coverage/mutation.
     """
-    verify_json = REPO_ROOT / "target" / "verify.json"
-    if not verify_json.exists():
+    gate_json = REPO_ROOT / "target" / json_name
+    if not gate_json.exists():
         return None
     try:
         import json
-        commit = json.loads(verify_json.read_text())["commit"]
+        commit = json.loads(gate_json.read_text())["commit"]
     except (json.JSONDecodeError, KeyError):
         return None
 
@@ -655,7 +655,15 @@ def _get_verify_status():
     if count == 0:
         return f"up to date ({short})"
     plural = "s" if count != 1 else ""
-    return f"{count} commit{plural} since last run ({short}) — run `make verify`"
+    return f"{count} commit{plural} since last run ({short}) — run `{rerun_hint}`"
+
+
+def _get_verify_status():
+    return _get_gate_status("verify.json", "make verify")
+
+
+def _get_supply_chain_status():
+    return _get_gate_status("supply-chain.json", "make supply-chain")
 
 
 def report(requirements, verbose=False, traceability_only=False):
@@ -726,6 +734,8 @@ def report(requirements, verbose=False, traceability_only=False):
     if not traceability_only:
         verify_status = _get_verify_status()
         print(f"Verify:               {verify_status if verify_status is not None else 'never run — `make verify` (coverage-gate + deny + mvl-limit + mod-files)'}")
+        supply_chain_status = _get_supply_chain_status()
+        print(f"Supply chain:         {supply_chain_status if supply_chain_status is not None else 'never run — `make supply-chain` (deny + audit)'}")
     print("Not measured here — run `make verification` (alias for `make test`) or `make mvl-limit`")
     print("=" * 60)
 

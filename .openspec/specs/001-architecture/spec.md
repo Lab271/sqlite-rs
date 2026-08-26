@@ -327,11 +327,15 @@ Each layer MUST communicate only through its defined interface. No layer SHALL r
 - WHEN reading the row's content
 - THEN the B-tree MUST return raw bytes, not parsed columns
 
+**Tests:** `tests/unit/layer_isolation.rs::tier0_modules_do_not_import_sql_execution_layers`
+
 #### Scenario: VDBE does not know file format
 
 - GIVEN a VDBE program accessing a table
 - WHEN executing an `OpenRead` instruction
 - THEN the VDBE MUST call B-tree API, not pager API directly
+
+**Tests:** `tests/unit/layer_isolation.rs::vdbe_and_codegen_do_not_bypass_btree_for_storage_access`
 
 ### Requirement 2: File Format Compatibility [MUST]
 
@@ -352,6 +356,8 @@ sqlite-rs MUST read and write files that SQLite 3.x can read and write.
 - GIVEN a database created by sqlite-rs
 - WHEN SQLite 3.45 opens it
 - THEN all tables, indices, and data MUST be accessible
+
+**Tests:** `tests/corpus/cli_write_test.rs::insert_round_trips_through_cli_query`
 
 ### Requirement 3: Test Oracle [MUST]
 

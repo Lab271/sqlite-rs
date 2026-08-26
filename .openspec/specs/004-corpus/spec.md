@@ -29,11 +29,15 @@ Fixture generation and oracle diffs MUST use a pinned, non-codec sqlite3 build w
 - WHEN the corpus harness starts
 - THEN it aborts with an error naming both versions — no silent fallback to the system sqlite3
 
+**Tests:** `tests/corpus/oracle_test.rs::rejects_version_mismatch`
+
 #### Scenario: Codec build rejected
 
 - GIVEN macOS's system sqlite3 (compiled with `CODEC=see-cccrypt`)
 - WHEN offered as the oracle
 - THEN the harness rejects it (detects codec via reserved-bytes behavior or compile options)
+
+**Tests:** `tests/corpus/oracle_test.rs::rejects_codec_oracle`
 
 ### Requirement 2: Reproducible Fixture Generation [MUST]
 
@@ -64,20 +68,28 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 - GIVEN the `serialtypes/` family
 - THEN it contains every serial type including `i64::MIN`/`MAX`, `-0.0`, huge floats, empty and 64-byte blobs, and NULL
 
+**Tests:** `tests/corpus/families_test.rs::serial_type_family`
+
 #### Scenario: Encoding family
 
 - GIVEN the `encodings/` family
 - THEN it contains UTF-8, UTF-16LE, and UTF-16BE databases with identical logical content
+
+**Tests:** `tests/corpus/families_test.rs::encoding_family`
 
 #### Scenario: Page geometry family
 
 - GIVEN the `pagesizes/` family
 - THEN it contains page sizes 512 and 65536 (4096 is covered implicitly by every other family), and reserved-bytes variants 0 and 12
 
+**Tests:** `tests/corpus/families_test.rs::page_geometry_family`
+
 #### Scenario: B-tree shape family
 
 - GIVEN the `btrees/` family
 - THEN it contains single-page tables, multi-page tables (interior nodes), index b-trees, WITHOUT ROWID tables, and rows forcing single- and multi-page overflow chains
+
+**Tests:** `tests/corpus/families_test.rs::btree_shape_family`
 
 #### Scenario: Journal-state family
 
@@ -91,10 +103,14 @@ The corpus MUST contain fixtures for every Tier 0 format dimension. One family p
 - GIVEN the `features/` family
 - THEN it contains auto-vacuum, FTS5, R-Tree, STRICT, and generated-column databases — all raw-row readable per Tier 0 (spec 001 Requirement 4)
 
+**Tests:** `tests/corpus/families_test.rs::feature_bearing_family`
+
 #### Scenario: Invalid-input family
 
 - GIVEN the `invalid/` family (added beyond this spec's original scope, for #11's "rejects non-SQLite files" / "malformed headers: Err, never panic" acceptance criteria)
 - THEN it contains a zero-byte file, a database truncated mid-header, and a database with a corrupted magic string
+
+**Tests:** `tests/corpus/families_test.rs::invalid_family`
 
 ### Requirement 4: Oracle Diff Harness [MUST]
 
@@ -104,17 +120,21 @@ The harness MUST, for each fixture, compare sqlite-rs output against pinned-orac
 
 **Tests:** `tests/corpus/harness_test.rs`
 
-#### Scenario: Green with stub reader
+#### Scenario: Every fixture reports a real outcome
 
-- GIVEN the harness before any reader code exists
+- GIVEN the harness today (the reader landed; this scenario's original title, "Green with stub reader," described the pre-reader placeholder state and is obsolete)
 - WHEN `make test-corpus` runs
-- THEN all fixtures report SKIPPED and the run exits 0
+- THEN every non-`invalid` fixture reports Dumped and every `invalid`-family fixture reports Failed — no fixture is silently skipped
+
+**Tests:** `tests/corpus/harness_test.rs::every_fixture_reports_a_real_outcome`
 
 #### Scenario: Diff failure is actionable
 
 - GIVEN a fixture where sqlite-rs output diverges from the oracle
 - WHEN the harness reports it
-- THEN the report names the fixture, the first diverging row/value, and both outputs
+- THEN the report names the fixture and table, and shows both outputs in full
+
+**Tests:** `tests/corpus/dump_oracle_test.rs::dump_matches_sqlite3_list_mode_across_corpus`
 
 #### Scenario: sqllogictest-format slice runs under the same policy
 
