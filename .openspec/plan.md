@@ -490,8 +490,11 @@ The compatibility contract has **two halves**: the file format (static — what 
 ## Dependencies
 
 Aspirational list from early planning — stale; see `DEPENDENCIES.md` for the
-actual current dependency set, and [ADR-0030](adr/0030-zero-proc-macro-dependencies.md)
-for why `thiserror` was dropped in favor of hand-rolled error impls.
+actual current dependency set, [ADR-0030](adr/0030-zero-proc-macro-dependencies.md)
+for why `thiserror` was dropped in favor of hand-rolled error impls, and
+[ADR-0031](adr/0031-vendor-nix-subset.md) for why `nix` was dropped in
+favor of a vendored `fcntl`/`termios` FFI subset in `src/sys/` (#563).
+`sqlite-rs` now has **zero external dependencies**.
 
 ```toml
 [dependencies]

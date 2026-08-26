@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use nix::libc::off_t;
+use crate::sys::fcntl::off_t;
 
 /// Locates the `lock_probe` helper binary next to this test binary.
 /// `CARGO_BIN_EXE_lock_probe` isn't available here — Cargo only sets it for

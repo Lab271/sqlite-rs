@@ -40,7 +40,7 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use nix::libc::{self, off_t};
+use crate::sys::fcntl::{off_t, EACCES, EAGAIN, F_RDLCK, F_UNLCK, F_WRLCK, O_NOFOLLOW};
 
 use super::lock::fcntl_lock;
 use super::{SharedLockGuard, VfsError};
@@ -107,14 +107,14 @@ impl SharedLockGuard for WalWriteLock {}
 
 impl Drop for WalWriteLock {
     fn drop(&mut self) {
-        fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1).ok();
+        fcntl_lock(&self.file, F_UNLCK, WAL_WRITE_LOCK_BYTE, 1).ok();
     }
 }
 
 pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> {
     let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
-    fcntl_lock(&file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
+    fcntl_lock(&file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
     Ok(WalWriteLock { file })
 }
 
@@ -146,7 +146,7 @@ fn to_shm_vfs_error(path: &Path, source: io::Error) -> VfsError {
 /// paths).
 fn to_shm_lock_error(path: &Path, source: io::Error) -> VfsError {
     match source.raw_os_error() {
-        Some(libc::EAGAIN) | Some(libc::EACCES) => VfsError::Locked {
+        Some(EAGAIN) | Some(EACCES) => VfsError::Locked {
             path: path.display().to_string(),
         },
         _ => to_shm_vfs_error(path, source),
@@ -155,12 +155,12 @@ fn to_shm_lock_error(path: &Path, source: io::Error) -> VfsError {
 
 impl super::WalShm for UnixWalShm {
     fn claim_write_lock(&self) -> super::Result<()> {
-        fcntl_lock(&self.file, libc::F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)
+        fcntl_lock(&self.file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)
             .map_err(|source| to_shm_lock_error(&self.path, source))
     }
 
     fn release_write_lock(&self) -> super::Result<()> {
-        fcntl_lock(&self.file, libc::F_UNLCK, WAL_WRITE_LOCK_BYTE, 1)
+        fcntl_lock(&self.file, F_UNLCK, WAL_WRITE_LOCK_BYTE, 1)
             .map_err(|source| to_shm_vfs_error(&self.path, source))
     }
 
@@ -229,7 +229,7 @@ fn open_shm_shared(shm_path: &Path) -> io::Result<Arc<File>> {
         OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(O_NOFOLLOW)
             .open(shm_path)?,
     );
     files.insert(shm_path.to_path_buf(), Arc::downgrade(&file));
@@ -281,14 +281,14 @@ impl SharedLockGuard for WalCheckpointLock {}
 
 impl Drop for WalCheckpointLock {
     fn drop(&mut self) {
-        fcntl_lock(&self.file, libc::F_UNLCK, WAL_CKPT_LOCK_BYTE, 1).ok();
+        fcntl_lock(&self.file, F_UNLCK, WAL_CKPT_LOCK_BYTE, 1).ok();
     }
 }
 
 pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckpointLock> {
     let file = open_shm_shared(shm_path)?;
     validate_shm_len(&file)?;
-    fcntl_lock(&file, libc::F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
+    fcntl_lock(&file, F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
     Ok(WalCheckpointLock { file })
 }
 
@@ -307,11 +307,11 @@ pub(crate) fn active_reader_marks(shm_path: &Path) -> io::Result<Vec<u32>> {
     let mut marks = Vec::new();
     for slot in 1..=4usize {
         let byte = wal_read_lock_byte(slot);
-        match fcntl_lock(&file, libc::F_WRLCK, byte, 1) {
+        match fcntl_lock(&file, F_WRLCK, byte, 1) {
             Ok(()) => {
-                fcntl_lock(&file, libc::F_UNLCK, byte, 1)?;
+                fcntl_lock(&file, F_UNLCK, byte, 1)?;
             }
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)) => {
+            Err(e) if matches!(e.raw_os_error(), Some(EAGAIN) | Some(EACCES)) => {
                 marks.push(read_mark(&file, slot)?);
             }
             Err(e) => return Err(e),
@@ -413,7 +413,7 @@ impl Drop for WalReadLock {
     fn drop(&mut self) {
         // Best-effort: `drop` can't propagate a failure, and there is
         // nothing more this crate can do about one anyway.
-        fcntl_lock(&self.file, libc::F_UNLCK, wal_read_lock_byte(self.slot), 1).ok();
+        fcntl_lock(&self.file, F_UNLCK, wal_read_lock_byte(self.slot), 1).ok();
     }
 }
 
@@ -451,13 +451,13 @@ pub(crate) fn claim_wal_read_lock(shm_path: &Path) -> io::Result<Option<WalReadL
         // Briefly exclusive, only long enough to publish this slot's mark
         // before downgrading to the SHARED lock held for the guard's
         // lifetime — matches SQLite's own claim sequence (spike 005 exp 4).
-        match fcntl_lock(&file, libc::F_WRLCK, byte, 1) {
+        match fcntl_lock(&file, F_WRLCK, byte, 1) {
             Ok(()) => {
                 set_read_mark(&file, slot, mx_frame(&file)?)?;
-                fcntl_lock(&file, libc::F_RDLCK, byte, 1)?;
+                fcntl_lock(&file, F_RDLCK, byte, 1)?;
                 return Ok(Some(WalReadLock { file, slot }));
             }
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)) => {
+            Err(e) if matches!(e.raw_os_error(), Some(EAGAIN) | Some(EACCES)) => {
                 last_err = Some(e);
             }
             Err(e) => return Err(e),
