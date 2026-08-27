@@ -935,6 +935,78 @@ pub(super) fn collect_leaf_cells(
     Ok(out)
 }
 
+/// Zero-copy pre-scan of a leaf page for the insert fast path (#588):
+/// returns `(insert_pos, num_cells, total_cell_bytes)` for inserting
+/// `rowid` — everything the fit check and `splice_insert_cell` need —
+/// without materializing any cell the way [`collect_leaf_cells`] does.
+/// Errors with [`BtreeError::DuplicateRowid`] if `rowid` is already
+/// present.
+pub(super) fn scan_leaf_cells(
+    buf: &[u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    rowid: i64,
+) -> Result<(usize, usize, usize), BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(8);
+    let mut insert_pos = num_cells;
+    let mut total_bytes = 0usize;
+    for i in 0..num_cells {
+        let ptr_off = cell_ptr_offset(ptr_base, i);
+        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
+        let (cell_rowid, payload_len, tail_start) = decode_cell_head(buf, cell_start, page_num)?;
+        if cell_rowid == rowid {
+            return Err(BtreeError::DuplicateRowid { rowid });
+        }
+        if cell_rowid > rowid && insert_pos == num_cells {
+            insert_pos = i;
+        }
+        let local_size = local_payload_size(usable_size, payload_len) as usize;
+        let has_overflow = (local_size as u64) < payload_len;
+        let cell_end = tail_start
+            .saturating_add(local_size)
+            .saturating_add(if has_overflow { 4 } else { 0 });
+        if cell_end > buf.len() {
+            return Err(BtreeError::PayloadTooShort { page_num });
+        }
+        total_bytes = total_bytes.saturating_add(cell_end.saturating_sub(cell_start));
+    }
+    Ok((insert_pos, num_cells, total_bytes))
+}
+
+/// Zero-copy pre-scan of a leaf page for the delete fast path (#588):
+/// locates `rowid`'s cell, returning `(pos, num_cells, overflow_page)` —
+/// `overflow_page` is the cell's first overflow page, or 0 if its payload
+/// is entirely local — without materializing any cell. Returns `Ok(None)`
+/// if `rowid` isn't on this page.
+pub(super) fn find_leaf_cell(
+    buf: &[u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    rowid: i64,
+) -> Result<Option<(usize, usize, u32)>, BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(8);
+    for i in 0..num_cells {
+        let ptr_off = cell_ptr_offset(ptr_base, i);
+        let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
+        let (cell_rowid, payload_len, tail_start) = decode_cell_head(buf, cell_start, page_num)?;
+        if cell_rowid != rowid {
+            continue;
+        }
+        let local_size = local_payload_size(usable_size, payload_len) as usize;
+        let overflow_page = if (local_size as u64) < payload_len {
+            read_u32(buf, tail_start.saturating_add(local_size), page_num)?
+        } else {
+            0
+        };
+        return Ok(Some((i, num_cells, overflow_page)));
+    }
+    Ok(None)
+}
+
 /// Reads every cell of an interior page, returning `(child_page, key)`
 /// pairs in on-disk order plus the rightmost pointer. Shared by the insert
 /// and delete write paths.
