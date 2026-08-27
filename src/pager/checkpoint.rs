@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! PASSIVE WAL checkpoint (#386): copies committed WAL frames into the
 //! main database file up to the oldest active reader's mark, then
 //! publishes the new backfill boundary (`nBackfill`). Never waits for a

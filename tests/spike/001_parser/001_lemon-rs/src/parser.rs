@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Parser front end: wires the hand-rolled tokenizer into the Lemon-generated
 //! LALR(1) parser.
 

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `repl <file>`: a minimal read-eval-print loop (#365) — the CLI
 //! surface transaction control (#356/#360) actually needs. `exec`
 //! (#358) already runs a `;`-separated multi-statement *script* in one

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Oracle harness entry point. Run via `make test-corpus`
 //! (`cargo test --test corpus`) — kept separate from `make test` so the
 //! fast unit-test loop doesn't pay for corpus discovery on every run.

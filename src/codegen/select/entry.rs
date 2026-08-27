@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::aggregate::{
     compile_grouped_scan, select_has_aggregate, try_compile_index_ordered_group_by,
 };

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::join_access::{choose_auto_index_probe, choose_join_access, AutoIndexProbe, JoinAccess};
 use super::limit_scan::{
     find_covering_index, find_skip_scan_index, is_rowid_reference, top_level_equality_operands,

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Accept/reject-unsupported/reject-invalid parity between the V2
 //! SELECT-core parser and a live `sqlite3` oracle (issue #61's "Oracle
 //! parity" acceptance bar, spike 006's three-way outcome).

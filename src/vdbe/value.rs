@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! NULL propagation and three-valued logic (spec 008, Requirement 4).
 //! `None` represents SQL NULL throughout this module's `Option<bool>`
 //! results — never a boolean.

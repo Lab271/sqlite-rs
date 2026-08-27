@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Rollback-journal on-disk format: header layout and the per-page
 //! checksum, matching stock SQLite's `pager.c` byte-for-byte (#172) so a
 //! journal we write is recoverable by a real `sqlite3`, and vice versa.

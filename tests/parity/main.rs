@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Parity harness entry point. Run via `make test-parity`
 //! (`cargo test --test parity`) — the third leg of the testing triad
 //! alongside tier contracts (#69) and the fixture corpus (#72's Refs:

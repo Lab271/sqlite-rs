@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Handlers for the REPL's `.help`/`.version`/`.schema`/`.dump`/
 //! `.databases`/`.indices` dot-commands (#495) — `.tables`/`.quit`/
 //! `.exit` stay in `repl.rs` (#478 already wired those), and

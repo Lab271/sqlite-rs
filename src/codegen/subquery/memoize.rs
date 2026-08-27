@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #314's per-probe-value memoization cache for correlated scalar
 //! subqueries — see `super`'s module doc.
 

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Whole-page reads on top of [`VfsFile::read_at`], for the b-tree layer.
 //!
 //! [`PageSource`] is defined here (not in `src/btree/`) so the b-tree

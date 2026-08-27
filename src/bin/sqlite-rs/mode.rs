@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `.mode`/`.headers` REPL state (#495): a small `OutputMode` enum plus
 //! one dispatch function (`print_rows`) the REPL's own result-set
 //! printer routes every `SELECT` through, replacing the single

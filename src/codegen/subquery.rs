@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Subquery-expression codegen (#238, plus the correlated-subquery
 //! follow-up): scalar subqueries (`(SELECT ...)`), `IN (SELECT ...)`/
 //! `NOT IN (SELECT ...)`, and `EXISTS (SELECT ...)`/`NOT EXISTS

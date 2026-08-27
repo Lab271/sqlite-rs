@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #196 acceptance: `compile_insert`/`compile_delete`/`compile_update`
 //! keep secondary indexes in sync with table data. Seeds a table +
 //! index via the oracle (so index root pages exist), reads its

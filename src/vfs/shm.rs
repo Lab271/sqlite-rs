@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! WAL-mode `-shm` reader-mark protocol: claims a `WAL_READ_LOCK` slot and
 //! publishes the frame count a reader is pinned to (`aReadMark`), so a live
 //! checkpointer backs off rather than backfilling/truncating WAL frames a

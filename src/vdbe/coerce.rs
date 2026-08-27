@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Text-to-numeric coercion and checked arithmetic (spec 008,
 //! Requirement 5). Integer overflow promotes to REAL rather than
 //! silently wrapping — the CVE-2025-29087/3277 class.

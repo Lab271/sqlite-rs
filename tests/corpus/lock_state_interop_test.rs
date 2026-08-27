@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #357 cross-compat proof for the [`sqlite_rs::vfs::FileLockState`]
 //! ladder against a live, stock `sqlite3` process — spike 005
 //! (`tests/spike/005_locking_interop/findings.md`) validated the byte

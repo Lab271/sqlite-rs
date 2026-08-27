@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Expression lowering (spec 009, Requirement 11): boolean-valued
 //! expressions compile to jump instructions targeting a true/false
 //! continuation, never an intermediate boolean register — the classic

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Result-row opcodes (spec 009, Requirement 8): literal loading
 //! (`Integer`, `Int64`, `Real`, `Blob`, `Null`, `String8`, `Variable`),
 //! record serialization (`MakeRecord`, reusing spec 003's on-disk record

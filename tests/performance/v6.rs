@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V6 (epic #354) benchmarks (#391): four scenarios from the ticket,
 //! adapted to what this codebase can actually measure honestly today —
 //! see each `bench_*` function's own doc comment for what changed from

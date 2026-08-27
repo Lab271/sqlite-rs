@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Byte-for-byte diff of `dump_database`'s rendering against a real,
 //! read-only `sqlite3` process — issue #37's "match `sqlite3`
 //! `-csv`/`-list` modes exactly" acceptance bar, exercised across every

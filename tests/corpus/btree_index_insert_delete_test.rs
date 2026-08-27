@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #171 acceptance: index b-tree insert/delete (same split/merge
 //! mechanics as the table write path, #168/#169, but index cell format
 //! and key-comparison ordering) must produce files stock `sqlite3` opens,

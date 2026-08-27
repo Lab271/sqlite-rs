@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Delete` AST -> `Program` compilation (#210, index maintenance #196).
 //! Mirrors `select.rs`'s `Init -> OpenRead -> Rewind -> [WHERE test] ->
 //! Next -> Halt` scan shape, swapping `OpenRead` for `OpenWrite` and the

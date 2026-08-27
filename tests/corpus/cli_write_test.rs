@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end tests of the `sqlite-rs exec` CLI subcommand (#215, Phase 4
 //! of the V3 epic #161): INSERT/UPDATE/DELETE/CREATE TABLE/DROP TABLE/
 //! CREATE INDEX/DROP INDEX, each written via the CLI binary against a

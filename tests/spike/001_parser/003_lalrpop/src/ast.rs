@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal AST for the parser spike -- just enough to prove that LALRPOP's
 //! semantic actions can build a real tree. Not the production AST from
 //! `.openspec/specs/002-parser/spec.md`.

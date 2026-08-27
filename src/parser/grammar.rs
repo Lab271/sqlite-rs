@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Recursive-descent parser for the SELECT-core V2 slice (spec
 //! 002-parser Requirements 2-4; grammar `.openspec/grammar/sqlite.ebnf`
 //! V2 block). Hand-written rather than pomelo/lemon-generated: spike

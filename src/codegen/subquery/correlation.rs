@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Correlation detection and #306's uncorrelated-subquery hoist — see
 //! `super`'s module doc.
 

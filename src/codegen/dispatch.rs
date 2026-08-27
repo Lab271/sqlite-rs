@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Statement dispatch: keyword-sniffs a raw SQL string to pick the right
 //! parser/compiler pair for one INSERT/UPDATE/DELETE/CREATE TABLE/CREATE
 //! INDEX/DROP TABLE/DROP INDEX statement (#292 — moved out of the CLI

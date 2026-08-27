@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Test-only helper binary: a genuine second OS process that runs a
 //! tight `BEGIN IMMEDIATE; INSERT; UPDATE; COMMIT;` loop against a
 //! database, forever — #361's crash-torture test (`tests/corpus/

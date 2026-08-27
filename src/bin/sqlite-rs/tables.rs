@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `tables <file> [PATTERN]`: `sqlite3`'s `.tables [PATTERN]` shell
 //! command (#177) — table and view names from `sqlite_master`, sorted
 //! alphabetically, excluding internal `sqlite_%` names, optionally

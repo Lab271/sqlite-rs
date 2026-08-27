@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Validates the SQL text corpus's three-way labels
 //! (`valid_in_subset` / `valid_out_of_subset` / `invalid`) against a real
 //! `sqlite3` — issue #2, scoped per spike #57's V2 grammar-slice findings

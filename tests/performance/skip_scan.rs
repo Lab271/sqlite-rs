@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #485 phase 4: an internal, relative benchmark (sqlite-rs vs
 //! sqlite-rs, not vs oracle — same shape as `v6.rs`'s
 //! `bench_cte_reuse_10x`) comparing a skip-scan plan against the plain

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Requirement 3 scenarios: every fixture family present with its expected
 //! members. Structural presence only — semantic decode verification lands
 //! with the real reader (V1 steps 1-9).

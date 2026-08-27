@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #168 acceptance: table b-tree insert (cell insert, leaf split,
 //! cascading interior splits, root split) must produce files stock
 //! `sqlite3` opens, `PRAGMA integrity_check`s cleanly, and reads back

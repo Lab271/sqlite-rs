@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! WAL (write-ahead log) frame reading: merges committed frames from an
 //! uncheckpointed `-wal` file over the main database's pages. Read-only,
 //! quiescent-file recovery only — no `-shm` file, no read-locks, no

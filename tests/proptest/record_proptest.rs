@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Property-based tests for varint and record-decoding roundtrips.
 //!
 //! Lives outside `src/` rather than alongside the hand-picked example

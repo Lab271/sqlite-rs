@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `query [-csv] [-explain] <file> "<SQL>"`: parse -> resolve the `FROM`
 //! table's schema -> compile -> execute -> render, read-only, through
 //! the same `dump::open` (safe-reader locking, WAL-pending visible,

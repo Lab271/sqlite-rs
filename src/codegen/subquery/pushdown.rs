@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Predicate push-down into `FROM`-subqueries and views (#532) — see
 //! `super`'s module doc.
 //!

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Pretty-printer for the V2 AST, used to verify the roundtrip
 //! requirement (spec 002-parser Requirement 3: "parse -> print -> parse
 //! gives identical AST"). Always emits explicit parentheses around

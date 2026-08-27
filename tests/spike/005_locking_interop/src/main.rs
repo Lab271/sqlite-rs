@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike #8 / 005_locking_interop: does a Rust process taking byte-identical
 //! `fcntl` locks actually interop with a live, stock `sqlite3` process?
 //!

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The value-semantics kernel beneath the future VDBE opcodes: type
 //! affinity, cross-type comparison order, collations, NULL/three-valued
 //! logic, and numeric coercion. Pure functions on `Value` — no expression

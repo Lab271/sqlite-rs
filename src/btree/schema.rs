@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Runtime write-path helpers for `CREATE TABLE`/`CREATE INDEX` (#215):
 //! allocating a fresh, empty b-tree root page for a new table or index,
 //! and (for `CREATE INDEX` on an already-populated table) building index

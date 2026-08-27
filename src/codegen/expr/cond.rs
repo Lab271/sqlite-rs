@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Jump-mode condition compilation — see `super`'s module doc.
 
 use super::value::{collation_of, compile_value, expr_affinity, expr_collation};

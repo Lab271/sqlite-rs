@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Option B prototype: closed enum dispatch, no `dyn`, no generics.
 //!
 //! Same slice as option_a.rs: `Vfs`/`VfsFile`/`PageSource`/`VfsPageSource`

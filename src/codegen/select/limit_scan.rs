@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::order_by::{OrderByPlan, OrderByTarget};
 use super::projection::{
     compile_row_values, emit_distinct_guard, emit_row_via_sink, ResultColumnPlan,

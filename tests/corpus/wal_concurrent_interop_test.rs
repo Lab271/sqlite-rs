@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #390 acceptance tests for the V6 demo (epic #354's stated goal):
 //! *"sqlite-rs writing while stock sqlite3 reads the same WAL-mode file
 //! live."* One level up from `wal_write_interop_test.rs`'s byte-level

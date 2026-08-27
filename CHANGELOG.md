@@ -6,6 +6,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Chore
+
+- Added a `// Copyright 2026 Schuberg Philis` / `// SPDX-License-Identifier:
+  Apache-2.0` header to every `src/**/*.rs` and `tests/**/*.rs` file (#582),
+  matching the license already declared in `LICENSE`/`Cargo.toml`. Excludes
+  the one genuinely vendored file,
+  `tests/spike/001_parser/001_lemon-rs/third_party/lemon/lempar.rs`.
+
 ### Changed
 
 - Correlated `EXISTS`/`NOT EXISTS` subqueries (`compile_exists`,

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Cross-type comparison order (spec 008, Requirement 2): NULL < numeric
 //! < text < blob, with INTEGER and REAL merged into one numeric class.
 

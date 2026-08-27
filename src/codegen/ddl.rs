@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! DDL codegen: `CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP INDEX`
 //! (#215). Each compiles to a single procedural opcode at exec time —
 //! no per-row cursor work, unlike the DML statements in the parent

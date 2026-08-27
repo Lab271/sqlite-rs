@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Throwaway tree-walking expression evaluator (spike #59, spec
 //! `002-parser` Req 3 / `008-value-semantics`): parser AST -> kernel
 //! calls -> `Value`. First real consumer of both the phase-1 parser's

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! In-memory line buffer with cursor-relative editing operations (#558).
 //! Operates on `char`s (not bytes), so multi-byte UTF-8 input is edited
 //! and measured correctly.

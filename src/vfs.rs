@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Virtual filesystem: the read path sqlite-rs uses to open and read
 //! database files. Read-only for now (see issue #11) — the write path is
 //! deliberately out of scope here. [`VfsFile::lock_shared`] (#50) acquires

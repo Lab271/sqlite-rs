@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQL parser (spec 002-parser). Lives independently of
 //! `src/schema/ddl_reader.rs` (Requirement 5): the minimal DDL reader
 //! must keep building and passing with this module absent, so nothing

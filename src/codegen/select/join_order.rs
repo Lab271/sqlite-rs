@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #470/#462 (spec 011): reorders a purely `INNER`/`CROSS` join chain's
 //! *execution* order by estimated table size, using the `sqlite_stat1`
 //! cost model (#461, `crate::planner`). `LEFT`/`RIGHT`/`FULL`/`NATURAL`-

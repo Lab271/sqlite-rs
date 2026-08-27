@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! sqlite-rs parser spike, variant 004: `pest` (PEG).
 //!
 //! Grammar lives in `src/grammar.pest`; this module turns pest's `Pairs`

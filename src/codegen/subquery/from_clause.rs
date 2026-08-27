@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `FROM`-subquery schema resolution and materialization — see
 //! `super`'s module doc.
 

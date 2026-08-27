@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 /// Errors from decoding a SQLite record (the payload format used by table and index B-tree
 /// cells).
 #[derive(Debug, PartialEq, Eq)]

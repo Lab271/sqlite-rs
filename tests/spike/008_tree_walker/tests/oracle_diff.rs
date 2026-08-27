@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Oracle-diff harness for spike #59: every vector under
 //! `tests/corpus/expr_vectors/` (expression-shaped families — not
 //! `affinity.jsonl`, which is declared-type probes, not expressions)

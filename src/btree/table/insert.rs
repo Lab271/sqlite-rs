@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Table b-tree insert (write path): cell insert, leaf split, cascading
 //! interior splits, and root split. See
 //! `.openspec/specs/006-btree/spec.md` (insert/split requirements) for the

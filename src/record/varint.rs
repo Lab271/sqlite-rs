@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::error::RecordError;
 
 /// Decodes a SQLite varint: big-endian, 7 bits per byte with a high-bit

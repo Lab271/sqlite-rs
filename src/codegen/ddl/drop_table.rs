@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `DropTable` AST -> `Program` compilation (#215). Like `CreateTable`,
 //! a single `Opcode::DropTable` instruction does the whole job at exec
 //! time: free the table's b-tree pages, cascade-drop every index on it

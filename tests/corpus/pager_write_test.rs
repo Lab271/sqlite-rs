@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #166 compatibility proof: a page flushed through `Pager::flush` must
 //! still be a file stock `sqlite3` opens and `PRAGMA integrity_check`s
 //! cleanly. `run_oracle` (`oracle.rs`) is deliberately read-only, so this

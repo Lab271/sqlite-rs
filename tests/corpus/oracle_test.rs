@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Requirement 1 scenarios: the generator script rejects a codec-enabled
 //! oracle and a wrong-version oracle. Uses fake `sqlite3` doubles (see
 //! `tests/corpus/support/`) rather than real binaries, since the two real

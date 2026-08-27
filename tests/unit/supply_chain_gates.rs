@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Enforces spec 005-assurance Requirement 3 (Supply-Chain Gates), both
 //! scenarios:
 //! - "Locked, advisory-clean build": CI runs `cargo test --locked` (or

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Vendored terminal raw-mode FFI (#563) — replaces `nix::sys::termios`.
 //! `tcgetattr`/`tcsetattr`/`cfmakeraw` are ordinary exported libc symbols
 //! on both macOS and Linux (no raw `ioctl` numbers to hand-roll), so the

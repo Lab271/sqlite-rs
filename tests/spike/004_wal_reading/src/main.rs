@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 // Spike #7 / #004 — de-risk WAL frame reading, the quirkiest unexercised
 // corner of the Tier 0 READ CORE (see .openspec/specs/001-architecture).
 // Throwaway, self-contained experiment (see findings.md); the b-tree walk

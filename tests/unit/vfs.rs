@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Black-box tests of `sqlite_rs::vfs::*` — only public paths, exactly as an
 //! external consumer of the crate would see them.
 

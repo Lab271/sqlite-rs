@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike 005 (#12): export every user table of a SQLite file to CSV.
 //! Throwaway experiment — reuses the real crate's `DatabaseHeader`,
 //! `Vfs`/`VfsFile`, `record::decode_record`/`decode_varint`, and prototypes

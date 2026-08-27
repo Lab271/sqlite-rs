@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Analyze` AST -> `Program` compilation (#461, spec 011). Like
 //! `CreateTable`/`CreateIndex`, a single `Opcode::Analyze` instruction
 //! does the whole job procedurally at exec time (scan each target

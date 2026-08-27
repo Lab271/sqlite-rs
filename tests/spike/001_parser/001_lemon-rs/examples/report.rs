@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike report helper: prints the per-statement outcome for both fixture files
 //! and times a 1000x parse of the whole valid corpus.
 //!

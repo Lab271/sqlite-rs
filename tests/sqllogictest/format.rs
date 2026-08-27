@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Parser for the sqllogictest text format (`statement ok/error`,
 //! `query <types> <sort> [label]` + SQL + `----` + expected block),
 //! as used by the vendored files under

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end oracle-diff tests for non-correlated subquery expressions
 //! (#238): scalar `(SELECT ...)`, `IN (SELECT ...)`/`NOT IN
 //! (SELECT ...)`, and `EXISTS (SELECT ...)`/`NOT EXISTS (SELECT ...)`

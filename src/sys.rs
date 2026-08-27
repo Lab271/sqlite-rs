@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Vendored subset of POSIX syscalls sqlite-rs needs and no pure-Rust/
 //! `std` API covers: byte-range `fcntl` locking (SQLite's journal-mode
 //! lock ladder) and `termios` raw mode (readline's raw keypress input).

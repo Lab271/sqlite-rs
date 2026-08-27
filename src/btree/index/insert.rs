@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Index b-tree insert (write path): entry insert, leaf split, cascading
 //! interior splits, and root split. WITHOUT ROWID tables are index
 //! b-trees (see `index.rs`'s module doc) — the same `insert_entry` writes

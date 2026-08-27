@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V06 parity: WAL journal mode plus the basic-relational surface
 //! deferred alongside it — non-recursive `WITH`/CTE, `UNION` (dedup),
 //! and `CREATE VIEW` (`.openspec/plan.md`'s V6 Slim scope). Same

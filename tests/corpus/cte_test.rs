@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end oracle-diff tests for non-recursive `WITH`-clause (CTE)
 //! materialization (#376) — via the `sqlite-rs` CLI's `exec`/`query`
 //! subcommands, mirroring `subquery_test.rs`'s scratch-db-per-test

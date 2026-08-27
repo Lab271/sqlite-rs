@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V05 parity: core transactions (#356/#360's BEGIN/COMMIT/ROLLBACK
 //! surface). Same CLI-driven write/verify shape as `v04.rs`: seed an
 //! identical schema+data on both engines via a shared oracle-authored

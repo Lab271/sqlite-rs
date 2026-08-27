@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! In-memory history ring plus best-effort persistence (#558).
 //!
 //! History file location: `$XDG_STATE_HOME/sqlite-rs/history` when

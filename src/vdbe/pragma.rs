@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `SetJournalMode` execution (#388): switches the pager between
 //! rollback-journal and WAL journal modes, matching `PRAGMA
 //! journal_mode = WAL|DELETE`. Mirrors `src/vdbe/control.rs`'s

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Journal-mode SHARED byte-range locking via `crate::sys::fcntl` (a
 //! vendored safe wrapper over POSIX `fcntl(F_SETLK)`, #563 — previously
 //! `nix::fcntl`). `src/vfs/` used to be the crate's sole

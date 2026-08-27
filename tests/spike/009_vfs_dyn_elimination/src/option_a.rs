@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Option A prototype: associated-type `Vfs`, no `dyn`.
 //!
 //! Slice under test: `Vfs`/`VfsFile`/`PageSource`/`VfsPageSource`, mirroring

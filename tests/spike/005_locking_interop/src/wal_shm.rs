@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal reader/writer for the `-shm` wal-index header, per the exact
 //! layout of `WalIndexHdr` + `WalCkptInfo` in SQLite's wal.c:
 //!

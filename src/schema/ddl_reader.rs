@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `sqlite_master` decode + minimal DDL reader. Lives outside
 //! `src/parser/` by design (spec 002-parser Requirement 5): zero
 //! dependency on the full SQL parser, so schema decoding keeps working

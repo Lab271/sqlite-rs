@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Executes one vendored `.test` file's [`Record`]s: `statement ok`
 //! blocks are replayed through the pinned oracle (read-write) to build
 //! real on-disk fixture state — this engine has no write path yet, see

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Tier 1 (engine-to-engine) CRUD bench: sqlite-rs vs libsqlite3 (via
 //! rusqlite) on 15 scenarios spanning Create/Read/Update/Delete at
 //! varying complexity (single-row/PK vs range/multi-row vs indexed-column

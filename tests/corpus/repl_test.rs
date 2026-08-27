@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end tests of the `sqlite-rs repl` CLI subcommand (#365): a
 //! minimal read-eval-print loop, driven here by piping a script into
 //! its stdin — exactly the acceptance transcript from the issue body

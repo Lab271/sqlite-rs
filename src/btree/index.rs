@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Index b-tree read path (Tier 0): a read-only cursor over index b-trees
 //! (page types 0x02 interior / 0x0a leaf). WITHOUT ROWID tables are
 //! stored as index b-trees — confirmed on a real fixture (spike 005,

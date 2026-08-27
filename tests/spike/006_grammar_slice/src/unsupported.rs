@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! "Unsupported" classification: the third outcome the spike falsification
 //! criterion requires alongside accept/syntax-error.
 //!

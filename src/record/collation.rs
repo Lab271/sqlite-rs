@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Collating functions for text comparison (spec 008, Requirement 3).
 
 use std::cmp::Ordering;

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `DropIndex` AST -> `Program` compilation (#215). A single
 //! `Opcode::DropIndex` instruction frees the index's b-tree pages,
 //! removes its `sqlite_master` row, and bumps the schema cookie.

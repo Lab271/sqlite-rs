@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::eqp::table_binding_name;
 use super::join_access::{
     compile_join_order_by_sort_keys, emit_full_joined_row, emit_joined_pseudo_projection,

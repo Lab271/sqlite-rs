@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Test-only: drives the `lock_probe` helper binary (`tests/helpers/
 //! lock_probe.rs`) — a genuine second OS process — to observe `fcntl`
 //! byte-range lock contention that a same-process re-lock could never see

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Pragma` AST -> `Program` compilation: `journal_mode` (#388) and
 //! `integrity_check`/`quick_check` (#540, #541). Mirrors
 //! `src/codegen/transaction.rs`'s shape: one control opcode per pragma,

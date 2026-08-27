@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `EXPLAIN` output rendering (spec 009, Requirement 10): one row per
 //! instruction — `addr`, `opcode`, `p1`, `p2`, `p3`, `p4` (rendered in
 //! its display form, not its raw bytes), `p5`, `comment`. Stable enough

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Value-mode expression compilation — see `super`'s module doc.
 
 use super::cond::compile_cond;

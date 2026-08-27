@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Build script: compile the vendored Lemon parser generator, then run it over
 //! `src/parse.y` with the Rust code-generation template
 //! `third_party/lemon/lempar.rs`, emitting `$OUT_DIR/parse.rs`.

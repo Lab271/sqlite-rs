@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Table b-tree delete (write path): cell delete plus page
 //! merge/collapse on underflow. See `.openspec/specs/006-btree/spec.md`
 //! (delete/collapse requirements) for the byte-layout contract this

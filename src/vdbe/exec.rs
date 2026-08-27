@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The register file, cursor-slot table, and fetch-decode-execute loop
 //! (spec 009, Requirement 2), plus dispatch for the compare opcodes
 //! (Requirement 5) — the only opcode family whose delegation to the

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Fixture discovery and the real per-fixture reader: opens each
 //! committed fixture through the library's `dump` path (issue #37, V1
 //! step 9) and reports whether it decoded or failed. See

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #506 regression coverage: `compile_grouped_scan`'s pass 1 now only
 //! serializes schema columns actually referenced by the `GROUP BY` key,
 //! aggregate arguments, or plain result/`HAVING` columns

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! pomelo (Lemon-as-a-proc-macro) grammar for the spike SQL subset.
 //!
 //! Mirrors `tests/spike/001_parser/grammar/sqlite-subset.ebnf`. As in SQLite's own

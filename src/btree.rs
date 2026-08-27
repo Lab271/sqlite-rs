@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Table b-tree read path (Tier 0): a read-only cursor over table b-trees
 //! (page types 0x05 interior / 0x0d leaf), including overflow-chain
 //! reassembly. See `.openspec/specs/006-btree/spec.md` for the page/cell

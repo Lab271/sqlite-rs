@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unit tests for expression lowering (spec 009 Requirement 11),
 //! pinning the four codegen defects the sqllogictest slice surfaced
 //! (#96, #131 review).

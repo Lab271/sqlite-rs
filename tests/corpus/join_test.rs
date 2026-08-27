@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end oracle-diff tests for INNER/LEFT [OUTER]/CROSS JOIN
 //! (#237), via the `sqlite-rs` CLI's `exec`/`query` subcommands —
 //! mirroring `cli_write_test.rs`'s scratch-db-per-test shape.

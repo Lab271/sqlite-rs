@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Whole-database read: schema + every row of every table, the shared
 //! core behind the `dump` and `export` CLI subcommands (issue #37, V1
 //! step 9 — the acceptance gate for epic #5).

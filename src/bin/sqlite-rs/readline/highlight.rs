@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Syntax highlighting for the line being edited (#558): keywords,
 //! strings, numbers, comments, dot-commands, colored while typing.
 //! Built on the real tokenizer ([`sqlite_rs::parser::tokenizer::Tokenizer`])

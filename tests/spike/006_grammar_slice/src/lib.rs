@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike 006: does slicing the grammar down to V2 SELECT-core work?
 //!
 //! See `.openspec/grammar/sqlite.ebnf` for the V-block-tagged grammar source
