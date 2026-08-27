@@ -13,6 +13,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   pages were freed. Table leaf, index leaf, and index interior cells now
   have their first overflow page located and their whole chain walked
   and deallocated before the tree structure itself is freed.
+- Index cells (leaf and interior) were reading their local-payload size
+  with the table leaf cell's `max_local` formula (`usable_size - 35`)
+  instead of the smaller one SQLite defines for index cells
+  (`(usable_size - 12) * 64 / 255 - 23`), corrupting reads on any index
+  cell whose payload landed between the two thresholds. Found while
+  closing 006-btree Req 7's documented "no overflowing-index-key
+  fixture" coverage gap — adding one immediately hit `PayloadTooShort`.
+  Fixing the threshold also surfaced that index entry delete never freed
+  a removed entry's overflow chain at all (table delete already did);
+  index entries essentially never overflowed under the old, too-generous
+  threshold, so the gap was never exercised.
 
 ### Docs
 
