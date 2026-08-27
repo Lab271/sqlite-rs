@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](introduction.md)
+[Performance](performance.md)
 
 # Architecture
 
