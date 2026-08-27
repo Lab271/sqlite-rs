@@ -625,3 +625,293 @@ fn recurse_into_from_subqueries(select: &mut Select) {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::parser::error::{parse_select, ParseOutcome};
+
+    fn parse(sql: &str) -> Select {
+        match parse_select(sql) {
+            ParseOutcome::Accepted(select) => *select,
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    fn flatten(sql: &str) -> Select {
+        let mut select = parse(sql);
+        flatten_from_subqueries(&mut select);
+        select
+    }
+
+    #[test]
+    fn flattens_star_subquery_into_base_table() {
+        let select = flatten("SELECT * FROM (SELECT * FROM t) AS s WHERE s.a > 1");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Name(n) if n == "t"));
+        assert_eq!(from.first.alias.as_deref(), Some("s"));
+        // s.a > 1 rewritten to unqualified a > 1 (no sibling join).
+        let where_str = format!("{:?}", select.where_clause.unwrap());
+        assert!(where_str.contains("\"a\""));
+        assert!(!where_str.contains("\"s\""));
+    }
+
+    #[test]
+    fn flattens_explicit_column_list_and_rewrites_alias() {
+        let select = flatten("SELECT s.x FROM (SELECT a AS x, b FROM t) AS s WHERE s.x > 1");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Name(n) if n == "t"));
+        let ResultColumn::Expr { expr, .. } = &select.columns[0] else {
+            panic!("expected Expr result column");
+        };
+        let ExprKind::Column { name, .. } = &expr.kind else {
+            panic!("expected Column expr");
+        };
+        assert_eq!(name, "a");
+    }
+
+    #[test]
+    fn merges_inner_where_with_outer_where() {
+        let select = flatten("SELECT * FROM (SELECT * FROM t WHERE b > 0) AS s WHERE s.a > 1");
+        let where_clause = select.where_clause.unwrap();
+        assert!(matches!(
+            where_clause.kind,
+            ExprKind::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn requalifies_when_sibling_join_present() {
+        let select =
+            flatten("SELECT * FROM (SELECT a FROM t) AS s JOIN u ON s.a = u.a WHERE s.a > 1");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Name(n) if n == "t"));
+        let where_str = format!("{:?}", select.where_clause.unwrap());
+        assert!(where_str.contains("\"s\""));
+    }
+
+    #[test]
+    fn does_not_flatten_distinct_subquery() {
+        let select = flatten("SELECT * FROM (SELECT DISTINCT a FROM t) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn does_not_flatten_aggregate_subquery() {
+        let select = flatten("SELECT * FROM (SELECT count(*) FROM t) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn does_not_flatten_subquery_with_limit() {
+        let select = flatten("SELECT * FROM (SELECT a FROM t LIMIT 5) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn does_not_flatten_subquery_with_join_in_its_own_from() {
+        let select = flatten("SELECT * FROM (SELECT t.a FROM t JOIN u ON t.a = u.a) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn does_not_flatten_across_left_join() {
+        let select = flatten("SELECT * FROM t LEFT JOIN (SELECT a FROM u) AS s ON t.a = s.a");
+        let from = select.from.unwrap();
+        assert!(matches!(
+            &from.joins[0].table.kind,
+            TableRefKind::Subquery(_)
+        ));
+    }
+
+    #[test]
+    fn bails_on_alias_star_reference() {
+        let select = flatten("SELECT s.* FROM (SELECT a FROM t) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn bails_when_alias_referenced_inside_nested_subquery() {
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM v WHERE v.x = s.a)",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn flattens_join_slot_subquery() {
+        let select = flatten("SELECT * FROM t JOIN (SELECT a FROM u) AS s ON t.a = s.a");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.joins[0].table.kind, TableRefKind::Name(n) if n == "u"));
+    }
+
+    #[test]
+    fn rewrite_expr_covers_every_expr_kind_that_can_reference_the_alias() {
+        let select = flatten(
+            "SELECT s.a, count(s.a) FROM (SELECT a FROM t) AS s JOIN u ON s.a = u.a \
+             WHERE CASE WHEN s.a BETWEEN 1 AND 10 THEN s.a IN (1, 2, 3) \
+                        ELSE s.a LIKE 'x%' ESCAPE '\\' END \
+               AND CAST(s.a AS INTEGER) IS NULL \
+               AND (-s.a) IS NOT NULL \
+               AND s.a IS 1 \
+               AND (s.a) = 1 \
+             GROUP BY s.a HAVING s.a > 1 ORDER BY s.a",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Name(n) if n == "t"));
+        // Sibling join present, so require_qualified is true: every
+        // rewritten reference is re-qualified as `s.a`, not bare `a`.
+        let where_str = format!("{:?}", select.where_clause.unwrap());
+        assert!(where_str.contains("\"s\""));
+    }
+
+    #[test]
+    fn rewrite_expr_rejects_unmapped_column_in_nested_position() {
+        // `s.missing` inside a CASE arm isn't in the explicit column
+        // map, so the whole rewrite bails and the subquery stays put.
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE CASE WHEN 1 THEN s.missing ELSE 0 END",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn inner_where_qualify_covers_every_expr_kind() {
+        // The inner subquery's own WHERE gets re-qualified via
+        // `qualify_with_outer_alias` once merged into the outer WHERE —
+        // exercise that recursion's arms directly through a rich inner
+        // predicate, in a sibling-join query (so `require_qualified` is
+        // true and the alias actually gets substituted back in).
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t \
+               WHERE CASE WHEN a BETWEEN 1 AND 10 THEN a IN (1, 2) ELSE a LIKE 'y' END \
+                 AND -a IS NOT NULL AND (a) = 1 AND foo(a, a)) AS s \
+             JOIN u ON s.a = u.a",
+        );
+        let where_str = format!("{:?}", select.where_clause.unwrap());
+        assert!(where_str.contains("\"s\""));
+    }
+
+    #[test]
+    fn select_references_alias_checks_group_by_having_order_by_and_joins() {
+        for sql in [
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM v GROUP BY s.a)",
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM v HAVING s.a > 1)",
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM v ORDER BY s.a)",
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM v JOIN w ON s.a = w.a)",
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT s.* FROM v)",
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS (SELECT 1 FROM (SELECT 1 FROM v WHERE s.a = 1) AS z)",
+        ] {
+            let select = flatten(sql);
+            let from = select.from.unwrap();
+            assert!(
+                matches!(&from.first.kind, TableRefKind::Subquery(_)),
+                "expected {sql} to stay unflattened"
+            );
+        }
+    }
+
+    #[test]
+    fn in_subquery_and_in_subquery_multi_veto_flattening_when_correlated() {
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s \
+             WHERE s.a IN (SELECT x FROM v WHERE v.x = s.a)",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s \
+             WHERE (s.a, s.a) IN (SELECT x, y FROM v WHERE v.x = s.a)",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn expr_references_alias_covers_every_expr_kind() {
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS ( \
+                SELECT 1 FROM v WHERE \
+                    CASE WHEN s.a BETWEEN 1 AND 10 THEN s.a IN (1, 2) ELSE s.a LIKE 'x' END \
+                    AND CAST(s.a AS INTEGER) IS NULL \
+                    AND (-s.a) \
+                    AND foo(s.a) \
+             )",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn expr_references_alias_descends_into_in_subquery_variants() {
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS ( \
+                SELECT 1 FROM v WHERE v.x IN (SELECT y FROM w WHERE w.y = s.a) \
+             )",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+
+        let select = flatten(
+            "SELECT * FROM (SELECT a FROM t) AS s WHERE EXISTS ( \
+                SELECT 1 FROM v WHERE (v.x, v.y) IN (SELECT p, q FROM w WHERE w.p = s.a) \
+             )",
+        );
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn try_flatten_table_ref_at_early_return_branches() {
+        // First table ref isn't a Subquery at all.
+        let select = flatten("SELECT * FROM t");
+        assert!(matches!(&select.from.unwrap().first.kind, TableRefKind::Name(n) if n == "t"));
+
+        // Subquery's own FROM is missing entirely (`SELECT 1`).
+        let select = flatten("SELECT * FROM (SELECT 1) AS s");
+        assert!(matches!(
+            &select.from.unwrap().first.kind,
+            TableRefKind::Subquery(_)
+        ));
+
+        // Subquery's own FROM is itself a subquery, not a base table Name.
+        let select = flatten("SELECT * FROM (SELECT * FROM (SELECT 1) AS z) AS s");
+        assert!(matches!(
+            &select.from.unwrap().first.kind,
+            TableRefKind::Subquery(_)
+        ));
+    }
+
+    #[test]
+    fn flatten_from_subqueries_is_a_noop_without_a_from_clause() {
+        let select = flatten("SELECT 1");
+        assert!(select.from.is_none());
+    }
+
+    #[test]
+    fn recurses_into_nested_from_subqueries() {
+        // The outer subquery's own FROM is itself a subquery, so
+        // `subquery_flatten_safe` rejects flattening `s` directly — but
+        // `recurse_into_from_subqueries` still descends and flattens the
+        // inner `inner_s` subquery into its base table.
+        let select = flatten("SELECT * FROM (SELECT * FROM (SELECT * FROM t) AS inner_s) AS s");
+        let from = select.from.unwrap();
+        let TableRefKind::Subquery(inner) = &from.first.kind else {
+            panic!("expected outer subquery to remain unflattened");
+        };
+        let inner_from = inner.from.as_ref().unwrap();
+        assert!(matches!(&inner_from.first.kind, TableRefKind::Name(n) if n == "t"));
+    }
+}

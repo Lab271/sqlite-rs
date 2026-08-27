@@ -811,3 +811,403 @@ pub(super) fn compile_join_level_for_sort(
         },
     )
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::parser::ast::BinaryOp;
+    use crate::parser::tokenizer::Span;
+    use crate::planner::Stats;
+    use crate::schema::{IndexSchema, IndexedColumn};
+
+    fn span() -> Span {
+        Span {
+            line: 0,
+            column: 0,
+            offset: 0,
+            len: 0,
+        }
+    }
+
+    fn col(table: Option<&str>, name: &str) -> Expr {
+        Expr {
+            kind: ExprKind::Column {
+                table: table.map(str::to_string),
+                catalog: None,
+                name: name.to_string(),
+            },
+            span: span(),
+        }
+    }
+
+    fn lit_int(n: i64) -> Expr {
+        Expr {
+            kind: ExprKind::Literal(crate::parser::ast::Literal::Integer(n)),
+            span: span(),
+        }
+    }
+
+    fn eq(lhs: Expr, rhs: Expr) -> Expr {
+        Expr {
+            kind: ExprKind::Binary {
+                op: BinaryOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span: span(),
+        }
+    }
+
+    fn schema(name: &str, columns: &[&str], indexes: Vec<IndexSchema>) -> TableSchema {
+        TableSchema {
+            name: name.to_string(),
+            root_page: 0,
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+            column_types: vec![String::new(); columns.len()],
+            column_collations: vec![],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: String::new(),
+            indexes,
+            rowid_alias: None,
+        }
+    }
+
+    fn binding(schema: TableSchema, alias: Option<&str>) -> TableBinding {
+        TableBinding {
+            alias: alias.map(str::to_string),
+            name: schema.name.clone(),
+            schema,
+            cursor: 0,
+            forced_null: false,
+            stats: Stats::default(),
+        }
+    }
+
+    fn unique_index(name: &str, col: &str) -> IndexSchema {
+        IndexSchema {
+            name: name.to_string(),
+            unique: true,
+            columns: vec![IndexedColumn {
+                name: col.to_string(),
+                desc: false,
+                collation: crate::vdbe::Collation::Binary,
+            }],
+            root_page: 0,
+        }
+    }
+
+    #[test]
+    fn column_belongs_to_binding_qualifier_mismatch() {
+        let b = binding(schema("t", &["a"], vec![]), Some("alias"));
+        assert!(!column_belongs_to_binding(&b, Some("other"), "a"));
+    }
+
+    #[test]
+    fn column_belongs_to_binding_no_qualifier_checks_schema() {
+        let b = binding(schema("t", &["a"], vec![]), None);
+        assert!(column_belongs_to_binding(&b, None, "a"));
+        assert!(!column_belongs_to_binding(&b, None, "missing"));
+    }
+
+    #[test]
+    fn expr_is_safe_join_probe_literal_and_param() {
+        let priors: Vec<TableBinding> = vec![];
+        assert!(expr_is_safe_join_probe(&lit_int(1), &priors));
+        let param = Expr {
+            kind: ExprKind::Param(crate::parser::ast::ParamKind::Numbered(1)),
+            span: span(),
+        };
+        assert!(expr_is_safe_join_probe(&param, &priors));
+    }
+
+    #[test]
+    fn expr_is_safe_join_probe_rejects_unknown_column() {
+        let priors = vec![binding(schema("t0", &["id"], vec![]), None)];
+        assert!(!expr_is_safe_join_probe(
+            &col(Some("t0"), "missing"),
+            &priors
+        ));
+    }
+
+    #[test]
+    fn expr_is_safe_join_probe_rejects_other_expr_kinds() {
+        let priors: Vec<TableBinding> = vec![];
+        // A binary expression is neither Literal/Param/Column.
+        let expr = eq(lit_int(1), lit_int(2));
+        assert!(!expr_is_safe_join_probe(&expr, &priors));
+    }
+
+    #[test]
+    fn choose_join_access_rowid_seek() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1 = schema("t1", &["rowid", "name"], vec![]);
+        let t1b = binding(t1, None);
+        let on_expr = eq(col(Some("t1"), "rowid"), col(Some("t0"), "id"));
+        let result = choose_join_access(&t1b, &on_expr, &[t0]);
+        assert!(matches!(result, Some(JoinAccess::Rowid(_))));
+    }
+
+    #[test]
+    fn choose_join_access_none_when_not_equality() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["id"], vec![]), None);
+        let on_expr = col(Some("t1"), "id");
+        assert!(choose_join_access(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_join_access_none_when_neither_side_belongs() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["id"], vec![]), None);
+        let on_expr = eq(col(Some("other"), "x"), col(Some("t0"), "id"));
+        assert!(choose_join_access(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_join_access_none_when_probe_unsafe() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["id"], vec![]), None);
+        // Other side references t1 itself (not-yet-bound), unsafe.
+        let on_expr = eq(col(Some("t1"), "id"), col(Some("t1"), "id"));
+        assert!(choose_join_access(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_join_access_none_when_no_matching_index() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["other"], vec![]), None);
+        let on_expr = eq(col(Some("t1"), "other"), col(Some("t0"), "id"));
+        assert!(choose_join_access(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_join_access_unique_index_pick() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let idx = unique_index("idx_key", "key");
+        let t1b = binding(schema("t1", &["id", "key"], vec![idx]), None);
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        let result = choose_join_access(&t1b, &on_expr, &[t0]);
+        assert!(matches!(result, Some(JoinAccess::UniqueIndex { .. })));
+    }
+
+    #[test]
+    fn choose_join_access_vetoed_by_expensive_index_stats() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let idx = unique_index("idx_key", "key");
+        let mut t1_schema = schema("t1", &["id", "key"], vec![idx]);
+        t1_schema.name = "t1".to_string();
+        let stats = Stats::from_stat1_rows(vec![
+            (None, "10".to_string()),
+            (Some("idx_key".to_string()), "1000 1000".to_string()),
+        ]);
+        let mut t1b = binding(t1_schema, None);
+        t1b.stats = stats;
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        assert!(choose_join_access(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_join_access_rhs_belongs_to_binding() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["rowid"], vec![]), None);
+        // lhs belongs to prior t0, rhs belongs to t1 -> swapped branch.
+        let on_expr = eq(col(Some("t0"), "id"), col(Some("t1"), "rowid"));
+        let result = choose_join_access(&t1b, &on_expr, &[t0]);
+        assert!(matches!(result, Some(JoinAccess::Rowid(_))));
+    }
+
+    #[test]
+    fn choose_auto_index_probe_requires_worthwhile_stats() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["key"], vec![]), None);
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        // No stats at all -> not worthwhile.
+        assert!(choose_auto_index_probe(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_auto_index_probe_picks_when_worthwhile() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let stats = Stats::from_stat1_rows(vec![(None, "10000".to_string())]);
+        let mut t1b = binding(schema("t1", &["id", "key"], vec![]), None);
+        t1b.stats = stats;
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        let probe = choose_auto_index_probe(&t1b, &on_expr, &[t0]);
+        assert!(probe.is_some());
+        assert_eq!(probe.unwrap().key_column, 1);
+    }
+
+    #[test]
+    fn choose_auto_index_probe_none_when_equality_fails() {
+        let stats = Stats::from_stat1_rows(vec![(None, "10000".to_string())]);
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = stats;
+        let on_expr = col(Some("t1"), "id");
+        assert!(choose_auto_index_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_auto_index_probe_none_when_neither_side_belongs() {
+        let stats = Stats::from_stat1_rows(vec![(None, "10000".to_string())]);
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = stats;
+        let on_expr = eq(col(Some("other"), "x"), col(Some("other2"), "y"));
+        assert!(choose_auto_index_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_auto_index_probe_none_when_probe_unsafe() {
+        let stats = Stats::from_stat1_rows(vec![(None, "10000".to_string())]);
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = stats;
+        let on_expr = eq(col(Some("t1"), "id"), col(Some("t1"), "id"));
+        assert!(choose_auto_index_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_requires_min_rows() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let mut t1b = binding(schema("t1", &["key"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "5".to_string())]);
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_none_when_no_stats() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let t1b = binding(schema("t1", &["key"], vec![]), None);
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[t0]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_picks_when_rows_large_enough() {
+        let t0 = binding(schema("t0", &["id"], vec![]), None);
+        let mut t1b = binding(schema("t1", &["id", "key"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
+        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        let probe = choose_bloom_probe(&t1b, &on_expr, &[t0]).unwrap();
+        assert_eq!(probe.key_column, 1);
+        assert_eq!(probe.rows, 1000);
+    }
+
+    #[test]
+    fn choose_bloom_probe_none_when_equality_fails() {
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
+        let on_expr = col(Some("t1"), "id");
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_none_when_neither_side_belongs() {
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
+        let on_expr = eq(col(Some("other"), "x"), col(Some("other2"), "y"));
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_none_when_probe_unsafe() {
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
+        let on_expr = eq(col(Some("t1"), "id"), col(Some("t1"), "id"));
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn choose_bloom_probe_none_when_column_unknown_to_schema() {
+        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
+        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
+        let on_expr = eq(col(Some("t1"), "missing"), lit_int(1));
+        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
+    }
+
+    #[test]
+    fn joined_column_offset_sums_prior_bindings() {
+        let scope = Scope {
+            tables: vec![
+                binding(schema("t0", &["a", "b"], vec![]), None),
+                binding(schema("t1", &["c"], vec![]), None),
+            ],
+            ..Scope::default()
+        };
+        assert_eq!(joined_column_offset(&scope, 0), 0);
+        assert_eq!(joined_column_offset(&scope, 1), 2);
+        assert_eq!(joined_column_offset(&scope, 2), 3);
+    }
+
+    #[test]
+    fn resolve_scope_column_finds_binding_and_local_index() {
+        let scope = Scope {
+            tables: vec![
+                binding(schema("t0", &["a", "b"], vec![]), None),
+                binding(schema("t1", &["c"], vec![]), None),
+            ],
+            ..Scope::default()
+        };
+        let (binding_idx, local_idx) = resolve_scope_column(&scope, Some("t1"), "c").unwrap();
+        assert_eq!(binding_idx, 1);
+        assert_eq!(local_idx, 0);
+    }
+
+    #[test]
+    fn resolve_scope_column_unknown_errors() {
+        let scope = Scope {
+            tables: vec![binding(schema("t0", &["a"], vec![]), None)],
+            ..Scope::default()
+        };
+        assert!(resolve_scope_column(&scope, None, "missing").is_err());
+    }
+
+    #[test]
+    fn join_order_plan_ascending_offset_defaults() {
+        let plan = JoinOrderPlan::ascending_offset(3, Collation::Binary);
+        assert!(matches!(plan.target, JoinOrderTarget::Offset(3)));
+        assert!(!plan.descending);
+        assert!(plan.nulls_first);
+    }
+
+    fn empty_select(columns: Vec<ResultColumn>) -> Select {
+        Select {
+            with_clause: None,
+            distinct: None,
+            columns,
+            from: None,
+            where_clause: None,
+            group_by: vec![],
+            having: None,
+            compound: vec![],
+            order_by: vec![],
+            limit: None,
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn resolve_join_order_by_target_prefers_alias() {
+        let select = empty_select(vec![ResultColumn::Expr {
+            expr: col(Some("t0"), "a"),
+            alias: Some("aliased".to_string()),
+        }]);
+        let scope = Scope {
+            tables: vec![binding(schema("t0", &["a"], vec![]), None)],
+            ..Scope::default()
+        };
+        let target = resolve_join_order_by_target(&col(None, "aliased"), &select, &scope).unwrap();
+        assert!(matches!(target, JoinOrderTarget::Offset(0)));
+    }
+
+    #[test]
+    fn resolve_join_order_by_target_non_column_becomes_expr() {
+        let select = empty_select(vec![]);
+        let scope = Scope::default();
+        let expr = lit_int(42);
+        let target = resolve_join_order_by_target(&expr, &select, &scope).unwrap();
+        assert!(matches!(target, JoinOrderTarget::Expr(_)));
+    }
+}

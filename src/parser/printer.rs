@@ -712,3 +712,370 @@ impl fmt::Display for ParamKind {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::super::error::{
+        parse_begin, parse_commit, parse_create_index, parse_create_table, parse_create_view,
+        parse_delete, parse_drop_index, parse_drop_table, parse_drop_view, parse_insert,
+        parse_rollback, parse_select, ParseOutcome,
+    };
+
+    fn ok_select(sql: &str) -> String {
+        match parse_select(sql) {
+            ParseOutcome::Accepted(select) => select.to_string(),
+            other => panic!("expected accepted select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_distinct_all_group_having_order_limit_offset() {
+        assert_eq!(
+            ok_select(
+                "SELECT DISTINCT a, b FROM t WHERE a > 1 GROUP BY a HAVING b < 2 \
+                 ORDER BY a ASC NULLS FIRST, b DESC NULLS LAST LIMIT 5 OFFSET 10"
+            ),
+            "SELECT DISTINCT a, b FROM t WHERE a > 1 GROUP BY a HAVING b < 2 \
+             ORDER BY a ASC NULLS FIRST, b DESC NULLS LAST LIMIT 5 OFFSET 10"
+        );
+        assert_eq!(ok_select("SELECT ALL a FROM t"), "SELECT ALL a FROM t");
+    }
+
+    #[test]
+    fn select_with_clause_and_cte_columns() {
+        assert_eq!(
+            ok_select("WITH x (a, b) AS (SELECT 1, 2), y AS (SELECT 3) SELECT * FROM x"),
+            "WITH x (a, b) AS (SELECT 1, 2), y AS (SELECT 3) SELECT * FROM x"
+        );
+    }
+
+    #[test]
+    fn compound_select_union_and_union_all() {
+        assert_eq!(
+            ok_select("SELECT a FROM t UNION SELECT b FROM u"),
+            "SELECT a FROM t UNION SELECT b FROM u"
+        );
+        assert_eq!(
+            ok_select("SELECT a FROM t UNION ALL SELECT DISTINCT b FROM u WHERE b > 0 GROUP BY b HAVING b < 9"),
+            "SELECT a FROM t UNION ALL SELECT DISTINCT b FROM u WHERE b > 0 GROUP BY b HAVING b < 9"
+        );
+    }
+
+    #[test]
+    fn result_column_star_table_star_and_alias() {
+        assert_eq!(ok_select("SELECT * FROM t"), "SELECT * FROM t");
+        assert_eq!(ok_select("SELECT t.* FROM t"), "SELECT t.* FROM t");
+        assert_eq!(ok_select("SELECT a AS x FROM t"), "SELECT a AS x FROM t");
+    }
+
+    #[test]
+    fn from_clause_subquery_alias_and_joins() {
+        assert_eq!(
+            ok_select("SELECT * FROM (SELECT 1) AS sub"),
+            "SELECT * FROM (SELECT 1) AS sub"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a NATURAL JOIN b"),
+            "SELECT * FROM a NATURAL JOIN b"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a LEFT JOIN b ON a.x = b.x"),
+            "SELECT * FROM a LEFT JOIN b ON a.x = b.x"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a CROSS JOIN b USING (x)"),
+            "SELECT * FROM a CROSS JOIN b USING (x)"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a RIGHT JOIN b ON a.x = b.x"),
+            "SELECT * FROM a RIGHT JOIN b ON a.x = b.x"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a FULL JOIN b ON a.x = b.x"),
+            "SELECT * FROM a FULL JOIN b ON a.x = b.x"
+        );
+        assert_eq!(
+            ok_select("SELECT * FROM a JOIN b ON a.x = b.x"),
+            "SELECT * FROM a JOIN b ON a.x = b.x"
+        );
+    }
+
+    #[test]
+    fn expr_display_covers_all_kinds() {
+        assert_eq!(ok_select("SELECT 1"), "SELECT 1");
+        assert_eq!(ok_select("SELECT ?"), "SELECT ?");
+        assert_eq!(ok_select("SELECT ?1"), "SELECT ?1");
+        assert_eq!(ok_select("SELECT :name"), "SELECT :name");
+        assert_eq!(ok_select("SELECT @name"), "SELECT @name");
+        assert_eq!(ok_select("SELECT $name"), "SELECT $name");
+        assert_eq!(ok_select("SELECT db.tbl.col"), "SELECT db.tbl.col");
+        assert_eq!(ok_select("SELECT tbl.col"), "SELECT tbl.col");
+        assert_eq!(ok_select("SELECT col"), "SELECT col");
+        assert_eq!(
+            ok_select("SELECT count(DISTINCT a, b)"),
+            "SELECT count(DISTINCT a, b)"
+        );
+        assert_eq!(ok_select("SELECT count(*)"), "SELECT count(*)");
+        assert_eq!(ok_select("SELECT NOT a"), "SELECT NOT a");
+        assert_eq!(ok_select("SELECT +a"), "SELECT +a");
+        assert_eq!(ok_select("SELECT -a"), "SELECT -a");
+        assert_eq!(ok_select("SELECT ~a"), "SELECT ~a");
+        assert_eq!(ok_select("SELECT a AND b"), "SELECT a AND b");
+        assert_eq!(ok_select("SELECT a OR b"), "SELECT a OR b");
+        assert_eq!(ok_select("SELECT a = b"), "SELECT a = b");
+        assert_eq!(ok_select("SELECT a != b"), "SELECT a != b");
+        assert_eq!(ok_select("SELECT a < b"), "SELECT a < b");
+        assert_eq!(ok_select("SELECT a <= b"), "SELECT a <= b");
+        assert_eq!(ok_select("SELECT a > b"), "SELECT a > b");
+        assert_eq!(ok_select("SELECT a >= b"), "SELECT a >= b");
+        assert_eq!(ok_select("SELECT a & b"), "SELECT a & b");
+        assert_eq!(ok_select("SELECT a | b"), "SELECT a | b");
+        assert_eq!(ok_select("SELECT a << b"), "SELECT a << b");
+        assert_eq!(ok_select("SELECT a >> b"), "SELECT a >> b");
+        assert_eq!(ok_select("SELECT a + b"), "SELECT a + b");
+        assert_eq!(ok_select("SELECT a - b"), "SELECT a - b");
+        assert_eq!(ok_select("SELECT a * b"), "SELECT a * b");
+        assert_eq!(ok_select("SELECT a / b"), "SELECT a / b");
+        assert_eq!(ok_select("SELECT a % b"), "SELECT a % b");
+        assert_eq!(ok_select("SELECT a || b"), "SELECT a || b");
+        assert_eq!(ok_select("SELECT a IS b"), "SELECT a IS b");
+        assert_eq!(ok_select("SELECT a IS NOT b"), "SELECT a IS NOT b");
+        assert_eq!(ok_select("SELECT a ISNULL"), "SELECT a ISNULL");
+        assert_eq!(ok_select("SELECT a NOTNULL"), "SELECT a NOTNULL");
+        assert_eq!(
+            ok_select("SELECT a BETWEEN 1 AND 2"),
+            "SELECT a BETWEEN 1 AND 2"
+        );
+        assert_eq!(
+            ok_select("SELECT a NOT BETWEEN 1 AND 2"),
+            "SELECT a NOT BETWEEN 1 AND 2"
+        );
+        assert_eq!(ok_select("SELECT a IN (1, 2)"), "SELECT a IN (1, 2)");
+        assert_eq!(
+            ok_select("SELECT a NOT IN (1, 2)"),
+            "SELECT a NOT IN (1, 2)"
+        );
+        assert_eq!(ok_select("SELECT a LIKE 'x'"), "SELECT a LIKE 'x'");
+        assert_eq!(ok_select("SELECT a NOT LIKE 'x'"), "SELECT a NOT LIKE 'x'");
+        assert_eq!(ok_select("SELECT a GLOB 'x'"), "SELECT a GLOB 'x'");
+        assert_eq!(
+            ok_select("SELECT a LIKE 'x' ESCAPE '\\'"),
+            "SELECT a LIKE 'x' ESCAPE '\\'"
+        );
+        assert_eq!(
+            ok_select("SELECT CASE a WHEN 1 THEN 'x' ELSE 'y' END"),
+            "SELECT CASE a WHEN 1 THEN 'x' ELSE 'y' END"
+        );
+        assert_eq!(
+            ok_select("SELECT CASE WHEN a THEN 'x' END"),
+            "SELECT CASE WHEN a THEN 'x' END"
+        );
+        assert_eq!(
+            ok_select("SELECT CAST(a AS INTEGER)"),
+            "SELECT CAST(a AS INTEGER)"
+        );
+        assert_eq!(ok_select("SELECT a COLLATE bin"), "SELECT a COLLATE bin");
+        assert_eq!(ok_select("SELECT (a)"), "SELECT (a)");
+        assert_eq!(ok_select("SELECT (SELECT 1)"), "SELECT (SELECT 1)");
+        assert_eq!(
+            ok_select("SELECT EXISTS (SELECT 1)"),
+            "SELECT EXISTS (SELECT 1)"
+        );
+        assert_eq!(
+            ok_select("SELECT NOT EXISTS (SELECT 1)"),
+            "SELECT NOT EXISTS (SELECT 1)"
+        );
+        assert_eq!(
+            ok_select("SELECT a IN (SELECT 1)"),
+            "SELECT a IN (SELECT 1)"
+        );
+        assert_eq!(
+            ok_select("SELECT a NOT IN (SELECT 1)"),
+            "SELECT a NOT IN (SELECT 1)"
+        );
+        assert_eq!(
+            ok_select("SELECT (a, b) IN (SELECT 1, 2)"),
+            "SELECT (a, b) IN (SELECT 1, 2)"
+        );
+        assert_eq!(
+            ok_select("SELECT (a, b) NOT IN (SELECT 1, 2)"),
+            "SELECT (a, b) NOT IN (SELECT 1, 2)"
+        );
+    }
+
+    #[test]
+    fn literal_display_covers_all_kinds() {
+        assert_eq!(ok_select("SELECT 1.5"), "SELECT 1.5");
+        assert_eq!(ok_select("SELECT 'it''s'"), "SELECT 'it''s'");
+        assert_eq!(ok_select("SELECT x'AB01'"), "SELECT X'AB01'");
+        assert_eq!(ok_select("SELECT NULL"), "SELECT NULL");
+        assert_eq!(ok_select("SELECT TRUE"), "SELECT TRUE");
+        assert_eq!(ok_select("SELECT FALSE"), "SELECT FALSE");
+    }
+
+    #[test]
+    fn insert_variants() {
+        match parse_insert("INSERT OR REPLACE INTO t (a, b) VALUES (1, 2), (3, 4)") {
+            ParseOutcome::Accepted(insert) => assert_eq!(
+                insert.to_string(),
+                "INSERT OR REPLACE INTO t (a, b) VALUES (1, 2), (3, 4)"
+            ),
+            other => panic!("{other:?}"),
+        }
+        for (action, sql) in [
+            ("IGNORE", "INSERT OR IGNORE INTO t DEFAULT VALUES"),
+            ("ABORT", "INSERT OR ABORT INTO t DEFAULT VALUES"),
+            ("ROLLBACK", "INSERT OR ROLLBACK INTO t DEFAULT VALUES"),
+            ("FAIL", "INSERT OR FAIL INTO t DEFAULT VALUES"),
+        ] {
+            match parse_insert(sql) {
+                ParseOutcome::Accepted(insert) => {
+                    assert!(insert.to_string().contains(action));
+                    assert!(insert.to_string().contains("DEFAULT VALUES"));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        match parse_insert("INSERT INTO t SELECT * FROM u") {
+            ParseOutcome::Accepted(insert) => {
+                assert_eq!(insert.to_string(), "INSERT INTO t SELECT * FROM u");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_display() {
+        match parse_delete("DELETE FROM t WHERE a = 1") {
+            ParseOutcome::Accepted(delete) => {
+                assert_eq!(delete.to_string(), "DELETE FROM t WHERE a = 1");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_delete("DELETE FROM t") {
+            ParseOutcome::Accepted(delete) => assert_eq!(delete.to_string(), "DELETE FROM t"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_table_variants() {
+        match parse_create_table(
+            "CREATE TABLE IF NOT EXISTS t (a INTEGER PRIMARY KEY ASC AUTOINCREMENT NOT NULL UNIQUE DEFAULT (1) CHECK (a > 0) COLLATE bin, UNIQUE (a, b), PRIMARY KEY (a), CHECK (a > 0)) WITHOUT ROWID",
+        ) {
+            ParseOutcome::Accepted(ct) => {
+                let s = ct.to_string();
+                assert!(s.starts_with("CREATE TABLE IF NOT EXISTS t ("));
+                assert!(s.contains("PRIMARY KEY ASC AUTOINCREMENT"));
+                assert!(s.contains("NOT NULL"));
+                assert!(s.contains("UNIQUE"));
+                assert!(s.contains("DEFAULT (1)"));
+                assert!(s.contains("CHECK (a > 0)"));
+                assert!(s.contains("COLLATE bin"));
+                assert!(s.contains("WITHOUT ROWID"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_create_table("CREATE TABLE t (a INTEGER, b TEXT) STRICT") {
+            ParseOutcome::Accepted(ct) => {
+                assert_eq!(ct.to_string(), "CREATE TABLE t (a INTEGER, b TEXT) STRICT");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_create_table("CREATE TABLE t (a, b PRIMARY KEY DESC)") {
+            ParseOutcome::Accepted(ct) => {
+                assert_eq!(ct.to_string(), "CREATE TABLE t (a, b PRIMARY KEY DESC)");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_index_and_drop_variants() {
+        match parse_create_index(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx ON t (a ASC, b DESC) WHERE a > 0",
+        ) {
+            ParseOutcome::Accepted(ci) => assert_eq!(
+                ci.to_string(),
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx ON t (a ASC, b DESC) WHERE a > 0"
+            ),
+            other => panic!("{other:?}"),
+        }
+        match parse_create_index("CREATE INDEX idx ON t (a)") {
+            ParseOutcome::Accepted(ci) => {
+                assert_eq!(ci.to_string(), "CREATE INDEX idx ON t (a)");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_index("DROP INDEX IF EXISTS idx") {
+            ParseOutcome::Accepted(di) => {
+                assert_eq!(di.to_string(), "DROP INDEX IF EXISTS idx");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_index("DROP INDEX idx") {
+            ParseOutcome::Accepted(di) => assert_eq!(di.to_string(), "DROP INDEX idx"),
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_table("DROP TABLE IF EXISTS t") {
+            ParseOutcome::Accepted(dt) => assert_eq!(dt.to_string(), "DROP TABLE IF EXISTS t"),
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_table("DROP TABLE t") {
+            ParseOutcome::Accepted(dt) => assert_eq!(dt.to_string(), "DROP TABLE t"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_view_and_drop_view_variants() {
+        match parse_create_view("CREATE VIEW IF NOT EXISTS v (a, b) AS SELECT 1, 2") {
+            ParseOutcome::Accepted(cv) => assert_eq!(
+                cv.to_string(),
+                "CREATE VIEW IF NOT EXISTS v (a, b) AS SELECT 1, 2"
+            ),
+            other => panic!("{other:?}"),
+        }
+        match parse_create_view("CREATE VIEW v AS SELECT 1") {
+            ParseOutcome::Accepted(cv) => {
+                assert_eq!(cv.to_string(), "CREATE VIEW v AS SELECT 1");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_view("DROP VIEW IF EXISTS v") {
+            ParseOutcome::Accepted(dv) => assert_eq!(dv.to_string(), "DROP VIEW IF EXISTS v"),
+            other => panic!("{other:?}"),
+        }
+        match parse_drop_view("DROP VIEW v") {
+            ParseOutcome::Accepted(dv) => assert_eq!(dv.to_string(), "DROP VIEW v"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_statements() {
+        match parse_begin("BEGIN") {
+            ParseOutcome::Accepted(b) => assert_eq!(b.to_string(), "BEGIN"),
+            other => panic!("{other:?}"),
+        }
+        for (mode, sql) in [
+            ("DEFERRED", "BEGIN DEFERRED"),
+            ("IMMEDIATE", "BEGIN IMMEDIATE"),
+            ("EXCLUSIVE", "BEGIN EXCLUSIVE"),
+        ] {
+            match parse_begin(sql) {
+                ParseOutcome::Accepted(b) => assert_eq!(b.to_string(), format!("BEGIN {mode}")),
+                other => panic!("{other:?}"),
+            }
+        }
+        match parse_commit("COMMIT") {
+            ParseOutcome::Accepted(c) => assert_eq!(c.to_string(), "COMMIT"),
+            other => panic!("{other:?}"),
+        }
+        match parse_rollback("ROLLBACK") {
+            ParseOutcome::Accepted(r) => assert_eq!(r.to_string(), "ROLLBACK"),
+            other => panic!("{other:?}"),
+        }
+    }
+}

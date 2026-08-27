@@ -2390,7 +2390,12 @@ pub fn analyze(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::header::DatabaseHeader;
@@ -3692,6 +3697,413 @@ mod tests {
         let mut vm = Vm::new();
         open_ephemeral_table(&mut vm, 0);
         let err = rowid(&mut vm, &Instruction::new(Opcode::Rowid, 0, 10, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    // --- index-read cursor: OpenRead(P5!=0)/SeekIndexEq/IdxRowid/
+    // IdxRewind/IdxLast/IdxNext/IdxPrev ---
+
+    /// Opens a real LEAF_INDEX b-tree with `n` entries `(i, i*10)` for
+    /// `i` in `1..=n`, and returns a `Vm` with a write cursor open on
+    /// slot 1 so the caller can `idx_insert` before switching to an
+    /// index-read cursor on slot 0.
+    fn writable_vm_with_index_entries(n: i64) -> Vm {
+        let mut vm = writable_vm(0x0a);
+        let mut open_instr = Instruction::new(Opcode::OpenWrite, 1, 1, 0);
+        open_instr.p5 = 1;
+        open_write(&mut vm, &open_instr).unwrap();
+        for i in 1..=n {
+            vm.set_register(0, Value::Integer(i)).unwrap();
+            vm.set_register(1, Value::Integer(i * 10)).unwrap();
+            idx_insert(
+                &mut vm,
+                &Instruction::with_p4(Opcode::IdxInsert, 1, 0, 0, P4::Int(2)),
+            )
+            .unwrap();
+        }
+        vm
+    }
+
+    fn open_index_read(vm: &mut Vm, slot: i32) {
+        let mut open_instr = Instruction::new(Opcode::OpenRead, slot, 1, 0);
+        open_instr.p5 = 1;
+        open_read(vm, &open_instr).unwrap();
+    }
+
+    #[test]
+    fn seek_index_eq_hits_and_idx_rowid_reads_the_trailing_rowid() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(2)).unwrap();
+        let step = seek_index_eq(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexEq, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+        idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(20));
+    }
+
+    #[test]
+    fn seek_index_eq_misses_and_jumps_to_p2() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(999)).unwrap();
+        let step = seek_index_eq(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexEq, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn idx_rowid_without_a_prior_seek_errors() {
+        let mut vm = writable_vm_with_index_entries(1);
+        open_index_read(&mut vm, 0);
+        let err = idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn idx_rewind_idx_next_walk_the_index_in_ascending_order() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        let step = idx_rewind(&mut vm, &Instruction::new(Opcode::IdxRewind, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+
+        let mut rowids = Vec::new();
+        loop {
+            idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+            rowids.push(vm.register(10).unwrap().clone());
+            match idx_next(&mut vm, &Instruction::new(Opcode::IdxNext, 0, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(
+            rowids,
+            vec![Value::Integer(10), Value::Integer(20), Value::Integer(30)]
+        );
+    }
+
+    #[test]
+    fn idx_last_idx_prev_walk_the_index_in_descending_order() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        let step = idx_last(&mut vm, &Instruction::new(Opcode::IdxLast, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+
+        let mut rowids = Vec::new();
+        loop {
+            idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+            rowids.push(vm.register(10).unwrap().clone());
+            match idx_prev(&mut vm, &Instruction::new(Opcode::IdxPrev, 0, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(
+            rowids,
+            vec![Value::Integer(30), Value::Integer(20), Value::Integer(10)]
+        );
+    }
+
+    #[test]
+    fn idx_rewind_and_idx_last_jump_to_p2_on_an_empty_index() {
+        let mut vm = writable_vm(0x0a);
+        open_index_read(&mut vm, 0);
+        let step = idx_rewind(&mut vm, &Instruction::new(Opcode::IdxRewind, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Jump(99));
+        let step = idx_last(&mut vm, &Instruction::new(Opcode::IdxLast, 0, 99, 0)).unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn index_read_state_mut_type_mismatch_errors() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let err = idx_rewind(&mut vm, &Instruction::new(Opcode::IdxRewind, 0, 99, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    #[test]
+    fn column_reads_through_an_index_read_cursor() {
+        let mut vm = writable_vm_with_index_entries(1);
+        open_index_read(&mut vm, 0);
+        idx_rewind(&mut vm, &Instruction::new(Opcode::IdxRewind, 0, 99, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(1));
+    }
+
+    // --- automatic-index cursor: OpenEphemeral(P5==2)/AutoIndexInsert/
+    // AutoIndexSeek/AutoIndexRowid/AutoIndexNext ---
+
+    fn open_auto_index(vm: &mut Vm, slot: i32) {
+        open_ephemeral(
+            vm,
+            &Instruction {
+                opcode: Opcode::OpenEphemeral,
+                p1: slot,
+                p2: 0,
+                p3: 0,
+                p4: P4::None,
+                p5: 2,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_index_seek_finds_every_rowid_sharing_a_duplicate_key() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+
+        vm.set_register(0, Value::Text("k".to_string().into()))
+            .unwrap();
+        vm.set_register(1, Value::Integer(100)).unwrap();
+        auto_index_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexInsert, 0, 0, 1, P4::Int(1)),
+        )
+        .unwrap();
+        vm.set_register(1, Value::Integer(200)).unwrap();
+        auto_index_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexInsert, 0, 0, 1, P4::Int(1)),
+        )
+        .unwrap();
+
+        vm.set_register(5, Value::Text("k".to_string().into()))
+            .unwrap();
+        let step = auto_index_seek(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexSeek, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+
+        let mut rowids = Vec::new();
+        loop {
+            auto_index_rowid(&mut vm, &Instruction::new(Opcode::AutoIndexRowid, 0, 10, 0)).unwrap();
+            rowids.push(vm.register(10).unwrap().clone());
+            match auto_index_next(&mut vm, &Instruction::new(Opcode::AutoIndexNext, 0, 1, 0))
+                .unwrap()
+            {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        assert_eq!(rowids, vec![Value::Integer(100), Value::Integer(200)]);
+    }
+
+    #[test]
+    fn auto_index_seek_jumps_to_p2_on_a_miss() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+        vm.set_register(5, Value::Text("nope".to_string().into()))
+            .unwrap();
+        let step = auto_index_seek(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexSeek, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn auto_index_rowid_without_a_prior_seek_errors() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+        let err = auto_index_rowid(&mut vm, &Instruction::new(Opcode::AutoIndexRowid, 0, 10, 0))
+            .unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn auto_index_insert_rejects_a_non_integer_rowid_register() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+        vm.set_register(0, Value::Text("k".to_string().into()))
+            .unwrap();
+        vm.set_register(1, Value::Text("nope".to_string().into()))
+            .unwrap();
+        let err = auto_index_insert(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexInsert, 0, 0, 1, P4::Int(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn auto_index_next_with_no_current_position_is_a_no_op() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+        let step =
+            auto_index_next(&mut vm, &Instruction::new(Opcode::AutoIndexNext, 0, 1, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+    }
+
+    #[test]
+    fn auto_index_mut_type_mismatch_errors() {
+        let mut vm = Vm::new();
+        open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
+        let err = auto_index_seek(
+            &mut vm,
+            &Instruction::with_p4(Opcode::AutoIndexSeek, 0, 99, 0, P4::Int(1)),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
+    }
+
+    // --- Count / Analyze ---
+
+    #[test]
+    fn count_opcode_reports_the_exact_row_count() {
+        let mut vm = open_vm("table_multipage.db");
+        count(&mut vm, &Instruction::new(Opcode::Count, 2, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(3000));
+    }
+
+    #[test]
+    fn analyze_populates_sqlite_stat1_for_a_table_and_its_index() {
+        let mut vm = writable_vm(0x0d);
+        create_table(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::CreateTable,
+                0,
+                0,
+                0,
+                P4::CreateTable {
+                    name: "t".to_string(),
+                    sql: "CREATE TABLE t (a)".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+        open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 1, 1, 0)).unwrap();
+        rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 22)).unwrap();
+        let table_root = match vm.register(22).unwrap() {
+            Value::Integer(n) => u32::try_from(*n).unwrap(),
+            other => panic!("expected integer rootpage, got {other:?}"),
+        };
+
+        open_write(
+            &mut vm,
+            &Instruction::new(Opcode::OpenWrite, 2, i32::try_from(table_root).unwrap(), 0),
+        )
+        .unwrap();
+        for i in 1..=3i64 {
+            vm.set_register(3, Value::Integer(i)).unwrap();
+            crate::vdbe::result::make_record(
+                &mut vm,
+                &Instruction::new(Opcode::MakeRecord, 3, 1, 4),
+            )
+            .unwrap();
+            vm.set_register(5, Value::Integer(i)).unwrap();
+            insert(&mut vm, &Instruction::new(Opcode::Insert, 2, 5, 4)).unwrap();
+        }
+
+        create_index(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::CreateIndex,
+                0,
+                0,
+                0,
+                P4::CreateIndex {
+                    name: "idx".to_string(),
+                    table_name: "t".to_string(),
+                    table_root_page: table_root,
+                    sql: "CREATE INDEX idx ON t (a)".to_string(),
+                    column_indices: vec![0],
+                    unique: false,
+                },
+            ),
+        )
+        .unwrap();
+
+        // Find the freshly created index's own root page back out of
+        // sqlite_master (CreateIndex only returns via the schema, not a
+        // register), the same way the create_index round-trip test does.
+        let mut index_root = None;
+        let step = rewind(&mut vm, &Instruction::new(Opcode::Rewind, 1, 999, 0)).unwrap();
+        assert_eq!(step, Step::Next);
+        loop {
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 0, 30)).unwrap();
+            column(&mut vm, &Instruction::new(Opcode::Column, 1, 3, 31)).unwrap();
+            if vm.register(30).unwrap() == &Value::Text("index".to_string().into()) {
+                if let Value::Integer(n) = vm.register(31).unwrap() {
+                    index_root = Some(u32::try_from(*n).unwrap());
+                }
+            }
+            match next(&mut vm, &Instruction::new(Opcode::Next, 1, 1, 0)).unwrap() {
+                Step::Jump(1) => continue,
+                Step::Next => break,
+                other => panic!("unexpected step {other:?}"),
+            }
+        }
+        let index_root = index_root.unwrap();
+
+        analyze(
+            &mut vm,
+            &Instruction::with_p4(
+                Opcode::Analyze,
+                0,
+                0,
+                0,
+                P4::Analyze {
+                    targets: vec![crate::vdbe::program::AnalyzeTarget {
+                        table_name: "t".to_string(),
+                        table_root_page: table_root,
+                        indexes: vec![crate::vdbe::program::AnalyzeIndexTarget {
+                            index_name: "idx".to_string(),
+                            root_page: index_root,
+                        }],
+                    }],
+                },
+            ),
+        )
+        .unwrap();
+
+        // sqlite_stat1 now holds one row for the table and one for the index.
+        let db = vm.db().unwrap();
+        let stat1_root = btree::ensure_sqlite_stat1_table(
+            &mut vm.writer("test").unwrap().borrow_mut(),
+            &db.header,
+        )
+        .unwrap();
+        let mut stat_cursor = TableCursor::new(Rc::clone(&db.source), &db.header, stat1_root);
+        let mut rows = Vec::new();
+        let mut row = stat_cursor.first_row().unwrap();
+        while let Some(r) = row {
+            rows.push(decode_record(&r.payload, TextEncoding::Utf8).unwrap());
+            row = stat_cursor.next_row().unwrap();
+        }
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|r| r[1] == Value::Null && r[2] == Value::Text("3".into())));
+        assert!(rows
+            .iter()
+            .any(|r| r[1] == Value::Text("idx".into()) && r[2] == Value::Text("3 1".into())));
+    }
+
+    #[test]
+    fn analyze_rejects_a_mismatched_p4() {
+        let mut vm = writable_vm(0x0d);
+        let err = analyze(&mut vm, &Instruction::new(Opcode::Analyze, 0, 0, 0)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
     }
 }

@@ -155,6 +155,8 @@ pub fn cfmakeraw_call(t: &mut termios) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::os::fd::AsFd;
+
     use super::*;
 
     // `ICANON`/`ECHO` (`c_lflag` bits `cfmakeraw` must clear) are at
@@ -177,5 +179,35 @@ mod tests {
         cfmakeraw_call(&mut t);
         assert_eq!(t.c_lflag as u64 & ICANON, 0, "ICANON must be cleared");
         assert_eq!(t.c_lflag as u64 & ECHO, 0, "ECHO must be cleared");
+    }
+
+    #[test]
+    fn stdin_fd_borrows_fd_zero() {
+        assert_eq!(stdin_fd().as_raw_fd(), 0);
+    }
+
+    // A regular file's fd is valid but not a tty, so `tcgetattr`/
+    // `tcsetattr` fail with `ENOTTY` — exercising the `ret == -1` error
+    // branch without needing a real controlling tty.
+    #[test]
+    fn tcgetattr_call_errors_on_non_tty_fd() {
+        let file = std::fs::File::open("Cargo.toml").unwrap();
+        let fd = file.as_fd();
+        assert!(tcgetattr_call(fd).is_err());
+    }
+
+    #[test]
+    fn tcsetattr_call_errors_on_non_tty_fd() {
+        let file = std::fs::File::open("Cargo.toml").unwrap();
+        let fd = file.as_fd();
+        let t: termios = unsafe { std::mem::zeroed() };
+        assert!(tcsetattr_call(fd, SetArg::TCSANOW, &t).is_err());
+        assert!(tcsetattr_call(fd, SetArg::TCSAFLUSH, &t).is_err());
+    }
+
+    #[test]
+    fn is_tty_false_on_non_tty_fd() {
+        let file = std::fs::File::open("Cargo.toml").unwrap();
+        assert!(!is_tty(file.as_fd()));
     }
 }

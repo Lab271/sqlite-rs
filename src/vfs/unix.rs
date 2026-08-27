@@ -280,3 +280,171 @@ fn to_lock_error(path: &Path, source: std::io::Error) -> VfsError {
         _ => to_vfs_error(path, source),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "sqlite_rs_unix_vfs_test_{}_{}_{}",
+            std::process::id(),
+            name,
+            fastrand_stub()
+        ));
+        p
+    }
+
+    // Cheap unique suffix without pulling in a rand dependency.
+    fn fastrand_stub() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+
+    #[test]
+    fn open_read_missing_file_is_not_found() {
+        let vfs = UnixVfs;
+        let path = tmp_path("missing_read");
+        let err = vfs.open_read(&path).err().unwrap();
+        assert!(matches!(err, VfsError::NotFound { .. }));
+    }
+
+    #[test]
+    fn open_write_missing_file_is_not_found() {
+        let vfs = UnixVfs;
+        let path = tmp_path("missing_write");
+        let err = vfs.open_write(&path).err().unwrap();
+        assert!(matches!(err, VfsError::NotFound { .. }));
+    }
+
+    #[test]
+    fn exists_reports_true_and_false() {
+        let vfs = UnixVfs;
+        let path = tmp_path("exists");
+        assert!(!vfs.exists(&path).unwrap());
+        std::fs::write(&path, b"hi").unwrap();
+        assert!(vfs.exists(&path).unwrap());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn create_or_open_write_creates_then_reopens_without_truncating() {
+        let vfs = UnixVfs;
+        let path = tmp_path("create_or_open");
+        std::fs::remove_file(&path).ok();
+
+        let file = vfs.create_or_open_write(&path).unwrap();
+        file.write_at(b"hello", 0).unwrap();
+        drop(file);
+
+        let file = vfs.create_or_open_write(&path).unwrap();
+        assert_eq!(file.size().unwrap(), 5);
+        let mut buf = [0u8; 5];
+        file.read_at(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"hello");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn delete_missing_file_is_ok() {
+        let vfs = UnixVfs;
+        let path = tmp_path("delete_missing");
+        vfs.delete(&path).unwrap();
+    }
+
+    #[test]
+    fn delete_existing_file_removes_it() {
+        let vfs = UnixVfs;
+        let path = tmp_path("delete_existing");
+        std::fs::write(&path, b"x").unwrap();
+        vfs.delete(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn wal_shm_helpers_return_none_or_empty_without_shm_file() {
+        let vfs = UnixVfs;
+        let path = tmp_path("no_shm.db");
+        std::fs::remove_file(companion_path(&path, "-shm")).ok();
+
+        assert!(vfs.claim_wal_checkpoint_lock(&path).unwrap().is_none());
+        assert!(vfs.active_wal_reader_marks(&path).unwrap().is_empty());
+        vfs.publish_wal_backfill(&path, 3).unwrap();
+        assert_eq!(vfs.read_wal_backfill(&path).unwrap(), 0);
+        assert!(vfs.claim_wal_write_lock(&path).unwrap().is_none());
+        vfs.publish_wal_mx_frame(&path, 7).unwrap();
+        assert!(vfs.open_wal_shm(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn vfs_file_write_read_truncate_sync() {
+        let vfs = UnixVfs;
+        let path = tmp_path("rw");
+        std::fs::remove_file(&path).ok();
+        let file = vfs.create_or_open_write(&path).unwrap();
+
+        file.write_at(b"abcdef", 0).unwrap();
+        assert_eq!(file.size().unwrap(), 6);
+
+        file.truncate(3).unwrap();
+        assert_eq!(file.size().unwrap(), 3);
+
+        file.sync().unwrap();
+
+        let mut buf = [0u8; 3];
+        file.read_at(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"abc");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn lock_shared_guard_checks_reserved_and_escalates() {
+        let vfs = UnixVfs;
+        let path = tmp_path("lock");
+        std::fs::remove_file(&path).ok();
+        let file = vfs.create_or_open_write(&path).unwrap();
+
+        let mut guard = file.lock_shared().unwrap();
+        assert!(!guard.check_reserved().unwrap());
+        guard.escalate_to_exclusive().unwrap();
+        guard.de_escalate_to_shared().unwrap();
+        guard.set_level(lock::LockLevel::Unlocked).unwrap();
+        drop(guard);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn to_vfs_error_display_variants() {
+        let path = Path::new("/some/path");
+        let not_found = to_vfs_error(path, std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(matches!(not_found, VfsError::NotFound { .. }));
+
+        let other = to_vfs_error(
+            path,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(matches!(other, VfsError::Io { .. }));
+    }
+
+    #[test]
+    fn to_lock_error_maps_eagain_and_eacces_to_locked() {
+        let path = Path::new("/some/path");
+
+        let eagain = to_lock_error(path, std::io::Error::from_raw_os_error(EAGAIN));
+        assert!(matches!(eagain, VfsError::Locked { .. }));
+
+        let eacces = to_lock_error(path, std::io::Error::from_raw_os_error(EACCES));
+        assert!(matches!(eacces, VfsError::Locked { .. }));
+
+        let other = to_lock_error(path, std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(matches!(other, VfsError::NotFound { .. }));
+    }
+}

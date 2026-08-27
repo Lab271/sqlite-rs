@@ -205,3 +205,98 @@ pub(crate) use entry::{
 };
 pub(crate) use joins::compile_select_joined_scan;
 pub(crate) use limit_scan::{is_rowid_reference, top_level_equality_operands};
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codegen_error_display_variants() {
+        assert_eq!(
+            CodegenError::NoFromClause.to_string(),
+            "SELECT has no FROM clause — not supported by this V2-scope compiler"
+        );
+        assert_eq!(
+            CodegenError::UnknownColumn {
+                name: "x".to_string()
+            }
+            .to_string(),
+            "unknown column \"x\""
+        );
+        assert_eq!(
+            CodegenError::AmbiguousColumn {
+                name: "x".to_string()
+            }
+            .to_string(),
+            "ambiguous column name: \"x\""
+        );
+        assert_eq!(
+            CodegenError::Unsupported {
+                reason: "foo".to_string()
+            }
+            .to_string(),
+            "unsupported: foo"
+        );
+        assert_eq!(
+            CodegenError::RowShapeMismatch {
+                table: "t".to_string(),
+                expected: 2,
+                found: 3,
+            }
+            .to_string(),
+            "t has 2 columns but 3 values were supplied"
+        );
+        assert_eq!(
+            CodegenError::CompoundColumnMismatch {
+                expected: 2,
+                found: 3,
+            }
+            .to_string(),
+            "SELECTs to the left and right of UNION ALL do not have the same number of result \
+             columns: expected 2, found 3"
+        );
+        assert_eq!(
+            CodegenError::CircularView {
+                name: "v".to_string()
+            }
+            .to_string(),
+            "view v is circularly defined"
+        );
+    }
+
+    #[test]
+    fn codegen_error_is_std_error() {
+        let err = CodegenError::NoFromClause;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn scan_cursors_for_standalone_select() {
+        let cursors = ScanCursors::for_standalone_select();
+        assert_eq!(cursors.table, TABLE_CURSOR);
+        assert_eq!(cursors.sort, SORT_CURSOR);
+        assert_eq!(cursors.pseudo, PSEUDO_CURSOR);
+        assert_eq!(cursors.distinct, DISTINCT_CURSOR);
+    }
+
+    #[test]
+    fn scan_cursors_for_arm_offsets_by_four() {
+        let arm0 = ScanCursors::for_arm(0);
+        assert_eq!(
+            (arm0.table, arm0.sort, arm0.pseudo, arm0.distinct),
+            (0, 1, 2, 3)
+        );
+        let arm1 = ScanCursors::for_arm(1);
+        assert_eq!(
+            (arm1.table, arm1.sort, arm1.pseudo, arm1.distinct),
+            (4, 5, 6, 7)
+        );
+    }
+
+    #[test]
+    fn scan_cursors_after_arms() {
+        assert_eq!(ScanCursors::after_arms(0), 0);
+        assert_eq!(ScanCursors::after_arms(3), 12);
+    }
+}

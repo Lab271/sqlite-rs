@@ -217,3 +217,148 @@ fn prefix_matching_reaches_new_commands() {
     let out = stdout_of(&db, ".ver\n.quit\n");
     assert!(out.contains(env!("CARGO_PKG_VERSION")), "{out}");
 }
+
+#[test]
+fn unknown_dot_command_prints_error_and_continues() {
+    let db = scratch_db("unknown-cmd");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = run_repl_script(&db, ".bogus\nSELECT 1;\n.quit\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown command"), "{stderr}");
+    assert!(out.status.success());
+}
+
+#[test]
+fn color_toggle_accepts_on_off_and_rejects_garbage() {
+    let db = scratch_db("color");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = run_repl_script(&db, ".color on\n.color off\n.color sideways\n.quit\n");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: .color on|off"), "{stderr}");
+}
+
+#[test]
+fn headers_rejects_invalid_argument() {
+    let db = scratch_db("headers-bad");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = run_repl_script(&db, ".headers sideways\n.quit\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: .headers on|off"), "{stderr}");
+}
+
+#[test]
+fn mode_rejects_invalid_argument() {
+    let db = scratch_db("mode-bad");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = run_repl_script(&db, ".mode sideways\n.quit\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("usage: .mode csv|column|line|list"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn schema_includes_view_statements() {
+    let db = scratch_db("schema-view");
+    seed(&db, "CREATE TABLE t(a, b)");
+    seed(&db, "CREATE VIEW v AS SELECT a FROM t");
+
+    let all = stdout_of(&db, ".schema\n.quit\n");
+    assert!(all.contains("CREATE VIEW v AS SELECT a FROM t;"), "{all}");
+
+    let named = stdout_of(&db, ".schema v\n.quit\n");
+    assert!(
+        named.contains("CREATE VIEW v AS SELECT a FROM t;"),
+        "{named}"
+    );
+}
+
+#[test]
+fn indices_with_no_matching_table_prints_nothing() {
+    let db = scratch_db("indices-none");
+    seed(&db, "CREATE TABLE t(a)");
+    seed(&db, "CREATE INDEX idx_t_a ON t(a)");
+    let out = stdout_of(&db, ".indices nosuchtable\n.quit\n");
+    assert!(!out.contains("idx_t_a"), "{out}");
+}
+
+#[test]
+fn dump_filtered_by_table_omits_other_tables() {
+    let db = scratch_db("dump-filtered");
+    seed(&db, "CREATE TABLE t(a)");
+    seed(&db, "CREATE TABLE other(x)");
+    seed(&db, "INSERT INTO t VALUES (1)");
+    seed(&db, "INSERT INTO other VALUES (2)");
+
+    let out = stdout_of(&db, ".dump t\n.quit\n");
+    assert!(out.contains("CREATE TABLE t(a);"), "{out}");
+    assert!(out.contains("INSERT INTO \"t\" VALUES(1);"), "{out}");
+    assert!(!out.contains("other"), "{out}");
+}
+
+#[test]
+fn pragma_query_runs_through_the_repl_loop() {
+    let db = scratch_db("pragma");
+    seed(&db, "CREATE TABLE t(a INTEGER, b TEXT)");
+    let out = stdout_of(&db, "PRAGMA table_info(t);\n.quit\n");
+    assert!(out.contains('a'), "{out}");
+    assert!(out.contains('b'), "{out}");
+}
+
+#[test]
+fn transaction_control_survives_across_statements() {
+    let db = scratch_db("txn");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = stdout_of(
+        &db,
+        "BEGIN;\nINSERT INTO t VALUES (1);\nSELECT * FROM t;\nCOMMIT;\n.quit\n",
+    );
+    assert!(out.contains('1'), "{out}");
+}
+
+#[test]
+fn select_syntax_error_is_reported_and_repl_continues() {
+    let db = scratch_db("syntax-error");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = run_repl_script(&db, "SELECT FROM;\nSELECT 1;\n.quit\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Error: syntax error"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('1'), "{stdout}");
+}
+
+#[test]
+fn multiple_statements_on_one_line_all_execute() {
+    let db = scratch_db("multi-stmt");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = stdout_of(&db, "INSERT INTO t VALUES (1); SELECT * FROM t;\n.quit\n");
+    assert!(out.contains('1'), "{out}");
+}
+
+#[test]
+fn crlf_line_endings_are_trimmed_like_bare_newlines() {
+    let db = scratch_db("crlf");
+    seed(&db, "CREATE TABLE t(a)");
+    let out = stdout_of(
+        &db,
+        "INSERT INTO t VALUES (1);\r\nSELECT * FROM t;\r\n.quit\r\n",
+    );
+    assert!(out.contains('1'), "{out}");
+}
+
+#[test]
+fn select_with_join_falls_back_to_positional_headers() {
+    let db = scratch_db("join-headers");
+    seed(&db, "CREATE TABLE t(a)");
+    seed(&db, "CREATE TABLE u(b)");
+    seed(&db, "INSERT INTO t VALUES (1)");
+    seed(&db, "INSERT INTO u VALUES (2)");
+
+    let out = stdout_of(
+        &db,
+        ".headers on\nSELECT t.a, u.b FROM t JOIN u ON 1;\n.quit\n",
+    );
+    assert!(out.contains("column1|column2"), "{out}");
+}

@@ -369,3 +369,192 @@ pub(crate) fn materialize_from_subquery(
 
     Ok(synthetic_schema)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::codegen::{Emitter, RegAlloc};
+    use crate::parser::error::{parse_select, ParseOutcome};
+
+    fn parse(sql: &str) -> Select {
+        match parse_select(sql) {
+            ParseOutcome::Accepted(select) => *select,
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    fn table(name: &str, root_page: u32) -> TableSchema {
+        TableSchema {
+            name: name.to_string(),
+            root_page,
+            columns: vec!["a".to_string(), "b".to_string()],
+            without_rowid: false,
+            strict: false,
+            column_types: vec![String::new(), String::new()],
+            column_collations: vec![],
+            is_virtual: false,
+            sql: format!("CREATE TABLE {name}(a, b)"),
+            indexes: Vec::new(),
+            rowid_alias: None,
+        }
+    }
+
+    fn from_of(select: &Select) -> &TableRef {
+        &select.from.as_ref().unwrap().first
+    }
+
+    #[test]
+    fn resolve_subquery_schema_none_when_no_from() {
+        let select = parse("SELECT (SELECT 1)");
+        let inner = match &select.columns[0] {
+            ResultColumn::Expr { expr, .. } => match &expr.kind {
+                ExprKind::Subquery(sub) => (**sub).clone(),
+                _ => panic!("expected subquery expr"),
+            },
+            _ => panic!("expected Expr result column"),
+        };
+        let result = resolve_subquery_schema(&inner, &[]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_subquery_schema_rejects_join_in_own_from() {
+        let sub = parse("SELECT a FROM t JOIN u ON t.a = u.a");
+        let err = resolve_subquery_schema(&sub, &[]).unwrap_err();
+        assert!(matches!(err, CodegenError::Unsupported { reason } if reason.contains("JOIN")));
+    }
+
+    #[test]
+    fn resolve_subquery_schema_rejects_nested_subquery_from() {
+        let sub = parse("SELECT a FROM (SELECT a FROM t) AS x");
+        let err = resolve_subquery_schema(&sub, &[]).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported { reason } if reason.contains("subquery-expression"))
+        );
+    }
+
+    #[test]
+    fn resolve_subquery_schema_rejects_unknown_table() {
+        let sub = parse("SELECT a FROM missing");
+        let err = resolve_subquery_schema(&sub, &[]).unwrap_err();
+        assert!(matches!(err, CodegenError::Unsupported { reason } if reason.contains("missing")));
+    }
+
+    #[test]
+    fn resolve_subquery_schema_finds_catalog_table_case_insensitively() {
+        let sub = parse("SELECT a FROM T");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_subquery_schema(&sub, &catalog).unwrap().unwrap();
+        assert_eq!(schema.name, "t");
+    }
+
+    #[test]
+    fn resolve_from_table_schema_name_not_found() {
+        let select = parse("SELECT a FROM missing");
+        let err = resolve_from_table_schema(from_of(&select), &[]).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::Unsupported { reason } if reason.contains("no such table"))
+        );
+    }
+
+    #[test]
+    fn resolve_from_table_schema_name_found() {
+        let select = parse("SELECT a FROM t");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_from_table_schema(from_of(&select), &catalog).unwrap();
+        assert_eq!(schema.name, "t");
+    }
+
+    #[test]
+    fn resolve_from_table_schema_star_and_alias_expr() {
+        let select = parse("SELECT * FROM (SELECT a, b AS c FROM t) AS s");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_from_table_schema(from_of(&select), &catalog).unwrap();
+        assert_eq!(schema.name, "s");
+        assert_eq!(schema.columns, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn resolve_from_table_schema_table_star() {
+        let select = parse("SELECT s.* FROM (SELECT a, b FROM t) AS s");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_from_table_schema(from_of(&select), &catalog).unwrap();
+        assert_eq!(schema.columns, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn resolve_from_table_schema_computed_expr_gets_positional_name() {
+        let select = parse("SELECT * FROM (SELECT a + 1 FROM t) AS s");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_from_table_schema(from_of(&select), &catalog).unwrap();
+        assert_eq!(schema.columns, vec!["column1".to_string()]);
+    }
+
+    #[test]
+    fn resolve_from_table_schema_unaliased_column_expr_uses_column_name() {
+        let select = parse("SELECT a FROM (SELECT a FROM t) AS s");
+        let catalog = vec![table("t", 2)];
+        let schema = resolve_from_table_schema(from_of(&select), &catalog).unwrap();
+        assert_eq!(schema.columns, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn materialize_from_subquery_rejects_compound() {
+        let subquery = parse("SELECT a FROM t UNION SELECT a FROM t2");
+        let mut em = Emitter::new();
+        let mut reg = RegAlloc::default();
+        let err = materialize_from_subquery(&mut em, &mut reg, &subquery, &[], 1).unwrap_err();
+        assert!(matches!(err, CodegenError::Unsupported { reason } if reason.contains("UNION")));
+    }
+
+    #[test]
+    fn materialize_from_subquery_rejects_unknown_table() {
+        let subquery = parse("SELECT a FROM missing");
+        let mut em = Emitter::new();
+        let mut reg = RegAlloc::default();
+        let err = materialize_from_subquery(&mut em, &mut reg, &subquery, &[], 1).unwrap_err();
+        assert!(matches!(err, CodegenError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn materialize_from_subquery_single_table_and_cache_reuse() {
+        let subquery = parse("SELECT a, b FROM t");
+        let catalog = vec![table("t", 2)];
+        let mut em = Emitter::new();
+        let mut reg = RegAlloc::default();
+
+        let schema = materialize_from_subquery(&mut em, &mut reg, &subquery, &catalog, 10).unwrap();
+        assert_eq!(schema.columns, vec!["a".to_string(), "b".to_string()]);
+
+        // #425: an identical subquery reuses the cached materialization via
+        // OpenDup instead of re-running the scan.
+        let before = em.here();
+        let schema2 =
+            materialize_from_subquery(&mut em, &mut reg, &subquery, &catalog, 11).unwrap();
+        assert_eq!(schema2.columns, schema.columns);
+        let program = em.finish();
+        assert_eq!(program.len(), before + 1);
+        assert_eq!(program.get(before).unwrap().opcode, Opcode::OpenDup);
+    }
+
+    #[test]
+    fn materialize_from_subquery_joined_own_from() {
+        let subquery = parse("SELECT t.a FROM t JOIN t2 ON t.a = t2.a");
+        let catalog = vec![table("t", 2), table("t2", 3)];
+        let mut em = Emitter::new();
+        let mut reg = RegAlloc::default();
+        let schema = materialize_from_subquery(&mut em, &mut reg, &subquery, &catalog, 10).unwrap();
+        assert_eq!(schema.columns, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn materialize_from_subquery_nested_subquery_in_own_from() {
+        let subquery = parse("SELECT a FROM (SELECT a FROM t) AS inner_s");
+        let catalog = vec![table("t", 2)];
+        let mut em = Emitter::new();
+        let mut reg = RegAlloc::default();
+        let schema = materialize_from_subquery(&mut em, &mut reg, &subquery, &catalog, 10).unwrap();
+        assert_eq!(schema.columns, vec!["a".to_string()]);
+    }
+}

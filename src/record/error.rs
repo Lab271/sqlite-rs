@@ -67,3 +67,58 @@ impl std::fmt::Display for RecordError {
 }
 
 impl std::error::Error for RecordError {}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        assert_eq!(
+            RecordError::UnexpectedEof { offset: 5 }.to_string(),
+            "unexpected end of input at byte offset 5"
+        );
+        assert_eq!(
+            RecordError::HeaderTooShort {
+                declared: 1,
+                varint_len: 2
+            }
+            .to_string(),
+            "record header length 1 is shorter than its own header-length varint (2 bytes)"
+        );
+        assert_eq!(
+            RecordError::HeaderOverrun {
+                offset: 3,
+                header_len: 4
+            }
+            .to_string(),
+            "record header entry at offset 3 extends past the declared header length 4"
+        );
+        assert_eq!(
+            RecordError::TrailingData { trailing: 7 }.to_string(),
+            "record has 7 unconsumed trailing byte(s) after decoding all columns"
+        );
+        assert_eq!(
+            RecordError::InvalidUtf8.to_string(),
+            "invalid UTF-8 in text value"
+        );
+        assert_eq!(
+            RecordError::InvalidUtf16.to_string(),
+            "invalid UTF-16 in text value"
+        );
+    }
+
+    #[test]
+    fn debug_and_eq() {
+        let err = RecordError::InvalidUtf8;
+        assert_eq!(err, RecordError::InvalidUtf8);
+        assert_ne!(format!("{err:?}"), "");
+    }
+
+    #[test]
+    fn implements_std_error() {
+        let err = RecordError::InvalidUtf8;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+}

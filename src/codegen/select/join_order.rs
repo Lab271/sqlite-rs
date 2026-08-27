@@ -241,8 +241,71 @@ fn collect_referenced_binding_indices(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::codegen::TableBinding;
+    use crate::parser::ast::BinaryOp;
+    use crate::parser::tokenizer::Span;
+    use crate::schema::IndexSchema;
+
+    fn span() -> Span {
+        Span {
+            line: 0,
+            column: 0,
+            offset: 0,
+            len: 0,
+        }
+    }
+
+    fn col(table: Option<&str>, name: &str) -> Expr {
+        Expr {
+            kind: ExprKind::Column {
+                table: table.map(str::to_string),
+                catalog: None,
+                name: name.to_string(),
+            },
+            span: span(),
+        }
+    }
+
+    fn eq(lhs: Expr, rhs: Expr) -> Expr {
+        Expr {
+            kind: ExprKind::Binary {
+                op: BinaryOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span: span(),
+        }
+    }
+
+    fn schema(name: &str, columns: &[&str], indexes: Vec<IndexSchema>) -> TableSchema {
+        TableSchema {
+            name: name.to_string(),
+            root_page: 0,
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+            column_types: vec![String::new(); columns.len()],
+            column_collations: vec![],
+            without_rowid: false,
+            strict: false,
+            is_virtual: false,
+            sql: String::new(),
+            indexes,
+            rowid_alias: None,
+        }
+    }
+
+    fn binding(schema: TableSchema, alias: Option<&str>) -> TableBinding {
+        TableBinding {
+            alias: alias.map(str::to_string),
+            name: schema.name.clone(),
+            schema,
+            cursor: 0,
+            forced_null: false,
+            stats: crate::planner::Stats::default(),
+        }
+    }
 
     #[test]
     fn plan_join_order_sorts_by_cost_ascending() {
@@ -255,5 +318,337 @@ mod tests {
         // Every table u64::MAX (no ANALYZE) -> original order preserved.
         let costs = vec![u64::MAX, u64::MAX, u64::MAX];
         assert_eq!(plan_join_order(&costs), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn plan_join_order_missing_cost_defaults_to_max() {
+        // costs.get(i) is None for an out-of-range index; unwrap_or(MAX)
+        // sorts it last.
+        assert_eq!(plan_join_order(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn scan_costs_marks_seekable_table_as_max_regardless_of_stats() {
+        let schemas = vec![schema("t", &["a"], vec![])];
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("t".to_string(), Stats::default());
+        let costs = scan_costs(&schemas, &stats, &[true]);
+        assert_eq!(costs, vec![u64::MAX]);
+    }
+
+    #[test]
+    fn scan_costs_uses_default_stats_for_unknown_table() {
+        let schemas = vec![schema("t", &["a"], vec![])];
+        let stats = std::collections::HashMap::new();
+        let costs = scan_costs(&schemas, &stats, &[false]);
+        assert_eq!(
+            costs,
+            vec![estimate_scan_cost(&Stats::default()).estimated_rows]
+        );
+    }
+
+    #[test]
+    fn seekable_tables_table_zero_never_seekable() {
+        let schemas = vec![schema("t0", &["id"], vec![])];
+        let seekable = seekable_tables(&schemas, &[]);
+        assert_eq!(seekable, vec![false]);
+    }
+
+    #[test]
+    fn seekable_tables_true_for_rowid_equality() {
+        let t0 = schema("t0", &["id"], vec![]);
+        // is_rowid_reference matches the literal "rowid"/"_rowid_"/"oid"
+        // names regardless of rowid_alias, so this triggers that path.
+        let t1 = schema("t1", &["rowid", "t0_id"], vec![]);
+        let constraint = eq(col(Some("t1"), "rowid"), col(Some("t0"), "id"));
+        let seekable = seekable_tables(&[t0, t1], &[Some(constraint)]);
+        assert_eq!(seekable, vec![false, true]);
+    }
+
+    #[test]
+    fn seekable_tables_true_for_unique_index_equality() {
+        let t0 = schema("t0", &["id"], vec![]);
+        let index = IndexSchema {
+            name: "idx_t1_key".to_string(),
+            unique: true,
+            columns: vec![crate::schema::IndexedColumn {
+                name: "key".to_string(),
+                desc: false,
+                collation: crate::vdbe::Collation::Binary,
+            }],
+            root_page: 0,
+        };
+        let t1 = schema("t1", &["id", "key"], vec![index]);
+        let constraint = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
+        let seekable = seekable_tables(&[t0, t1], &[Some(constraint)]);
+        assert_eq!(seekable, vec![false, true]);
+    }
+
+    #[test]
+    fn seekable_tables_false_for_non_equality_constraint() {
+        let t0 = schema("t0", &["id"], vec![]);
+        let t1 = schema("t1", &["id"], vec![]);
+        // Not a Binary/Eq expression, so top_level_equality_operands is None.
+        let constraint = col(Some("t1"), "id");
+        let seekable = seekable_tables(&[t0, t1], &[Some(constraint)]);
+        assert_eq!(seekable, vec![false, false]);
+    }
+
+    #[test]
+    fn seekable_tables_false_when_column_not_in_schema() {
+        let t0 = schema("t0", &["id"], vec![]);
+        let t1 = schema("t1", &["id"], vec![]);
+        let constraint = eq(col(Some("t1"), "missing"), col(Some("t0"), "id"));
+        let seekable = seekable_tables(&[t0, t1], &[Some(constraint)]);
+        assert_eq!(seekable, vec![false, false]);
+    }
+
+    #[test]
+    fn seekable_tables_skips_missing_constraint_or_schema() {
+        let t0 = schema("t0", &["id"], vec![]);
+        let t1 = schema("t1", &["id"], vec![]);
+        let seekable = seekable_tables(&[t0, t1], &[None]);
+        assert_eq!(seekable, vec![false, false]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_qualified_column() {
+        let bindings = vec![
+            binding(schema("t0", &["id"], vec![]), None),
+            binding(schema("t1", &["id"], vec![]), Some("u")),
+        ];
+        let expr = col(Some("u"), "id");
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![1]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_unqualified_column_matches_all_with_it() {
+        let bindings = vec![
+            binding(schema("t0", &["id"], vec![]), None),
+            binding(schema("t1", &["id"], vec![]), None),
+        ];
+        let expr = col(None, "id");
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0, 1]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_literal_and_param_reference_nothing() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let lit = Expr {
+            kind: ExprKind::Literal(Literal::Null),
+            span: span(),
+        };
+        assert_eq!(
+            referenced_binding_indices(&lit, &bindings),
+            Vec::<usize>::new()
+        );
+        let param = Expr {
+            kind: ExprKind::Param(ParamKind::Anonymous),
+            span: span(),
+        };
+        assert_eq!(
+            referenced_binding_indices(&param, &bindings),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn referenced_binding_indices_function_call_list_args() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::FunctionCall {
+                name: "coalesce".to_string(),
+                distinct: false,
+                args: FunctionArgs::List(vec![col(None, "id")]),
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_function_call_star_args_empty() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::FunctionCall {
+                name: "count".to_string(),
+                distinct: false,
+                args: FunctionArgs::Star,
+            },
+            span: span(),
+        };
+        assert_eq!(
+            referenced_binding_indices(&expr, &bindings),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn referenced_binding_indices_unary_isnull_cast_collate_paren() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let inner = || col(None, "id");
+        let cases = vec![
+            Expr {
+                kind: ExprKind::Unary {
+                    op: crate::parser::ast::UnaryOp::Not,
+                    expr: Box::new(inner()),
+                },
+                span: span(),
+            },
+            Expr {
+                kind: ExprKind::IsNull {
+                    expr: Box::new(inner()),
+                    negated: false,
+                },
+                span: span(),
+            },
+            Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(inner()),
+                    type_name: "TEXT".to_string(),
+                },
+                span: span(),
+            },
+            Expr {
+                kind: ExprKind::Collate {
+                    expr: Box::new(inner()),
+                    collation: "BINARY".to_string(),
+                },
+                span: span(),
+            },
+            Expr {
+                kind: ExprKind::Paren(Box::new(inner())),
+                span: span(),
+            },
+        ];
+        for expr in cases {
+            assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+        }
+    }
+
+    #[test]
+    fn referenced_binding_indices_is_operator() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::Is {
+                lhs: Box::new(col(None, "id")),
+                rhs: Box::new(Expr {
+                    kind: ExprKind::Literal(Literal::Null),
+                    span: span(),
+                }),
+                negated: false,
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_between() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::Between {
+                expr: Box::new(col(None, "id")),
+                lo: Box::new(Expr {
+                    kind: ExprKind::Literal(Literal::Integer(1)),
+                    span: span(),
+                }),
+                hi: Box::new(Expr {
+                    kind: ExprKind::Literal(Literal::Integer(2)),
+                    span: span(),
+                }),
+                negated: false,
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_in_list() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::In {
+                expr: Box::new(col(None, "id")),
+                list: vec![Expr {
+                    kind: ExprKind::Literal(Literal::Integer(1)),
+                    span: span(),
+                }],
+                negated: false,
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_like_with_escape() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::Like {
+                expr: Box::new(col(None, "id")),
+                pattern: Box::new(Expr {
+                    kind: ExprKind::Literal(Literal::Str("x".to_string())),
+                    span: span(),
+                }),
+                escape: Some(Box::new(Expr {
+                    kind: ExprKind::Literal(Literal::Str("!".to_string())),
+                    span: span(),
+                })),
+                glob: false,
+                negated: false,
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_case_with_operand_and_else() {
+        let bindings = vec![binding(schema("t0", &["id"], vec![]), None)];
+        let expr = Expr {
+            kind: ExprKind::Case {
+                operand: Some(Box::new(col(None, "id"))),
+                whens: vec![(
+                    Expr {
+                        kind: ExprKind::Literal(Literal::Integer(1)),
+                        span: span(),
+                    },
+                    Expr {
+                        kind: ExprKind::Literal(Literal::Integer(2)),
+                        span: span(),
+                    },
+                )],
+                else_: Some(Box::new(col(None, "id"))),
+            },
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&expr, &bindings), vec![0]);
+    }
+
+    #[test]
+    fn referenced_binding_indices_subquery_variants_reference_everything() {
+        let bindings = vec![
+            binding(schema("t0", &["id"], vec![]), None),
+            binding(schema("t1", &["id"], vec![]), None),
+        ];
+        let inner_select = Select {
+            with_clause: None,
+            distinct: None,
+            columns: vec![],
+            from: None,
+            where_clause: None,
+            group_by: vec![],
+            having: None,
+            compound: vec![],
+            order_by: vec![],
+            limit: None,
+            span: span(),
+        };
+        let subquery = Expr {
+            kind: ExprKind::Subquery(Box::new(inner_select)),
+            span: span(),
+        };
+        assert_eq!(referenced_binding_indices(&subquery, &bindings), vec![0, 1]);
     }
 }

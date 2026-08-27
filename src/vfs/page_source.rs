@@ -313,4 +313,111 @@ mod tests {
             other => panic!("expected ShortRead, got {other:?}"),
         }
     }
+
+    #[test]
+    fn display_and_source_for_each_variant() {
+        assert_eq!(
+            PageError::InvalidPageNumber.to_string(),
+            "invalid page number 0"
+        );
+        let short = PageError::ShortRead {
+            page_num: 3,
+            expected: 16,
+            got: 4,
+        };
+        assert_eq!(
+            short.to_string(),
+            "short read on page 3: expected 16 bytes, got 4"
+        );
+        let wrong = PageError::WrongLength {
+            page_num: 2,
+            expected: 16,
+            got: 8,
+        };
+        assert_eq!(
+            wrong.to_string(),
+            "wrong buffer length writing page 2: expected 16 bytes, got 8"
+        );
+
+        use std::error::Error;
+        assert!(PageError::InvalidPageNumber.source().is_none());
+        assert!(short.source().is_none());
+        assert!(wrong.source().is_none());
+
+        let vfs = MemoryVfs::new();
+        let missing = match vfs.open_read(Path::new("/missing")) {
+            Err(e) => e,
+            Ok(_) => panic!("expected open_read to fail for a missing file"),
+        };
+        let page_err: PageError = missing.into();
+        assert!(matches!(page_err, PageError::Vfs(_)));
+        assert!(page_err.source().is_some());
+        assert_eq!(page_err.to_string(), format!("{}", page_err));
+    }
+
+    #[test]
+    fn writable_page_source_round_trip() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![0u8; 16]);
+        let source = WritablePageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        source.write_page(1, &[7u8; 16]).unwrap();
+        source.sync().unwrap();
+        let page = source.read_page(1).unwrap();
+        assert_eq!(&*page, &[7u8; 16][..]);
+        drop(source.lock_shared().unwrap());
+    }
+
+    #[test]
+    fn writable_page_source_rejects_page_zero() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![0u8; 16]);
+        let source = WritablePageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        assert!(matches!(
+            source.write_page(0, &[0u8; 16]),
+            Err(PageError::InvalidPageNumber)
+        ));
+    }
+
+    #[test]
+    fn writable_page_source_rejects_wrong_length() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![0u8; 16]);
+        let source = WritablePageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        match source.write_page(1, &[0u8; 8]) {
+            Err(PageError::WrongLength {
+                page_num,
+                expected,
+                got,
+            }) => {
+                assert_eq!(page_num, 1);
+                assert_eq!(expected, 16);
+                assert_eq!(got, 8);
+            }
+            other => panic!("expected WrongLength, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_page_source_from_file_and_read_into() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![9u8; 16]);
+        let any_vfs = crate::vfs::AnyVfs::new(vfs);
+        let file = any_vfs.open_write(Path::new("/db")).unwrap();
+        let source = WritablePageSource::from_file(file, 16);
+        let mut buf = vec![0u8; 16];
+        source.read_page_into(1, &mut buf).unwrap();
+        assert_eq!(buf, vec![9u8; 16]);
+    }
+
+    #[test]
+    fn rc_and_ref_page_source_forward() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/db", vec![5u8; 16]);
+        let source = VfsPageSource::open(&vfs, Path::new("/db"), 16).unwrap();
+        let rc: Rc<dyn PageSource> = Rc::new(source);
+        assert_eq!(&*rc.read_page(1).unwrap(), &[5u8; 16][..]);
+
+        let by_ref: &dyn PageSource = &*rc;
+        assert_eq!(&*by_ref.read_page(1).unwrap(), &[5u8; 16][..]);
+    }
 }

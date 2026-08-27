@@ -391,3 +391,203 @@ pub fn parse_analyze(src: &str) -> ParseOutcome<Analyze> {
         Err(ParseFail::Invalid { message, span }) => ParseOutcome::Invalid { message, span },
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn assert_accepted<T: std::fmt::Debug>(outcome: ParseOutcome<T>, src: &str) {
+        match outcome {
+            ParseOutcome::Accepted(_) => {}
+            other => panic!("expected accepted for {src:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_unsupported<T: std::fmt::Debug>(outcome: ParseOutcome<T>, src: &str) {
+        match outcome {
+            ParseOutcome::Unsupported { .. } => {}
+            other => panic!("expected unsupported for {src:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_invalid<T: std::fmt::Debug>(outcome: ParseOutcome<T>, src: &str) {
+        match outcome {
+            ParseOutcome::Invalid { .. } => {}
+            other => panic!("expected invalid for {src:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_three_way_outcome() {
+        assert_accepted(parse_select("SELECT 1"), "SELECT 1");
+        assert_unsupported(
+            parse_select("SELECT 1 UNION SELECT 2 INTERSECT SELECT 3"),
+            "SELECT 1 UNION SELECT 2 INTERSECT SELECT 3",
+        );
+        assert_invalid(parse_select("SELECT FROM t"), "SELECT FROM t");
+    }
+
+    #[test]
+    fn explain_three_way_outcome() {
+        assert_accepted(
+            parse_explain("EXPLAIN QUERY PLAN SELECT 1"),
+            "EXPLAIN QUERY PLAN SELECT 1",
+        );
+        assert_unsupported(
+            parse_explain("EXPLAIN QUERY PLAN SELECT 1 UNION SELECT 2 INTERSECT SELECT 3"),
+            "EXPLAIN QUERY PLAN SELECT 1 UNION SELECT 2 INTERSECT SELECT 3",
+        );
+        assert_invalid(parse_explain("EXPLAIN QUERY PLAN"), "EXPLAIN QUERY PLAN");
+    }
+
+    #[test]
+    fn insert_three_way_outcome() {
+        assert_accepted(
+            parse_insert("INSERT INTO t VALUES (1, 2)"),
+            "INSERT INTO t VALUES (1, 2)",
+        );
+        assert_unsupported(
+            parse_insert("INSERT INTO t VALUES (CURRENT_TIMESTAMP)"),
+            "INSERT INTO t VALUES (CURRENT_TIMESTAMP)",
+        );
+        assert_invalid(parse_insert("INSERT INTO t"), "INSERT INTO t");
+    }
+
+    #[test]
+    fn delete_three_way_outcome() {
+        assert_accepted(parse_delete("DELETE FROM t"), "DELETE FROM t");
+        assert_unsupported(
+            parse_delete("DELETE FROM t UNION SELECT 1"),
+            "DELETE FROM t UNION SELECT 1",
+        );
+        assert_invalid(parse_delete("DELETE FROM"), "DELETE FROM");
+    }
+
+    #[test]
+    fn update_three_way_outcome() {
+        assert_accepted(
+            parse_update("UPDATE t1 SET x=1 WHERE x>0"),
+            "UPDATE t1 SET x=1 WHERE x>0",
+        );
+        assert_unsupported(
+            parse_update("UPDATE t1 SET x=1 UNION SELECT 1"),
+            "UPDATE t1 SET x=1 UNION SELECT 1",
+        );
+        assert_invalid(parse_update("UPDATE t1 SET"), "UPDATE t1 SET");
+    }
+
+    #[test]
+    fn create_table_three_way_outcome() {
+        assert_accepted(
+            parse_create_table("CREATE TABLE t (a INTEGER, b TEXT)"),
+            "CREATE TABLE t (a INTEGER, b TEXT)",
+        );
+        assert_unsupported(
+            parse_create_table("CREATE TEMP TABLE t (a)"),
+            "CREATE TEMP TABLE t (a)",
+        );
+        assert_invalid(
+            parse_create_table("CREATE TABLE t a INTEGER)"),
+            "CREATE TABLE t a INTEGER)",
+        );
+    }
+
+    #[test]
+    fn create_index_three_way_outcome() {
+        assert_accepted(
+            parse_create_index("CREATE INDEX i ON t (a)"),
+            "CREATE INDEX i ON t (a)",
+        );
+        assert_unsupported(
+            parse_create_index("CREATE INDEX i ON t (a) UNION SELECT 1"),
+            "CREATE INDEX i ON t (a) UNION SELECT 1",
+        );
+        assert_invalid(parse_create_index("CREATE INDEX"), "CREATE INDEX");
+    }
+
+    #[test]
+    fn create_view_three_way_outcome() {
+        assert_accepted(
+            parse_create_view("CREATE VIEW v AS SELECT 1"),
+            "CREATE VIEW v AS SELECT 1",
+        );
+        assert_unsupported(
+            parse_create_view("CREATE TEMP VIEW v AS SELECT 1"),
+            "CREATE TEMP VIEW v AS SELECT 1",
+        );
+        assert_invalid(parse_create_view("CREATE VIEW"), "CREATE VIEW");
+    }
+
+    #[test]
+    fn drop_view_three_way_outcome() {
+        assert_accepted(parse_drop_view("DROP VIEW v"), "DROP VIEW v");
+        assert_unsupported(
+            parse_drop_view("DROP VIEW v UNION SELECT 1"),
+            "DROP VIEW v UNION SELECT 1",
+        );
+        assert_invalid(parse_drop_view("DROP VIEW"), "DROP VIEW");
+    }
+
+    #[test]
+    fn drop_table_three_way_outcome() {
+        assert_accepted(parse_drop_table("DROP TABLE t"), "DROP TABLE t");
+        assert_unsupported(
+            parse_drop_table("DROP TABLE t UNION SELECT 1"),
+            "DROP TABLE t UNION SELECT 1",
+        );
+        assert_invalid(parse_drop_table("DROP TABLE"), "DROP TABLE");
+    }
+
+    #[test]
+    fn drop_index_three_way_outcome() {
+        assert_accepted(parse_drop_index("DROP INDEX i"), "DROP INDEX i");
+        assert_unsupported(
+            parse_drop_index("DROP INDEX i UNION SELECT 1"),
+            "DROP INDEX i UNION SELECT 1",
+        );
+        assert_invalid(parse_drop_index("DROP INDEX"), "DROP INDEX");
+    }
+
+    #[test]
+    fn begin_three_way_outcome() {
+        assert_accepted(parse_begin("BEGIN"), "BEGIN");
+        assert_invalid(
+            parse_begin("BEGIN TRANSACTION EXTRA"),
+            "BEGIN TRANSACTION EXTRA",
+        );
+    }
+
+    #[test]
+    fn commit_three_way_outcome() {
+        assert_accepted(parse_commit("COMMIT"), "COMMIT");
+        assert_invalid(parse_commit("COMMIT EXTRA"), "COMMIT EXTRA");
+    }
+
+    #[test]
+    fn rollback_three_way_outcome() {
+        assert_accepted(parse_rollback("ROLLBACK"), "ROLLBACK");
+        assert_invalid(parse_rollback("ROLLBACK EXTRA"), "ROLLBACK EXTRA");
+    }
+
+    #[test]
+    fn pragma_three_way_outcome() {
+        assert_accepted(
+            parse_pragma("PRAGMA journal_mode = WAL"),
+            "PRAGMA journal_mode = WAL",
+        );
+        assert_unsupported(
+            parse_pragma("PRAGMA cache_size = 10"),
+            "PRAGMA cache_size = 10",
+        );
+        assert_invalid(parse_pragma("PRAGMA"), "PRAGMA");
+    }
+
+    #[test]
+    fn analyze_three_way_outcome() {
+        assert_accepted(parse_analyze("ANALYZE"), "ANALYZE");
+        assert_accepted(parse_analyze("ANALYZE t"), "ANALYZE t");
+        assert_unsupported(parse_analyze("ANALYZE main.t"), "ANALYZE main.t");
+        assert_invalid(parse_analyze("ANALYZE 123"), "ANALYZE 123");
+    }
+}
