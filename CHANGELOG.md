@@ -6,6 +6,62 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Performance
+
+- Tier 2 query-pipeline performance (#590), no pipeline-structure or
+  output changes — every fix is intra-component and the corpus/parity
+  suites stay bit-exact. The tokenizer walks a byte cursor over its
+  source instead of materializing a `Vec<(usize, char)>` (~16× the
+  source size) up front, and identifier/number/parameter/string/quoted-
+  identifier scanners now slice the source directly rather than
+  rebuilding each token char-by-char — a string or quoted identifier
+  only allocates once a `''`/`""` escape actually appears in it.
+  `lookup_word` binary-searches the keyword table with an ASCII
+  case-insensitive comparator instead of heap-allocating an uppercased
+  copy of every identifier token, and `tokenize` pre-sizes its output
+  `Vec`. `TokenKind`'s rare `Blob`/`Param` variants are boxed, shrinking
+  the enum from ~40 to 32 bytes (guarded by `test_token_kind_size`) and
+  roughly halving token memory traffic. The parser gained
+  `advance_span()`, so the ~16 call sites that only need a token's span
+  no longer deep-clone its payload to immediately discard it. CTE and
+  view expansion return `Cow<Select>` rather than unconditionally
+  deep-cloning the entire `Select` AST: a SELECT with no `WITH` clause
+  and no view in scope now compiles with zero whole-AST clones, down
+  from two. Statement dispatch and `COLLATE` resolution compare with
+  `eq_ignore_ascii_case` instead of allocating uppercased copies.
+
+  Measured by the new `compile_path` bench (below), criterion baseline
+  against this branch's parent commit, all `p = 0.00`:
+
+  | Benchmark | Before | After | Change |
+  |-----------|-------:|------:|-------:|
+  | `tokenize/short` | 723 ns | 344 ns | **−52.6%** |
+  | `tokenize/long` | 3.26 µs | 1.62 µs | **−50.3%** |
+  | `tokenize/literals` | 1.19 µs | 759 ns | −35.8% |
+  | `parse/short` | 1.25 µs | 877 ns | −30.0% |
+  | `parse/long` | 6.14 µs | 3.41 µs | −39.1% |
+  | `parse/literals` | 2.80 µs | 2.00 µs | −31.4% |
+  | `expand_with_clause/no_cte` | 161 ns | 1.46 ns | **−99.1%** |
+  | `expand_with_clause/with_cte` | 769 ns | 691 ns | −6.3% |
+  | `compile_full/short` | 3.89 µs | 2.39 µs | **−39.3%** |
+  | `compile_full/no_cte` | 4.82 µs | 3.91 µs | −18.6% |
+
+  The `no_cte` expansion arm is the copy-on-write change in isolation:
+  with nothing to rewrite it is now a borrow rather than a whole-AST
+  clone. The `with_cte` arm still has to produce an owned, substituted
+  AST, and stays essentially flat — as intended.
+
+### Added
+
+- `tests/performance/compile_path.rs` (`make bench-compile-path`, #590):
+  a fixture-free, oracle-free criterion bench for the Tier 2 compile
+  path — tokenize, parse, `WITH`-expansion, and full text→`Program`
+  compilation. `engine.rs` times query *execution*, where compilation is
+  a rounding error next to B-tree/IO work, so compile-path changes are
+  invisible there. Numbers are a relative signal between revisions, not
+  a parity claim: stock sqlite3 exposes no comparable "compile but don't
+  run" entry point to form an oracle arm against.
+
 ## [0.18.4] - 2026-08-27
 
 ### Performance
@@ -65,59 +121,9 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Changed
 
-- Tier 2 query-pipeline performance (#590), no pipeline-structure or
-  output changes — every fix is intra-component and the corpus/parity
-  suites stay bit-exact. The tokenizer walks a byte cursor over its
-  source instead of materializing a `Vec<(usize, char)>` (~16× the
-  source size) up front, and identifier/number/parameter/string/quoted-
-  identifier scanners now slice the source directly rather than
-  rebuilding each token char-by-char — a string or quoted identifier
-  only allocates once a `''`/`""` escape actually appears in it.
-  `lookup_word` binary-searches the keyword table with an ASCII
-  case-insensitive comparator instead of heap-allocating an uppercased
-  copy of every identifier token, and `tokenize` pre-sizes its output
-  `Vec`. `TokenKind`'s rare `Blob`/`Param` variants are boxed, shrinking
-  the enum from ~40 to 32 bytes (guarded by `test_token_kind_size`) and
-  roughly halving token memory traffic. The parser gained
-  `advance_span()`, so the ~16 call sites that only need a token's span
-  no longer deep-clone its payload to immediately discard it. CTE and
-  view expansion return `Cow<Select>` rather than unconditionally
-  deep-cloning the entire `Select` AST: a SELECT with no `WITH` clause
-  and no view in scope now compiles with zero whole-AST clones, down
-  from two. Statement dispatch and `COLLATE` resolution compare with
-  `eq_ignore_ascii_case` instead of allocating uppercased copies.
-
-  Measured by the new `compile_path` bench (below), criterion baseline
-  against this branch's parent commit, all `p = 0.00`:
-
-  | Benchmark | Before | After | Change |
-  |-----------|-------:|------:|-------:|
-  | `tokenize/short` | 723 ns | 344 ns | **−52.6%** |
-  | `tokenize/long` | 3.26 µs | 1.62 µs | **−50.3%** |
-  | `tokenize/literals` | 1.19 µs | 759 ns | −35.8% |
-  | `parse/short` | 1.25 µs | 877 ns | −30.0% |
-  | `parse/long` | 6.14 µs | 3.41 µs | −39.1% |
-  | `parse/literals` | 2.80 µs | 2.00 µs | −31.4% |
-  | `expand_with_clause/no_cte` | 161 ns | 1.46 ns | **−99.1%** |
-  | `expand_with_clause/with_cte` | 769 ns | 691 ns | −6.3% |
-  | `compile_full/short` | 3.89 µs | 2.39 µs | **−39.3%** |
-  | `compile_full/no_cte` | 4.82 µs | 3.91 µs | −18.6% |
-
-  The `no_cte` expansion arm is the copy-on-write change in isolation:
-  with nothing to rewrite it is now a borrow rather than a whole-AST
-  clone. The `with_cte` arm still has to produce an owned, substituted
-  AST, and stays essentially flat — as intended.
 
 ### Added
 
-- `tests/performance/compile_path.rs` (`make bench-compile-path`, #590):
-  a fixture-free, oracle-free criterion bench for the Tier 2 compile
-  path — tokenize, parse, `WITH`-expansion, and full text→`Program`
-  compilation. `engine.rs` times query *execution*, where compilation is
-  a rounding error next to B-tree/IO work, so compile-path changes are
-  invisible there. Numbers are a relative signal between revisions, not
-  a parity claim: stock sqlite3 exposes no comparable "compile but don't
-  run" entry point to form an oracle arm against.
 
 - Tier 1 schema performance (#589): `TableSchema` now carries a
   `rowid_alias: Option<usize>` field resolved once at schema-decode time
