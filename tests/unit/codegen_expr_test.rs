@@ -127,6 +127,52 @@ fn and_short_circuits_on_false_first_operand() {
 }
 
 #[test]
+fn and_reorders_cheap_column_before_expensive_function_call() {
+    // #581: `length(name) = 2 AND a = 1` — `length(name)` is a scalar
+    // function call (cost class 2) while `a = 1` is a bare column
+    // comparison (cost class 1), so the cheap comparison must be
+    // emitted first, letting the row-failing case short-circuit before
+    // ever reaching the `Function` opcode.
+    let (path, schema) = one_row_fixture();
+    let program = compile_select(
+        &match parse_select("SELECT a FROM t WHERE length(name) = 2 AND a = 1") {
+            ParseOutcome::Accepted(s) => *s,
+            other => panic!("{other:?}"),
+        },
+        &schema,
+    )
+    .unwrap();
+    let rows = explain(&program);
+    let function_idx = rows
+        .iter()
+        .position(|r| r.opcode == "Function")
+        .expect("expected a Function instruction for length(name)");
+    let eq_idx = rows
+        .iter()
+        .position(|r| r.opcode == "Eq")
+        .expect("expected an Eq instruction for a = 1");
+    assert!(
+        eq_idx < function_idx,
+        "cheap `a = 1` comparison (idx {eq_idx}) must be emitted before \
+         the expensive `length(name)` call (idx {function_idx})"
+    );
+
+    // Behavior is unaffected by the reordering — same results either way.
+    let out = run_select(
+        &path,
+        &schema,
+        "SELECT a FROM t WHERE length(name) = 2 AND a = 1",
+    );
+    assert_eq!(out, vec![vec![Value::Integer(1)]]);
+    let out_excluded = run_select(
+        &path,
+        &schema,
+        "SELECT a FROM t WHERE length(name) = 2 AND a = 99",
+    );
+    assert!(out_excluded.is_empty());
+}
+
+#[test]
 fn or_includes_a_row_matched_by_either_operand() {
     let (path, schema) = one_row_fixture();
     let out = run_select(&path, &schema, "SELECT a FROM t WHERE a = 1 OR a = 99");

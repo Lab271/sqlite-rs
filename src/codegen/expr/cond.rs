@@ -23,6 +23,46 @@ pub(crate) fn column_index(schema: &TableSchema, name: &str) -> Option<usize> {
         .position(|c| c.eq_ignore_ascii_case(name))
 }
 
+/// #581: a rough, static (no `ANALYZE` data needed) cost class for an
+/// expression, used only to order `AND`/`OR` operands cheapest-first so
+/// short-circuit evaluation skips the pricier side more often — never
+/// to change what a query returns. Lower is cheaper. `Paren` is
+/// transparent (its inner cost is the whole thing's cost); everything
+/// not explicitly classified (`Case`, `Cast`, `Like`, ...) gets the
+/// arithmetic tier rather than the cheapest one, since none of them are
+/// as cheap as a bare column/literal read.
+fn cost_class(expr: &Expr) -> u8 {
+    match &expr.kind {
+        ExprKind::Paren(inner) => cost_class(inner),
+        ExprKind::Literal(_) | ExprKind::Param(_) | ExprKind::Column { .. } => 0,
+        ExprKind::Unary { expr: inner, .. } => cost_class(inner).max(1),
+        ExprKind::Binary { op, lhs, rhs } => {
+            let base = match op {
+                BinaryOp::And | BinaryOp::Or => 0,
+                _ => 1,
+            };
+            cost_class(lhs).max(cost_class(rhs)).max(base)
+        }
+        ExprKind::FunctionCall { .. } => 2,
+        ExprKind::Subquery(_)
+        | ExprKind::Exists { .. }
+        | ExprKind::InSubquery { .. }
+        | ExprKind::InSubqueryMulti { .. } => 3,
+        _ => 1,
+    }
+}
+
+/// Whether `rhs` is strictly cheaper (by [`cost_class`]) than `lhs`,
+/// i.e. whether a caller should swap them so the cheaper operand
+/// compiles first — safe for `AND`/`OR` because both are commutative
+/// under SQL's three-valued logic and SQLite's expression language has
+/// no operand with an evaluation side effect that order could
+/// observably change (#581). Ties keep the original left-to-right
+/// order.
+fn rhs_is_cheaper(lhs: &Expr, rhs: &Expr) -> bool {
+    cost_class(rhs) < cost_class(lhs)
+}
+
 /// Compiles `expr` as a boolean condition. [`CondTargets`] says where
 /// control continues on each of the three outcomes: `on_true`/
 /// `on_false` are real jump labels (or "fall through to the next
@@ -82,10 +122,27 @@ pub(crate) fn compile_cond(
             // via `rhs`, while `unknown AND true`/`unknown AND unknown`
             // are unknown and reach `on_true`, where NULL belongs
             // under this setting.
+            //
+            // #581: AND is commutative under three-valued logic, so
+            // whichever operand is cheaper (by [`cost_class`]) compiles
+            // first — the eagerly-evaluated slot — letting the pricier
+            // operand's evaluation be skipped whenever the cheap one
+            // already resolves the jump.
+            let (first, second) = if rhs_is_cheaper(lhs, rhs) {
+                (rhs, lhs)
+            } else {
+                (lhs, rhs)
+            };
             let (false_label, is_new) = ensure_label(em, targets.on_false);
             let operand = targets.with_false(Target::Jump(false_label));
-            compile_cond(em, reg, scope, lhs, operand.with_true(Target::Fallthrough))?;
-            compile_cond(em, reg, scope, rhs, operand)?;
+            compile_cond(
+                em,
+                reg,
+                scope,
+                first,
+                operand.with_true(Target::Fallthrough),
+            )?;
+            compile_cond(em, reg, scope, second, operand)?;
             if is_new {
                 em.place(false_label);
             }
@@ -107,10 +164,24 @@ pub(crate) fn compile_cond(
             // true or unknown, and both belong there), and under
             // `NullTarget::False` it falls into `rhs`, which decides
             // between true and the false/unknown continuation.
+            //
+            // #581: same cheapest-first reordering as AND above — OR
+            // is equally commutative under three-valued logic.
+            let (first, second) = if rhs_is_cheaper(lhs, rhs) {
+                (rhs, lhs)
+            } else {
+                (lhs, rhs)
+            };
             let (true_label, is_new) = ensure_label(em, targets.on_true);
             let operand = targets.with_true(Target::Jump(true_label));
-            compile_cond(em, reg, scope, lhs, operand.with_false(Target::Fallthrough))?;
-            compile_cond(em, reg, scope, rhs, operand)?;
+            compile_cond(
+                em,
+                reg,
+                scope,
+                first,
+                operand.with_false(Target::Fallthrough),
+            )?;
+            compile_cond(em, reg, scope, second, operand)?;
             if is_new {
                 em.place(true_label);
             }
