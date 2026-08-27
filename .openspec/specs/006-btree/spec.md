@@ -209,7 +209,7 @@ The system MUST insert a `(rowid, payload)` row into a table b-tree leaf page th
 - WHEN a second insert targets rowid `R`
 - THEN `insert_row` MUST return `Err(BtreeError::DuplicateRowid)`, leaving the page unchanged
 
-**Tests:** inline `#[cfg(test)]` in `src/btree/table/insert.rs` (planned — not yet written; duplicate-rowid rejection is implemented but not corpus/oracle-tested)
+**Tests:** `src/btree/table/insert.rs::tests::duplicate_rowid_is_rejected`
 
 ### Requirement 9: Leaf Split with Median Propagation [MUST]
 
