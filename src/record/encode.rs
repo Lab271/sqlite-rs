@@ -310,32 +310,32 @@ mod tests {
         assert_eq!(&payload[4..7], b"abc");
     }
 
-    /// #368 tagged MC/DC vector (obligation `encode_17`, decision
+    /// #368 tagged MC/DC vector (obligation `encode_33`, decision
     /// `groups < 8 && value >= (1u64 << (7 * groups))`): both leaves true
     /// on the loop's first check — `groups` must grow past 1.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__encode_17__v1_groups_grows() {
+    fn mcdc__encode_33__v1_groups_grows() {
         assert_eq!(encode_varint(128).len(), 2);
     }
 
-    /// #368 tagged MC/DC vector (obligation `encode_17`): leaf A
+    /// #368 tagged MC/DC vector (obligation `encode_33`): leaf A
     /// (`groups < 8`) true, leaf B false on the first check — the loop
     /// body never runs, `groups` stays 1. Independence pair for B against
-    /// `mcdc__encode_17__v1_groups_grows`.
+    /// `mcdc__encode_33__v1_groups_grows`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__encode_17__v2_groups_stays_one() {
+    fn mcdc__encode_33__v2_groups_stays_one() {
         assert_eq!(encode_varint(5).len(), 1);
     }
 
-    /// #368 tagged MC/DC vector (obligation `encode_17`): leaf A false
+    /// #368 tagged MC/DC vector (obligation `encode_33`): leaf A false
     /// (`groups` reaches 8, short-circuiting B) — the largest value still
     /// under the 9-byte-form threshold. Independence pair for A against
-    /// `mcdc__encode_17__v1_groups_grows`.
+    /// `mcdc__encode_33__v1_groups_grows`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__encode_17__v3_groups_caps_at_eight() {
+    fn mcdc__encode_33__v3_groups_caps_at_eight() {
         assert_eq!(encode_varint((1u64 << 56) - 1).len(), 8);
     }
 }
