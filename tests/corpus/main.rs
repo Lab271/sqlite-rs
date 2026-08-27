@@ -40,6 +40,7 @@ mod no_stats_optimizations_test;
 mod oracle_test;
 mod pager_write_test;
 mod parser_oracle_test;
+mod partial_sort_test;
 mod regen_test;
 mod repl_test;
 mod schema_test;

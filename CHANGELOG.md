@@ -20,6 +20,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Partial-sort optimization for `ORDER BY <indexed prefix cols>,
+  <suffix cols>` (#574): when an index satisfies a strict prefix of the
+  requested order but not all of it, the compiled program now walks
+  that index directly and only sorts the unsatisfied suffix within
+  each prefix-group, instead of `compile_sorted_scan`'s single sort
+  over the entire result set
+  (`src/codegen/select/index_scan.rs::try_compile_partial_sorted_index_scan`).
+  Closes the last open technique in epic #548.
 - `.color on|off` dot-command for the REPL: toggles ANSI syntax
   highlighting of the in-progress input line
   (`src/bin/sqlite-rs/readline.rs`'s `Readline::set_color`), alongside

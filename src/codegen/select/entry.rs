@@ -1,7 +1,7 @@
 use super::aggregate::{
     compile_grouped_scan, select_has_aggregate, try_compile_index_ordered_group_by,
 };
-use super::index_scan::try_compile_index_ordered_scan;
+use super::index_scan::{try_compile_index_ordered_scan, try_compile_partial_sorted_index_scan};
 use super::limit_scan::{
     compile_direct_scan, compile_limit_setup, compile_sorted_scan, emit_limit_guard,
     emit_offset_guard,
@@ -268,10 +268,24 @@ where
 
     let order_by_plans = resolve_order_by(select, schema)?;
     if order_by_plans.is_empty() {
-        compile_direct_scan(
+        return compile_direct_scan(
             em, reg, select, schema, cursors, end_label, catalog, stats, sink,
-        )
-    } else if try_compile_index_ordered_scan(
+        );
+    }
+    if try_compile_index_ordered_scan(
+        em,
+        reg,
+        select,
+        schema,
+        &order_by_plans,
+        cursors,
+        end_label,
+        catalog,
+        sink,
+    )? {
+        return Ok(());
+    }
+    if try_compile_partial_sorted_index_scan(
         em,
         reg,
         select,
