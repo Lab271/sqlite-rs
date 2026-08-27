@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_main]
 
+use std::rc::Rc;
+
 use libfuzzer_sys::fuzz_target;
 
 use sqlite_rs::btree::TableCursor;
@@ -19,14 +21,14 @@ struct FuzzPageSource<'a> {
 }
 
 impl PageSource for FuzzPageSource<'_> {
-    fn read_page(&self, page_num: u32) -> Result<Vec<u8>, PageError> {
+    fn read_page(&self, page_num: u32) -> Result<Rc<[u8]>, PageError> {
         if page_num == 0 || page_num > 8 {
             return Err(PageError::InvalidPageNumber);
         }
         let mut buf = vec![0u8; self.page_size as usize];
         let n = self.data.len().min(buf.len());
         buf[..n].copy_from_slice(&self.data[..n]);
-        Ok(buf)
+        Ok(Rc::from(buf))
     }
 }
 
