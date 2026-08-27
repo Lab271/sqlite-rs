@@ -41,15 +41,61 @@ use std::cmp::Ordering;
 
 use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
-    compare_keys, descend_index_tree, write_index_interior_page, IndexDescent, INTERIOR_INDEX,
-    LEAF_INDEX,
+    compare_keys, decode_payload_len, descend_index_tree, write_index_interior_page, IndexDescent,
+    INTERIOR_INDEX, LEAF_INDEX,
 };
 use crate::btree::{
-    page1_header_start, read_page_type, splice_delete_cell, BtreeError, MAX_PAGES_VISITED,
+    local_payload_size, page1_header_start, read_page_type, read_u32, splice_delete_cell,
+    BtreeError, MAX_PAGES_VISITED,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
 use crate::record::{TextEncoding, Value};
+
+/// Returns the first overflow page of a value cell's raw bytes (`0` if
+/// its payload is entirely local). `value_bytes` is the verbatim
+/// `payload-length varint + local bytes [+ 4-byte overflow pointer]`
+/// shape [`collect_index_leaf_cells`]/[`collect_index_interior_entries`]
+/// already extract — decoding it directly (rather than re-reading from a
+/// live page) works because that shape is self-contained, with the
+/// payload-length varint at offset 0.
+fn overflow_page_of(value_bytes: &[u8], usable_size: u32) -> Result<u32, BtreeError> {
+    let (payload_len, tail_start) = decode_payload_len(value_bytes, 0, 0)?;
+    let local_size = local_payload_size(usable_size, payload_len, true) as usize;
+    if (local_size as u64) < payload_len {
+        Ok(read_u32(
+            value_bytes,
+            tail_start.saturating_add(local_size),
+            0,
+        )?)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Walks and frees an overflow-page chain starting at `first_page` (a
+/// no-op if it's `0` — the cell had no overflow). Mirrors
+/// `table::delete::free_overflow_chain` (duplicated rather than shared —
+/// see `insert.rs`'s `write_overflow_chain` doc comment for why).
+fn free_overflow_chain(pager: &mut Pager, first_page: u32) -> Result<(), BtreeError> {
+    let mut page_num = first_page;
+    let mut visited = std::collections::HashSet::new();
+    while page_num != 0 {
+        if !visited.insert(page_num) {
+            return Err(BtreeError::OverflowChainCycle {
+                page_num: first_page,
+                revisited_page: page_num,
+            });
+        }
+        let next = {
+            let buf = pager.get_page_mut(page_num)?;
+            read_u32(buf, 0, page_num)?
+        };
+        pager.deallocate_page(page_num)?;
+        page_num = next;
+    }
+    Ok(())
+}
 
 /// Deletes the entry with exactly `key` (via `compare_keys`) from the
 /// index b-tree rooted at `root_page`. Returns `Err(BtreeError::KeyNotFound)`
@@ -95,9 +141,17 @@ fn delete_from_leaf(
         .iter()
         .position(|(existing_key, _)| compare_keys(existing_key, key) == Ordering::Equal)
         .ok_or(BtreeError::KeyNotFound)?;
+    let overflow_page = overflow_page_of(
+        &cells
+            .get(pos)
+            .ok_or(BtreeError::Internal("delete_from_leaf: pos out of bounds"))?
+            .1,
+        usable_size,
+    )?;
 
     let buf = pager.get_page_mut(leaf_page)?;
-    splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, false)
+    splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, false)?;
+    free_overflow_chain(pager, overflow_page)
 }
 
 /// Handles a delete target found at interior level — see the module doc
@@ -258,13 +312,15 @@ fn remove_entry_by_child(
             page_num,
             child: child_to_remove,
         })?;
-    entries.remove(idx);
+    let (_, _, removed_value_bytes) = entries.remove(idx);
+    let overflow_page = overflow_page_of(&removed_value_bytes, usable_size)?;
     let cell_bytes: Vec<Vec<u8>> = entries
         .iter()
         .map(|(c, _, value_bytes)| build_index_interior_cell(*c, value_bytes))
         .collect();
     let buf = pager.get_page_mut(page_num)?;
-    write_index_interior_page(buf, header_start, page_num, &cell_bytes, rightmost)
+    write_index_interior_page(buf, header_start, page_num, &cell_bytes, rightmost)?;
+    free_overflow_chain(pager, overflow_page)
 }
 
 #[cfg(test)]
@@ -334,6 +390,39 @@ mod tests {
         )
         .unwrap();
         assert!(cells.is_empty());
+    }
+
+    /// Regression test: index cells use a smaller `max_local` than table
+    /// leaf cells (`(usable_size-12)*64/255-23`, not `usable_size-35` —
+    /// 006-btree Requirement 7 flagged this via a real fixture), so a key
+    /// well under the table threshold can still overflow here. Deleting
+    /// such an entry must free its overflow chain, not leak it — mirrors
+    /// `table::delete::tests::deleting_a_row_with_overflow_frees_its_overflow_chain`.
+    #[test]
+    fn deleting_an_entry_with_overflow_frees_its_overflow_chain() {
+        let page_size = 512u32;
+        let (vfs, header) = minimal_index_db(page_size);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        // `max_local` for a 512-byte page is (512-12)*64/255-23 = 102, so
+        // 300 bytes of key text forces an overflow chain.
+        let big_key = key(&"x".repeat(300), 1);
+        insert_entry(&mut pager, &header, 1, &big_key, TextEncoding::Utf8).unwrap();
+
+        let freelist_before = freelist_page_count(&mut pager);
+        assert_eq!(freelist_before, 0);
+        delete_entry(&mut pager, &header, 1, &big_key, TextEncoding::Utf8).unwrap();
+        let freelist_after = freelist_page_count(&mut pager);
+
+        assert!(
+            freelist_after > freelist_before,
+            "the entry's overflow chain must be returned to the freelist on delete"
+        );
+    }
+
+    fn freelist_page_count(pager: &mut Pager) -> u32 {
+        let page1 = pager.get_page_mut(1).unwrap().clone();
+        u32::from_be_bytes(page1[36..40].try_into().unwrap())
     }
 
     #[test]

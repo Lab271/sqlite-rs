@@ -279,6 +279,7 @@ impl<P: PageSource> TableCursor<P> {
             &cur.page,
             cur.tail_start,
             cur.payload_len,
+            false,
         )
     }
 
@@ -606,14 +607,24 @@ impl<P: PageSource> TableCursor<P> {
 }
 
 /// SQLite's overflow local-size formula (fileformat2.html "Cell Payload
-/// Overflow"), shared by table leaf cells, index leaf cells, and index
-/// interior cells (table interior cells have no payload at all). All
-/// arithmetic saturates rather than panics — a pathological `usable_size`
-/// degrades to a safe (wrong but non-panicking) answer, caught by the
-/// length checks around the call site instead of an arithmetic panic
-/// here.
-fn local_payload_size(usable_size: u32, payload_len: u64) -> u64 {
-    let max_local = usable_size.saturating_sub(35) as u64;
+/// Overflow"). `min_local` is shared by every cell kind, but `max_local`
+/// is NOT: table leaf cells use `usable_size - 35`, while index cells
+/// (leaf AND interior — table interior cells have no payload at all) use
+/// `(usable_size - 12) * 64 / 255 - 23`, a smaller threshold. Passing the
+/// wrong one for an index cell computes a `local_size` that doesn't fit
+/// the space SQLite actually reserved on the page — caught in practice
+/// once a fixture forces an index cell's payload past the *correct*
+/// (smaller) index threshold while still under the table one (#Req 7).
+/// All arithmetic saturates rather than panics — a pathological
+/// `usable_size` degrades to a safe (wrong but non-panicking) answer,
+/// caught by the length checks around the call site instead of an
+/// arithmetic panic here.
+fn local_payload_size(usable_size: u32, payload_len: u64, is_index: bool) -> u64 {
+    let max_local = if is_index {
+        ((usable_size.saturating_sub(12) as u64).saturating_mul(64) / 255).saturating_sub(23)
+    } else {
+        usable_size.saturating_sub(35) as u64
+    };
     if payload_len <= max_local {
         return payload_len;
     }
@@ -643,8 +654,9 @@ fn first_overflow_page(
     payload_len: u64,
     usable_size: u32,
     page_num: u32,
+    is_index: bool,
 ) -> Result<Option<u32>, BtreeError> {
-    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let local_size = local_payload_size(usable_size, payload_len, is_index) as usize;
     if (local_size as u64) < payload_len {
         Ok(Some(read_u32(
             buf,
@@ -702,6 +714,7 @@ fn reassemble_payload<P: PageSource>(
     page: &Rc<[u8]>,
     tail_start: usize,
     payload_len: u64,
+    is_index: bool,
 ) -> Result<Payload, BtreeError> {
     if payload_len > MAX_PAYLOAD_LEN {
         return Err(BtreeError::PayloadTooLarge {
@@ -712,7 +725,7 @@ fn reassemble_payload<P: PageSource>(
     let cell_tail = page
         .get(tail_start..)
         .ok_or(BtreeError::PayloadTooShort { page_num })?;
-    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let local_size = local_payload_size(usable_size, payload_len, is_index) as usize;
     let local_bytes = cell_tail
         .get(..local_size)
         .ok_or(BtreeError::PayloadTooShort { page_num })?;
@@ -877,9 +890,14 @@ fn free_btree_pages_inner(
                 let ptr_off = cell_ptr_offset(ptr_base, i);
                 let cell_start = read_cell_pointer(&buf, ptr_off, page_num, i)?;
                 let (_, payload_len, tail_start) = decode_cell_head(&buf, cell_start, page_num)?;
-                if let Some(overflow_page) =
-                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
-                {
+                if let Some(overflow_page) = first_overflow_page(
+                    &buf,
+                    tail_start,
+                    payload_len,
+                    usable_size,
+                    page_num,
+                    false,
+                )? {
                     free_overflow_chain(pager, page_num, overflow_page, visited)?;
                 }
             }
@@ -900,7 +918,7 @@ fn free_btree_pages_inner(
                 let (payload_len, tail_start) =
                     index::decode_payload_len(&buf, cell_start, page_num)?;
                 if let Some(overflow_page) =
-                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
+                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num, true)?
                 {
                     free_overflow_chain(pager, page_num, overflow_page, visited)?;
                 }
@@ -916,7 +934,7 @@ fn free_btree_pages_inner(
                 let (payload_len, tail_start) =
                     index::decode_payload_len(&buf, value_start, page_num)?;
                 if let Some(overflow_page) =
-                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
+                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num, true)?
                 {
                     free_overflow_chain(pager, page_num, overflow_page, visited)?;
                 }
@@ -1022,7 +1040,7 @@ pub(super) fn collect_leaf_cells(
         let ptr_off = cell_ptr_offset(ptr_base, i);
         let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
         let (rowid, payload_len, tail_start) = decode_cell_head(buf, cell_start, page_num)?;
-        let local_size = local_payload_size(usable_size, payload_len) as usize;
+        let local_size = local_payload_size(usable_size, payload_len, false) as usize;
         let has_overflow = (local_size as u64) < payload_len;
         let cell_end = tail_start
             .saturating_add(local_size)
@@ -1063,7 +1081,7 @@ pub(super) fn scan_leaf_cells(
         if cell_rowid > rowid && insert_pos == num_cells {
             insert_pos = i;
         }
-        let local_size = local_payload_size(usable_size, payload_len) as usize;
+        let local_size = local_payload_size(usable_size, payload_len, false) as usize;
         let has_overflow = (local_size as u64) < payload_len;
         let cell_end = tail_start
             .saturating_add(local_size)
@@ -1097,7 +1115,7 @@ pub(super) fn find_leaf_cell(
         if cell_rowid != rowid {
             continue;
         }
-        let local_size = local_payload_size(usable_size, payload_len) as usize;
+        let local_size = local_payload_size(usable_size, payload_len, false) as usize;
         let overflow_page = if (local_size as u64) < payload_len {
             read_u32(buf, tail_start.saturating_add(local_size), page_num)?
         } else {
@@ -1526,7 +1544,7 @@ pub(super) fn splice_delete_cell(
     } else {
         index::decode_payload_len(buf, cell_start, page_num)?
     };
-    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let local_size = local_payload_size(usable_size, payload_len, !has_rowid) as usize;
     let has_overflow = (local_size as u64) < payload_len;
     let cell_end = tail_start
         .saturating_add(local_size)
@@ -2326,7 +2344,7 @@ mod tests {
         // denom` remainder on opposite sides of a denom (508) multiple,
         // making the two paths diverge to entirely different results (70
         // vs 167) instead of coincidentally agreeing.
-        assert_eq!(local_payload_size(512, 5150), 70);
+        assert_eq!(local_payload_size(512, 5150, false), 70);
     }
 
     #[test]
@@ -2335,7 +2353,8 @@ mod tests {
             pages: HashMap::new(),
         };
         let page: Rc<[u8]> = Rc::from(Vec::new().as_slice());
-        let err = reassemble_payload(&source, 512, 2, &page, 0, MAX_PAYLOAD_LEN).unwrap_err();
+        let err =
+            reassemble_payload(&source, 512, 2, &page, 0, MAX_PAYLOAD_LEN, false).unwrap_err();
         assert!(!matches!(err, BtreeError::PayloadTooLarge { .. }));
     }
 
@@ -2361,7 +2380,7 @@ mod tests {
         let mut cell = Vec::new();
         cell.extend_from_slice(&encode_varint_for_test(5000));
         cell.extend_from_slice(&encode_varint_for_test(1));
-        let local_size = local_payload_size(512, 5000) as usize;
+        let local_size = local_payload_size(512, 5000, false) as usize;
         cell.extend(std::iter::repeat_n(0u8, local_size));
         cell.extend_from_slice(&99u32.to_be_bytes());
         page[cell_start..cell_start.saturating_add(cell.len())].copy_from_slice(&cell);

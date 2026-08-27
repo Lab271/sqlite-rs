@@ -88,3 +88,26 @@ fn without_rowid_row_count_matches_oracle() {
     }
     assert_eq!(n, 500);
 }
+
+/// 006-btree Requirement 7: `overflow_index_key.db`'s single index entry
+/// has an ~8000-byte TEXT key against a 4096-byte page — the index cell
+/// itself (not just the table row sharing the same column) overflows.
+/// Index-cell overflow reuses `reassemble_payload` (Requirement 2), but
+/// no fixture exercised that path on an index leaf until now.
+#[test]
+fn overflowing_index_key_reassembles_byte_identical_to_oracle() {
+    use sqlite_rs::record::{decode_record, TextEncoding, Value};
+
+    let mut cursor = open_index_cursor("overflow_index_key.db", 3);
+    let row = cursor.first().unwrap().unwrap();
+    let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
+    // Index entries append the rowid as the record's trailing value.
+    let key = match &values[0] {
+        Value::Text(s) => s.as_ref(),
+        other => panic!("expected a TEXT index key, got {other:?}"),
+    };
+    assert_eq!(key.len(), 8002, "prefix 'a-' + 8000 hex chars");
+    assert!(key.starts_with("a-"));
+    assert!(key[2..].bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(cursor.next().unwrap().is_none());
+}

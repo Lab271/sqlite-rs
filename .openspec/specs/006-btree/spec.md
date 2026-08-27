@@ -175,19 +175,19 @@ The system SHOULD provide enough key ordering to walk an index b-tree correctly 
 
 **Tests:** `src/btree/index.rs::secondary_index_seek_matches_oracle`
 
-### Requirement 7: No Fixture Yet Covers an Overflowing Index Key [SHOULD]
+### Requirement 7: Overflowing Index Keys Use the Index (Not Table) Local-Size Threshold [MUST]
 
-The originating issue's corpus section expects an index fixture with an overflowing key; `tests/corpus/fixtures/btrees/index.db`'s actual generated content (`b TEXT`, max length 15 bytes) does not exercise this — overflow reassembly on index cells reuses the same `reassemble_payload` function already proven byte-identical against table-cell overflow (Requirement 2), so the residual risk is low, but this is a real coverage gap, not a silent oversight.
+The originating issue's corpus section expected an index fixture with an overflowing key; none existed (`tests/corpus/fixtures/btrees/index.db`'s content — `b TEXT`, max length 15 bytes — never exercised it), flagged as a real coverage gap rather than a silent oversight. Building `overflow_index_key.db` (an ~8000-byte indexed TEXT key against a 4096-byte page) surfaced that the gap was hiding an actual bug, not just missing coverage: `local_payload_size`'s `max_local` was computed as `usable_size - 35` unconditionally, but SQLite defines a smaller `max_local` for index cells (leaf AND interior) — `(usable_size - 12) * 64 / 255 - 23` — than for table leaf cells. Every index cell whose payload fell between the two thresholds was read with a `local_size` far larger than what SQLite actually reserved on the page, corrupting the read (`PayloadTooShort`) the moment a fixture forced a payload past the *correct* (smaller) index threshold while still under the incorrect (larger) table one. The system MUST select `max_local` by cell kind, not just by whether the payload overflows.
 
-**Implementation:** `tools/gen_fixtures.sh` (planned — no fixture with an overflowing index key exists yet)
+**Implementation:** `src/btree.rs::local_payload_size` (takes an `is_index` flag); `tools/gen_fixtures.sh` (`overflow_index_key.db`)
 
 #### Scenario: Overflowing index key
 
-- GIVEN an index whose key column is large enough to overflow into one or more overflow pages
+- GIVEN an index whose key column is large enough to overflow into one or more overflow pages under the index (not table) local-size threshold
 - WHEN the cursor reads that entry
 - THEN the reassembled key payload MUST be byte-identical to the pinned oracle's value
 
-**Tests:** `tools/gen_fixtures.sh` (planned)
+**Tests:** `tests/corpus/btree_test.rs::overflowing_index_key_reassembles_byte_identical_to_oracle`
 
 ### Requirement 8: Leaf Cell Insert Without Split [MUST]
 
@@ -418,6 +418,14 @@ The system MUST delete the entry with a given key from an index b-tree. Deleting
 - THEN stock `sqlite3` MUST report zero rows in the underlying table and pass `PRAGMA integrity_check`, and this crate's own `IndexCursor` MUST also report zero entries
 
 **Tests:** `tests/corpus/btree_index_insert_delete_test.rs::delete_all_entries_leaves_an_empty_index`
+
+#### Scenario: Deleting an entry with an overflowing value frees its overflow chain
+
+- GIVEN an index entry whose key/value overflows into one or more overflow pages (per Requirement 7's corrected threshold)
+- WHEN that entry is deleted, whether directly from a leaf or removed outright by the interior-match path (Requirement 17)
+- THEN every page in its overflow chain MUST be returned to the freelist, not leaked — found via Requirement 7's fixture work, since index cells overflow far more readily under the corrected (smaller) threshold than the previous bug allowed
+
+**Tests:** `src/btree/index/delete.rs::tests::deleting_an_entry_with_overflow_frees_its_overflow_chain`, `src/btree/index/delete.rs::tests::deleting_all_entries_orphans_no_page`
 
 ### Requirement 17: Interior-Match Deletion via Predecessor Swap [MUST]
 
