@@ -632,6 +632,69 @@ fn local_payload_size(usable_size: u32, payload_len: u64) -> u64 {
     }
 }
 
+/// Returns the first overflow page number for a cell whose local payload
+/// starts at `buf[tail_start..]`, or `None` if `payload_len` fits
+/// entirely within the page (no overflow chain). Shared by the table-leaf
+/// and index (leaf/interior) overflow-freeing walk in
+/// `free_btree_pages_inner`.
+fn first_overflow_page(
+    buf: &[u8],
+    tail_start: usize,
+    payload_len: u64,
+    usable_size: u32,
+    page_num: u32,
+) -> Result<Option<u32>, BtreeError> {
+    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    if (local_size as u64) < payload_len {
+        Ok(Some(read_u32(
+            buf,
+            tail_start.saturating_add(local_size),
+            page_num,
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Walks and frees the overflow-page chain starting at `overflow_page`,
+/// the on-disk linked list SQLite uses for payloads too large to fit
+/// locally. Mirrors `reassemble_payload`'s chain walk (including its
+/// cycle guard) but deallocates each page instead of copying its bytes.
+/// Used by `free_btree_pages_inner` (DROP TABLE/DROP INDEX) to reclaim
+/// overflow pages that would otherwise leak (#215 follow-up).
+fn free_overflow_chain(
+    pager: &mut crate::pager::Pager,
+    owner_page_num: u32,
+    mut overflow_page: u32,
+    visited: &mut usize,
+) -> Result<(), BtreeError> {
+    let mut seen = std::collections::HashSet::new();
+    while overflow_page != 0 {
+        *visited = visited.saturating_add(1);
+        if *visited > MAX_PAGES_VISITED {
+            return Err(BtreeError::TraversalTooLong {
+                max: MAX_PAGES_VISITED,
+            });
+        }
+        if !seen.insert(overflow_page) {
+            return Err(BtreeError::OverflowChainCycle {
+                page_num: owner_page_num,
+                revisited_page: overflow_page,
+            });
+        }
+        let page = pager
+            .read_page(overflow_page)
+            .map_err(|source| BtreeError::PageSource {
+                page_num: overflow_page,
+                source,
+            })?;
+        let next = read_u32(&page, 0, overflow_page)?;
+        pager.deallocate_page(overflow_page)?;
+        overflow_page = next;
+    }
+    Ok(())
+}
+
 fn reassemble_payload<P: PageSource>(
     source: &P,
     usable_size: u32,
@@ -772,18 +835,11 @@ pub(super) fn find_leaf_page(
 
 /// Frees every page of the b-tree (table or index) rooted at `root_page`,
 /// walking interior pages depth-first and freeing children before their
-/// parent, finally freeing `root_page` itself. Used by DROP TABLE/DROP
-/// INDEX (#215) to reclaim the pages a dropped object's b-tree occupied.
-///
-/// Known gap: does not walk or free overflow-page chains hanging off
-/// individual cells — freeing an overflow chain needs per-cell
-/// has-overflow detection that neither `collect_interior_entries` (table)
-/// nor `index::collect_index_interior_entries` (index) expose today. A
-/// DROP on a b-tree whose rows/entries overflowed their page therefore
-/// leaks those overflow pages rather than returning them to the
-/// freelist. This does not affect query-visible correctness (the dropped
-/// object is gone from `sqlite_master` either way) — only on-disk space
-/// reclamation is incomplete. Tracked as a follow-up, not fixed here.
+/// parent, finally freeing `root_page` itself. Also walks and frees each
+/// leaf/interior cell's overflow-page chain (if any), so a DROP on a
+/// b-tree whose rows/entries overflowed their page reclaims those pages
+/// too rather than leaking them. Used by DROP TABLE/DROP INDEX (#215) to
+/// reclaim the pages a dropped object's b-tree occupied.
 pub(crate) fn free_btree_pages(
     pager: &mut crate::pager::Pager,
     header: &DatabaseHeader,
@@ -814,7 +870,20 @@ fn free_btree_pages_inner(
     let header_start = page1_header_start(page_num);
     let page_type = read_page_type(&buf, header_start, page_num)?;
     match page_type {
-        LEAF_TABLE => {}
+        LEAF_TABLE => {
+            let num_cells = read_num_cells(&buf, header_start, page_num)?;
+            let ptr_base = header_start.saturating_add(8);
+            for i in 0..num_cells {
+                let ptr_off = cell_ptr_offset(ptr_base, i);
+                let cell_start = read_cell_pointer(&buf, ptr_off, page_num, i)?;
+                let (_, payload_len, tail_start) = decode_cell_head(&buf, cell_start, page_num)?;
+                if let Some(overflow_page) =
+                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
+                {
+                    free_overflow_chain(pager, page_num, overflow_page, visited)?;
+                }
+            }
+        }
         INTERIOR_TABLE => {
             let (entries, rightmost) = collect_interior_entries(&buf, header_start, page_num)?;
             for (child, _) in &entries {
@@ -822,8 +891,36 @@ fn free_btree_pages_inner(
             }
             free_btree_pages_inner(pager, rightmost, usable_size, encoding, visited)?;
         }
-        t if t == index::LEAF_INDEX => {}
+        t if t == index::LEAF_INDEX => {
+            let num_cells = read_num_cells(&buf, header_start, page_num)?;
+            let ptr_base = header_start.saturating_add(8);
+            for i in 0..num_cells {
+                let ptr_off = cell_ptr_offset(ptr_base, i);
+                let cell_start = read_cell_pointer(&buf, ptr_off, page_num, i)?;
+                let (payload_len, tail_start) =
+                    index::decode_payload_len(&buf, cell_start, page_num)?;
+                if let Some(overflow_page) =
+                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
+                {
+                    free_overflow_chain(pager, page_num, overflow_page, visited)?;
+                }
+            }
+        }
         t if t == index::INTERIOR_INDEX => {
+            let num_cells = read_num_cells(&buf, header_start, page_num)?;
+            let ptr_base = header_start.saturating_add(12);
+            for i in 0..num_cells {
+                let ptr_off = cell_ptr_offset(ptr_base, i);
+                let cell_start = read_cell_pointer(&buf, ptr_off, page_num, i)?;
+                let value_start = cell_start.saturating_add(4);
+                let (payload_len, tail_start) =
+                    index::decode_payload_len(&buf, value_start, page_num)?;
+                if let Some(overflow_page) =
+                    first_overflow_page(&buf, tail_start, payload_len, usable_size, page_num)?
+                {
+                    free_overflow_chain(pager, page_num, overflow_page, visited)?;
+                }
+            }
             let (entries, rightmost) = index::collect_index_interior_entries(
                 &*pager,
                 &buf,
@@ -1895,6 +1992,54 @@ mod tests {
             "a6bedce1e512d6531cd02fe7a0b72bb64f229cdb254ec48d63308877004e620a"
         );
         assert!(cursor.next_row().unwrap().is_none());
+    }
+
+    #[test]
+    fn free_btree_pages_reclaims_overflow_chain_pages() {
+        // Regression test for the overflow-leak gap documented at
+        // `free_btree_pages_inner`'s previous doc comment: DROP on a
+        // b-tree whose rows overflowed their page must return every
+        // overflow page to the freelist too, not just the leaf/interior
+        // pages that make up the tree's own structure.
+        let page_size = 512u32;
+        let (vfs, header) = test_minimal_db(page_size);
+        let mut pager = crate::pager::Pager::open(&vfs, Path::new("/test.db"), page_size).unwrap();
+
+        let root = schema::create_empty_table_root(&mut pager).unwrap();
+        // Comfortably larger than one page, forcing a multi-page overflow
+        // chain off the single row's cell.
+        let payload = vec![0xABu8; 4000];
+        table::insert_row(&mut pager, &header, root, 1, &payload).unwrap();
+
+        let page_count_before = {
+            let page1 = pager.get_page_mut(1).unwrap().clone();
+            u32::from_be_bytes(page1[28..32].try_into().unwrap())
+        };
+        let freelist_before = {
+            let page1 = pager.get_page_mut(1).unwrap().clone();
+            u32::from_be_bytes(page1[36..40].try_into().unwrap())
+        };
+        assert_eq!(freelist_before, 0);
+
+        free_btree_pages(&mut pager, &header, root).unwrap();
+
+        let freelist_after = {
+            let page1 = pager.get_page_mut(1).unwrap().clone();
+            u32::from_be_bytes(page1[36..40].try_into().unwrap())
+        };
+        // Every page this b-tree occupies (its own root leaf plus every
+        // overflow page in the chain) must come back to the freelist —
+        // i.e. every page allocated after the fixture's original single
+        // page, since nothing else was ever allocated in this pager.
+        assert_eq!(
+            freelist_after,
+            page_count_before.saturating_sub(1),
+            "DROP must free the root leaf AND every overflow page, not just the leaf"
+        );
+        assert!(
+            freelist_after > 1,
+            "a 4000-byte payload on a 512-byte page must span more than one overflow page"
+        );
     }
 
     #[test]
