@@ -27,6 +27,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Docs
 
+- 006-btree Req 4 (rowid-alias columns) read as unimplemented ("covered
+  functionally once #34 lands"), but #34's DDL reader
+  (`rowid_alias_from_sql`/`TableSchema::rowid_alias`) already landed and
+  substitution is already wired through `codegen/select/projection.rs`,
+  `codegen/stmt/insert.rs`, and `codegen/stmt/update.rs` — the note was
+  stale. Added the one missing piece, a btree-layer unit test proving
+  this module itself decodes the alias column as `Value::Null`, and
+  split the requirement into its two scenarios, both now test-linked.
 - Audited all 11 specs for drift between prose and implementation and fixed
   every confirmed instance; specs 004, 007 and 008 were already clean. No
   requirement semantics changed — citations, type definitions and
