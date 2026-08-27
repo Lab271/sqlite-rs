@@ -6,6 +6,12 @@
 //! See the [repository README](https://github.com/iheitlager/sqlite-rs)
 //! for the full design rationale.
 //!
+//! ## Performance
+//!
+//! 5 of 7 benchmark queries beat or match the sqlite3 oracle (v3.53.4).
+//! See [`docs/performance.md`](https://github.com/iheitlager/sqlite-rs/blob/main/docs/performance.md)
+//! for the full V4→V7.3 progression.
+//!
 //! `include_str!` can't pull the README in directly here: `src/` is a
 //! qualified Rust subset checked by `make mvl-limit` (mvl-rust rust-limit),
 //! which doesn't allowlist that macro.
