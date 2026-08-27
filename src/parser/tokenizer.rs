@@ -51,6 +51,13 @@ pub enum Param {
 }
 
 /// The kind of a scanned [`Token`], carrying any literal value it holds.
+///
+/// `Blob`/`Param` are boxed: both are rare token kinds, but `Vec<u8>`
+/// and `Param` (which itself carries a `String`) are wide enough that
+/// leaving them inline roughly doubles every `TokenKind`'s size to
+/// match the widest variant — boxing shrinks the common case (`Eq`,
+/// punctuation, small literals) accordingly. See
+/// `test_token_kind_size` below for the enforced bound.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
@@ -61,7 +68,7 @@ pub enum TokenKind {
     /// String literal (quotes stripped, escapes resolved).
     String(String),
     /// `X'...'` blob literal, decoded to raw bytes.
-    Blob(Vec<u8>),
+    Blob(Box<Vec<u8>>),
     /// The `NULL` literal.
     Null,
     /// The `TRUE` literal.
@@ -74,7 +81,7 @@ pub enum TokenKind {
     /// A reserved SQL keyword.
     Keyword(Keyword),
     /// A bind parameter (`?`, `?NNN`, `:name`, `@name`, `$name`).
-    Param(Param),
+    Param(Box<Param>),
 
     // Punctuation / operators
     /// `*`
@@ -582,17 +589,30 @@ const KEYWORDS: &[(&str, Keyword)] = &[
     ("WITHOUT", Keyword::WITHOUT),
 ];
 
+/// Case-insensitive ASCII ordering of `a` against `b`, without
+/// allocating an uppercased copy of either — used by [`lookup_word`]'s
+/// binary search so per-identifier lookup costs no heap allocation.
+/// SQL keywords and identifiers are ASCII, so ASCII case-folding (not a
+/// full Unicode fold) is exactly what SQLite itself does here too.
+fn cmp_ignore_ascii_case(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_uppercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_uppercase()))
+}
+
 /// Classifies an identifier-shaped word (already scanned) as a
 /// keyword, `NULL`/`TRUE`/`FALSE` literal, or plain identifier.
 fn lookup_word(word: &str) -> TokenKind {
-    let upper = word.to_ascii_uppercase();
-    match upper.as_str() {
-        "NULL" => return TokenKind::Null,
-        "TRUE" => return TokenKind::True,
-        "FALSE" => return TokenKind::False,
-        _ => {}
+    if word.eq_ignore_ascii_case("NULL") {
+        return TokenKind::Null;
     }
-    match KEYWORDS.binary_search_by(|(text, _)| (*text).cmp(upper.as_str())) {
+    if word.eq_ignore_ascii_case("TRUE") {
+        return TokenKind::True;
+    }
+    if word.eq_ignore_ascii_case("FALSE") {
+        return TokenKind::False;
+    }
+    match KEYWORDS.binary_search_by(|(text, _)| cmp_ignore_ascii_case(text, word)) {
         // `Ok(idx)` proves `idx` is in bounds, so `.get` never hits the
         // `unwrap_or_else` fallback; it's written this way (rather than
         // indexing) because the qualified subset denies
@@ -605,14 +625,20 @@ fn lookup_word(word: &str) -> TokenKind {
     }
 }
 
-/// Owns its input as a `Vec<(byte_offset, char)>` rather than borrowing
-/// `&str` — the qualified subset (`make mvl-limit`) disallows explicit
-/// lifetimes beyond function-scoped elision, so this can't hold a
-/// borrowed `CharIndices` across calls.
+/// Owns a copy of the source as a `String` and walks it with a byte
+/// cursor (`pos`), rather than pre-decoding the whole input into a
+/// `Vec<(usize, char)>` up front — the qualified subset (`make
+/// mvl-limit`) disallows explicit lifetimes beyond function-scoped
+/// elision, so this can't instead hold a borrowed `&str`/`CharIndices`
+/// across calls. Every scan function reads through `peek_char`/
+/// `peek_at`, which decode at most one UTF-8 character on demand from
+/// the byte cursor's position rather than indexing into a
+/// fully-materialized per-character buffer; ASCII SQL syntax (the
+/// overwhelming majority of real input) never pays more than a
+/// single-byte check.
 pub struct Tokenizer {
-    chars: Vec<(usize, char)>,
+    src: String,
     pos: usize,
-    src_len: usize,
     line: u32,
     column: u32,
 }
@@ -621,9 +647,8 @@ impl Tokenizer {
     /// Creates a tokenizer positioned at the start of `src`.
     pub fn new(src: &str) -> Self {
         Tokenizer {
-            chars: src.char_indices().collect(),
+            src: src.to_string(),
             pos: 0,
-            src_len: src.len(),
             line: 1,
             column: 1,
         }
@@ -631,7 +656,12 @@ impl Tokenizer {
 
     /// Tokenizes the whole input, including the trailing [`TokenKind::Eof`].
     pub fn tokenize(src: &str) -> Vec<Token> {
-        let mut out = Vec::new();
+        // A rough token-count estimate (one token per ~4 source bytes:
+        // shortest real tokens are single-character punctuation/
+        // operators, but identifiers/keywords/literals are typically
+        // several bytes) avoids repeated reallocation as `out` grows for
+        // any but the shortest inputs.
+        let mut out = Vec::with_capacity(src.len().saturating_div(4).saturating_add(1));
         let mut tokenizer = Tokenizer::new(src);
         loop {
             let tok = tokenizer.next_token();
@@ -644,25 +674,27 @@ impl Tokenizer {
         out
     }
 
+    /// The remaining unconsumed source, from the current byte cursor.
+    fn rest(&self) -> &str {
+        self.src.get(self.pos..).unwrap_or("")
+    }
+
     fn peek_char(&self) -> Option<char> {
-        self.peek_at(0)
+        self.rest().chars().next()
     }
 
-    /// Looks `ahead` positions past the current position without
+    /// Looks `ahead` characters past the current position without
     /// consuming anything (`ahead == 0` is the current character).
+    /// Decodes at most `ahead + 1` characters from the byte cursor —
+    /// call sites only ever look 1-2 characters ahead, so this stays
+    /// cheap despite not being a random-access index.
     fn peek_at(&self, ahead: usize) -> Option<char> {
-        self.chars
-            .get(self.pos.checked_add(ahead)?)
-            .map(|&(_, c)| c)
-    }
-
-    fn peek_offset(&self) -> Option<usize> {
-        self.chars.get(self.pos).map(|&(i, _)| i)
+        self.rest().chars().nth(ahead)
     }
 
     fn bump(&mut self) -> Option<char> {
-        let &(_, c) = self.chars.get(self.pos)?;
-        self.pos = self.pos.saturating_add(1);
+        let c = self.peek_char()?;
+        self.pos = self.pos.saturating_add(c.len_utf8());
         if c == '\n' {
             self.line = self.line.saturating_add(1);
             self.column = 1;
@@ -673,12 +705,11 @@ impl Tokenizer {
     }
 
     fn current_pos(&self) -> (u32, u32, u32) {
-        let offset = self.peek_offset().unwrap_or(self.src_len) as u32;
-        (self.line, self.column, offset)
+        (self.line, self.column, self.pos as u32)
     }
 
     fn span_from(&self, start: (u32, u32, u32)) -> Span {
-        let end_offset = self.peek_offset().unwrap_or(self.src_len) as u32;
+        let end_offset = self.pos as u32;
         Span {
             line: start.0,
             column: start.1,
@@ -794,16 +825,16 @@ impl Tokenizer {
     }
 
     fn scan_identifier_or_keyword(&mut self) -> TokenKind {
-        let mut word = String::new();
+        let start = self.pos;
         while let Some(c) = self.peek_char() {
             if is_ident_continue(c) {
-                word.push(c);
                 self.bump();
             } else {
                 break;
             }
         }
-        lookup_word(&word)
+        let word = self.src.get(start..self.pos).unwrap_or("");
+        lookup_word(word)
     }
 
     /// `X'...'`/`x'...'` blob literal, or falls back to a plain
@@ -812,7 +843,7 @@ impl Tokenizer {
         if self.peek_at(1) == Some('\'') {
             self.bump(); // consume x/X
             self.bump(); // consume opening '
-            let mut hex = String::new();
+            let hex_start = self.pos;
             loop {
                 match self.peek_char() {
                     None => {
@@ -821,27 +852,34 @@ impl Tokenizer {
                         ));
                     }
                     Some('\'') => {
-                        self.bump();
                         break;
                     }
-                    Some(c) => {
-                        hex.push(c);
+                    Some(_) => {
                         self.bump();
                     }
                 }
             }
+            let hex_end = self.pos;
+            let hex = self.src.get(hex_start..hex_end).unwrap_or("");
             if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return TokenKind::Error(format!("invalid blob literal hex digits: {hex:?}"));
+                let msg = format!("invalid blob literal hex digits: {hex:?}");
+                self.bump(); // closing '
+                return TokenKind::Error(msg);
             }
             let mut bytes = Vec::with_capacity(hex.len() / 2);
             for pair in hex.as_bytes().chunks(2) {
                 let pair = std::str::from_utf8(pair).unwrap_or_default();
                 match u8::from_str_radix(pair, 16) {
                     Ok(b) => bytes.push(b),
-                    Err(_) => return TokenKind::Error(format!("invalid blob byte: {pair:?}")),
+                    Err(_) => {
+                        let msg = format!("invalid blob byte: {pair:?}");
+                        self.bump(); // closing '
+                        return TokenKind::Error(msg);
+                    }
                 }
             }
-            TokenKind::Blob(bytes)
+            self.bump(); // closing '
+            TokenKind::Blob(Box::new(bytes))
         } else {
             self.scan_identifier_or_keyword()
         }
@@ -849,26 +887,40 @@ impl Tokenizer {
 
     fn scan_string(&mut self) -> TokenKind {
         self.bump(); // opening '
-        let mut value = String::new();
+                     // Only allocates a `String` once a `''`-escape is actually seen;
+                     // the common case (no embedded quote) returns a single slice of
+                     // the source instead of a char-by-char rebuild.
+        let mut acc: Option<String> = None;
+        let mut seg_start = self.pos;
         loop {
             match self.peek_char() {
                 None => return TokenKind::Error("unterminated string literal".to_string()),
                 Some('\'') => {
-                    self.bump();
+                    let quote_pos = self.pos;
+                    self.bump(); // consume this quote
                     if self.peek_char() == Some('\'') {
-                        value.push('\'');
-                        self.bump();
+                        let seg = self.src.get(seg_start..quote_pos).unwrap_or("");
+                        let buf = acc.get_or_insert_with(String::new);
+                        buf.push_str(seg);
+                        buf.push('\'');
+                        self.bump(); // consume the second quote
+                        seg_start = self.pos;
                     } else {
-                        break;
+                        let seg = self.src.get(seg_start..quote_pos).unwrap_or("");
+                        return TokenKind::String(match acc {
+                            Some(mut buf) => {
+                                buf.push_str(seg);
+                                buf
+                            }
+                            None => seg.to_string(),
+                        });
                     }
                 }
-                Some(c) => {
-                    value.push(c);
+                Some(_) => {
                     self.bump();
                 }
             }
         }
-        TokenKind::String(value)
     }
 
     /// Quoted identifier with `open`/`close` delimiters. `"..."` and
@@ -876,8 +928,9 @@ impl Tokenizer {
     /// / MySQL convention); `[...]` has no escape mechanism.
     fn scan_quoted_identifier(&mut self, open: char, close: char) -> TokenKind {
         self.bump(); // opening delimiter
-        let mut value = String::new();
         let escapes = open == close;
+        let mut seg_start = self.pos;
+        let mut acc: Option<String> = None;
         loop {
             match self.peek_char() {
                 None => {
@@ -886,35 +939,45 @@ impl Tokenizer {
                     ));
                 }
                 Some(c) if c == close => {
-                    self.bump();
+                    let close_pos = self.pos;
+                    self.bump(); // consume this closing delimiter
                     if escapes && self.peek_char() == Some(close) {
-                        value.push(close);
-                        self.bump();
+                        let seg = self.src.get(seg_start..close_pos).unwrap_or("");
+                        let buf = acc.get_or_insert_with(String::new);
+                        buf.push_str(seg);
+                        buf.push(close);
+                        self.bump(); // consume the doubled delimiter
+                        seg_start = self.pos;
                     } else {
-                        break;
+                        let seg = self.src.get(seg_start..close_pos).unwrap_or("");
+                        return TokenKind::Identifier(match acc {
+                            Some(mut buf) => {
+                                buf.push_str(seg);
+                                buf
+                            }
+                            None => seg.to_string(),
+                        });
                     }
                 }
-                Some(c) => {
-                    value.push(c);
+                Some(_) => {
                     self.bump();
                 }
             }
         }
-        TokenKind::Identifier(value)
     }
 
     fn scan_param_question(&mut self) -> TokenKind {
         self.bump(); // '?'
-        let mut digits = String::new();
-        while let Some(c @ '0'..='9') = self.peek_char() {
-            digits.push(c);
+        let start = self.pos;
+        while matches!(self.peek_char(), Some('0'..='9')) {
             self.bump();
         }
+        let digits = self.src.get(start..self.pos).unwrap_or("");
         if digits.is_empty() {
-            TokenKind::Param(Param::Anonymous)
+            TokenKind::Param(Box::new(Param::Anonymous))
         } else {
             match digits.parse::<u32>() {
-                Ok(n) => TokenKind::Param(Param::Numbered(n)),
+                Ok(n) => TokenKind::Param(Box::new(Param::Numbered(n))),
                 Err(_) => TokenKind::Error(format!("parameter number out of range: {digits}")),
             }
         }
@@ -922,42 +985,39 @@ impl Tokenizer {
 
     fn scan_param_named(&mut self, sigil: char) -> TokenKind {
         self.bump(); // sigil
-        let mut name = String::new();
+        let start = self.pos;
         while let Some(c) = self.peek_char() {
             if is_ident_continue(c) {
-                name.push(c);
                 self.bump();
             } else {
                 break;
             }
         }
+        let name = self.src.get(start..self.pos).unwrap_or("");
         if name.is_empty() {
             return TokenKind::Error(format!("expected parameter name after {sigil:?}"));
         }
+        let name = name.to_string();
         match sigil {
-            ':' => TokenKind::Param(Param::Colon(name)),
-            '@' => TokenKind::Param(Param::At(name)),
-            '$' => TokenKind::Param(Param::Dollar(name)),
+            ':' => TokenKind::Param(Box::new(Param::Colon(name))),
+            '@' => TokenKind::Param(Box::new(Param::At(name))),
+            '$' => TokenKind::Param(Box::new(Param::Dollar(name))),
             _ => TokenKind::Error(format!("unsupported parameter sigil {sigil:?}")),
         }
     }
 
     fn scan_number(&mut self) -> TokenKind {
-        let mut text = String::new();
+        let start = self.pos;
         let mut is_float = false;
 
         if self.peek_char() == Some('0') && matches!(self.peek_at(1), Some('x' | 'X')) {
-            text.push(self.bump().unwrap_or_default());
-            text.push(self.bump().unwrap_or_default());
-            let mut hex = String::new();
-            while let Some(c) = self.peek_char() {
-                if c.is_ascii_hexdigit() {
-                    hex.push(c);
-                    self.bump();
-                } else {
-                    break;
-                }
+            self.bump();
+            self.bump();
+            let hex_start = self.pos;
+            while matches!(self.peek_char(), Some(c) if c.is_ascii_hexdigit()) {
+                self.bump();
             }
+            let hex = self.src.get(hex_start..self.pos).unwrap_or("");
             if hex.is_empty() {
                 return TokenKind::Error("hex literal has no digits".to_string());
             }
@@ -965,26 +1025,23 @@ impl Tokenizer {
             // bit-reinterprets them as signed i64 (values above i64::MAX
             // wrap to negative, e.g. 0xFFFFFFFFFFFFFFFF -> -1) — matched
             // here intentionally, not an unreviewed truncation.
-            return match i64::from_str_radix(&hex, 16) {
+            return match i64::from_str_radix(hex, 16) {
                 Ok(n) => TokenKind::Integer(n),
-                Err(_) => match u64::from_str_radix(&hex, 16) {
+                Err(_) => match u64::from_str_radix(hex, 16) {
                     Ok(n) => TokenKind::Integer(n as i64),
                     Err(e) => TokenKind::Error(format!("invalid hex literal: {e}")),
                 },
             };
         }
 
-        while let Some(c @ '0'..='9') = self.peek_char() {
-            text.push(c);
+        while matches!(self.peek_char(), Some('0'..='9')) {
             self.bump();
         }
 
         if self.peek_char() == Some('.') {
             is_float = true;
-            text.push('.');
             self.bump();
-            while let Some(c @ '0'..='9') = self.peek_char() {
-                text.push(c);
+            while matches!(self.peek_char(), Some('0'..='9')) {
                 self.bump();
             }
         }
@@ -995,17 +1052,17 @@ impl Tokenizer {
             let has_exp_digits = matches!(self.peek_at(digits_ahead), Some('0'..='9'));
             if has_exp_digits {
                 is_float = true;
-                text.push(self.bump().unwrap_or_default()); // e/E
+                self.bump(); // e/E
                 if sign_char {
-                    text.push(self.bump().unwrap_or_default());
+                    self.bump();
                 }
-                while let Some(c @ '0'..='9') = self.peek_char() {
-                    text.push(c);
+                while matches!(self.peek_char(), Some('0'..='9')) {
                     self.bump();
                 }
             }
         }
 
+        let text = self.src.get(start..self.pos).unwrap_or("");
         if is_float {
             match text.parse::<f64>() {
                 Ok(f) => TokenKind::Float(f),
@@ -1133,11 +1190,11 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         match tok.kind {
             TokenKind::Semicolon => {
                 let end = tok.span.offset as usize;
-                push_trimmed(&mut statements, &sql[start..end]);
+                push_trimmed(&mut statements, sql.get(start..end).unwrap_or(""));
                 start = (tok.span.offset as usize).saturating_add(tok.span.len as usize);
             }
             TokenKind::Eof => {
-                push_trimmed(&mut statements, &sql[start..]);
+                push_trimmed(&mut statements, sql.get(start..).unwrap_or(""));
             }
             _ => {}
         }
@@ -1259,7 +1316,10 @@ mod tests {
         let got = kinds("X'48454C4C4F'");
         assert_eq!(
             got,
-            vec![TokenKind::Blob(vec![72, 69, 76, 76, 79]), TokenKind::Eof]
+            vec![
+                TokenKind::Blob(Box::new(vec![72, 69, 76, 76, 79])),
+                TokenKind::Eof
+            ]
         );
     }
 
@@ -1270,15 +1330,15 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                TokenKind::Param(Param::Anonymous),
+                TokenKind::Param(Box::new(Param::Anonymous)),
                 TokenKind::Comma,
-                TokenKind::Param(Param::Numbered(1)),
+                TokenKind::Param(Box::new(Param::Numbered(1))),
                 TokenKind::Comma,
-                TokenKind::Param(Param::Colon("name".to_string())),
+                TokenKind::Param(Box::new(Param::Colon("name".to_string()))),
                 TokenKind::Comma,
-                TokenKind::Param(Param::At("var".to_string())),
+                TokenKind::Param(Box::new(Param::At("var".to_string()))),
                 TokenKind::Comma,
-                TokenKind::Param(Param::Dollar("param".to_string())),
+                TokenKind::Param(Box::new(Param::Dollar("param".to_string()))),
                 TokenKind::Eof,
             ]
         );
@@ -1442,6 +1502,40 @@ mod tests {
         assert_eq!(from.span.column, 1);
     }
 
+    /// A `TokenKind` no wider than two machine words plus a
+    /// discriminant — `Blob`/`Param` are boxed precisely so the many
+    /// small variants (punctuation, `Eq`, `Keyword`) don't all inflate
+    /// to match those two's original inline width. Guards item 5 of
+    /// #590 (`Box` rare variants) against silent regression.
+    #[test]
+    fn test_token_kind_size() {
+        // The widest remaining inline field is `String` (24 bytes on a
+        // 64-bit target) from `Identifier`/`String`/`Error`, plus an
+        // 8-byte discriminant — 32 bytes, down from ~40 before `Blob`/
+        // `Param` were boxed (issue #590 item 5).
+        assert!(
+            std::mem::size_of::<TokenKind>() <= 32,
+            "TokenKind grew to {} bytes",
+            std::mem::size_of::<TokenKind>()
+        );
+    }
+
+    /// Multi-byte UTF-8 in a quoted identifier and string literal round-
+    /// trips correctly through the byte-cursor scanner (non-ASCII slow
+    /// path exercised by `peek_char`/`bump` decoding one `char` at a
+    /// time from the byte cursor).
+    #[test]
+    fn test_non_ascii_identifiers_and_strings() {
+        assert_eq!(
+            kinds("\"café\""),
+            vec![TokenKind::Identifier("café".to_string()), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds("'héllo'"),
+            vec![TokenKind::String("héllo".to_string()), TokenKind::Eof]
+        );
+    }
+
     /// #368 tagged MC/DC vector (obligation `tokenizer_783`, match guard
     /// `c == 'x' || c == 'X'` dispatching to `scan_maybe_blob`): leaf A
     /// (`c == 'x'`) true.
@@ -1450,7 +1544,7 @@ mod tests {
     fn mcdc__tokenizer_783__v1_lowercase_x() {
         assert_eq!(
             kinds("x'41'"),
-            vec![TokenKind::Blob(vec![0x41]), TokenKind::Eof]
+            vec![TokenKind::Blob(Box::new(vec![0x41])), TokenKind::Eof]
         );
     }
 
@@ -1475,7 +1569,7 @@ mod tests {
     fn mcdc__tokenizer_783__v3_uppercase_x() {
         assert_eq!(
             kinds("X'41'"),
-            vec![TokenKind::Blob(vec![0x41]), TokenKind::Eof]
+            vec![TokenKind::Blob(Box::new(vec![0x41])), TokenKind::Eof]
         );
     }
 
@@ -1497,7 +1591,7 @@ mod tests {
     fn mcdc__tokenizer_831__v2_valid_hex() {
         assert_eq!(
             kinds("x'41'"),
-            vec![TokenKind::Blob(vec![0x41]), TokenKind::Eof]
+            vec![TokenKind::Blob(Box::new(vec![0x41])), TokenKind::Eof]
         );
     }
 

@@ -198,6 +198,11 @@ name = "skip_scan"
 path = "tests/performance/skip_scan.rs"
 harness = false
 
+[[bench]]
+name = "compile_path"
+path = "tests/performance/compile_path.rs"
+harness = false
+
 # Single source of truth for the pinned sqlite3 version — the oracle binary,
 # the parse.y the grammar is re-derived from, and the TCL suite the SQL corpus
 # is extracted from all track this one value.

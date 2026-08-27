@@ -16,9 +16,9 @@ use std::rc::Rc;
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
     compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    compile_select_with_catalog_and_stats, expand_views, expand_with_clause, explain_query_plan,
+    compile_select_with_catalog_and_stats, expand_with_clause, explain_query_plan,
     flatten_from_subqueries, push_down_where_predicates, resolve_from_table_schema, resolve_views,
-    CodegenError, EqpRow,
+    CodegenError, EqpRow, ExpandViews,
 };
 use sqlite_rs::dump;
 use sqlite_rs::format::{write_csv_value, write_query_value};
@@ -72,7 +72,14 @@ pub(crate) fn compile_select_program(
     // CTE also shadows a same-named view for the scope of its declaring
     // `SELECT`, matching how it already shadows a same-named real table.
     let resolved_views = resolve_views(views);
-    let mut expanded = expand_views(&cte_expanded, &resolved_views).map_err(|e| e.to_string())?;
+    let expanded = cte_expanded
+        .expand_views(&resolved_views)
+        .map_err(|e| e.to_string())?;
+    // `flatten_from_subqueries`/`push_down_where_predicates` below always
+    // need `&mut Select`, so this is where the deferred clone (if any —
+    // Cow was `Borrowed` for the common no-CTE/no-view case) finally
+    // happens, at most once total rather than once per expansion pass.
+    let mut expanded = expanded.into_owned();
     // #566: flatten a simple FROM-subquery/view/CTE directly into the
     // enclosing query first — eliminating it outright makes any base-
     // table index it hides visible to the planner, which a mere

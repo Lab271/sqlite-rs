@@ -131,4 +131,43 @@ proptest! {
         let toks = Tokenizer::tokenize(&src);
         prop_assert!(matches!(toks.last().map(|t| &t.kind), Some(TokenKind::Eof)));
     }
+
+    /// Every emitted span is a valid, in-bounds, char-boundary-aligned
+    /// byte range of the source, and spans advance monotonically without
+    /// overlapping. Guards #590's tokenizer rewrite, which derives
+    /// `Span::offset`/`len` from a raw byte cursor rather than from a
+    /// pre-materialized `Vec<(usize, char)>`'s per-character offsets —
+    /// an off-by-one or a mid-UTF-8-sequence cursor would produce
+    /// offsets that slice outside the source or panic on a non-boundary,
+    /// which the kind-only assertions above would not catch.
+    #[test]
+    fn spans_are_valid_char_aligned_and_monotonic(src in ".{0,64}") {
+        let toks = Tokenizer::tokenize(&src);
+        let mut prev_end = 0usize;
+        for tok in &toks {
+            let start = tok.span.offset as usize;
+            let end = start + tok.span.len as usize;
+            prop_assert!(
+                start <= src.len() && end <= src.len(),
+                "span {start}..{end} out of bounds for {} bytes", src.len()
+            );
+            prop_assert!(
+                src.is_char_boundary(start) && src.is_char_boundary(end),
+                "span {start}..{end} not char-aligned in {src:?}"
+            );
+            // Slicing must not panic — this is the assertion that would
+            // fail on a mid-UTF-8-sequence cursor.
+            let _ = &src[start..end];
+            prop_assert!(
+                start >= prev_end,
+                "span {start}..{end} overlaps previous ending at {prev_end}"
+            );
+            prev_end = end;
+        }
+        // The final `Eof` span always sits at end-of-input.
+        if let Some(eof) = toks.last() {
+            prop_assert_eq!(eof.span.offset as usize, src.len());
+            prop_assert_eq!(eof.span.len, 0);
+        }
+    }
 }

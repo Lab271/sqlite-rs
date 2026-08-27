@@ -19,8 +19,8 @@ use crate::vdbe::Program;
 use super::{
     compile_analyze, compile_begin, compile_commit, compile_create_index, compile_create_table,
     compile_create_view, compile_delete_with_catalog, compile_drop_index, compile_drop_table,
-    compile_insert, compile_pragma, compile_rollback, compile_update_with_catalog, expand_views,
-    expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError,
+    compile_insert, compile_pragma, compile_rollback, compile_update_with_catalog,
+    expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError, ExpandViews,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -76,11 +76,40 @@ impl From<CodegenError> for DispatchError {
 /// — enough to pick which statement-specific parser to hand `sql` to
 /// (`CREATE TABLE` vs `CREATE INDEX`/`CREATE UNIQUE INDEX`, `DROP TABLE`
 /// vs `DROP INDEX`), without re-tokenizing the whole statement twice.
+///
+/// Kept as `Vec<String>` (rather than `[&str; 3]`) since callers outside
+/// this module (the REPL's `leading_keywords` consumer) hold onto the
+/// result past `sql`'s lifetime; the per-word allocation is unavoidable
+/// there. `compile_statement` below instead does its own borrowed,
+/// non-allocating scan for the hot dispatch path.
 pub fn leading_keywords(sql: &str) -> Vec<String> {
     sql.split_whitespace()
         .take(3)
         .map(|w| w.to_ascii_uppercase())
         .collect()
+}
+
+/// Every leading word [`compile_statement`]'s dispatch branches on, in
+/// canonical uppercase spelling — the entire vocabulary [`canonical`]
+/// can return.
+const DISPATCH_WORDS: &[&str] = &[
+    "ANALYZE", "BEGIN", "COMMIT", "CREATE", "DELETE", "DROP", "END", "INDEX", "INSERT", "PRAGMA",
+    "ROLLBACK", "TABLE", "UNIQUE", "UPDATE", "VIEW",
+];
+
+/// `word`'s canonical uppercase spelling if it's one of the statement
+/// keywords dispatch branches on, else `""` — a `&'static str`, so
+/// [`compile_statement`] can match on borrowed string literals without
+/// allocating an uppercased copy of every leading word the way
+/// [`leading_keywords`] does (#590 item 8). Any word outside this fixed
+/// vocabulary maps to `""`, which matches no dispatch arm and so falls
+/// through to `Unrecognized` exactly as an unknown keyword did before.
+fn canonical(word: &str) -> &'static str {
+    DISPATCH_WORDS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(word))
+        .unwrap_or("")
 }
 
 fn parse_error<T: std::fmt::Debug>(other: ParseOutcome<T>) -> DispatchError {
@@ -113,10 +142,12 @@ pub fn compile_statement(
             .ok_or_else(|| DispatchError::NoSuchIndex(name.to_string()))
     };
 
-    let keywords = leading_keywords(sql);
-    let kw = |i: usize| keywords.get(i).map(String::as_str).unwrap_or("");
+    let mut words = sql.split_whitespace();
+    let first_word = words.next().unwrap_or("");
+    let head = canonical(first_word);
+    let second = canonical(words.next().unwrap_or(""));
 
-    match kw(0) {
+    match head {
         "BEGIN" => match parse_begin(sql) {
             ParseOutcome::Accepted(begin) => Ok(compile_begin(&begin)),
             other => Err(parse_error(other)),
@@ -190,7 +221,7 @@ pub fn compile_statement(
                         // rootpage-less schema).
                         let resolved_views = resolve_views(views);
                         let cte_expanded = expand_with_clause(select);
-                        let expanded = expand_views(&cte_expanded, &resolved_views)?;
+                        let expanded = cte_expanded.expand_views(&resolved_views)?;
 
                         let Some(from) = &expanded.from else {
                             return Err(DispatchError::NoFromClause);
@@ -213,7 +244,7 @@ pub fn compile_statement(
                         for join in &from.joins {
                             joined_schemas.push(resolve_from_table_schema(&join.table, schemas)?);
                         }
-                        insert.source = InsertSource::Select(Box::new(expanded));
+                        insert.source = InsertSource::Select(Box::new(expanded.into_owned()));
                         Some(joined_schemas)
                     }
                     InsertSource::Values(_) | InsertSource::DefaultValues => None,
@@ -236,35 +267,38 @@ pub fn compile_statement(
             }
             other => Err(parse_error(other)),
         },
-        "CREATE" if kw(1) == "TABLE" => match parse_create_table(sql) {
+        "CREATE" if second == "TABLE" => match parse_create_table(sql) {
             ParseOutcome::Accepted(create) => Ok(compile_create_table(&create, sql)?),
             other => Err(parse_error(other)),
         },
-        "CREATE" if kw(1) == "VIEW" => match parse_create_view(sql) {
+        "CREATE" if second == "VIEW" => match parse_create_view(sql) {
             ParseOutcome::Accepted(create) => Ok(compile_create_view(&create, sql)?),
             other => Err(parse_error(other)),
         },
-        "CREATE" if kw(1) == "INDEX" || kw(1) == "UNIQUE" => match parse_create_index(sql) {
+        "CREATE" if second == "INDEX" || second == "UNIQUE" => match parse_create_index(sql) {
             ParseOutcome::Accepted(ci) => {
                 let schema = find_schema(&ci.table)?;
                 Ok(compile_create_index(&ci, schema, sql)?)
             }
             other => Err(parse_error(other)),
         },
-        "DROP" if kw(1) == "TABLE" => match parse_drop_table(sql) {
+        "DROP" if second == "TABLE" => match parse_drop_table(sql) {
             ParseOutcome::Accepted(drop) => {
                 let schema = find_schema(&drop.name)?;
                 Ok(compile_drop_table(&drop, schema)?)
             }
             other => Err(parse_error(other)),
         },
-        "DROP" if kw(1) == "INDEX" => match parse_drop_index(sql) {
+        "DROP" if second == "INDEX" => match parse_drop_index(sql) {
             ParseOutcome::Accepted(di) => {
                 let root_page = find_index_root(&di.name)?;
                 Ok(compile_drop_index(&di, root_page)?)
             }
             other => Err(parse_error(other)),
         },
-        other => Err(DispatchError::Unrecognized(other.to_string())),
+        // Reports the statement's actual leading word (uppercased, as
+        // before), not `canonical`'s `""` sentinel — this is a cold
+        // path, so the one allocation is free.
+        _ => Err(DispatchError::Unrecognized(first_word.to_ascii_uppercase())),
     }
 }

@@ -17,6 +17,8 @@
 //! SQLite's own "view X is circularly defined" wording) instead of
 //! recursing forever.
 
+use std::borrow::Cow;
+
 use crate::parser::ast::{Select, TableRef, TableRefKind};
 use crate::parser::error::ParseOutcome;
 
@@ -58,16 +60,63 @@ pub fn resolve_views(views: &[crate::schema::ViewSchema]) -> Vec<ResolvedView> {
 
 /// Rewrites away every catalog-view reference in `select`'s `FROM`/
 /// `JOIN` clauses (main query and each `UNION`/`UNION ALL` arm),
-/// recursively. A `Select` that references no view is returned
-/// unchanged (cloned, matching [`super::cte::expand_with_clause`]'s
-/// contract of always handing back an owned value). Fails with
-/// [`CodegenError::CircularView`] if a view directly or transitively
-/// references itself.
-pub fn expand_views(select: &Select, views: &[ResolvedView]) -> Result<Select, CodegenError> {
-    let mut out = select.clone();
-    let mut stack = Vec::new();
-    expand_views_in_select(&mut out, views, &mut stack)?;
-    Ok(out)
+/// recursively. A `Select` that references no view (including no view
+/// reachable through a `TableRefKind::Subquery` a prior CTE rewrite
+/// produced) is returned as `Cow::Borrowed` rather than cloned — the
+/// common case for a query with no view in scope at all (#590 item 6).
+/// Fails with [`CodegenError::CircularView`] if a view directly or
+/// transitively references itself.
+///
+/// A method (rather than a free function taking `select: &Select,
+/// views: &[ResolvedView]`) specifically so the returned `Cow<'_,
+/// Select>`'s lifetime elides to the receiver's alone — the qualified
+/// subset (`make mvl-limit`) denies explicit lifetime parameters, and a
+/// free function with two independently-lifetimed reference parameters
+/// has no elided borrow to tie an elided `Cow<'_, _>` to.
+pub trait ExpandViews {
+    /// See [`ExpandViews`]'s trait-level doc.
+    fn expand_views(&self, views: &[ResolvedView]) -> Result<Cow<'_, Select>, CodegenError>;
+}
+
+impl ExpandViews for Select {
+    fn expand_views(&self, views: &[ResolvedView]) -> Result<Cow<'_, Select>, CodegenError> {
+        if views.is_empty() || !select_references_any_view(self, views) {
+            return Ok(Cow::Borrowed(self));
+        }
+        let mut out = self.clone();
+        let mut stack = Vec::new();
+        expand_views_in_select(&mut out, views, &mut stack)?;
+        Ok(Cow::Owned(out))
+    }
+}
+
+/// Read-only check mirroring [`expand_views_in_select`]'s traversal
+/// exactly (main `FROM`/`JOIN`, each compound arm, recursing into any
+/// `TableRefKind::Subquery`) so the "nothing to rewrite" fast path in
+/// [`expand_views`] can never disagree with what the rewrite itself
+/// would have found.
+fn select_references_any_view(select: &Select, views: &[ResolvedView]) -> bool {
+    let from_has_view = |from: &crate::parser::ast::FromClause| {
+        table_ref_references_view(&from.first, views)
+            || from
+                .joins
+                .iter()
+                .any(|j| table_ref_references_view(&j.table, views))
+    };
+    if select.from.as_ref().is_some_and(from_has_view) {
+        return true;
+    }
+    select
+        .compound
+        .iter()
+        .any(|arm| arm.from.as_ref().is_some_and(from_has_view))
+}
+
+fn table_ref_references_view(table_ref: &TableRef, views: &[ResolvedView]) -> bool {
+    match &table_ref.kind {
+        TableRefKind::Name(name) => views.iter().any(|v| v.name.eq_ignore_ascii_case(name)),
+        TableRefKind::Subquery(inner) => select_references_any_view(inner, views),
+    }
 }
 
 fn expand_views_in_select(
@@ -117,7 +166,7 @@ fn expand_table_ref(
             // of `compile_select_program`. Expanding it here, before
             // recursing for nested views, mirrors the ordering already
             // used at the top level (CTEs first, then views).
-            let mut query = expand_with_clause(&view.query);
+            let mut query = expand_with_clause(&view.query).into_owned();
             if let Some(columns) = &view.columns {
                 apply_column_aliases(&mut query, columns);
             }
