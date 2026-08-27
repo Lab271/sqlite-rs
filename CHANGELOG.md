@@ -87,6 +87,38 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   from two. Statement dispatch and `COLLATE` resolution compare with
   `eq_ignore_ascii_case` instead of allocating uppercased copies.
 
+  Measured by the new `compile_path` bench (below), criterion baseline
+  against this branch's parent commit, all `p = 0.00`:
+
+  | Benchmark | Before | After | Change |
+  |-----------|-------:|------:|-------:|
+  | `tokenize/short` | 723 ns | 344 ns | **−52.6%** |
+  | `tokenize/long` | 3.26 µs | 1.62 µs | **−50.3%** |
+  | `tokenize/literals` | 1.19 µs | 759 ns | −35.8% |
+  | `parse/short` | 1.25 µs | 877 ns | −30.0% |
+  | `parse/long` | 6.14 µs | 3.41 µs | −39.1% |
+  | `parse/literals` | 2.80 µs | 2.00 µs | −31.4% |
+  | `expand_with_clause/no_cte` | 161 ns | 1.46 ns | **−99.1%** |
+  | `expand_with_clause/with_cte` | 769 ns | 691 ns | −6.3% |
+  | `compile_full/short` | 3.89 µs | 2.39 µs | **−39.3%** |
+  | `compile_full/no_cte` | 4.82 µs | 3.91 µs | −18.6% |
+
+  The `no_cte` expansion arm is the copy-on-write change in isolation:
+  with nothing to rewrite it is now a borrow rather than a whole-AST
+  clone. The `with_cte` arm still has to produce an owned, substituted
+  AST, and stays essentially flat — as intended.
+
+### Added
+
+- `tests/performance/compile_path.rs` (`make bench-compile-path`, #590):
+  a fixture-free, oracle-free criterion bench for the Tier 2 compile
+  path — tokenize, parse, `WITH`-expansion, and full text→`Program`
+  compilation. `engine.rs` times query *execution*, where compilation is
+  a rounding error next to B-tree/IO work, so compile-path changes are
+  invisible there. Numbers are a relative signal between revisions, not
+  a parity claim: stock sqlite3 exposes no comparable "compile but don't
+  run" entry point to form an oracle arm against.
+
 - Tier 1 schema performance (#589): `TableSchema` now carries a
   `rowid_alias: Option<usize>` field resolved once at schema-decode time
   (`rowid_alias_from_sql`), so codegen reads a field instead of re-parsing
