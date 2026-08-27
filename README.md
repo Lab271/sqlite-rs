@@ -1,6 +1,6 @@
 # sqlite-rs
 
-A binary compatible Rust replication of SQLite.
+A safe binary compatible Rust replication of SQLite without any reliance on external libraries.
 
 ## Why
 
@@ -23,7 +23,7 @@ The honest caveat: safety is not correctness. Memory-safe code can still return 
 
 ### Zero external dependencies
 
-sqlite-rs targets security-sensitive contexts (forensics, FRANK), where every dependency is a trust boundary and proc macros are the worst case — they execute arbitrary code at build time, not just at run time. The production build has **zero external dependencies**: proc-macro-based error enums and the CLI's line editor were replaced with hand-rolled equivalents ([ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md)), and the last remaining crate (`nix`, for POSIX file locking and raw-mode termios) was replaced by ~180 lines of vendored, verified `unsafe extern "C"` bindings confined to `src/sys/` — the crate's sole `unsafe` carve-out, everywhere else is `#![deny(unsafe_code)]` ([ADR-0031](.openspec/adr/0031-vendor-nix-subset.md)).
+sqlite-rs targets security-sensitive contexts where every dependency is a trust boundary and proc macros are the worst case — they execute arbitrary code at build time, not just at run time. The production build has **zero external dependencies**: proc-macro-based error enums and the CLI's line editor were replaced with hand-rolled equivalents ([ADR-0030](.openspec/adr/0030-zero-proc-macro-dependencies.md)), and the last remaining crate (`nix`, for POSIX file locking and raw-mode termios) was replaced by ~180 lines of vendored, verified `unsafe extern "C"` bindings confined to `src/sys/` — the crate's sole `unsafe` carve-out, everywhere else is `#![deny(unsafe_code)]` ([ADR-0031](.openspec/adr/0031-vendor-nix-subset.md)).
 
 This is a machine-checked claim, not a prose one: [`sqlite-rs.cdx.json`](sqlite-rs.cdx.json) is a [CycloneDX](https://cyclonedx.org/) SBOM generated from `Cargo.lock` (`make sbom`), and it has zero components. Build-time code execution is a real attack surface independent of what ships, though, so [`sqlite-rs-dev.cdx.json`](sqlite-rs-dev.cdx.json) (`make sbom-dev`) covers the full `Cargo.lock` closure — every test/build/bench-only crate, `scope`-tagged `optional` — for exactly that visibility; `make deny`/`make audit`/`cargo vet` already gate that same closure in CI.
 
@@ -75,13 +75,76 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.18.2** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase; V1 = 0.1.0–0.4.0, V2 = 0.5.0–0.8.0, V3 = 0.9.0–0.12.0.
+**Version 0.18.3** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase.
 
-All four V1 phases landed: format core (header, record decoder, VFS, pinned-oracle corpus), b-tree cursors incl. WITHOUT ROWID + minimal DDL reader, mid-life reading (pager, WAL frame recovery, safe-reader locking validated against live sqlite3), and the `sqlite-rs dump`/`export` CLI with shell-parity output.
+| Phase | Version | Status |
+|-------|---------|--------|
+| V1 — Read core | 0.1.0–0.4.0 | ✅ Complete |
+| V2 — Single-table queries | 0.5.0–0.8.0 | ✅ Complete |
+| V3 — CRUD | 0.9.0–0.12.0 | ✅ Complete |
+| V4 — JOINs & aggregates | 0.13.0 | ✅ Complete |
+| V5 — Transactions | 0.14.0–0.15.0 | ✅ Complete |
+| V6 — WAL & CTEs | 0.16.0–0.17.0 | ✅ Complete |
+| V7 — Polish & compatibility | 0.18.x | 🔄 In progress |
 
-All four V2 phases landed: tokenizer + SELECT-core parser, the value-semantics kernel (affinity, comparison, collation) and scalar function core, the VDBE interpreter with full control/cursor/compare/arithmetic/result/sorter opcode dispatch, and the `sqlite-rs query` CLI validated against a sqllogictest single-table slice. Epic #56 closed at 0.8.0.
+### Performance
 
-V3 phase 1 (the b-tree write path) landed at 0.9.0: pager write path + freelist, table and index b-tree insert/delete with page split/merge/collapse, overflow chain write/free, and statement-level rollback journaling. Every file this crate writes opens and `PRAGMA integrity_check`s cleanly in stock `sqlite3`. Next: V3 phase 2 — the write-path parser + schema layer.
+5 of 7 benchmark queries beat or match the sqlite3 oracle (v3.53.4):
+
+| Query | Ratio | Status |
+|-------|------:|--------|
+| point_lookup | 0.10× | 10× faster than C |
+| filter_scan | 0.73× | beats oracle |
+| full_scan | 0.83× | beats oracle |
+| order_by_limit | 0.98× | parity |
+| join | 1.86× | within 2× |
+| group_by_agg | 5.1× | within 5× |
+| correlated_subquery | 1.91× | within 2× |
+
+See [docs/performance.md](docs/src/performance.md) for the full progression.
+
+## Getting Started
+
+### Build
+
+```bash
+cargo build --release
+```
+
+### Run
+
+```bash
+# Query a database
+target/release/sqlite-rs query mydb.db "SELECT * FROM users"
+
+# Interactive REPL
+target/release/sqlite-rs repl mydb.db
+
+# Dump schema and data
+target/release/sqlite-rs dump mydb.db
+```
+
+### Documentation
+
+```bash
+# Build the docs site
+make docs
+
+# Serve locally
+make docs-serve
+
+# Generate rustdoc
+cargo doc --open
+```
+
+### Testing
+
+```bash
+make test          # Unit + integration tests
+make test-corpus   # Oracle parity tests (requires pinned sqlite3)
+make lint          # Clippy + fmt
+make bench         # Criterion benchmarks (requires pinned sqlite3)
+```
 
 ## Contributing
 
