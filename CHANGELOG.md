@@ -86,6 +86,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Hash-based `GROUP BY` aggregation (#570): a second `GROUP BY`
+  execution strategy alongside the existing sort-then-group one. Each
+  row is folded into its group's accumulators as the scan reaches it —
+  O(n) — instead of buffering and sorting every row (O(n log n)) purely
+  to make a group's rows adjacent; only the K groups are ever ordered,
+  which keeps output row order identical to before. New
+  `HashAggOpen`/`HashAggFind`/`HashAggStep`/`HashAggRewind`/
+  `HashAggData`/`HashAggNext` opcodes plus a `P4::GroupKey` descriptor
+  (`src/vdbe/hash_agg.rs`), shaped after the `Sorter*` family; the
+  per-group flush (`HAVING`/`LIMIT`/projection) and the aggregate
+  registry itself are shared verbatim with the sort strategy, so an
+  aggregate cannot mean one thing under each. Selected when no covering
+  index already produces group-ordered rows; a `DISTINCT` aggregate (or
+  no explicit `GROUP BY` key) still falls back to the sorter, which
+  remains the always-correct general path. Spec 009 Requirement 17.
+
 - Automatic index for unindexed equality join columns (#545): when a
   join level's `ON` condition is a single equality against a column
   with no usable index, and `ANALYZE` stats judge the table big enough

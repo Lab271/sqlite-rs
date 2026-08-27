@@ -35,3 +35,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0029](0029-introspection-pragmas-outside-vdbe.md) | Read-only introspection pragmas live outside the VDBE, as CLI-layer synthetic result sets | 2026-08-25 |
 | [0030](0030-zero-proc-macro-dependencies.md) | Zero proc-macro dependencies: hand-rolled errors and readline | 2026-08-26 |
 | [0031](0031-vendor-nix-subset.md) | Vendor a `nix` subset: reintroduce a single, narrow `unsafe` boundary | 2026-08-26 |
+| [0032](0032-hash-group-by-second-strategy.md) | Hash `GROUP BY` is a second strategy with its own opcode family, and still emits groups in key order | 2026-08-27 |

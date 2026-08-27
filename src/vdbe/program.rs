@@ -369,6 +369,36 @@ pub enum Opcode {
     /// Standalone in-place sort primitive (distinct from the
     /// `SorterOpen`/`SorterInsert`/`SorterSort` cursor-driven pipeline).
     Sort,
+    // hash aggregation (#570) — an O(n) alternative to the
+    // `SorterOpen`/`SorterInsert`/`SorterSort` grouping pipeline above,
+    // shaped deliberately as the same five-opcode open/insert/
+    // rewind/data/next family so the two strategies stay comparable.
+    // Postdates the V2 oracle harvest, so excluded from `ALL` like the
+    // other V3+ opcodes, but fully dispatched and
+    // exhaustiveness-checked. See `crate::vdbe::hash_agg`'s module doc.
+    /// Opens a hash-aggregation table on cursor `P1`, keyed per `P4`'s
+    /// group-key descriptor ([`P4::GroupKey`]).
+    HashAggOpen,
+    /// Locates (creating it on first sight) the group in hash-aggregation
+    /// cursor `P1` whose key is carried by the record in register `P2`,
+    /// making it the target of the `HashAggStep`s that follow.
+    HashAggFind,
+    /// Folds register `P2`'s value (`P4`'s arity registers starting
+    /// there) into accumulator slot `P1` of hash-aggregation cursor
+    /// `P3`'s currently-located group, per `P4`'s function descriptor —
+    /// the per-group counterpart of [`Opcode::AggStep`].
+    HashAggStep,
+    /// Freezes hash-aggregation cursor `P1`, orders its groups by group
+    /// key, and positions it at the first one — jumping to `P2` if no
+    /// group was ever created.
+    HashAggRewind,
+    /// Stores hash-aggregation cursor `P1`'s current group's retained
+    /// row into register `P2`, and restores that group's accumulators
+    /// into the `AggStep`/`AggFinal` context slots.
+    HashAggData,
+    /// Advances hash-aggregation cursor `P1` to its next group, jumping
+    /// to `P2` if there was one.
+    HashAggNext,
     // #464 (spec 011): a probabilistic pre-check for a join level's
     // nested-loop scan when no rowid/unique-index seek is structurally
     // available (`choose_join_access` returned `None`) -- like
@@ -574,6 +604,12 @@ fn _exhaustive(o: Opcode) {
         | Opcode::SorterNext
         | Opcode::SorterData
         | Opcode::Sort
+        | Opcode::HashAggOpen
+        | Opcode::HashAggFind
+        | Opcode::HashAggStep
+        | Opcode::HashAggRewind
+        | Opcode::HashAggData
+        | Opcode::HashAggNext
         | Opcode::FilterAdd
         | Opcode::Filter => {}
     }
@@ -597,6 +633,28 @@ pub struct SortKeyColumn {
     /// explicit `NULLS FIRST`/`NULLS LAST` clause (or SQLite's default:
     /// NULLs first for ASC, last for DESC, when no clause is given).
     pub nulls_first: bool,
+}
+
+/// One column of a [`HashAggOpen`](Opcode::HashAggOpen) group-key
+/// descriptor (#570) — the hash-aggregation counterpart of
+/// [`SortKeyColumn`]. Deliberately its own struct rather than a reuse
+/// of `SortKeyColumn`: a hash table has no ordering to describe (no
+/// `descending`/`nulls_first`), but it *does* need the comparison
+/// affinity the sort strategy carries on its group-boundary `Eq`'s
+/// [`P4::CollSeq`] instead — hash equality has no such per-comparison
+/// operand to hang it off, so it travels with the key descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupKeyColumn {
+    /// Index into the inserted record's payload this key column reads.
+    pub index: usize,
+    /// The collating sequence two values of this key column are
+    /// considered equal under.
+    pub collation: Collation,
+    /// The comparison affinity applied to this key column's values
+    /// before they are compared, per SQLite's affinity codes
+    /// ([`crate::vdbe::affinity::Affinity::to_p4_byte`]) — the same
+    /// byte the sort strategy puts on its boundary-check `Eq`.
+    pub affinity: u8,
 }
 
 /// P4's dynamic type: absent, an integer constant, a string constant
@@ -642,6 +700,10 @@ pub enum P4 {
     },
     /// A sorter's per-column sort-key descriptor.
     SortKey(Vec<SortKeyColumn>),
+    /// A hash-aggregation table's per-column group-key descriptor
+    /// (#570) — [`HashAggOpen`](Opcode::HashAggOpen)'s counterpart to
+    /// [`P4::SortKey`].
+    GroupKey(Vec<GroupKeyColumn>),
     /// `MakeRecord`'s (#194) per-column affinity string, one
     /// [`crate::vdbe::affinity::Affinity`] byte
     /// (`Affinity::to_p4_byte`'s `'A'..='E'` convention) per source

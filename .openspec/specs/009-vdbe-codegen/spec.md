@@ -1204,6 +1204,176 @@ two genuinely new fast paths.
 
 **Tests:** `tests/corpus/no_stats_optimizations_test.rs::index_only_count_star_no_where_matches_oracle`, `tests/corpus/no_stats_optimizations_test.rs::index_only_count_star_equality_where_matches_oracle`
 
+### Requirement 17: Hash-Based GROUP BY Aggregation [SHOULD]
+
+`GROUP BY` MUST have a hash-based execution strategy alongside
+Requirement 9's sort-based one (`src/codegen/select/aggregate.rs::compile_grouped_scan`),
+selected when no covering index already produces group-ordered rows.
+The sort strategy pays O(n log n) to make a group's rows adjacent before
+folding them; the hash strategy folds each row into its group's
+accumulators as the scan reaches it, so the build is O(n) in the row
+count and only the K groups are ever ordered. The sort strategy MUST
+remain fully working as the fallback — it is the general path (spec 001
+Tier 3, "simplifiable, not droppable"), and the hash strategy is an
+addition, never a replacement.
+
+The strategy is expressed as its own six-opcode family shaped
+deliberately like the `Sorter*` family it stands beside: `HashAggOpen`
+(keyed by `P4::GroupKey`, a per-key-column collation-plus-comparison-affinity
+descriptor), `HashAggFind` (locate-or-create this row's group),
+`HashAggStep` (fold into the located group's accumulator slot — the
+per-group counterpart of Requirement 12's `AggStep`, delegating to the
+same `src/vdbe/aggregate.rs` registry so an aggregate cannot mean one
+thing under each strategy), `HashAggRewind`/`HashAggData`/`HashAggNext`
+(iterate the groups, mirroring `SorterSort`/`SorterData`/`SorterNext`).
+`HashAggData` additionally installs its group's accumulators into the
+`AggStep`/`AggFinal` context slots, so the per-group flush codegen
+(`flush_group`) — and with it `HAVING`, `LIMIT`, and projection — is
+shared verbatim between the two strategies rather than duplicated.
+
+Two properties MUST hold, both about not diverging observably from the
+sort strategy:
+
+- **Group identity.** Two key values MUST hash to the same group exactly
+  when Requirement 5's `compare` calls them equal under that key
+  column's collation, after that column's comparison affinity has been
+  applied — the same collation and affinity the sort strategy carries on
+  its group-boundary `Eq`. This includes SQLite's merged numeric class
+  (`1` and `1.0` are one group) and collation folding (`NOCASE`).
+- **Group order.** Groups MUST be emitted in group-key order, matching
+  the sort strategy's output order. Ordering K groups is O(K log K),
+  not the O(n log n) sort of n rows this replaces.
+
+Narrowings are permitted where the strategy structurally lacks something
+the sort strategy has, and MUST fall back rather than approximate: no
+explicit `GROUP BY` key (one group, nothing to save), and a `DISTINCT`
+aggregate (whose dedup set is reopened per group boundary, which needs
+adjacency).
+
+See [ADR-0032](../../adr/0032-hash-group-by-second-strategy.md) for why
+this is a new opcode family rather than a reuse of `OpenEphemeral`, why
+groups are emitted in key order despite SQLite guaranteeing none, and
+why group identity is a canonical key encoding rather than a `Hash`
+instance on `Value`.
+
+**Implementation:** `src/vdbe/hash_agg.rs`,
+`src/codegen/select/aggregate/hash.rs::try_compile_hash_grouped_scan`
+
+#### Scenario: A plain GROUP BY compiles the hash strategy, not the sorter
+
+- GIVEN `SELECT bucket, count(*), sum(x) FROM t GROUP BY bucket` over a
+  table with no index on `bucket`
+- THEN the compiled program contains the full `HashAggOpen`/`HashAggFind`/
+  `HashAggStep`/`HashAggRewind`/`HashAggData`/`HashAggNext` family, one
+  `HashAggStep` per aggregate call, and no `SorterOpen`
+
+**Tests:** `tests/unit/codegen_select_test.rs::plain_group_by_compiles_the_hash_aggregation_strategy`
+
+#### Scenario: Several aggregates fold side by side into one hash table
+
+- GIVEN `SELECT bucket, count(*), sum(x), avg(x), min(x), max(x) FROM t GROUP BY bucket`
+- THEN every group's row matches the pinned oracle byte for byte, each
+  aggregate having folded into its own accumulator slot
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::multiple_aggregates_in_one_query_match_oracle`
+
+#### Scenario: A multi-column group key is encoded unambiguously
+
+- GIVEN `GROUP BY a, b` over rows including `('a','bc')` and `('ab','c')`
+- THEN they are distinct groups matching the oracle — a naive
+  concatenation of key bytes would have merged them
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::multi_column_group_by_matches_oracle`,
+`src/vdbe/hash_agg.rs::tests::multi_column_text_keys_are_unambiguous`
+
+#### Scenario: NULL group keys form one group of their own
+
+- GIVEN a `GROUP BY` column holding NULLs alongside other values
+- THEN every NULL row lands in a single NULL group, never merged with
+  any non-NULL value, matching the oracle
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::null_group_keys_match_oracle`,
+`src/vdbe/hash_agg.rs::tests::null_and_missing_columns_share_the_null_key`
+
+#### Scenario: A NOCASE-collated text key groups case-insensitively
+
+- GIVEN a `TEXT COLLATE NOCASE` group-by column holding `'Ann'`, `'ann'`,
+  `'ANN'`
+- THEN they form one group, matching the oracle — the key is folded
+  before hashing, not compared after
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::nocase_collated_text_group_keys_match_oracle`,
+`src/vdbe/hash_agg.rs::tests::nocase_folds_text_keys_but_binary_does_not`
+
+#### Scenario: INTEGER and REAL keys that compare equal share a group
+
+- GIVEN group-by key values `1` and `1.0` (and `2` and `2.0`)
+- THEN each pair forms one group, matching the oracle — and a REAL with
+  a fractional part, or one outside `i64`'s range, never collides with
+  an INTEGER
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::integer_and_real_group_keys_that_compare_equal_share_a_group`,
+`src/vdbe/hash_agg.rs::tests::integer_and_exactly_equal_real_share_one_key`,
+`src/vdbe/hash_agg.rs::tests::out_of_range_real_never_collides_with_an_integer`
+
+#### Scenario: A key column's comparison affinity is applied before hashing
+
+- GIVEN an `INTEGER`-declared group-by column holding both `1` and `'1'`
+- THEN they form one group, matching the oracle — the same coercion the
+  sort strategy's boundary `Eq` performs via its `P4::CollSeq` affinity
+  byte
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::numeric_affinity_group_keys_match_oracle`,
+`src/vdbe/hash_agg.rs::tests::numeric_affinity_groups_numeric_text_with_its_number`
+
+#### Scenario: An explicit GROUP BY matching no rows produces no groups
+
+- GIVEN an empty table, or a `WHERE` clause that excludes every row
+- THEN zero rows are emitted — not the one all-NULL row an aggregate
+  with no `GROUP BY` would produce
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::empty_result_set_matches_oracle`,
+`src/vdbe/hash_agg.rs::tests::an_empty_table_jumps_past_the_loop`
+
+#### Scenario: HAVING and LIMIT run unchanged at flush time
+
+- GIVEN `GROUP BY ... HAVING count(*) > 18` and `... HAVING sum(x) > 1800 LIMIT 3`
+- THEN the emitted rows match the oracle — the flush codegen is shared
+  verbatim with the sort strategy, not reimplemented
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::group_by_with_having_and_limit_matches_oracle`
+
+#### Scenario: A plain column takes the group's first row
+
+- GIVEN a non-aggregate, non-grouped-by result column
+- THEN it reads the group's first scanned row, the same "arbitrary row"
+  the oracle's own sort-then-group strategy picks
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::plain_column_takes_the_same_arbitrary_row_as_the_oracle`,
+`src/vdbe/hash_agg.rs::tests::the_first_row_of_a_group_is_the_one_retained`
+
+#### Scenario: A DISTINCT aggregate falls back to the sort strategy
+
+- GIVEN `SELECT bucket, count(DISTINCT x) FROM t GROUP BY bucket`
+- THEN the compiled program contains `SorterOpen` and no `HashAggOpen`,
+  and its rows still match the oracle — the fallback is exercised, not
+  merely present
+
+**Tests:** `tests/unit/codegen_select_test.rs::distinct_aggregate_group_by_still_compiles_the_sorter_strategy`,
+`tests/corpus/hash_group_by_test.rs::distinct_aggregate_falls_back_to_the_sorter_and_still_matches_oracle`
+
+#### Scenario: The shapes the index-ordered fast path declines are hashed
+
+- GIVEN a `WHERE`-filtered `GROUP BY`, or a `GROUP BY` over a computed
+  expression — neither of which
+  `try_compile_index_ordered_group_by` accepts
+- THEN both compile to the hash strategy (never the index walk) and
+  match the oracle
+
+**Tests:** `tests/corpus/hash_group_by_test.rs::where_filtered_and_computed_group_keys_match_oracle`,
+`tests/corpus/index_ordered_group_by_test.rs::group_by_with_where_falls_back_to_hash_aggregation_and_still_matches_oracle`,
+`tests/corpus/index_ordered_group_by_test.rs::group_by_over_expression_falls_back_to_hash_aggregation_and_still_matches_oracle`
+
 ## Traceability Note
 
 Requirements 1, 2 (partial), 3, 4, 5 (partial), 6, 8, and 9 were made
