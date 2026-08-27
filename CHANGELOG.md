@@ -6,6 +6,22 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-08-27
+
+### Chore
+
+- Raised line coverage to 85%+ across 21 of the 22 files that were below
+  the repo's threshold (#603): test-only coverage added for error
+  `Display`/`From`-conversion paths, subquery flatten/pushdown
+  expression-rewrite branches, join ordering, integrity-check branches,
+  parser error paths, pager checkpoint, VFS edge cases, and readline
+  dispatch/redraw/terminal logic. TOTAL line coverage 89.22% → 92.88%.
+  `src/bin/sqlite-rs/readline/term.rs` stays below threshold (66%,
+  up from 16.67%) — its tty-only branches (`RawMode::enable`'s success
+  path, `Drop`, `read_byte`) require a real controlling tty that
+  `cargo test` never has, and are flagged rather than faked with a
+  fragile pty harness.
+
 ### Performance
 
 - Tier 2 query-pipeline performance (#590), no pipeline-structure or
