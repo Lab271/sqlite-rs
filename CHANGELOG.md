@@ -6,6 +6,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-08-27
+
+### Fixed
+
+- Crate-wide `unsafe_code` deny lint added at the Cargo.toml level as a
+  backstop for ADR-0031's single-`src/sys/`-boundary policy (#592): the
+  underlying drift (unsafe stdin fd construction in the bin crate,
+  unlinted and outside the boundary) was already closed by #587; this
+  makes the deny explicit for lib and bin targets uniformly.
+
 ### Performance
 
 - Tier 0 storage hot paths shed their dominant copies (#588): WAL replay
