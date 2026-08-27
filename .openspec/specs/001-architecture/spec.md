@@ -76,8 +76,12 @@ Transforms SQL text into an analyzed AST ready for code generation.
 |-----------|----------------|-------------------|
 | `Tokenizer` | Lexical analysis | `tokenize.c` |
 | `Parser` | Grammar parsing (LALR(1)) | `parse.y` + Lemon |
-| `AST` | Syntax tree nodes | `parse.c` output |
-| `Analyzer` | Name resolution, type checking | `resolve.c`, `expr.c` |
+| `ast` module | Syntax tree nodes | `parse.c` output |
+
+Name resolution and type checking (`resolve.c`) are not a separate frontend
+pass: column references resolve during codegen via `Scope` in
+`src/codegen/expr.rs`, against the schema catalog, so the parser produces a
+syntactic AST rather than an analyzed one.
 
 **Implementation:** `src/parser/`
 
@@ -147,18 +151,19 @@ struct Instruction {
 }
 ```
 
-**Key opcodes (192 total):**
+**Key opcodes** (SQLite defines ~192; `Opcode` currently implements 102 —
+the harvested subset the implemented V-blocks need):
 
 | Category | Examples |
 |----------|----------|
-| Control | `Goto`, `If`, `IfNot`, `Halt`, `Return` |
-| Cursor | `OpenRead`, `OpenWrite`, `Close`, `Next`, `Prev`, `Seek*` |
-| Column | `Column`, `Rowid`, `MakeRecord`, `Insert`, `Delete` |
+| Control | `Goto`, `IfNot`, `IfPos`, `IfNotZero`, `Halt`, `Return` |
+| Cursor | `OpenRead`, `OpenWrite`, `Rewind`, `Next`, `SeekRowid`, `SeekIndexEq` |
+| Column | `Column`, `Rowid`, `MakeRecord`, `Insert`, `Delete`, `IdxInsert` |
 | Arithmetic | `Add`, `Subtract`, `Multiply`, `Divide` |
-| Comparison | `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge` |
-| Aggregation | `AggStep`, `AggFinal`, `AggValue` |
-| String | `Concat`, `Substr`, `Length` |
-| Result | `ResultRow`, `Copy`, `Move` |
+| Comparison | `Eq`, `Lt`, `Le`, `Gt`, `Ge`, `RealAffinity` |
+| Aggregation | `AggStep`, `AggFinal`, `HashAggStep` |
+| String | `Concat`; `substr`/`length` are scalar functions via `Function`, not opcodes |
+| Result | `ResultRow`, `Copy`, `Integer`, `String8` |
 
 ### Layer 5: B-Tree
 

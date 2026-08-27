@@ -13,7 +13,7 @@ Backs V2 phase 3 (#89/#90/#91), part of epic #56. The opcode set is frozen
 by the phase-3 opener (#87), grown by #139's bitwise/concat harvest,
 #142's literal-fidelity/CAST harvest (`Real`, `Blob`, `Int64`, `Cast`),
 and #137's bound-parameter harvest (`Variable`, for `WHERE rowid = ?`
-point lookups): the harvested, scope-decided `tools/opcodes-v2.json` (65 opcodes,
+point lookups): the harvested, scope-decided `tools/opcodes-v2.json` (68 opcodes,
 oracle 3.53.4) is the exhaustive
 denominator for every requirement below — no opcode outside that inventory
 is in scope for V2, and every opcode inside it must appear as a scenario
@@ -23,8 +23,8 @@ Refs: 001/Req-3.
 ## Philosophy
 
 SQLite has one VM, one instruction set, and one place semantics live: the
-value-semantics kernel (spec 008, `src/vdbe/{compare,affinity,collation,
-coerce,value}.rs`). The VDBE itself is a dumb dispatcher over that kernel —
+value-semantics kernel (spec 008, `src/vdbe/{compare,affinity,coerce,value}.rs`
+plus `src/record/collation.rs`). The VDBE itself is a dumb dispatcher over that kernel —
 it owns control flow (jumps, subroutines, loop counters), register storage,
 and cursor plumbing, but it never re-derives a comparison, coercion, or
 collation rule the kernel already defines. This mirrors the epic's adopted
@@ -262,7 +262,7 @@ is comparison-distinct across `=`, DISTINCT, and ORDER BY" scenario
 The 6 compare-category opcodes — `Eq`, `Ge`, `Gt`, `Le`, `Lt`, and
 `RealAffinity` — MUST delegate their value comparison to spec 008's
 `src/vdbe/compare.rs` (cross-type ordering, Requirement 2 there) and
-collation dispatch to `src/vdbe/collation.rs` (Requirement 3 there); the
+collation dispatch to `src/record/collation.rs` (Requirement 3 there); the
 opcode layer supplies only the jump-on-result control flow and the P4
 collation-sequence descriptor (e.g. `"BINARY-8"`: collating function name
 plus operand affinity byte), never a second comparison rule. `RealAffinity`
@@ -651,7 +651,7 @@ sorter-sourced rows.
   up-front) — and the sorted output matches the oracle exactly,
   including in combination with LIMIT/OFFSET and a second, plain
   sort key
-- The final `ResultRow` projection (`emit_result_row`) is unaffected:
+- The final `ResultRow` projection (`projection::emit_row_via_sink`) is unaffected:
   it only ever reads `select.columns` from the pseudo-cursor's
   decoded record, so the trailing sort-key-only registers are never
   projected
@@ -969,7 +969,7 @@ through one ephemeral index (`OpenEphemeral`) opened once for the whole
 statement, past the last arm's own cursor block — a `Found`/`IdxInsert`
 check before each `ResultRow`, reusing the exact dedup mechanism
 Requirement 8's `SELECT DISTINCT` already performs
-(`projection::emit_dedup_guard`, factored out of
+(`projection::emit_dedup_check`, factored out of
 `projection::emit_distinct_guard`) — drops a row already seen from an
 earlier arm instead of re-emitting it. Mixing `UNION` and `UNION ALL`
 arms in one statement is simplified to "any `UNION` arm dedups the
@@ -988,7 +988,7 @@ SQLite's own rejection of this). Joins/subqueries within an arm, and
 of scope.
 
 **Implementation:** `src/codegen/select/entry.rs::compile_select_compound`,
-`src/codegen/select/projection.rs::emit_dedup_guard`
+`src/codegen/select/projection.rs::emit_dedup_check`
 
 #### Scenario: UNION ALL concatenates without deduplication
 
@@ -1037,8 +1037,7 @@ of scope.
 ### Requirement 15: View Storage and Query Expansion [MUST]
 
 `CREATE VIEW` (#379's parser support) MUST register a `sqlite_master`
-row exactly like `CREATE TABLE`/`CREATE INDEX` (Requirement 9's DDL
-opcodes) do — `type = 'view'`, `name`/`tbl_name` the view's name,
+row exactly like `CREATE TABLE`/`CREATE INDEX` do — `type = 'view'`, `name`/`tbl_name` the view's name,
 `rootpage = 0` (a view owns no b-tree of its own, matching stock
 SQLite's own storage convention), `sql` the verbatim `CREATE VIEW ...`
 source text — via a single `Opcode::CreateView` instruction
@@ -1055,8 +1054,8 @@ becomes a `TableRefKind::Subquery` wrapping that view's stored query,
 reusing Requirement 4's `OpenEphemeral`-backed `FROM`-subquery
 materialization unchanged — except it resolves against the always-fully-
 known view catalog rather than an in-declaration-order CTE list, and
-therefore recurses into any nested `TableRefKind::Subquery` (bounded by
-`views::MAX_DEPTH`) so a view-of-view resolves to arbitrary depth. An
+therefore recurses into any nested `TableRefKind::Subquery` (bounded by a view-name stack that rejects
+cycles with `CodegenError::CircularView`) so a view-of-view resolves to arbitrary depth. An
 explicit `CREATE VIEW v(a, b) AS ...` column list renames the view's
 exposed output columns via the same `apply_column_aliases` helper
 Requirement 13's CTE column-list rename already uses. `expand_views`
@@ -1396,9 +1395,8 @@ reset mechanism along the way.
 
 `tests/unit/vdbe_opcode_completeness_test.rs` (#65) asserts `Opcode::ALL`
 (`src/vdbe/program.rs`) exactly matches `tools/opcodes-v2.json`'s
-harvested opcode set — the full 61-opcode inventory, independent of how
+harvested opcode set — the full 68-opcode inventory, independent of how
 many are dispatched yet. `tools/assurance.py`'s `Opcode completeness:`
-line tracks how many of those 60 are actually dispatched in
-`src/vdbe/exec.rs` (58/60 — it read 52/54 before #139 harvested and
-dispatched `BitAnd`/`BitOr`/`ShiftLeft`/`ShiftRight`/`BitNot`/`Concat`
-on arrival, so the two undispatched opcodes are unchanged).
+line tracks how many of those 68 are actually dispatched in
+`src/vdbe/exec.rs` (currently 68/68 — every harvested opcode is
+dispatched).

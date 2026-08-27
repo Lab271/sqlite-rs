@@ -13,7 +13,7 @@ index probe. Together these let the query planner make cost-informed
 decisions instead of the purely structural pattern-matching it uses today
 (`src/codegen/select/join_access.rs::choose_join_access`).
 
-Assigned to **V7** (`.openspec/plan.md:269`). Enables #470 (join ordering
+Assigned to **V7** (`.openspec/plan.md:267`). Enables #470 (join ordering
 heuristics), skip-scan optimization, and bloom-filter decisions — none of
 which are in scope here.
 
@@ -45,7 +45,7 @@ dispatched to a dedicated codegen path.
   named index's owning table) is out of scope for this MVP and MUST
   report `Unsupported` rather than `Invalid` — it is syntactically valid
   SQL this parser doesn't yet implement, mirroring the `PRAGMA
-  journal_mode` precedent (`src/parser/grammar.rs:907`).
+  journal_mode` precedent (`src/parser/grammar.rs:952`).
 
 **Implementation:** `src/parser/grammar.rs::parse_analyze_stmt`,
 `src/parser/ast.rs::Analyze`, `src/codegen/analyze.rs::compile_analyze`
@@ -154,7 +154,7 @@ spec.
 
 ### Requirement 4: Cost-Informed Join Access Selection [MUST]
 
-`choose_join_access` (`src/codegen/select/join_access.rs:68`) MUST consult
+`choose_join_access` (`src/codegen/select/join_access.rs:86`) MUST consult
 `PlanCost` when `Stats` are available for a binding's table, and MUST fall
 back to its current purely-structural selection (rowid → unique index →
 full scan, unchanged) when they are not — so a database that has never run
