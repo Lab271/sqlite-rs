@@ -6,6 +6,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Fixed
+
+- The CLI's two raw `BorrowedFd::borrow_raw(0)` blocks
+  (`src/bin/sqlite-rs/readline/term.rs`) moved behind a safe,
+  `// SAFETY:`-documented `sys::termios::stdin_fd()` wrapper, and the
+  binary crate root now carries `#![deny(unsafe_code)]` — restoring
+  ADR-0031's "unsafe lives only in `src/sys/`" invariant and lint-enforcing
+  it for bin targets (#587).
+
 ### Chore
 
 - Added a `// Copyright 2026 Schuberg Philis` / `// SPDX-License-Identifier:
