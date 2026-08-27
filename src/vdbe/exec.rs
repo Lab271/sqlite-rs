@@ -16,7 +16,7 @@ use crate::vdbe::cast::cast_to;
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::program::{Instruction, Opcode, Program, P4};
-use crate::vdbe::{arithmetic, control, cursor, pragma, result, sorter};
+use crate::vdbe::{arithmetic, control, cursor, hash_agg, pragma, result, sorter};
 use crate::vfs::PageSource;
 
 /// The ways the fetch-decode-execute loop can fail to run a [`Program`]
@@ -729,13 +729,14 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         AutoIndexRowid, AutoIndexSeek, BeginSubrtn, BitAnd, BitNot, BitOr, Blob, Cast, Column,
         Concat, Copy, Count, CreateIndex, CreateTable, CreateView, DecrJumpZero, Delete, Divide,
         DropIndex, DropTable, Eq, Filter, FilterAdd, Found, Function, Ge, Goto, Gt, Halt,
-        IdxDelete, IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot,
-        IfNotZero, IfPos, Init, Insert, Int64, Integer, IntegrityCheck, IsNull, Last, Le, Lt,
-        MakeRecord, Multiply, MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow,
-        OffsetLimit, Once, OpenDup, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real,
-        RealAffinity, Remainder, ResultRow, Return, Rewind, Rowid, SeekIndexEq, SeekRowid,
-        Sequence, SetJournalMode, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert,
-        SorterNext, SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        HashAggData, HashAggFind, HashAggNext, HashAggOpen, HashAggRewind, HashAggStep, IdxDelete,
+        IdxInsert, IdxLE, IdxLast, IdxNext, IdxPrev, IdxRewind, IdxRowid, IfNot, IfNotZero, IfPos,
+        Init, Insert, Int64, Integer, IntegrityCheck, IsNull, Last, Le, Lt, MakeRecord, Multiply,
+        MustBeInt, NewRowid, Next, NoConflict, Not, NotNull, Null, NullRow, OffsetLimit, Once,
+        OpenDup, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder,
+        ResultRow, Return, Rewind, Rowid, SeekIndexEq, SeekRowid, Sequence, SetJournalMode,
+        ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext, SorterOpen, SorterSort,
+        String8, Subtract, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -832,6 +833,12 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         SorterInsert => sorter::sorter_insert(vm, instr),
         SorterSort | Sort => sorter::sorter_sort(vm, instr),
         SorterNext => sorter::sorter_next(vm, instr),
+        HashAggOpen => hash_agg::hash_agg_open(vm, instr),
+        HashAggFind => hash_agg::hash_agg_find(vm, instr),
+        HashAggStep => hash_agg::hash_agg_step(vm, instr),
+        HashAggRewind => hash_agg::hash_agg_rewind(vm, instr),
+        HashAggData => hash_agg::hash_agg_data(vm, instr),
+        HashAggNext => hash_agg::hash_agg_next(vm, instr),
         SorterData => sorter::sorter_data(vm, instr),
 
         Function => function(vm, instr),

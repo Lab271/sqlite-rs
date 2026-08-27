@@ -1,4 +1,5 @@
 mod accum;
+mod hash;
 mod join;
 
 use super::limit_scan::compile_limit_setup;
@@ -12,6 +13,7 @@ pub(super) use accum::{
     collect_aggregates, emit_agg_step, flush_group, read_pseudo_column, read_row_columns_into,
     AggSlot,
 };
+pub(in crate::codegen::select) use hash::try_compile_hash_grouped_scan;
 pub(crate) use join::compile_joined_grouped_scan;
 
 /// Emits a fast `COUNT(*)` (#444, #543): either a bare `SELECT

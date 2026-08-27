@@ -15,6 +15,7 @@ mod exec;
 pub mod explain;
 mod filter;
 mod functions;
+mod hash_agg;
 mod pragma;
 mod program;
 mod result;
@@ -40,6 +41,7 @@ pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, like_match, FunctionError};
 pub use pragma::{JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL};
 pub use program::{
-    AnalyzeIndexTarget, AnalyzeTarget, Instruction, Opcode, Program, SortKeyColumn, P4,
+    AnalyzeIndexTarget, AnalyzeTarget, GroupKeyColumn, Instruction, Opcode, Program, SortKeyColumn,
+    P4,
 };
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};

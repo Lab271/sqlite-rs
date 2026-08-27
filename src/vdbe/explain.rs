@@ -5,7 +5,7 @@
 //! instruction comparison against the pinned oracle's own `EXPLAIN`).
 
 use crate::format::format_real;
-use crate::vdbe::program::{Opcode, Program, SortKeyColumn, P4};
+use crate::vdbe::program::{GroupKeyColumn, Opcode, Program, SortKeyColumn, P4};
 
 /// One rendered `EXPLAIN` row.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +67,7 @@ fn render_p4(p4: &P4) -> String {
             collation,
         } => format!("{name}({arity})-{}", collation_name(*collation)),
         P4::SortKey(cols) => render_sort_key(cols),
+        P4::GroupKey(cols) => render_group_key(cols),
         P4::SeekKey(collations) => collations
             .iter()
             .map(|c| collation_name(*c))
@@ -111,6 +112,23 @@ fn render_sort_key(cols: &[SortKeyColumn]) -> String {
         parts.push(format!("{sign}{coll}"));
     }
     format!("k({},{})", cols.len(), parts.join(","))
+}
+
+/// `HashAggOpen`'s group-key descriptor, rendered in the same
+/// `g(N,...)` shape [`render_sort_key`] uses for the sorter's — one
+/// entry per key column, its collation's first letter plus the
+/// comparison-affinity byte the hash equality applies.
+fn render_group_key(cols: &[GroupKeyColumn]) -> String {
+    let mut parts = Vec::with_capacity(cols.len());
+    for col in cols {
+        let coll = match col.collation {
+            crate::vdbe::Collation::Binary => "B",
+            crate::vdbe::Collation::NoCase => "N",
+            crate::vdbe::Collation::RTrim => "R",
+        };
+        parts.push(format!("{coll}{}", col.affinity));
+    }
+    format!("g({},{})", cols.len(), parts.join(","))
 }
 
 fn opcode_name(opcode: Opcode) -> &'static str {
@@ -209,6 +227,12 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::SorterNext => "SorterNext",
         Opcode::SorterData => "SorterData",
         Opcode::Sort => "Sort",
+        Opcode::HashAggOpen => "HashAggOpen",
+        Opcode::HashAggFind => "HashAggFind",
+        Opcode::HashAggStep => "HashAggStep",
+        Opcode::HashAggRewind => "HashAggRewind",
+        Opcode::HashAggData => "HashAggData",
+        Opcode::HashAggNext => "HashAggNext",
         Opcode::FilterAdd => "FilterAdd",
         Opcode::Filter => "Filter",
     }
@@ -253,6 +277,12 @@ fn comment_for(opcode: Opcode, p1: i32, p2: i32, p3: i32) -> String {
         Opcode::SorterSort | Opcode::Sort => format!("cursor {p1} sort, jump {p2} if empty"),
         Opcode::SorterNext => format!("cursor {p1} sorter next, jump {p2} if row found"),
         Opcode::SorterData => format!("r[{p2}] = cursor {p1} sorted row"),
+        Opcode::HashAggOpen => format!("cursor {p1} hash aggregation open"),
+        Opcode::HashAggFind => format!("cursor {p1} locate group for r[{p2}]"),
+        Opcode::HashAggStep => format!("cursor {p3} group accumulator {p1} += r[{p2}]"),
+        Opcode::HashAggRewind => format!("cursor {p1} first group, jump {p2} if none"),
+        Opcode::HashAggData => format!("r[{p2}] = cursor {p1} group row"),
+        Opcode::HashAggNext => format!("cursor {p1} next group, jump {p2} if group found"),
         Opcode::Found => format!("cursor {p1} found key at r[{p3}..], jump {p2}"),
         Opcode::IdxInsert => format!("cursor {p1} insert key r[{p2}..]"),
         Opcode::IdxDelete => format!("cursor {p1} delete key r[{p2}..]"),

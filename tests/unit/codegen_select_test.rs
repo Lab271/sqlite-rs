@@ -1262,3 +1262,95 @@ fn group_by_expression() {
     assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(6)]]);
     std::fs::remove_file(&path).ok();
 }
+
+/// #570: a plain `GROUP BY` (no covering index to walk in group order,
+/// no `DISTINCT` aggregate) compiles to the hash-aggregation strategy —
+/// one O(n) fold pass, no sorter — rather than
+/// `compile_grouped_scan`'s buffer-and-sort pipeline. Compile-only:
+/// the oracle row diffs live in
+/// `tests/corpus/hash_group_by_test.rs`.
+#[test]
+fn plain_group_by_compiles_the_hash_aggregation_strategy() {
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["bucket".to_string(), "x".to_string()],
+        column_types: vec!["INTEGER".to_string(), "INTEGER".to_string()],
+        column_collations: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    let select = match parse_select("SELECT bucket, count(*), sum(x) FROM t GROUP BY bucket;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let opcodes: Vec<&str> = sqlite_rs::vdbe::explain(&program)
+        .iter()
+        .map(|r| r.opcode)
+        .collect();
+    for expected in [
+        "HashAggOpen",
+        "HashAggFind",
+        "HashAggStep",
+        "HashAggRewind",
+        "HashAggData",
+        "HashAggNext",
+    ] {
+        assert!(
+            opcodes.contains(&expected),
+            "expected {expected} in the compiled program, got: {opcodes:?}"
+        );
+    }
+    assert!(
+        !opcodes.contains(&"SorterOpen"),
+        "hash aggregation should not also open a sorter, got: {opcodes:?}"
+    );
+    // One `HashAggStep` per aggregate call, folded inline during the
+    // single scan pass — the whole point of the strategy.
+    assert_eq!(
+        opcodes.iter().filter(|o| **o == "HashAggStep").count(),
+        2,
+        "expected one HashAggStep per aggregate call, got: {opcodes:?}"
+    );
+}
+
+/// #570's counterpart guard: the sort strategy stays reachable and
+/// fully working (spec 001 Tier 3 — "simplifiable, not droppable"). A
+/// `DISTINCT` aggregate needs a per-group dedup set the hash table does
+/// not model, so it falls back to the sorter.
+#[test]
+fn distinct_aggregate_group_by_still_compiles_the_sorter_strategy() {
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["bucket".to_string(), "x".to_string()],
+        column_types: vec!["INTEGER".to_string(), "INTEGER".to_string()],
+        column_collations: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+    };
+    let select = match parse_select("SELECT bucket, count(DISTINCT x) FROM t GROUP BY bucket;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let opcodes: Vec<&str> = sqlite_rs::vdbe::explain(&program)
+        .iter()
+        .map(|r| r.opcode)
+        .collect();
+    assert!(
+        opcodes.contains(&"SorterOpen"),
+        "expected the sorter fallback for a DISTINCT aggregate, got: {opcodes:?}"
+    );
+    assert!(
+        !opcodes.contains(&"HashAggOpen"),
+        "a DISTINCT aggregate must not take the hash path, got: {opcodes:?}"
+    );
+}

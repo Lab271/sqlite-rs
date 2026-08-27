@@ -105,6 +105,13 @@ pub(crate) enum CursorSlot {
         register: i32,
     },
     Sorter(crate::vdbe::sorter::SorterState),
+    /// A hash-aggregation table (#570) — opened by `HashAggOpen`, the
+    /// O(n) `GROUP BY` strategy alternative to buffering every row in a
+    /// [`CursorSlot::Sorter`] and sorting it. See
+    /// [`crate::vdbe::hash_agg`]'s module doc for why key equality here
+    /// has to agree exactly with the sort strategy's group-boundary
+    /// comparison.
+    HashAgg(crate::vdbe::hash_agg::HashAggState),
 }
 
 impl CursorSlot {
@@ -118,6 +125,7 @@ impl CursorSlot {
             CursorSlot::EphemeralAutoIndex(_) => "ephemeral automatic-index cursor",
             CursorSlot::Pseudo { .. } => "pseudo cursor",
             CursorSlot::Sorter(_) => "sorter cursor",
+            CursorSlot::HashAgg(_) => "hash-aggregation cursor",
         }
     }
 }
