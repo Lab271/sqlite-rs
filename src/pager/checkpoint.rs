@@ -169,6 +169,11 @@ pub fn checkpoint_passive(
     // own doc for why it fails closed rather than open.
     let current_pages = page_count_from_size(db_file.size()?, header.page_size);
     let max_page = db_size.max(current_pages);
+    // Backfill in ascending page order (#588): HashMap iteration order
+    // would scatter write_at offsets randomly across the main file; a
+    // sorted pass writes sequentially.
+    let mut pages: Vec<(u32, Vec<u8>)> = pages.into_iter().collect();
+    pages.sort_unstable_by_key(|&(page_num, _)| page_num);
     for (page_num, content) in &pages {
         if *page_num == 0 || *page_num > max_page {
             continue;

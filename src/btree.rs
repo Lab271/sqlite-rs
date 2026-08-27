@@ -672,7 +672,11 @@ fn reassemble_payload<P: PageSource>(
     // returned above), so this never underflows; saturating_sub keeps the
     // lint satisfied without asserting that invariant unsafely.
     let mut remaining = payload_len.saturating_sub(local_size as u64);
-    let mut result = local_bytes.to_vec();
+    // payload_len is bounds-checked against MAX_PAYLOAD_LEN above, so
+    // preallocating the full length avoids the log₂(payload/page) regrow-
+    // and-recopy chain a bare to_vec() + extend_from_slice would pay (#588).
+    let mut result = Vec::with_capacity(payload_len as usize);
+    result.extend_from_slice(local_bytes);
     let available = usable_size.saturating_sub(4).max(1) as u64;
     let mut hops = 0usize;
     // A legitimate SQLite overflow chain never revisits a page — each
