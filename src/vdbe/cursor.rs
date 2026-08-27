@@ -930,7 +930,7 @@ fn read_row_column(
             return Ok(state
                 .pos
                 .and_then(|p| rows.get(p))
-                .ok_or(ExecError::MalformedInstruction {
+                .ok_or_else(|| ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
                 })?
@@ -947,7 +947,7 @@ fn read_row_column(
                 .last_key
                 .as_ref()
                 .and_then(|key| state.entries.get(key))
-                .ok_or(ExecError::MalformedInstruction {
+                .ok_or_else(|| ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
                 })?
@@ -1009,7 +1009,7 @@ fn read_row_column(
             let payload = &state
                 .current
                 .as_ref()
-                .ok_or(ExecError::MalformedInstruction {
+                .ok_or_else(|| ExecError::MalformedInstruction {
                     opcode,
                     reason: "cursor has no current row".to_string(),
                 })?
@@ -1065,23 +1065,23 @@ pub fn rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             if state.forced_null {
                 Value::Null
             } else {
-                let rowid = state.current_rowid.ok_or(ExecError::MalformedInstruction {
-                    opcode: "Rowid",
-                    reason: "cursor has no current row".to_string(),
-                })?;
+                let rowid = state
+                    .current_rowid
+                    .ok_or_else(|| ExecError::MalformedInstruction {
+                        opcode: "Rowid",
+                        reason: "cursor has no current row".to_string(),
+                    })?;
                 Value::Integer(rowid)
             }
         }
         CursorSlot::EphemeralTable(state) => {
             let rows = state.try_rows("Rowid")?;
-            let (rowid, _) =
-                state
-                    .pos
-                    .and_then(|p| rows.get(p))
-                    .ok_or(ExecError::MalformedInstruction {
-                        opcode: "Rowid",
-                        reason: "cursor has no current row".to_string(),
-                    })?;
+            let (rowid, _) = state.pos.and_then(|p| rows.get(p)).ok_or_else(|| {
+                ExecError::MalformedInstruction {
+                    opcode: "Rowid",
+                    reason: "cursor has no current row".to_string(),
+                }
+            })?;
             Value::Integer(*rowid)
         }
         other => {
@@ -1439,19 +1439,21 @@ pub fn idx_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
         }
         CursorSlot::Ephemeral(_) => {
             let extra = usize::from(instr.p5);
-            let total = key_count
-                .checked_add(extra)
-                .ok_or(ExecError::RegisterRangeTooLarge {
-                    opcode: "IdxInsert",
-                    count: instr.p5.into(),
-                })?;
+            let total =
+                key_count
+                    .checked_add(extra)
+                    .ok_or_else(|| ExecError::RegisterRangeTooLarge {
+                        opcode: "IdxInsert",
+                        count: instr.p5.into(),
+                    })?;
             let values = read_register_range(vm, instr.p2, total, "IdxInsert")?;
-            let key_values = values
-                .get(..key_count)
-                .ok_or(ExecError::MalformedInstruction {
-                    opcode: "IdxInsert",
-                    reason: "key column count exceeds the values read".to_string(),
-                })?;
+            let key_values =
+                values
+                    .get(..key_count)
+                    .ok_or_else(|| ExecError::MalformedInstruction {
+                        opcode: "IdxInsert",
+                        reason: "key column count exceeds the values read".to_string(),
+                    })?;
             let key = encode_record(
                 &normalize_key_values(key_values, &key_collations),
                 TextEncoding::Utf8,
@@ -1750,10 +1752,12 @@ pub fn auto_index_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecErr
 pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     match vm.cursor(instr.p1)? {
         CursorSlot::Table(state) => {
-            let rowid = state.current_rowid.ok_or(ExecError::MalformedInstruction {
-                opcode: "Delete",
-                reason: "cursor has no current row".to_string(),
-            })?;
+            let rowid = state
+                .current_rowid
+                .ok_or_else(|| ExecError::MalformedInstruction {
+                    opcode: "Delete",
+                    reason: "cursor has no current row".to_string(),
+                })?;
             let root_page = state.root_page;
             let pager = vm.writer("Delete")?;
             let db = vm.db()?;

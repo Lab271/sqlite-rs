@@ -366,12 +366,12 @@ impl<P: PageSource> TableCursor<P> {
                             page_num,
                             mid,
                         )?;
-                        let key_bytes = page.get(cell_start.saturating_add(4)..).ok_or(
+                        let key_bytes = page.get(cell_start.saturating_add(4)..).ok_or({
                             BtreeError::InvalidCellPointer {
                                 page_num,
                                 index: mid,
-                            },
-                        )?;
+                            }
+                        })?;
                         let (key, _) = decode_varint(key_bytes)
                             .map_err(|source| BtreeError::InvalidCellVarint { page_num, source })?;
                         if target_rowid <= key as i64 {
@@ -712,12 +712,12 @@ fn reassemble_payload<P: PageSource>(
             })?;
         let next = read_u32(&page, 0, overflow_page)?;
         let take = remaining.min(available) as usize;
-        let chunk = page
-            .get(4..4usize.saturating_add(take))
-            .ok_or(BtreeError::PageTooShort {
-                page_num: overflow_page,
-                len: page.len(),
-            })?;
+        let chunk =
+            page.get(4..4usize.saturating_add(take))
+                .ok_or_else(|| BtreeError::PageTooShort {
+                    page_num: overflow_page,
+                    len: page.len(),
+                })?;
         result.extend_from_slice(chunk);
         remaining = remaining.saturating_sub(take as u64);
         overflow_page = next;
