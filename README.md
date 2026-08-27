@@ -75,7 +75,7 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.18.3** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase.
+**Version 0.18.4** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase.
 
 | Phase | Version | Status |
 |-------|---------|--------|
