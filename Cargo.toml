@@ -220,6 +220,15 @@ lto = "thin"
 codegen-units = 1
 debug = true
 
+[lints.rust]
+# Backstop for ADR-0031: `src/lib.rs` and `src/bin/sqlite-rs/main.rs` each
+# carry their own `#![deny(unsafe_code)]`; this makes the crate-wide
+# default explicit at the Cargo.toml level too, so both lib and bin
+# targets are covered even if a module-level attribute is ever dropped.
+# `src/sys/{fcntl,termios}.rs` are the only `#![allow(unsafe_code)]`
+# carve-outs (#592).
+unsafe_code = "deny"
+
 [lints.clippy]
 let_underscore_must_use = "deny"
 unwrap_used = "deny"
