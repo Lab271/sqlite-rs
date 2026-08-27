@@ -277,6 +277,13 @@ pub(crate) fn compile_scalar_subquery(
 /// scalar/`IN` forms since `EXISTS` never needs a row's actual values.
 /// `EXISTS` is always definitely true or false (never SQL's unknown),
 /// so `targets.on_null` is not consulted.
+///
+/// #580: when the `WHERE` clause is a single correlated equality
+/// against a rowid or unique index (the same shape #434 detects for
+/// scalar subqueries via `choose_join_access`), this compiles to a
+/// `SeekRowid`/`SeekIndexEq` point lookup instead of an unconditional
+/// `Rewind`/`Next` scan — no scan loop at all, not merely an early exit
+/// from one.
 pub(crate) fn compile_exists(
     em: &mut Emitter,
     reg: &mut RegAlloc,
@@ -303,6 +310,68 @@ pub(crate) fn compile_exists(
         (targets.on_true, targets.on_false)
     };
     let (t_label, t_is_new) = crate::codegen::expr::ensure_label(em, exists_true);
+
+    let seek_access = subselect.where_clause.as_ref().and_then(|where_expr| {
+        let sub_binding = sub_scope.tables.first()?;
+        choose_join_access(sub_binding, where_expr, &outer_scope.tables)
+    });
+
+    if let Some(access) = seek_access {
+        let not_found = em.new_label();
+        let value_reg = match &access {
+            JoinAccess::Rowid(operand) | JoinAccess::UniqueIndex { operand, .. } => {
+                compile_value(em, reg, outer_scope, operand)?
+            }
+        };
+        // A NULL probe value can never equal anything (SQL's `NULL =
+        // x` is unknown, not true) — `SeekRowid`/`SeekIndexEq` require
+        // an actual key, so this must be checked explicitly rather
+        // than let it reach either opcode as a malformed target.
+        let null_addr = em.emit(Instruction::new(Opcode::IsNull, value_reg, 0, 0));
+        em.patch_p2(null_addr, not_found);
+        let root_page = valid_table_root_page(&schema)?;
+        em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));
+        match access {
+            JoinAccess::Rowid(_) => {
+                let seek_addr = em.emit(Instruction::new(
+                    Opcode::SeekRowid,
+                    sub_cursor,
+                    0,
+                    value_reg,
+                ));
+                em.patch_p2(seek_addr, not_found);
+            }
+            JoinAccess::UniqueIndex { index, .. } => {
+                let index_cursor = reg.alloc_cursor();
+                let root_page = valid_index_root_page(&index)?;
+                let mut open_instr = Instruction::new(Opcode::OpenRead, index_cursor, root_page, 0);
+                open_instr.p5 = 1;
+                em.emit(open_instr);
+                let leading_collation = index
+                    .columns
+                    .first()
+                    .map_or(Collation::Binary, |c| c.collation);
+                let seek_instr = Instruction::with_p4(
+                    Opcode::SeekIndexEq,
+                    index_cursor,
+                    0,
+                    value_reg,
+                    P4::SeekKey(vec![leading_collation]),
+                );
+                let seek_addr = em.emit(seek_instr);
+                em.patch_p2(seek_addr, not_found);
+            }
+        }
+        em.goto(t_label);
+        em.place(not_found);
+        if let Target::Jump(fl) = exists_false {
+            em.goto(fl);
+        }
+        if t_is_new {
+            em.place(t_label);
+        }
+        return Ok(());
+    }
 
     let root_page = valid_table_root_page(&schema)?;
     em.emit(Instruction::new(Opcode::OpenRead, sub_cursor, root_page, 0));

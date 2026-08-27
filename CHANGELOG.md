@@ -8,6 +8,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Changed
 
+- Correlated `EXISTS`/`NOT EXISTS` subqueries (`compile_exists`,
+  `src/codegen/subquery/scalar.rs`) now reuse #434's
+  `choose_join_access` seek detection: a `WHERE` clause that's a single
+  correlated equality against a rowid or unique index compiles to a
+  `SeekRowid`/`SeekIndexEq` point lookup instead of an unconditional
+  `Rewind`/`Next` scan (#580). The scan's existing jump-to-true-on-first-match
+  behavior is unchanged for non-seekable `WHERE` clauses.
+
 - `encode_record_into` (`src/record/encode.rs`) no longer allocates a
   `Vec<u8>` per column plus a serial-type-bytes buffer per call: serial
   types/body lengths are computed up front without allocating, then the

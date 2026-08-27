@@ -1316,6 +1316,53 @@ fn correlated_subquery_seek_on_rowid_compiles_to_seek_not_scan() {
     );
 }
 
+/// #580 correctness: `EXISTS` over a correlated rowid equality must
+/// still answer correctly when compiled as a `SeekRowid` point lookup
+/// instead of a `Rewind`/`Next` scan.
+#[test]
+fn correlated_exists_seek_on_rowid_matches_oracle() {
+    let db = high_cardinality_correlated_fixture_db("exists_seek_rowid");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM catalog \
+         WHERE EXISTS (SELECT 1 FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "correlated_exists_seek_on_rowid_matches_oracle",
+    );
+}
+
+/// #580 counterpart for `NOT EXISTS`.
+#[test]
+fn correlated_not_exists_seek_on_rowid_matches_oracle() {
+    let db = high_cardinality_correlated_fixture_db("not_exists_seek_rowid");
+    assert_matches_oracle(
+        &db,
+        "SELECT id FROM catalog \
+         WHERE NOT EXISTS (SELECT 1 FROM lookup WHERE cat = catalog.category) ORDER BY id",
+        "correlated_not_exists_seek_on_rowid_matches_oracle",
+    );
+}
+
+/// #580 regression: a correlated `EXISTS`'s `WHERE` equality against a
+/// rowid must compile to a `SeekRowid` point lookup, not a
+/// `Rewind`/`Next` scan of the inner table — same shape as #434's
+/// scalar-subquery counterpart (`correlated_subquery_seek_on_rowid_compiles_to_seek_not_scan`).
+#[test]
+fn correlated_exists_seek_on_rowid_compiles_to_seek_not_scan() {
+    let db = high_cardinality_correlated_fixture_db("exists_seek_rowid_explain");
+    let program = explain(
+        &db,
+        "SELECT id FROM catalog WHERE EXISTS (SELECT 1 FROM lookup WHERE cat = catalog.category)",
+    );
+    // The outer query's own `catalog` scan still uses Rewind/Next —
+    // this test is only about how the *inner* EXISTS subquery scans
+    // `lookup`, which must be a SeekRowid, not a second Rewind/Next
+    // pair over the `lookup` table.
+    assert!(
+        first_opcode_line(&program, "SeekRowid").is_some(),
+        "expected a SeekRowid opcode (the EXISTS subquery's point lookup) in program:\n{program}"
+    );
+}
+
 /// #566's plan-shape counterpart to the correctness tests above:
 /// flattening a single-table FROM-subquery must expose the base
 /// table's own index to the planner, not leave it hidden behind a
