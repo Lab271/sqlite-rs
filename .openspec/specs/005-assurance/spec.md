@@ -46,9 +46,9 @@ argument (the same logic as diverse-lens verification in MVL).
 |----------------|--------------------------|-------------------------|
 | TCL suite (1,462 scripts, ~1M tests) | Feature regressions | Inline `#[cfg(test)]` + `tests/unit/` public-API tests (#30) |
 | TH3 (proprietary, 100% MC/DC, 2.4M instances) | Untested branches, embedded configs | llvm-cov gate, mutation testing (`make mutants`), and MC/DC obligation tracking against `tests/mcdc/obligations.json` (`make test-mcdc`, `tools/mcdc_report.py`) |
-| sqllogictest (7.2M queries) | Result divergence from other engines | Corpus + pinned-oracle diff harness (spec 004) — our center of gravity; full SLT run unlocks at V4 |
-| dbsqlfuzz / AFL / OSS-Fuzz | Malformed-input crashes | cargo-fuzz on `decode_record` (#26), later on b-tree/WAL parsers |
-| Anomaly testing (OOM injection, I/O fault, crash tests) | Failure-path bugs | V5 power-cut torture harness; fault-injecting VFS impl (the `Vfs` trait is our injection point) |
+| sqllogictest (7.2M queries) | Result divergence from other engines | Corpus + pinned-oracle diff harness (spec 004) — our center of gravity; the SLT runner (`tests/sqllogictest/`) is wired up |
+| dbsqlfuzz / AFL / OSS-Fuzz | Malformed-input crashes | cargo-fuzz on `decode_record`, `btree_cursor`, `wal_frames`, `parse_select`, `vdbe_exec`, `scalar_functions` (#26) |
+| Anomaly testing (OOM injection, I/O fault, crash tests) | Failure-path bugs | power-cut torture harness (`tests/corpus/crash_torture_test.rs`); fault-injecting VFS impl (the `Vfs` trait is our injection point) |
 | Boundary/property testing | Edge values | proptest roundtrips (#26) |
 | Valgrind/sanitizers | Memory errors | Largely subsumed by Pillar 1 (safe Rust) — crate-wide `#![deny(unsafe_code)]` (#66) means the only `unsafe` for miri to check is the audited `src/sys/{fcntl,termios}.rs` syscall carve-out (ADR-0031, #592), not a codebase-wide concern |
 | Disabled-optimization diff | Optimizer bugs | Future: planner-on vs planner-off result diffing (V4) — full scans as the reference implementation |
@@ -97,12 +97,12 @@ claim enforced at compile time (panic-surface lints) and test time
 (exhaustive/fuzz coverage of decode paths), not merely asserted in
 documentation.
 
-Structured errors discharge this claim today; the panic-surface compile-time
-gate and the decoder fuzz target land in #26 (existing non-test violations
-in `src/header.rs`, `src/record/decode.rs`, `src/btree.rs`, and
-`src/schema/ddl_reader.rs` must be refactored to a non-panicking form
-first; `tests/fuzz/fuzz_targets/btree_cursor.rs` is the existing pattern the new
-target follows).
+Structured errors, the panic-surface compile-time gate, and the decoder
+fuzz target all discharge this claim today: `Cargo.toml`'s
+`[lints.clippy]` denies `unwrap_used`, `expect_used`, `indexing_slicing`,
+`panic`, and `arithmetic_side_effects` (#26), and
+`tests/fuzz/fuzz_targets/decode_record.rs` sits alongside the
+`btree_cursor.rs` pattern it followed.
 
 **Implementation:** `src/record/error.rs`
 
@@ -120,7 +120,7 @@ target follows).
 - WHEN `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing`, `clippy::panic`, and `clippy::arithmetic_side_effects` are set to `deny`
 - THEN `make lint` fails on any new panic-surface code in `src/` before it ships
 
-**Tests:** `Cargo.toml` (planned)
+**Tests:** `Cargo.toml`
 
 #### Scenario: Fuzz target on the decoder
 
@@ -128,7 +128,7 @@ target follows).
 - WHEN run under `cargo fuzz run decode_record`
 - THEN no panic is ever found — this discharges spec 003 Requirement 6's "Fuzz safety" scenario directly
 
-**Tests:** `tests/fuzz/fuzz_targets/decode_record.rs` (planned)
+**Tests:** `tests/fuzz/fuzz_targets/decode_record.rs`
 
 ### Requirement 3: Supply-Chain Gates [MUST]
 
@@ -137,9 +137,9 @@ license/advisory scanning, and CI actions pinned to a commit SHA rather
 than a mutable tag — all installed at the cheapest possible moment (zero
 runtime dependencies today).
 
-Locked resolution (`Cargo.lock`) exists today; `--locked` CI enforcement,
-`deny.toml`, and SHA-pinned actions (per the Lab271 SOP, noting the
-documented container-action exception) land in #26.
+Locked resolution (`Cargo.lock`), `--locked` CI enforcement, `deny.toml`,
+and SHA-pinned actions (per the Lab271 SOP, noting the documented
+container-action exception) are all in place (#26).
 
 **Implementation:** `Cargo.lock`, `deny.toml`, `.github/workflows/ci.yml`
 
