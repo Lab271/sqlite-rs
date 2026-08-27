@@ -50,6 +50,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
     `CodegenError::CircularView`, `src/vdbe/collation.rs` →
     `src/record/collation.rs`, and three `path:line` citations in 011.
 
+### Fix
+
+- `tests/fuzz/fuzz_targets/btree_cursor.rs`'s `FuzzPageSource` implemented
+  the pre-`Rc<[u8]>` `PageSource::read_page` signature, breaking
+  `make fuzz-btree`. Updated to return `Rc<[u8]>`.
+
+### Chore
+
+- Regenerated the MC/DC obligations snapshot (`tests/mcdc/obligations.json`)
+  and renamed every `mcdc__<id>__vN` tagged test (plus doc-comment
+  cross-references) to the obligation id its decision now resolves to,
+  across `src/btree.rs`, `src/btree/index.rs`, `src/btree/table/delete.rs`,
+  `src/parser/grammar.rs`, `src/parser/tokenizer.rs`, `src/record/encode.rs`,
+  `src/vdbe/exec.rs`, `src/vdbe/functions.rs` — the ids had drifted from
+  source line numbers, silently reducing real MC/DC discharge on the
+  scanned file set to near zero. Now correctly reports 40/42 real MC/DC
+  obligations discharged; `btree_966` and `encode_68` remain undischarged.
+
 ## [0.18.5] - 2026-08-27
 
 ### Chore

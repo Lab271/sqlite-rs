@@ -1494,32 +1494,32 @@ mod tests {
         assert_eq!(*vm.register(1).unwrap(), Value::Text("a".into()));
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_453`, decision
+    /// #368 tagged MC/DC vector (obligation `exec_444`, decision
     /// `reg < 0 || reg as usize > MAX_REGISTERS`): leaf A (`reg < 0`) true.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_453__v1_negative_register() {
+    fn mcdc__exec_444__v1_negative_register() {
         assert!(matches!(
             Vm::index("Test", -1),
             Err(ExecError::RegisterOutOfRange { index: -1, .. })
         ));
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_453`): both leaves false.
+    /// #368 tagged MC/DC vector (obligation `exec_444`): both leaves false.
     /// Independence pair for A against
-    /// `mcdc__exec_453__v1_negative_register`.
+    /// `mcdc__exec_444__v1_negative_register`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_453__v2_in_range() {
+    fn mcdc__exec_444__v2_in_range() {
         assert_eq!(Vm::index("Test", 5).unwrap(), 5);
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_453`): leaf B
+    /// #368 tagged MC/DC vector (obligation `exec_444`): leaf B
     /// (`reg as usize > MAX_REGISTERS`) true, leaf A false. Independence
-    /// pair for B against `mcdc__exec_453__v2_in_range`.
+    /// pair for B against `mcdc__exec_444__v2_in_range`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_453__v3_over_max_registers() {
+    fn mcdc__exec_444__v3_over_max_registers() {
         let over = (MAX_REGISTERS as i32).saturating_add(1);
         assert!(matches!(
             Vm::index("Test", over),
@@ -1527,12 +1527,12 @@ mod tests {
         ));
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_669`, decision
+    /// #368 tagged MC/DC vector (obligation `exec_664`, decision
     /// `matches!(a, Value::Null) || matches!(b, Value::Null)`): leaf A
     /// true.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_669__v1_left_operand_null() {
+    fn mcdc__exec_664__v1_left_operand_null() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Null).unwrap();
         vm.set_register(1, Value::Integer(1)).unwrap();
@@ -1543,12 +1543,12 @@ mod tests {
         );
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_669`): both leaves
+    /// #368 tagged MC/DC vector (obligation `exec_664`): both leaves
     /// false. Independence pair for A against
-    /// `mcdc__exec_669__v1_left_operand_null`.
+    /// `mcdc__exec_664__v1_left_operand_null`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_669__v2_neither_operand_null() {
+    fn mcdc__exec_664__v2_neither_operand_null() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(1)).unwrap();
         vm.set_register(1, Value::Integer(1)).unwrap();
@@ -1559,12 +1559,12 @@ mod tests {
         );
     }
 
-    /// #368 tagged MC/DC vector (obligation `exec_669`): leaf B true,
+    /// #368 tagged MC/DC vector (obligation `exec_664`): leaf B true,
     /// leaf A false. Independence pair for B against
-    /// `mcdc__exec_669__v2_neither_operand_null`.
+    /// `mcdc__exec_664__v2_neither_operand_null`.
     #[test]
     #[allow(non_snake_case)]
-    fn mcdc__exec_669__v3_right_operand_null() {
+    fn mcdc__exec_664__v3_right_operand_null() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(1)).unwrap();
         vm.set_register(1, Value::Null).unwrap();
