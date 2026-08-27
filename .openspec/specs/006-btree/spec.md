@@ -7,13 +7,13 @@ date: 2026-08-14
 
 # 006 — B-Tree
 
-The read-only table and index b-tree cursors: page header/cell-pointer-array layout, cell decode, key comparison, and overflow-chain reassembly. Backs V1 step 4 (#32) and step 5 (#33), part of epic #5 phase 2. Depends on spec 003 (header, VFS, record decode). Validated in part by spike 005 (#12), which exercised interior-node traversal and overflow reassembly against real multi-page/overflow fixtures before this spec was written.
+The table and index b-tree cursors and write path: page header/cell-pointer-array layout, cell decode, key comparison, overflow-chain reassembly, and cell insert/delete with split and collapse. Backs V1 step 4 (#32) and step 5 (#33), part of epic #5 phase 2. Depends on spec 003 (header, VFS, record decode). Validated in part by spike 005 (#12), which exercised interior-node traversal and overflow reassembly against real multi-page/overflow fixtures before this spec was written.
 
 Everything in this spec is **Tier 0 READ CORE** — never droppable.
 
 ## Philosophy
 
-Transcribed from [fileformat2.html](https://www.sqlite.org/fileformat2.html)'s b-tree page and cell-payload-overflow sections, verified byte-by-byte against the pinned oracle (spec 004) rather than against any secondary source. `src/btree/` is not exempt from the `mvl-limit` qualified-subset gate (no `unsafe`/`dyn`/explicit lifetimes); the `PageSource` trait this module depends on is defined in `src/vfs/` for exactly that reason. Tier 0 core carries no exclusions at all — where the gate and a convenience collide here, the code changes: `TableCursor::prev()`'s precondition is a real `BtreeError::CursorNotPositioned` rather than a `debug_assert!` (outside the gate's macro allowlist), which also makes the check survive into release builds. The exempt set is `src/vfs/` plus, since #90, the VDBE's `Rc<dyn PageSource>` handle in `src/vdbe/{exec,cursor}.rs` — a deliberate, permanent second boundary (ADR-0013 considered genericizing `Vm` over `P: PageSource` instead, #114, and rejected it; see the Makefile's boundary policy).
+Transcribed from [fileformat2.html](https://www.sqlite.org/fileformat2.html)'s b-tree page and cell-payload-overflow sections, verified byte-by-byte against the pinned oracle (spec 004) rather than against any secondary source. `src/btree/` is not exempt from the `mvl-limit` qualified-subset gate (no `unsafe`/`dyn`/explicit lifetimes); the `PageSource` trait this module depends on is defined in `src/vfs/` for exactly that reason. Tier 0 core carries no exclusions at all — where the gate and a convenience collide here, the code changes: `TableCursor::prev()`'s precondition is a real `BtreeError::CursorNotPositioned` rather than a `debug_assert!` (outside the gate's macro allowlist), which also makes the check survive into release builds. The exempt set is `src/vfs/` plus, since #90, the VDBE's `Rc<dyn PageSource>` handle in `src/vdbe/exec.rs` — a deliberate, permanent second boundary (ADR-0013 considered genericizing `Vm` over `P: PageSource` instead, #114, and rejected it; see the Makefile's boundary policy).
 
 ## Requirements
 
@@ -209,7 +209,7 @@ The system MUST insert a `(rowid, payload)` row into a table b-tree leaf page th
 - WHEN a second insert targets rowid `R`
 - THEN `insert_row` MUST return `Err(BtreeError::DuplicateRowid)`, leaving the page unchanged
 
-**Tests:** inline `#[cfg(test)]` in `src/btree/table/insert.rs` (planned — not yet written; duplicate-rowid rejection is implemented but not corpus/oracle-tested)
+**Tests:** `src/btree/table/insert.rs::tests::duplicate_rowid_is_rejected`
 
 ### Requirement 9: Leaf Split with Median Propagation [MUST]
 

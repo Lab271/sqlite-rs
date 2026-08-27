@@ -262,7 +262,7 @@ call, matching `IdxInsert`/`IdxDelete`'s existing stateless
 
 **Implementation:** `src/vdbe/cursor.rs::no_conflict`
 
-**Codegen:** `src/codegen/insert.rs::emit_unique_check` emits this
+**Codegen:** `src/codegen/stmt/insert.rs::emit_unique_check` emits this
 opcode per `UNIQUE` index (`schema.indexes.iter().filter(|i| i.unique)`)
 before the row's own `Insert`, dispatching `ON CONFLICT`
 (`IGNORE`/`REPLACE`/`ABORT`+`FAIL`+`ROLLBACK`) the same way

@@ -17,9 +17,9 @@ The file format is SQLite's real product — frozen until 2050. We implement it 
 
 ## Requirements
 
-### Requirement 1: Read-Only VFS [MUST]
+### Requirement 1: VFS Abstraction [MUST]
 
-The system MUST provide a read-only virtual filesystem abstraction with a Unix implementation and an in-memory implementation. Both MUST pass an identical test suite. The trait MUST be extensible with locking methods later (spike 004, #8) without breaking consumers.
+The system MUST provide a virtual filesystem abstraction with a Unix implementation and an in-memory implementation. Both MUST pass an identical test suite. The trait was subsequently extended with locking (`lock_shared`, `src/vfs/lock.rs`) and write methods (`write_at`/`truncate`/`sync`) without breaking consumers, as spike 004 (#8) required.
 
 **Implementation:** `src/vfs.rs`
 

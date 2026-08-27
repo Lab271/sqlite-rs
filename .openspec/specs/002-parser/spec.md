@@ -90,12 +90,15 @@ stmt ::= SELECT select_core(S) orderby_opt(O) limit_opt(L). {
 
 ### Rust Alternatives
 
-| Tool | Type | SQLite grammar? | Recommendation |
-|------|------|-----------------|----------------|
-| **lemon-rs** | Lemon port | Yes (already ported) | **Use this** |
-| **pomelo** | Lemon as proc-macro | Partial | Evaluate later |
-| **lalrpop** | LALR(1) native | Must rewrite | Cleaner but work |
-| **pest** | PEG | Must rewrite | Different paradigm |
+The landscape surveyed before the Decision above, which selected
+**pomelo**; this table records what was compared, not a recommendation.
+
+| Tool | Type | SQLite grammar? | Notes |
+|------|------|-----------------|-------|
+| **lemon-rs** | Lemon port | Yes (already ported) | Runtime `unreachable!()` panics on grammar error |
+| **pomelo** | Lemon as proc-macro | Partial | Selected — see Decision above |
+| **lalrpop** | LALR(1) native | Must rewrite | Fallback if compile-time diagnostics outweigh parse.y fidelity |
+| **pest** | PEG | Must rewrite | Ordered-choice hazard; can't cleanly reproduce `%fallback ID` |
 | **nom** | Combinators | Must hand-write | For tokenizer only |
 | **tree-sitter** | Incremental | Community grammar | For tooling, not DB |
 
@@ -136,54 +139,70 @@ VALUES VIEW VIRTUAL WHEN WHERE WINDOW WITH WITHOUT
 
 ### Tokenizer Implementation
 
+Real definitions live in `src/parser/tokenizer.rs`; this is the shape, not
+a copy — consult the source for the full variant list and its doc comments.
+
 ```rust
+pub struct Span {
+    pub line: u32,    // 1-based
+    pub column: u32,  // 1-based
+    pub offset: u32,  // byte offset of first character
+    pub len: u32,     // length in bytes
+}
+
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
-    pub value: Option<String>,  // For identifiers, strings, numbers
 }
 
-pub struct Span {
-    pub start: usize,   // Byte offset
-    pub end: usize,
-    pub line: u32,
-    pub column: u32,
+pub enum Param {
+    Anonymous,        // ?
+    Numbered(u32),    // ?NNN
+    Colon(String),    // :name
+    At(String),       // @name
+    Dollar(String),   // $name
 }
 
 pub enum TokenKind {
-    // Keywords
-    Select, From, Where, Insert, Update, Delete, Create, Drop,
-    Table, Index, View, Trigger, // ... ~140 more
-    
     // Literals
     Integer(i64),
     Float(f64),
-    String,
-    Blob,
+    String(String),      // quotes stripped, escapes resolved
+    Blob(Box<Vec<u8>>),  // X'...' decoded to raw bytes
     Null,
-    
-    // Identifiers
-    Identifier,
-    QuotedIdentifier,
-    
-    // Operators
-    Plus, Minus, Star, Slash, Percent,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    And, Or, Not,
-    
-    // Punctuation
-    LParen, RParen, Comma, Semicolon, Dot,
-    
-    // Parameters
-    Param,          // ?
-    ParamNum(u32),  // ?123
-    ParamName,      // :name, @name, $name
-    
-    // Special
+    True,
+    False,
+
+    Identifier(String),  // unquoted or quoted
+    Keyword(Keyword),    // one enum for all reserved words
+    Param(Box<Param>),
+
+    // Punctuation / operators
+    Star, Comma, Semicolon, LParen, RParen, Dot,
+    Plus, Minus, Slash, Percent,
+    Eq, Ne, Lt, Le, Gt, Ge,
+    Concat, Arrow, ArrowArrow,
+    BitAnd, BitOr, BitNot, Shl, Shr,
+
+    Error(String),  // malformed input, with a human-readable reason
     Eof,
-    Error,
 }
 ```
+
+Three properties of this shape are load-bearing:
+
+- **A token carries its own value.** There is no separate `value` field —
+  `Integer(i64)`, `String(String)`, `Identifier(String)` and friends hold
+  the scanned value in the variant, so a token is self-describing.
+- **Keywords are one variant, not ~146.** `Keyword(Keyword)` wraps a
+  separate `Keyword` enum rather than giving each reserved word its own
+  `TokenKind`, which keeps `TokenKind` small and lets keyword recognition
+  stay a single table lookup. `NULL`/`TRUE`/`FALSE` are the exceptions —
+  they are literals, so they get their own variants.
+- **`Blob` and `Param` are boxed.** Both are rare, and `Vec<u8>`/`Param`
+  are wide enough that leaving them inline would roughly double every
+  token's size to match the widest variant. `test_token_kind_size`
+  enforces the resulting bound.
 
 ## Grammar Overview
 
@@ -282,59 +301,74 @@ unary_op
 
 ## AST Data Structures
 
+Real definitions live in `src/parser/ast.rs`, which is heavily
+doc-commented; this is the shape, not a copy.
+
 ```rust
-pub enum Stmt {
-    Select(SelectStmt),
-    Insert(InsertStmt),
-    Update(UpdateStmt),
-    Delete(DeleteStmt),
-    CreateTable(CreateTableStmt),
-    CreateIndex(CreateIndexStmt),
-    // ...
-}
-
-pub struct SelectStmt {
-    pub with: Option<WithClause>,
-    pub body: SelectBody,
-    pub order_by: Option<Vec<OrderingTerm>>,
-    pub limit: Option<Limit>,
-}
-
-pub enum SelectBody {
-    Select(SelectCore),
-    Compound {
-        op: CompoundOp,
-        left: Box<SelectBody>,
-        right: Box<SelectBody>,
-    },
-}
-
-pub struct SelectCore {
-    pub distinct: Distinct,
+// No unifying `Stmt` enum: each statement is its own top-level struct,
+// and dispatch happens on the leading keyword in `codegen::dispatch`.
+pub struct Select {
+    pub with_clause: Option<WithClause>,
+    pub distinct: Option<Distinctness>,
     pub columns: Vec<ResultColumn>,
     pub from: Option<FromClause>,
     pub where_clause: Option<Expr>,
-    pub group_by: Option<GroupBy>,
+    pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
-    pub window: Option<Vec<WindowDef>>,
+    pub compound: Vec<CompoundSelect>,   // UNION [ALL] arms
+    pub order_by: Vec<OrderingTerm>,     // applies to the whole compound
+    pub limit: Option<Limit>,            // applies to the whole compound
+    pub span: Span,
 }
 
-pub enum Expr {
+// Sibling statement structs: Insert, Update, Delete, CreateTable,
+// CreateIndex, DropTable, CreateView, DropView, DropIndex, Begin,
+// Commit, Rollback, Explain, Analyze, Pragma.
+
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+pub enum ExprKind {
     Literal(Literal),
-    Column(ColumnRef),
-    Unary { op: UnaryOp, operand: Box<Expr> },
-    Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
-    Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, not: bool },
-    In { expr: Box<Expr>, values: InValues, not: bool },
-    Like { expr: Box<Expr>, pattern: Box<Expr>, escape: Option<Box<Expr>>, not: bool },
-    Case { operand: Option<Box<Expr>>, cases: Vec<WhenClause>, else_expr: Option<Box<Expr>> },
-    Cast { expr: Box<Expr>, type_name: TypeName },
-    FunctionCall(FunctionCall),
-    Subquery(Box<SelectStmt>),
-    Exists(Box<SelectStmt>),
-    // ...
+    Param(ParamKind),
+    Column { table: Option<String>, catalog: Option<String>, name: String },
+    FunctionCall { .. },
+    Unary { .. },
+    Binary { .. },
+    Is { .. },
+    IsNull { .. },
+    Between { .. },
+    In { .. },
+    Like { .. },
+    Case { .. },
+    Cast { .. },
+    Collate { .. },
+    Paren(Box<Expr>),
+    Subquery(Box<Select>),
+    Exists { .. },
+    InSubquery { .. },
+    InSubqueryMulti { .. },
 }
 ```
+
+Three shape decisions worth stating, because they differ from the obvious
+design:
+
+- **There is no `Stmt` enum.** Each statement kind is a flat top-level
+  struct. Nothing needs to match over "any statement" — `compile_statement`
+  dispatches on leading keywords (`codegen::dispatch::leading_keywords`)
+  and calls the specific parser, so a wrapping enum would only add a layer
+  to unwrap.
+- **`Select` is flat, with no `SelectBody`/`SelectCore` layering.** A
+  compound `SELECT` is the first arm's own core plus a `compound: Vec<..>`
+  of further arms, rather than a recursive left/right tree. `order_by` and
+  `limit` sit on the `Select` itself because SQLite's grammar only lets the
+  outermost `select-stmt` carry them.
+- **`Expr` is a struct wrapping `ExprKind`, not an enum.** Every expression
+  carries a `span` regardless of kind, so the span lives on the struct
+  instead of being repeated into every variant.
 
 ## Requirements
 
@@ -380,7 +414,7 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 
 The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLite rejects.
 
-**Implementation:** `src/parser/grammar.rs` (V2 SELECT-core slice, hand-written recursive descent; pomelo/lemon-generated grammar per spike 006 is future work for V3+)
+**Implementation:** `src/parser/grammar.rs` (hand-written recursive descent covering SELECT core, DML, core DDL, transactions, PRAGMA and ANALYZE; a pomelo-generated grammar per spike 006 is future work — Requirement 6)
 
 #### Scenario: Accept valid SELECT
 
@@ -560,7 +594,7 @@ The Tier 0 minimal DDL reader (used to decode `sqlite_master` for the READ CORE)
 - WHEN sqlite-rs opens a database and dumps its rows
 - THEN schema decoding MUST still work via the minimal DDL reader
 
-Trivially true today — `src/schema/ddl_reader.rs` has zero `use` of any `src/parser/` item, and no `src/parser/` module or Cargo feature flag exists yet to gate. Re-verify with a real feature-gated build once a parser lands; no automated test backs this yet since there is nothing to gate.
+`src/schema/ddl_reader.rs` has zero `use` of any `src/parser/` item (verified). No Cargo feature flag exists yet to gate the parser out, so the feature-gated-build half of this scenario remains unverified; no automated test backs it.
 
 #### Scenario: Tolerate unparseable DDL
 
@@ -570,16 +604,16 @@ Trivially true today — `src/schema/ddl_reader.rs` has zero `use` of any `src/p
 
 **Tests:** `src/schema/ddl_reader.rs::fts5_virtual_table_is_graceful_unknown_shadow_tables_are_readable`, `src/schema/ddl_reader.rs::unparseable_non_virtual_ddl_degrades_gracefully_never_errors`
 
-### Requirement 6: lemon-rs Integration [MAY]
+### Requirement 6: Generator Swap [MAY]
 
-If using lemon-rs, the grammar file SHOULD be derived from SQLite's `parse.y` with minimal modifications.
+The hand-written recursive-descent parser MAY be replaced by a pomelo-generated one (the Decision above; spike 006, #57). If it is, the pomelo grammar SHOULD be a near-1:1 transliteration of SQLite's `parse.y`, and the swap MUST NOT change the AST or diagnostics contract.
 
-**Implementation:** `src/parser/parse.y` (planned)
+**Implementation:** `src/parser/grammar.rs` (planned) — the swap would replace this file's hand-written recursive descent; not yet started.
 
 #### Scenario: Grammar parity
 
 - GIVEN SQLite's `parse.y`
-- WHEN compared to sqlite-rs grammar
+- WHEN compared to sqlite-rs grammar (`.openspec/grammar/sqlite.ebnf`)
 - THEN all production rules SHOULD have direct correspondence
 
 ## Development Strategy
@@ -590,10 +624,10 @@ If using lemon-rs, the grammar file SHOULD be derived from SQLite's `parse.y` wi
 2. Test against SQLite tokenizer output
 3. Benchmark performance
 
-### Phase 2: Parser (lemon-rs)
+### Phase 2: Parser
 
-1. Port SQLite `parse.y` to lemon-rs format
-2. Generate parser
+1. Hand-written recursive descent against the tokenizer (done)
+2. Optionally swap in a pomelo-generated parser (Requirement 6)
 3. Test against SQLite parser (success/failure parity)
 
 ### Phase 3: AST Builder

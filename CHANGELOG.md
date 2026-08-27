@@ -6,6 +6,42 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Docs
+
+- Audited all 11 specs for drift between prose and implementation and fixed
+  every confirmed instance; specs 004, 007 and 008 were already clean. No
+  requirement semantics changed — citations, type definitions and
+  descriptive prose only.
+  - **005** claimed crate-wide `#![forbid(unsafe_code)]` and that there is
+    no `unsafe` for miri to check. Both false: `src/lib.rs` is
+    `#![deny(unsafe_code)]` and `src/sys/{fcntl,termios}.rs` carry audited
+    `#![allow(unsafe_code)]` carve-outs (ADR-0031, #592) that `forbid`
+    would make impossible.
+  - **009** carried a stale opcode inventory in four places (61/60/58-of-60
+    and "65 opcodes"); actual is 68 harvested, all 68 dispatched, so the
+    "two undispatched opcodes" clause described a gap that had closed.
+  - **001** and **002** documented types that never existed — `Connection`,
+    `Statement`, `SelectCompiler`, `Interpreter`, `Mem`, `BTree`, `MemVfs`,
+    `WindowsVfs`, plus 002's entire Tokenizer and AST code blocks
+    (`Token.value`, `Span.start/end`, per-keyword `TokenKind` variants, a
+    `Stmt`/`SelectStmt`/`SelectBody`/`SelectCore`/`Expr`-as-enum tree).
+    Rewritten against `src/parser/{tokenizer,ast}.rs` with notes on the
+    non-obvious shape decisions.
+  - **002**'s alternatives table recommended lemon-rs against the accepted
+    pomelo decision; Requirement 6 retitled to "Generator Swap" and
+    repointed off `src/parser/parse.y`, a file that will not exist.
+  - **003** and **006** still described themselves as read-only after their
+    write paths landed; **005** still described landed gates (panic-surface
+    lints, `deny.toml`, `--locked` CI, SLT runner, crash torture, six fuzz
+    targets) as future work.
+  - Stale citations fixed in **010**/**011** and elsewhere:
+    `src/codegen/insert.rs` → `src/codegen/stmt/insert.rs`,
+    `emit_result_row` → `projection::emit_row_via_sink`,
+    `emit_dedup_guard` → `emit_dedup_check`, a nonexistent
+    `views::MAX_DEPTH` → the view-name stack raising
+    `CodegenError::CircularView`, `src/vdbe/collation.rs` →
+    `src/record/collation.rs`, and three `path:line` citations in 011.
+
 ## [0.18.5] - 2026-08-27
 
 ### Chore

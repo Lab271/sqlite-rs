@@ -54,13 +54,17 @@ Public API for database operations.
 
 | Component | Responsibility | SQLite equivalent |
 |-----------|----------------|-------------------|
-| `Connection` | Database handle, statement cache | `sqlite3*` |
-| `Statement` | Prepared statement | `sqlite3_stmt*` |
+| CLI shell (`sqlite-rs`) | REPL, dot-commands, query/dump/exec drivers | `shell.c` |
 | `Value` | Dynamic SQL value (NULL, INTEGER, REAL, TEXT, BLOB) | `sqlite3_value*` |
-| `Row` | Result row iterator | `sqlite3_step()` |
-| `Error` | Error codes and messages | `SQLITE_*` codes |
+| Per-layer error enums | Error codes and messages | `SQLITE_*` codes |
 
-**Implementation:** `src/lib.rs`, `src/connection.rs`, `src/statement.rs`
+A library-level `Connection`/`Statement`/`Row` prepared-statement API
+(`sqlite3*`/`sqlite3_stmt*` equivalents) is planned but not yet
+implemented; today the public interface is the CLI shell driving
+`codegen::compile_statement` + `vdbe::Vm` directly, and `Value` lives in
+the record layer (`src/record/value.rs`).
+
+**Implementation:** `src/lib.rs`, `src/bin/sqlite-rs/`
 
 **Estimated lines:** ~2,000
 
@@ -72,8 +76,12 @@ Transforms SQL text into an analyzed AST ready for code generation.
 |-----------|----------------|-------------------|
 | `Tokenizer` | Lexical analysis | `tokenize.c` |
 | `Parser` | Grammar parsing (LALR(1)) | `parse.y` + Lemon |
-| `AST` | Syntax tree nodes | `parse.c` output |
-| `Analyzer` | Name resolution, type checking | `resolve.c`, `expr.c` |
+| `ast` module | Syntax tree nodes | `parse.c` output |
+
+Name resolution and type checking (`resolve.c`) are not a separate frontend
+pass: column references resolve during codegen via `Scope` in
+`src/codegen/expr.rs`, against the schema catalog, so the parser produces a
+syntactic AST rather than an analyzed one.
 
 **Implementation:** `src/parser/`
 
@@ -87,15 +95,15 @@ Compiles analyzed AST to VDBE bytecode.
 
 | Component | Responsibility | SQLite equivalent |
 |-----------|----------------|-------------------|
-| `Planner` | Query optimization, index selection | `where.c`, `whereexpr.c` |
-| `SelectCompiler` | SELECT → bytecode | `select.c` |
-| `InsertCompiler` | INSERT → bytecode | `insert.c` |
-| `UpdateCompiler` | UPDATE → bytecode | `update.c` |
-| `DeleteCompiler` | DELETE → bytecode | `delete.c` |
-| `DdlCompiler` | DDL (CREATE, DROP, ALTER) → bytecode | `build.c` |
-| `ExprCompiler` | Expression → bytecode | `expr.c` |
+| `planner` (`Stats`, `PlanCost`) | Cost model, index selection | `where.c`, `whereexpr.c` |
+| `codegen::dispatch` (`compile_statement`) | Statement dispatch entry point | `sqlite3Prepare` |
+| `codegen::select` (`compile_select*`) | SELECT → bytecode | `select.c` |
+| `codegen::stmt::{insert,update,delete}` | DML → bytecode | `insert.c`, `update.c`, `delete.c` |
+| `codegen::ddl` | DDL (CREATE, DROP) → bytecode | `build.c` |
+| `codegen::expr` | Expression → bytecode | `expr.c` |
+| `codegen::{subquery,transaction,pragma,analyze}` | Subqueries, BEGIN/COMMIT/ROLLBACK, PRAGMA, ANALYZE | `select.c`, `pragma.c`, `analyze.c` |
 
-**Implementation:** `src/codegen/`
+**Implementation:** `src/codegen/`, `src/planner.rs`
 
 **Estimated lines:** ~35,000
 
@@ -119,12 +127,12 @@ Executes bytecode programs.
 
 | Component | Responsibility | SQLite equivalent |
 |-----------|----------------|-------------------|
-| `Opcode` | Instruction enum (192 opcodes) | `opcodes.h` |
-| `Program` | Bytecode array | `Vdbe` |
-| `Interpreter` | Fetch-decode-execute loop | `vdbe.c` |
-| `Mem` | Register/value storage | `vdbemem.c` |
-| `Cursor` | B-tree cursor handle | `VdbeCursor` |
-| `Sorter` | External sort | `vdbesort.c` |
+| `Opcode` | Instruction enum (`src/vdbe/program.rs`) | `opcodes.h` (192 opcodes) |
+| `Program` / `Instruction` | Bytecode array | `Vdbe` |
+| `Vm` | Fetch-decode-execute loop (`src/vdbe/exec.rs`) | `vdbe.c` |
+| Registers (`Vec<Value>`) | Register/value storage | `vdbemem.c` |
+| `cursor` module | B-tree cursor handle | `VdbeCursor` |
+| `sorter` module | External sort | `vdbesort.c` |
 
 **Implementation:** `src/vdbe/`
 
@@ -143,18 +151,19 @@ struct Instruction {
 }
 ```
 
-**Key opcodes (192 total):**
+**Key opcodes** (SQLite defines ~192; `Opcode` currently implements 102 —
+the harvested subset the implemented V-blocks need):
 
 | Category | Examples |
 |----------|----------|
-| Control | `Goto`, `If`, `IfNot`, `Halt`, `Return` |
-| Cursor | `OpenRead`, `OpenWrite`, `Close`, `Next`, `Prev`, `Seek*` |
-| Column | `Column`, `Rowid`, `MakeRecord`, `Insert`, `Delete` |
+| Control | `Goto`, `IfNot`, `IfPos`, `IfNotZero`, `Halt`, `Return` |
+| Cursor | `OpenRead`, `OpenWrite`, `Rewind`, `Next`, `SeekRowid`, `SeekIndexEq` |
+| Column | `Column`, `Rowid`, `MakeRecord`, `Insert`, `Delete`, `IdxInsert` |
 | Arithmetic | `Add`, `Subtract`, `Multiply`, `Divide` |
-| Comparison | `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge` |
-| Aggregation | `AggStep`, `AggFinal`, `AggValue` |
-| String | `Concat`, `Substr`, `Length` |
-| Result | `ResultRow`, `Copy`, `Move` |
+| Comparison | `Eq`, `Lt`, `Le`, `Gt`, `Ge`, `RealAffinity` |
+| Aggregation | `AggStep`, `AggFinal`, `HashAggStep` |
+| String | `Concat`; `substr`/`length` are scalar functions via `Function`, not opcodes |
+| Result | `ResultRow`, `Copy`, `Integer`, `String8` |
 
 ### Layer 5: B-Tree
 
@@ -162,11 +171,10 @@ Logical storage as balanced trees.
 
 | Component | Responsibility | SQLite equivalent |
 |-----------|----------------|-------------------|
-| `BTree` | Tree operations (insert, delete, search) | `btree.c` |
-| `BTreeCursor` | Positioned iteration | `BtCursor` |
-| `Cell` | Key-value encoding | Cell format |
-| `Page` | Page layout (interior vs leaf) | Page types |
-| `Overflow` | Large value handling | Overflow pages |
+| `btree::{table,index}` insert/delete submodules | Tree operations (insert, delete, balance) | `btree.c` |
+| `TableCursor` / `IndexCursor` | Positioned iteration | `BtCursor` |
+| `btree::master` | `sqlite_master` reader (Tier 0 DDL slice) | `btree.c` |
+| Cell/page parsing (in `src/btree.rs`) | Cell encoding, page layout, overflow chains | Cell format, page types, overflow pages |
 
 **Implementation:** `src/btree/`
 
@@ -189,9 +197,9 @@ Page cache and transaction journaling.
 |-----------|----------------|-------------------|
 | `Pager` | Page cache, dirty tracking | `pager.c` |
 | `PageCache` | LRU buffer pool | `pcache.c` |
-| `Journal` | Rollback journal | Journal file |
-| `Wal` | Write-ahead log | `wal.c` |
-| `Checkpoint` | WAL → main DB | Checkpoint modes |
+| `JournalWriter` / `RecoveredJournal` | Rollback journal | Journal file |
+| `WalWriter` / `WalHeader` | Write-ahead log | `wal.c` |
+| `checkpoint` module | WAL → main DB | Checkpoint modes |
 
 **Implementation:** `src/pager/`
 
@@ -223,10 +231,12 @@ Platform abstraction for I/O.
 | Component | Responsibility | SQLite equivalent |
 |-----------|----------------|-------------------|
 | `Vfs` | Virtual filesystem trait | `sqlite3_vfs` |
-| `File` | File handle trait | `sqlite3_file` |
+| `VfsFile` | File handle trait | `sqlite3_file` |
 | `UnixVfs` | POSIX implementation | `os_unix.c` |
-| `WindowsVfs` | Windows implementation | `os_win.c` |
-| `MemVfs` | In-memory filesystem | `:memory:` |
+| `MemoryVfs` | In-memory filesystem | `:memory:` |
+| `PageSource` | Whole-page reads for the b-tree layer | — |
+
+A `WindowsVfs` (`os_win.c` equivalent) is planned but not yet implemented.
 
 **Implementation:** `src/vfs/`
 
