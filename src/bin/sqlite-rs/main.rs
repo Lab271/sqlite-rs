@@ -16,6 +16,10 @@
 //! mode too: `sqlite-rs <file>` with no recognized subcommand enters the
 //! REPL directly, matching `sqlite3 <file>`.
 
+// Same unsafe boundary as the library (ADR-0031): `unsafe` lives only in
+// `sqlite_rs::sys`; the CLI must go through its safe wrappers (#587).
+#![deny(unsafe_code)]
+
 mod common;
 mod dot_commands;
 mod dump;

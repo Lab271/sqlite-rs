@@ -83,6 +83,15 @@ extern "C" {
     fn isatty(fd: c_int) -> c_int;
 }
 
+/// Borrows the process's stdin descriptor (fd 0) for the `'static`
+/// lifetime, without going through `io::stdin()`'s handle/lock.
+pub fn stdin_fd() -> BorrowedFd<'static> {
+    // SAFETY: fd 0 is stdin on POSIX; it is open for the lifetime of the
+    // process and never closed by this crate, so the borrow is valid for
+    // `'static` and never aliases an owned descriptor we could close.
+    unsafe { BorrowedFd::borrow_raw(0) }
+}
+
 /// Whether `fd` refers to a terminal — POSIX `isatty(3)`.
 pub fn is_tty(fd: BorrowedFd) -> bool {
     // SAFETY: `fd` is a valid, open descriptor for the duration of this

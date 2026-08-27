@@ -6,14 +6,8 @@
 //! sequences) instead of a whole line at a time.
 
 use std::io::{self, Read, Write};
-use std::os::fd::BorrowedFd;
 
 use sqlite_rs::sys::termios::{self, termios as Termios, SetArg};
-
-/// stdin's file descriptor is always 0 on POSIX; borrowing it directly
-/// (rather than through `io::stdin()`) avoids taking ownership of — and
-/// so never risks closing — the process's actual stdin.
-const STDIN_FD: i32 = 0;
 
 /// Guard that restores the terminal's original mode on drop, so a panic
 /// or early return never leaves the user's shell in raw mode.
@@ -26,7 +20,7 @@ impl RawMode {
     /// (piped input) — callers fall back to plain line reads in that
     /// case, same as the old `rustyline` behavior.
     pub fn enable() -> io::Result<Option<Self>> {
-        let fd = unsafe { BorrowedFd::borrow_raw(STDIN_FD) };
+        let fd = termios::stdin_fd();
         let original = match termios::tcgetattr_call(fd) {
             Ok(t) => t,
             Err(_) => return Ok(None), // not a tty
@@ -40,7 +34,7 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let fd = unsafe { BorrowedFd::borrow_raw(STDIN_FD) };
+        let fd = termios::stdin_fd();
         termios::tcsetattr_call(fd, SetArg::TCSAFLUSH, &self.original).ok();
     }
 }
