@@ -256,6 +256,12 @@ CREATE TABLE t(a INTEGER, blb BLOB);
 INSERT INTO t VALUES(1, zeroblob(60000));
 SQL
 
+"$ORACLE" btrees/overflow_index_key.db <<'SQL'
+CREATE TABLE t(a INTEGER, b TEXT);
+CREATE INDEX idx_b ON t(b);
+INSERT INTO t VALUES(1, 'a-' || hex(zeroblob(4000)));
+SQL
+
 "$ORACLE" btrees/select_parity.db <<'SQL'
 CREATE TABLE t(id INTEGER PRIMARY KEY, i INTEGER, s TEXT, r REAL, b BLOB);
 INSERT INTO t VALUES(1, NULL, NULL, NULL, NULL);
@@ -273,6 +279,8 @@ index.db — an indexed column over 3000 rows, multi-page index b-tree.
 without_rowid.db — WITHOUT ROWID table, 500 rows.
 overflow_single_page.db — a 6000-byte blob, forces one overflow page.
 overflow_multi_page.db — a 60000-byte blob, forces a 14-page overflow chain.
+overflow_index_key.db — a single row whose indexed TEXT column is ~8000
+bytes, forcing the index key itself (not just the table row) to overflow.
 select_parity.db — a plain INTEGER PRIMARY KEY table aimed at SELECT
 parity: NULL in every nullable column, empty string vs NULL, zero vs
 NULL, duplicate rows (for DISTINCT), mixed-case text (for NOCASE), and

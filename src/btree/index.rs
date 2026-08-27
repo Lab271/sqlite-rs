@@ -360,6 +360,7 @@ impl<P: PageSource> IndexCursor<P> {
             &frame.page,
             tail_start,
             payload_len,
+            true,
         )?;
         Ok(IndexRow { payload })
     }
@@ -388,6 +389,7 @@ impl<P: PageSource> IndexCursor<P> {
             &frame.page,
             tail_start,
             payload_len,
+            true,
         )?;
         Ok(IndexRow { payload })
     }
@@ -525,7 +527,7 @@ fn decode_value_cell(
     encoding: TextEncoding,
 ) -> Result<(Vec<Value>, Vec<u8>), BtreeError> {
     let (payload_len, tail_start) = decode_payload_len(buf, value_start, page_num)?;
-    let local_size = local_payload_size(usable_size, payload_len) as usize;
+    let local_size = local_payload_size(usable_size, payload_len, true) as usize;
     let has_overflow = (local_size as u64) < payload_len;
     let cell_end = tail_start
         .saturating_add(local_size)
@@ -542,6 +544,7 @@ fn decode_value_cell(
         &page,
         tail_start,
         payload_len,
+        true,
     )?;
     let key = decode_record(&payload, encoding)?;
     Ok((key, cell_bytes))
