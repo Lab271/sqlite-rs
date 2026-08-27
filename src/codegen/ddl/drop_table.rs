@@ -68,7 +68,9 @@ mod tests {
                 columns: vec![],
                 root_page: 3,
             }],
+            rowid_alias: None,
         }
+        .with_computed_rowid_alias()
     }
 
     #[test]

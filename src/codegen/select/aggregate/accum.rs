@@ -214,7 +214,7 @@ pub(in crate::codegen::select) fn read_pseudo_column(
     idx: usize,
     dest: i32,
 ) -> Result<(), CodegenError> {
-    if rowid_alias_column(schema) == Some(idx) {
+    if schema.rowid_alias == Some(idx) {
         em.emit(Instruction::new(
             Opcode::Column,
             cursor,
@@ -377,6 +377,7 @@ where
         is_virtual: false,
         sql: String::new(),
         indexes: Vec::new(),
+        rowid_alias: None,
     };
 
     // Allocate one fresh, contiguous register per snapshot/aggregate

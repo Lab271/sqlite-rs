@@ -27,7 +27,7 @@ use crate::parser::ast::{
     JoinConstraint, JoinOp, Literal, ParamKind, ResultColumn, Select, TableRef, TableRefKind,
 };
 use crate::parser::tokenizer::Span;
-use crate::schema::{rowid_alias_column, IndexSchema, TableSchema};
+use crate::schema::{IndexSchema, TableSchema};
 use crate::vdbe::{
     comparison_affinity, Affinity, Collation, Instruction, Opcode, Program, SortKeyColumn, P4,
 };

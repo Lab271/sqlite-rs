@@ -133,7 +133,9 @@ fn schema(sql: &str) -> TableSchema {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
+        rowid_alias: None,
     }
+    .with_computed_rowid_alias()
 }
 
 #[test]

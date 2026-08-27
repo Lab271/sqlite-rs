@@ -463,7 +463,9 @@ mod tests {
             is_virtual: false,
             sql: "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)".to_string(),
             indexes: vec![],
-        };
+            rowid_alias: None,
+        }
+        .with_computed_rowid_alias();
         assert_eq!(primary_key_columns(&schema), vec!["a".to_string()]);
 
         schema.sql = "CREATE TABLE t (a INTEGER, b TEXT, PRIMARY KEY (a, b))".to_string();

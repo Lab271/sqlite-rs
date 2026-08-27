@@ -6,7 +6,7 @@
 //! constraints aren't cached anywhere (`TableSchema` is deliberately
 //! naive — see `src/schema/ddl_reader.rs`), so this module re-parses
 //! `schema.sql` with the real parser to recover them, the same trick
-//! `rowid_alias_column` already uses for the PK-rowid-alias fact.
+//! `rowid_alias_from_sql` already uses for the PK-rowid-alias fact.
 //!
 //! Secondary indexes are maintained on every row (#196): each index on
 //! the table gets its own write cursor, and once a row is inserted the
@@ -80,7 +80,7 @@ use crate::parser::ast::{
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
-use crate::schema::{rowid_alias_column, TableSchema};
+use crate::schema::TableSchema;
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
 
 const TABLE_CURSOR: i32 = 0;
@@ -206,7 +206,7 @@ pub fn compile_insert(
         }
     };
 
-    let rowid_alias = rowid_alias_column(schema);
+    let rowid_alias = schema.rowid_alias;
     let plans = column_plans(schema, &create, rowid_alias);
     // `AUTOINCREMENT` only ever attaches to the rowid-alias column's
     // own `INTEGER PRIMARY KEY` declaration (SQLite grammar doesn't
@@ -318,14 +318,14 @@ pub fn compile_insert(
 
     // Column references inside `CHECK` expressions resolve against
     // this shadow schema instead of `schema` itself: same columns, but
-    // no cached DDL text, so `rowid_alias_column` (textual, driven by
-    // `sql`) can never fire and make `compile_cond`/`compile_value`
+    // `rowid_alias` cleared (and no cached DDL text), so nothing can make `compile_cond`/`compile_value`
     // emit `Opcode::Rowid` — which the `CHECK` pseudo-cursor (built
     // from a plain record blob, not a real table cursor) doesn't
     // support. Every `CHECK` column reference reads via ordinary
     // `Opcode::Column` instead.
     let check_schema = TableSchema {
         sql: String::new(),
+        rowid_alias: None,
         ..schema.clone()
     };
 

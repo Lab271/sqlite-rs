@@ -242,7 +242,9 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
             is_virtual: false,
             sql: String::new(),
             indexes: vec![],
-        };
+            rowid_alias: None,
+        }
+        .with_computed_rowid_alias();
         let program = match compile_select(&select, &no_from_schema) {
             Ok(p) => p,
             Err(_) => return Outcome::Skip,

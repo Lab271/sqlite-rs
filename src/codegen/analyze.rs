@@ -77,7 +77,9 @@ mod tests {
             is_virtual: false,
             sql: format!("CREATE TABLE {name}(a)"),
             indexes,
+            rowid_alias: None,
         }
+        .with_computed_rowid_alias()
     }
 
     #[test]

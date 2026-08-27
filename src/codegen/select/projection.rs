@@ -75,7 +75,7 @@ pub(super) fn compile_row_values(
                         name: (*name).to_string(),
                     })?;
                 let r = reg.alloc();
-                if pseudo && rowid_alias_column(schema) == Some(idx) {
+                if pseudo && schema.rowid_alias == Some(idx) {
                     // `cursor` is a post-`ORDER BY` `OpenPseudo` re-read
                     // of an already-materialized record (see
                     // `compile_sorted_scan`'s pass 1), not a live table
@@ -128,7 +128,7 @@ pub(super) fn compile_row_values(
                     let pseudo_rowid_idx = pseudo
                         .then(|| column_index(schema, name))
                         .flatten()
-                        .filter(|idx| rowid_alias_column(schema) == Some(*idx));
+                        .filter(|idx| schema.rowid_alias == Some(*idx));
                     if let Some(idx) = pseudo_rowid_idx {
                         let r = reg.alloc();
                         em.emit(Instruction::new(

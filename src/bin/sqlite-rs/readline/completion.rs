@@ -180,7 +180,9 @@ mod tests {
             sql: String::new(),
             indexes: Vec::new(),
             columns,
+            rowid_alias: None,
         }
+        .with_computed_rowid_alias()
     }
 
     #[test]

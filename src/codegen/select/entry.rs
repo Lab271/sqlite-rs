@@ -173,6 +173,7 @@ pub(super) fn compile_select_no_from(
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
+        rowid_alias: None,
     };
     let cols = result_columns(select, &no_table);
     let (first, count) =
@@ -458,6 +459,7 @@ pub fn compile_select_compound(
         is_virtual: false,
         sql: String::new(),
         indexes: Vec::new(),
+        rowid_alias: None,
     };
     let order_by_plans = resolve_order_by(first, &output_schema)?;
     // A compound's ORDER BY term must be an ordinal position or a bare

@@ -29,7 +29,7 @@ use sqlite_rs::codegen::compile_statement;
 use sqlite_rs::dump;
 use sqlite_rs::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
 use sqlite_rs::parser::split_statements;
-use sqlite_rs::schema::{read_schema, read_views};
+use sqlite_rs::schema::{read_schema_and_views, TableSchema, ViewSchema};
 use sqlite_rs::vdbe::execute_transaction_step;
 use sqlite_rs::vfs::{UnixVfs, Vfs};
 
@@ -59,27 +59,28 @@ pub fn run_exec(path: &Path, sql: &str) -> ExitCode {
     let pager = Rc::new(RefCell::new(pager));
 
     let mut autocommit = true;
+    // The decoded catalog, reused across statements (#589): re-reading
+    // `sqlite_master` before every statement (the pre-#589 behavior) is
+    // two b-tree walks per statement even for a script of pure SELECTs.
+    // The cache is dropped after any statement that can change the
+    // schema, so a script that `CREATE TABLE`s and then writes to that
+    // same table still sees a catalog reflecting what already ran.
+    let mut catalog: Option<(Vec<TableSchema>, Vec<ViewSchema>)> = None;
     for stmt in split_statements(sql) {
-        // Re-read the schema before every statement, not just once up
-        // front: a script that `CREATE TABLE`s and then writes to that
-        // same table in a later statement needs the catalog to reflect
-        // what already ran earlier in this same script.
-        let (schemas, views) = {
+        if catalog.is_none() {
             let borrowed = pager.borrow();
             let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
-            let schemas = match read_schema(&mut schema_cursor, header.text_encoding) {
-                Ok(s) => s,
+            match read_schema_and_views(&mut schema_cursor, header.text_encoding) {
+                Ok(pair) => catalog = Some(pair),
                 Err(e) => return fatal(path, &e),
-            };
-            let mut view_cursor = TableCursor::new(&*borrowed, &header, 1);
-            let views = match read_views(&mut view_cursor, header.text_encoding) {
-                Ok(v) => v,
-                Err(e) => return fatal(path, &e),
-            };
-            (schemas, views)
+            }
+        }
+        let Some((schemas, views)) = catalog.as_ref() else {
+            // Unreachable: the block above always fills the cache.
+            return ExitCode::FAILURE;
         };
 
-        let program = match compile_statement(&stmt, &schemas, &views) {
+        let program = match compile_statement(&stmt, schemas, views) {
             Ok(p) => p,
             Err(e) => return fatal(path, &e),
         };
@@ -88,7 +89,23 @@ pub fn run_exec(path: &Path, sql: &str) -> ExitCode {
             Ok((_, ac)) => autocommit = ac,
             Err(e) => return fatal(path, &e),
         }
+
+        if is_schema_changing(&stmt) {
+            catalog = None;
+        }
     }
 
     ExitCode::SUCCESS
+}
+
+/// Whether `stmt` can change the `sqlite_master` catalog — the DDL
+/// dirty flag for the catalog cache above. Deliberately conservative:
+/// any statement starting with `CREATE`/`DROP`/`ALTER` invalidates,
+/// even one that ends up failing or being a no-op.
+fn is_schema_changing(stmt: &str) -> bool {
+    let head = stmt.trim_start();
+    ["CREATE", "DROP", "ALTER"].iter().any(|kw| {
+        head.get(..kw.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(kw))
+    })
 }

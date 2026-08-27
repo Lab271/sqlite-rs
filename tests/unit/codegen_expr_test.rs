@@ -60,7 +60,9 @@ fn one_row_fixture() -> (std::path::PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 
@@ -182,7 +184,9 @@ fn affinity_fixture() -> (std::path::PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 

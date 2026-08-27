@@ -47,7 +47,7 @@ use crate::parser::ast::{
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
-use crate::schema::{rowid_alias_column, TableSchema};
+use crate::schema::TableSchema;
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
 
 const TABLE_CURSOR: i32 = 0;
@@ -86,7 +86,7 @@ pub fn compile_update_with_catalog(
         }
     };
 
-    let rowid_alias = rowid_alias_column(schema);
+    let rowid_alias = schema.rowid_alias;
     let plans = column_plans(schema, &create, rowid_alias);
     let table_checks: Vec<Expr> = create
         .constraints
@@ -101,11 +101,12 @@ pub fn compile_update_with_catalog(
     // Same rationale as `insert.rs`'s `check_schema`: `CHECK` column
     // references must read via ordinary `Opcode::Column` against the
     // pseudo-cursor built from the new row's record, not `Opcode::Rowid`
-    // (which `rowid_alias_column`-driven codegen would otherwise emit
-    // for the rowid-alias column, and which the pseudo-cursor can't
+    // (which `rowid_alias`-driven codegen would otherwise emit
+    // for the rowid-alias column — cleared here alongside `sql`, and which the pseudo-cursor can't
     // answer).
     let check_schema = TableSchema {
         sql: String::new(),
+        rowid_alias: None,
         ..schema.clone()
     };
 

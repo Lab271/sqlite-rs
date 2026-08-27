@@ -17,9 +17,7 @@ use crate::btree::{BtreeError, IndexCursor, IndexRow, TableCursor, TableRow};
 use crate::header::{DatabaseHeader, HeaderError, HEADER_LEN};
 use crate::pager::{Pager, PagerError};
 use crate::record::{decode_record, RecordError, TextEncoding, Value};
-use crate::schema::{
-    column_defs, column_type, read_schema, rowid_alias_column, DdlError, TableSchema,
-};
+use crate::schema::{column_defs, column_type, read_schema, DdlError, TableSchema};
 use crate::vfs::{PageSource, Vfs, VfsError};
 
 /// Failure reading a database while producing a [`DumpResult`].
@@ -246,7 +244,7 @@ fn read_table_rows<P: PageSource>(
     header: &DatabaseHeader,
     schema: &TableSchema,
 ) -> Result<Vec<Vec<Value>>, TableReadError> {
-    let alias_col = rowid_alias_column(schema);
+    let alias_col = schema.rowid_alias;
     let real_affinity = real_affinity_columns(schema);
     if schema.without_rowid {
         let mut cursor = IndexCursor::new(source, header.usable_page_size(), schema.root_page);
@@ -336,20 +334,25 @@ mod tests {
             is_virtual: false,
             sql: sql.to_string(),
             indexes: vec![],
+            rowid_alias: None,
         }
+        .with_computed_rowid_alias()
     }
 
     #[test]
     fn rowid_alias_detects_plain_integer_primary_key() {
         let s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
-        assert_eq!(rowid_alias_column(&s), Some(0));
+        assert_eq!(s.rowid_alias, Some(0));
     }
 
     #[test]
     fn rowid_alias_none_for_without_rowid() {
         let mut s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
         s.without_rowid = true;
-        assert_eq!(rowid_alias_column(&s), None);
+        // `rowid_alias` is resolved at construction (#589), so a caller
+        // mutating `without_rowid` afterwards must recompute it.
+        let s = s.with_computed_rowid_alias();
+        assert_eq!(s.rowid_alias, None);
     }
 
     #[test]
@@ -358,7 +361,7 @@ mod tests {
         assert_eq!(real_affinity_columns(&s), vec![true, true, true, false]);
     }
 
-    // Regression cases for `column_defs`/`rowid_alias_column`/
+    // Regression cases for `column_defs`/`rowid_alias_from_sql`/
     // `real_affinity_columns` re-deriving column info from raw DDL text:
     // quote/comment-aware splitting (#135) and declared-type-token
     // matching (#181) keep these from false-positiving on constraint or
@@ -390,7 +393,7 @@ mod tests {
         );
     }
 
-    // The two `rowid_alias_column` cases below used to be the reason
+    // The two `rowid_alias_from_sql` cases below used to be the reason
     // that function's naivety carried more weight than it did before
     // #135: since #96, `src/codegen/expr.rs` emits `Rowid` instead of
     // `Column` based on its answer, so a wrong index is a wrong query
@@ -403,8 +406,7 @@ mod tests {
         // looking for the constraint, so it no longer reads as one.
         let s = schema("CREATE TABLE t (a INTEGER DEFAULT 'primary key', b TEXT)");
         assert_eq!(
-            rowid_alias_column(&s),
-            None,
+            s.rowid_alias, None,
             "PRIMARY KEY inside a string literal must not be read as a real constraint"
         );
     }
@@ -412,11 +414,11 @@ mod tests {
     #[test]
     fn table_level_primary_key_is_detected_as_the_alias() {
         // SQLite treats `CREATE TABLE t(x INTEGER, PRIMARY KEY(x))` as a
-        // rowid alias; #135 makes `rowid_alias_column` check the
+        // rowid alias; #135 makes `rowid_alias_from_sql` check the
         // table-level constraint form, not just an inline one.
         let s = schema("CREATE TABLE t (x INTEGER, PRIMARY KEY(x))");
         assert_eq!(
-            rowid_alias_column(&s),
+            s.rowid_alias,
             Some(0),
             "table-level PRIMARY KEY(x) over an INTEGER column is a rowid alias in SQLite"
         );
@@ -428,7 +430,7 @@ mod tests {
         // even though every named column is INTEGER — SQLite only
         // grants the optimization to a single-column key.
         let s = schema("CREATE TABLE t (x INTEGER, y INTEGER, PRIMARY KEY(x, y))");
-        assert_eq!(rowid_alias_column(&s), None);
+        assert_eq!(s.rowid_alias, None);
     }
 
     #[test]
@@ -450,7 +452,7 @@ mod tests {
     #[test]
     fn line_comment_containing_primary_key_does_not_false_positive() {
         let s = schema("CREATE TABLE t (a INTEGER -- not primary key\n, b TEXT)");
-        assert_eq!(rowid_alias_column(&s), None);
+        assert_eq!(s.rowid_alias, None);
     }
 
     #[test]
@@ -465,6 +467,6 @@ mod tests {
         // index and stores the column normally, so it must NOT be
         // substituted (SQLite's "ROWIDs and the INTEGER PRIMARY KEY").
         let s = schema("CREATE TABLE t (id INTEGER PRIMARY KEY DESC, name TEXT)");
-        assert_eq!(rowid_alias_column(&s), None);
+        assert_eq!(s.rowid_alias, None);
     }
 }
