@@ -22,7 +22,7 @@ arguments, not just a schedule:
 
 | Pillar | Phase | Argument it makes | Our mechanisms |
 |--------|-------|--------------------|-----------------|
-| **1. Constructive** | Compile time | *Whole defect classes cannot exist* — correctness by construction | rustc ownership, `#![forbid(unsafe_code)]`, panic-surface lints, mvl-limit qualified subset (#23), (experiment) `#[mvl::total]` contracts |
+| **1. Constructive** | Compile time | *Whole defect classes cannot exist* — correctness by construction | rustc ownership, `#![deny(unsafe_code)]`, panic-surface lints, mvl-limit qualified subset (#23), (experiment) `#[mvl::total]` contracts |
 | **2. Empirical** | Test time | *Behavior matches the oracle on evidence* | cargo test, llvm-cov, traceability dashboard (`tools/assurance.py`), corpus + pinned oracle (spec 004), proptest, cargo-fuzz — see harness taxonomy below |
 | **3. Provenance** | Build time | *What we ship is what we tested* | Cargo.lock, `--locked` CI, cargo-deny, SHA-pinned GitHub Actions, pinned oracle (spec 004 Req 1) |
 | **4. Operational** | Run time | *Failure is contained and explicit* | totality claim (any input -> `Ok` or structured `Err`, never panic/garbage — enforced at compile+fuzz time, claimed at run time), structured error taxonomy, `debug_assert!` invariants |
@@ -45,12 +45,12 @@ argument (the same logic as diverse-lens verification in MVL).
 | SQLite harness | What it's sensitive to | sqlite-rs counterpart |
 |----------------|--------------------------|-------------------------|
 | TCL suite (1,462 scripts, ~1M tests) | Feature regressions | Inline `#[cfg(test)]` + `tests/unit/` public-API tests (#30) |
-| TH3 (proprietary, 100% MC/DC, 2.4M instances) | Untested branches, embedded configs | llvm-cov gate now; mutation testing (cargo-mutants) at V1 exit (epic #5) as our MC/DC-spirit metric |
+| TH3 (proprietary, 100% MC/DC, 2.4M instances) | Untested branches, embedded configs | llvm-cov gate, mutation testing (`make mutants`), and MC/DC obligation tracking against `tests/mcdc/obligations.json` (`make test-mcdc`, `tools/mcdc_report.py`) |
 | sqllogictest (7.2M queries) | Result divergence from other engines | Corpus + pinned-oracle diff harness (spec 004) — our center of gravity; full SLT run unlocks at V4 |
 | dbsqlfuzz / AFL / OSS-Fuzz | Malformed-input crashes | cargo-fuzz on `decode_record` (#26), later on b-tree/WAL parsers |
 | Anomaly testing (OOM injection, I/O fault, crash tests) | Failure-path bugs | V5 power-cut torture harness; fault-injecting VFS impl (the `Vfs` trait is our injection point) |
 | Boundary/property testing | Edge values | proptest roundtrips (#26) |
-| Valgrind/sanitizers | Memory errors | Largely subsumed by Pillar 1 (safe Rust) — crate-wide `#![forbid(unsafe_code)]` (#66) means there is no `unsafe` for miri to ever need to check |
+| Valgrind/sanitizers | Memory errors | Largely subsumed by Pillar 1 (safe Rust) — crate-wide `#![deny(unsafe_code)]` (#66) means the only `unsafe` for miri to check is the audited `src/sys/{fcntl,termios}.rs` syscall carve-out (ADR-0031, #592), not a codebase-wide concern |
 | Disabled-optimization diff | Optimizer bugs | Future: planner-on vs planner-off result diffing (V4) — full scans as the reference implementation |
 
 ## Requirements
