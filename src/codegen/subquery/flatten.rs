@@ -716,6 +716,20 @@ mod tests {
     }
 
     #[test]
+    fn does_not_flatten_subquery_with_having() {
+        let select = flatten("SELECT * FROM (SELECT a FROM t GROUP BY a HAVING count(*) > 1) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
+    fn does_not_flatten_compound_subquery() {
+        let select = flatten("SELECT * FROM (SELECT a FROM t UNION SELECT a FROM t2) AS s");
+        let from = select.from.unwrap();
+        assert!(matches!(&from.first.kind, TableRefKind::Subquery(_)));
+    }
+
+    #[test]
     fn does_not_flatten_subquery_with_join_in_its_own_from() {
         let select = flatten("SELECT * FROM (SELECT t.a FROM t JOIN u ON t.a = u.a) AS s");
         let from = select.from.unwrap();

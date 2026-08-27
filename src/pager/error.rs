@@ -111,23 +111,20 @@ mod tests {
         }
         .to_string()
         .contains("reading WAL at db.sqlite-wal"));
-        assert!(
-            PagerError::Page(PageError::InvalidPageNumber)
-                .to_string()
-                .contains("page number")
-                || !PagerError::Page(PageError::InvalidPageNumber)
-                    .to_string()
-                    .is_empty()
+        assert_eq!(
+            PagerError::Page(PageError::InvalidPageNumber).to_string(),
+            "invalid page number 0"
         );
-        assert!(!PagerError::Vfs(VfsError::NotFound {
-            path: "x".to_string()
-        })
-        .to_string()
-        .is_empty());
-        assert!(
-            !PagerError::Freelist(FreelistError::PageTooShort { offset: 1, len: 2 })
-                .to_string()
-                .is_empty()
+        assert_eq!(
+            PagerError::Vfs(VfsError::NotFound {
+                path: "x".to_string()
+            })
+            .to_string(),
+            "file not found: x"
+        );
+        assert_eq!(
+            PagerError::Freelist(FreelistError::PageTooShort { offset: 1, len: 2 }).to_string(),
+            "freelist trunk page is 2 bytes, too short to read a field at offset 1"
         );
         assert_eq!(
             PagerError::PendingTransaction.to_string(),

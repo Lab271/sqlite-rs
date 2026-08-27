@@ -778,7 +778,9 @@ mod tests {
     fn scalar_subquery_with_aggregate() {
         let catalog = [t(), s_rowid()];
         let program = compile("SELECT (SELECT max(v) FROM s) FROM t", &catalog).unwrap();
-        assert!(!program.instructions.is_empty());
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::AggStep));
+        assert!(ops.contains(&Opcode::AggFinal));
     }
 
     #[test]

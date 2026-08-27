@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn allows_unqualified_column_without_join() {
         let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE a = 1");
-        assert!(!out.contains("WHERE a = 1") || out.contains("(SELECT a FROM t WHERE a = 1)"));
+        assert!(out.contains("(SELECT a FROM t WHERE a = 1)"), "{out}");
     }
 
     #[test]

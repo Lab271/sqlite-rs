@@ -352,7 +352,7 @@ mod tests {
         let page_err: PageError = missing.into();
         assert!(matches!(page_err, PageError::Vfs(_)));
         assert!(page_err.source().is_some());
-        assert_eq!(page_err.to_string(), format!("{}", page_err));
+        assert_eq!(page_err.to_string(), "file not found: /missing");
     }
 
     #[test]

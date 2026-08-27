@@ -1846,10 +1846,11 @@ mod tests {
 
     #[test]
     fn vm_debug_and_default_helpers_are_reachable() {
-        let vm = Vm::new();
+        let mut vm = Vm::new();
         assert!(vm.db.is_none());
+        vm.set_register(0, Value::Integer(42)).unwrap();
         let debug_str = format!("{vm:?}");
-        assert!(debug_str.contains("Vm"));
+        assert!(debug_str.contains("Integer(42)"), "{debug_str}");
     }
 
     fn open_read_vm() -> Vm {
