@@ -583,6 +583,19 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ctrl_e_moves_to_end() {
+        let mut editor = LineEditor::new();
+        editor.set("abc");
+        editor.move_home();
+        let mut src = byte_source(&[]);
+        assert!(matches!(
+            dispatch_byte(0x05, &mut editor, &mut src), // Ctrl-E
+            Ok(Dispatch::Continue)
+        ));
+        assert_eq!(editor.cursor(), 3);
+    }
+
+    #[test]
     fn dispatch_ctrl_k_and_ctrl_u_clear_to_end_and_home() {
         let mut editor = LineEditor::new();
         editor.insert('a');
@@ -664,8 +677,27 @@ mod tests {
         apply_escape_action(&mut editor, EscapeAction::Home, &mut history);
         assert_eq!(editor.cursor(), 0);
 
+        apply_escape_action(&mut editor, EscapeAction::Right, &mut history);
+        assert_eq!(editor.cursor(), 1);
+
         apply_escape_action(&mut editor, EscapeAction::End, &mut history);
         assert_eq!(editor.cursor(), 2);
+    }
+
+    #[test]
+    fn readline_error_display_matches_each_variant() {
+        assert_eq!(ReadlineError::Eof.to_string(), "EOF");
+        assert_eq!(ReadlineError::Interrupted.to_string(), "interrupted");
+        let io_err = ReadlineError::Io(io::Error::other("boom"));
+        assert_eq!(io_err.to_string(), "boom");
+    }
+
+    #[test]
+    fn redraw_writes_highlighted_and_plain_prompt_lines() {
+        let mut editor = LineEditor::new();
+        editor.set("select 1");
+        redraw("> ", &editor, true);
+        redraw("> ", &editor, false);
     }
 
     #[test]

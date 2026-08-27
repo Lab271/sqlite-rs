@@ -332,3 +332,170 @@ fn recurse_into_from_subqueries(select: &mut Select) {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::parser::error::{parse_select, ParseOutcome};
+
+    fn parse(sql: &str) -> Select {
+        match parse_select(sql) {
+            ParseOutcome::Accepted(select) => *select,
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    fn pushed(sql: &str) -> String {
+        let mut select = parse(sql);
+        push_down_where_predicates(&mut select);
+        select.to_string()
+    }
+
+    #[test]
+    fn pushes_predicate_through_wildcard_projection() {
+        let out = pushed("SELECT * FROM (SELECT a, b FROM t) AS sub WHERE sub.a = 1");
+        assert!(out.contains("WHERE a = 1"), "{out}");
+    }
+
+    #[test]
+    fn pushes_predicate_and_rewrites_aliased_column() {
+        let out = pushed("SELECT * FROM (SELECT a, b AS c FROM t) AS sub WHERE sub.c = 1");
+        assert!(out.contains("WHERE b = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_column_unknown_in_explicit_map() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE sub.zzz = 1");
+        assert!(out.contains("zzz"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_subquery_has_group_by() {
+        let out = pushed(
+            "SELECT * FROM (SELECT a, count(*) AS c FROM t GROUP BY a) AS sub WHERE sub.a = 1",
+        );
+        assert!(out.contains("sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_subquery_has_distinct() {
+        let out = pushed("SELECT * FROM (SELECT DISTINCT a FROM t) AS sub WHERE sub.a = 1");
+        assert!(out.contains("sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_subquery_has_limit() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t LIMIT 5) AS sub WHERE sub.a = 1");
+        assert!(out.contains("sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_subquery_is_compound() {
+        let out =
+            pushed("SELECT * FROM (SELECT a FROM t UNION SELECT a FROM t2) AS sub WHERE sub.a = 1");
+        assert!(out.contains("sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_when_subquery_has_own_join() {
+        let out = pushed(
+            "SELECT * FROM (SELECT t.a FROM t JOIN t2 ON t.a = t2.a) AS sub WHERE sub.a = 1",
+        );
+        assert!(out.contains("sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_computed_projection() {
+        let out = pushed("SELECT * FROM (SELECT a + 1 AS c FROM t) AS sub WHERE sub.c = 1");
+        assert!(out.contains("sub.c = 1"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_catalog_qualified_column() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE main.sub.a = 1");
+        assert!(out.contains("main.sub.a = 1"), "{out}");
+    }
+
+    #[test]
+    fn requires_qualification_when_join_present() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub JOIN t2 ON t2.x = 1 WHERE a = 1");
+        assert!(out.contains("WHERE a = 1"), "{out}");
+    }
+
+    #[test]
+    fn allows_unqualified_column_without_join() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE a = 1");
+        assert!(out.contains("(SELECT a FROM t WHERE a = 1)"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_nested_subquery_expression() {
+        let out =
+            pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE sub.a IN (SELECT x FROM t2)");
+        assert!(out.contains("sub.a IN"), "{out}");
+    }
+
+    #[test]
+    fn pushes_into_second_join_table() {
+        let out = pushed(
+            "SELECT * FROM t0 JOIN (SELECT a FROM t) AS sub ON t0.x = sub.a WHERE sub.a = 1",
+        );
+        assert!(out.contains("(SELECT a FROM t WHERE a = 1)"), "{out}");
+    }
+
+    #[test]
+    fn splits_conjuncts_pushing_only_the_movable_one() {
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE sub.a = 1 AND sub.zzz = 1");
+        assert!(out.contains("t WHERE a = 1"), "{out}");
+        assert!(out.contains("sub.zzz = 1"), "{out}");
+    }
+
+    #[test]
+    fn rewrite_for_pushdown_covers_every_expr_kind() {
+        let out = pushed(
+            "SELECT * FROM (SELECT a FROM t) AS sub WHERE \
+             CASE WHEN sub.a BETWEEN 1 AND 10 THEN sub.a IN (1, 2) ELSE sub.a LIKE 'x' END \
+               AND CAST(sub.a AS INTEGER) IS NULL \
+               AND (-sub.a) IS NOT 1 \
+               AND (sub.a) COLLATE NOCASE = 1 \
+               AND foo(sub.a)",
+        );
+        assert!(out.contains("FROM t WHERE"), "{out}");
+        assert!(!out.contains("sub.a"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_like_escape_referencing_unmapped_column() {
+        let out =
+            pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE sub.a LIKE 'x' ESCAPE sub.zzz");
+        assert!(out.contains("zzz"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_exists_or_scalar_subquery_conjunct() {
+        let out = pushed(
+            "SELECT * FROM (SELECT a FROM t) AS sub WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.x = sub.a)",
+        );
+        assert!(out.contains("EXISTS"), "{out}");
+
+        let out = pushed("SELECT * FROM (SELECT a FROM t) AS sub WHERE (SELECT x FROM t2) = sub.a");
+        assert!(out.contains("sub.a"), "{out}");
+    }
+
+    #[test]
+    fn does_not_push_in_subquery_multi_conjunct() {
+        let out = pushed(
+            "SELECT * FROM (SELECT a FROM t) AS sub WHERE (sub.a, 1) IN (SELECT x, y FROM t2)",
+        );
+        assert!(out.contains("sub.a"), "{out}");
+    }
+
+    #[test]
+    fn recurses_into_nested_subqueries() {
+        let out = pushed(
+            "SELECT * FROM (SELECT * FROM (SELECT a FROM t) AS inner1) AS outer1 WHERE outer1.a = 1",
+        );
+        assert!(out.contains("(SELECT a FROM t WHERE a = 1)"), "{out}");
+    }
+}

@@ -249,3 +249,157 @@ impl From<PagerError> for BtreeError {
         BtreeError::Pager(source)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        assert!(BtreeError::InvalidKeyRecord(RecordError::InvalidUtf8)
+            .to_string()
+            .contains("decoding a key record"));
+        assert!(BtreeError::PageSource {
+            page_num: 1,
+            source: PageError::InvalidPageNumber,
+        }
+        .to_string()
+        .contains("reading page 1"));
+        assert_eq!(
+            BtreeError::PageTooShort {
+                page_num: 1,
+                len: 3
+            }
+            .to_string(),
+            "page 1 is too short (3 bytes) to contain a b-tree page header"
+        );
+        assert_eq!(
+            BtreeError::CursorNotPositioned {
+                operation: "next",
+                required: "seek",
+            }
+            .to_string(),
+            "next called on a cursor that was never positioned by seek"
+        );
+        assert_eq!(
+            BtreeError::UnexpectedPageType {
+                page_num: 2,
+                page_type: 0xff
+            }
+            .to_string(),
+            "page 2 has unexpected b-tree page type 0xff"
+        );
+        assert_eq!(
+            BtreeError::InvalidCellPointer {
+                page_num: 2,
+                index: 9
+            }
+            .to_string(),
+            "page 2 cell pointer at index 9 is out of bounds"
+        );
+        assert!(BtreeError::InvalidCellVarint {
+            page_num: 2,
+            source: RecordError::InvalidUtf8,
+        }
+        .to_string()
+        .contains("cell varint decode failed"));
+        assert_eq!(
+            BtreeError::PayloadTooShort { page_num: 2 }.to_string(),
+            "page 2 cell payload is shorter than its declared local size"
+        );
+        assert_eq!(
+            BtreeError::PayloadTooLarge {
+                page_num: 2,
+                payload_len: 999
+            }
+            .to_string(),
+            "page 2 declares an implausible payload length 999"
+        );
+        assert_eq!(
+            BtreeError::OverflowChainTooLong {
+                page_num: 2,
+                max: 10
+            }
+            .to_string(),
+            "overflow chain from page 2 exceeded 10 pages (possible cycle)"
+        );
+        assert_eq!(
+            BtreeError::OverflowChainCycle {
+                page_num: 2,
+                revisited_page: 3
+            }
+            .to_string(),
+            "overflow chain from page 2 revisited page 3 (cycle)"
+        );
+        assert_eq!(
+            BtreeError::OverflowChainTruncated { page_num: 2 }.to_string(),
+            "overflow chain from page 2 ended before all payload bytes were read"
+        );
+        assert_eq!(
+            BtreeError::TraversalTooLong { max: 100 }.to_string(),
+            "b-tree traversal visited more than 100 pages (possible cycle)"
+        );
+        assert!(BtreeError::Pager(PagerError::PendingTransaction)
+            .to_string()
+            .contains("pager error"));
+        assert_eq!(
+            BtreeError::DuplicateRowid { rowid: 5 }.to_string(),
+            "cannot insert duplicate rowid 5"
+        );
+        assert_eq!(
+            BtreeError::MissingChildRoute {
+                page_num: 2,
+                child: 4
+            }
+            .to_string(),
+            "interior page 2 has no routing entry for child page 4"
+        );
+        assert_eq!(
+            BtreeError::RowidNotFound { rowid: 5 }.to_string(),
+            "cannot delete rowid 5: no such row"
+        );
+        assert_eq!(
+            BtreeError::DuplicateKey.to_string(),
+            "cannot insert duplicate index key"
+        );
+        assert_eq!(
+            BtreeError::KeyNotFound.to_string(),
+            "cannot delete index key: no such entry"
+        );
+        assert_eq!(
+            BtreeError::InvalidRootPage {
+                name: "t".to_string(),
+                rootpage: -1
+            }
+            .to_string(),
+            "sqlite_master entry \"t\" has out-of-range rootpage -1"
+        );
+        assert_eq!(
+            BtreeError::MasterEntryNotFound {
+                name: "t".to_string()
+            }
+            .to_string(),
+            "cannot delete sqlite_master entry \"t\": no such entry"
+        );
+        assert_eq!(
+            BtreeError::Internal("bad state").to_string(),
+            "internal invariant violated: bad state"
+        );
+    }
+
+    #[test]
+    fn from_conversions() {
+        let e: BtreeError = RecordError::InvalidUtf8.into();
+        assert!(matches!(e, BtreeError::InvalidKeyRecord(_)));
+
+        let e: BtreeError = PagerError::PendingTransaction.into();
+        assert!(matches!(e, BtreeError::Pager(_)));
+    }
+
+    #[test]
+    fn implements_std_error() {
+        let err = BtreeError::DuplicateKey;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+}

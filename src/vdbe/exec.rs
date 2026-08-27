@@ -1574,4 +1574,351 @@ mod tests {
             Step::Next
         );
     }
+
+    #[test]
+    fn display_covers_every_exec_error_variant() {
+        let cases: Vec<(ExecError, &str)> = vec![
+            (
+                ExecError::RegisterOutOfRange {
+                    opcode: "Op",
+                    index: 5,
+                },
+                "Op: register index 5 is out of range",
+            ),
+            (
+                ExecError::RegisterRangeTooLarge {
+                    opcode: "Op",
+                    count: 9,
+                },
+                "Op: register range count 9 exceeds the maximum",
+            ),
+            (
+                ExecError::TypeMismatch {
+                    opcode: "Op",
+                    found: "text",
+                },
+                "Op: expected a different value type, found text",
+            ),
+            (ExecError::MustBeInt, "MustBeInt: value cannot be converted"),
+            (
+                ExecError::MalformedInstruction {
+                    opcode: "Op",
+                    reason: "bad p4".to_string(),
+                },
+                "Op: malformed instruction (bad p4)",
+            ),
+            (
+                ExecError::Unimplemented {
+                    opcode: Opcode::Halt,
+                },
+                "opcode Halt is not yet implemented",
+            ),
+            (
+                ExecError::CursorNotOpen { slot: 3 },
+                "cursor slot 3 is not open",
+            ),
+            (
+                ExecError::CursorTypeMismatch {
+                    opcode: "Op",
+                    slot: 1,
+                    found: "sorter",
+                    expected: "table",
+                },
+                "Op: cursor slot 1 is a sorter, not a table",
+            ),
+            (
+                ExecError::NoDatabase { opcode: "Op" },
+                "Op requires a database attached",
+            ),
+            (
+                ExecError::ProgramCounterOutOfRange { pc: 42 },
+                "program counter 42 is out of range",
+            ),
+            (
+                ExecError::StepLimitExceeded,
+                "program exceeded the maximum step count",
+            ),
+            (
+                ExecError::EphemeralRowLimitExceeded {
+                    opcode: "Op",
+                    limit: 100,
+                },
+                "Op: ephemeral table/index exceeded the maximum row count (100)",
+            ),
+            (
+                ExecError::Halted {
+                    code: 1,
+                    message: None,
+                },
+                "statement halted with SQLite result code 1",
+            ),
+            (
+                ExecError::Halted {
+                    code: 1,
+                    message: Some("oops".to_string()),
+                },
+                "statement halted with SQLite result code 1: oops",
+            ),
+            (
+                ExecError::TransactionAlreadyActive,
+                "cannot start a transaction within a transaction",
+            ),
+            (
+                ExecError::NoActiveTransactionToCommit,
+                "cannot commit - no transaction is active",
+            ),
+            (
+                ExecError::NoActiveTransactionToRollback,
+                "cannot rollback - no transaction is active",
+            ),
+            (
+                ExecError::JournalModeChangeDuringTransaction,
+                "cannot change journal_mode within a transaction",
+            ),
+        ];
+        for (err, expected_prefix) in cases {
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(expected_prefix),
+                "expected {rendered:?} to contain {expected_prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flush_failed_display_and_source_delegate_to_pager_error() {
+        let pager_err = crate::pager::PagerError::PendingTransaction;
+        let err = ExecError::FlushFailed(pager_err);
+        assert!(err.to_string().contains("failed to flush pending writes"));
+        assert!(std::error::Error::source(&err).is_some());
+        assert!(std::error::Error::source(&ExecError::MustBeInt).is_none());
+    }
+
+    #[test]
+    fn from_pager_error_wraps_as_flush_failed() {
+        let pager_err = crate::pager::PagerError::PendingTransaction;
+        let err: ExecError = pager_err.into();
+        assert!(matches!(err, ExecError::FlushFailed(_)));
+    }
+
+    #[test]
+    fn cast_forces_target_affinity_regardless_of_source_type() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Text("123".to_string().into()))
+            .unwrap();
+        cast(
+            &mut vm,
+            &Instruction::new(
+                Opcode::Cast,
+                0,
+                i32::from(Affinity::Integer.to_p4_byte()),
+                0,
+            ),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(0).unwrap(), Value::Integer(123));
+    }
+
+    #[test]
+    fn filter_add_and_filter_check_round_trip_through_dispatch_helpers() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(7)).unwrap();
+        filter_add(
+            &mut vm,
+            &Instruction::with_p4(Opcode::FilterAdd, 0, 0, 0, P4::Int(10)),
+        )
+        .unwrap();
+        // Present value: never jumps.
+        assert_eq!(
+            filter_check(&mut vm, &Instruction::new(Opcode::Filter, 0, 99, 0)).unwrap(),
+            Step::Next
+        );
+        // A different slot was never populated, so it's still empty --
+        // absent values on an unopened slot report "maybe present" and
+        // never jump either.
+        assert_eq!(
+            filter_check(&mut vm, &Instruction::new(Opcode::Filter, 1, 99, 0)).unwrap(),
+            Step::Next
+        );
+    }
+
+    #[test]
+    fn function_rejects_non_string_p4() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            function(&mut vm, &Instruction::new(Opcode::Function, 0, 0, 0)),
+            Err(ExecError::MalformedInstruction {
+                opcode: "Function",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn function_rejects_malformed_descriptor() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            function(
+                &mut vm,
+                &Instruction::with_p4(
+                    Opcode::Function,
+                    0,
+                    0,
+                    0,
+                    P4::Str("not_a_descriptor".to_string()),
+                ),
+            ),
+            Err(ExecError::MalformedInstruction {
+                opcode: "Function",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn function_rejects_unknown_function_name() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(1)).unwrap();
+        assert!(matches!(
+            function(
+                &mut vm,
+                &Instruction::with_p4(
+                    Opcode::Function,
+                    0,
+                    0,
+                    1,
+                    P4::Str("not_a_real_fn(1)".to_string()),
+                ),
+            ),
+            Err(ExecError::MalformedInstruction {
+                opcode: "Function",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn function_dispatches_a_known_scalar_function() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(-5)).unwrap();
+        function(
+            &mut vm,
+            &Instruction::with_p4(Opcode::Function, 0, 0, 1, P4::Str("abs(1)".to_string())),
+        )
+        .unwrap();
+        assert_eq!(*vm.register(1).unwrap(), Value::Integer(5));
+    }
+
+    #[test]
+    fn agg_final_rejects_non_string_p4() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            agg_final(&mut vm, &Instruction::new(Opcode::AggFinal, 0, 0, 0)),
+            Err(ExecError::MalformedInstruction {
+                opcode: "AggFinal",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn agg_final_rejects_malformed_descriptor() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            agg_final(
+                &mut vm,
+                &Instruction::with_p4(Opcode::AggFinal, 0, 0, 0, P4::Str("garbage".to_string()),),
+            ),
+            Err(ExecError::MalformedInstruction {
+                opcode: "AggFinal",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_function_descriptor_rejects_missing_paren_and_bad_arity() {
+        assert_eq!(parse_function_descriptor("noparen"), None);
+        assert_eq!(parse_function_descriptor("abs(1"), None);
+        assert_eq!(parse_function_descriptor("abs(x)"), None);
+        assert_eq!(parse_function_descriptor("abs(1)"), Some(("abs", 1)));
+    }
+
+    #[test]
+    fn vm_debug_and_default_helpers_are_reachable() {
+        let mut vm = Vm::new();
+        assert!(vm.db.is_none());
+        vm.set_register(0, Value::Integer(42)).unwrap();
+        let debug_str = format!("{vm:?}");
+        assert!(debug_str.contains("Integer(42)"), "{debug_str}");
+    }
+
+    fn open_read_vm() -> Vm {
+        use crate::vfs::{UnixVfs, Vfs, VfsPageSource};
+        use std::path::Path;
+        let path = Path::new("tests/corpus/fixtures/btrees").join("table_single_page.db");
+        let vfs = UnixVfs;
+        let file = vfs.open_read(&path).unwrap();
+        let mut header_buf = [0u8; 100];
+        file.read_at(&mut header_buf, 0).unwrap();
+        let header = DatabaseHeader::parse(&header_buf).unwrap();
+        let source = VfsPageSource::open(&vfs, &path, header.page_size).unwrap();
+        Vm::with_db(Rc::new(source), header)
+    }
+
+    #[test]
+    fn vm_db_debug_omits_source_and_writer_fields() {
+        let vm = open_read_vm();
+        let rendered = format!("{:?}", vm.db.as_ref().unwrap());
+        assert!(rendered.contains("VmDb"));
+    }
+
+    #[test]
+    fn writer_errors_without_a_database_or_without_write_access() {
+        let vm = Vm::new();
+        assert!(matches!(
+            vm.writer("Op"),
+            Err(ExecError::NoDatabase { opcode: "Op" })
+        ));
+
+        let vm = open_read_vm();
+        assert!(matches!(
+            vm.writer("Op"),
+            Err(ExecError::NoDatabase { opcode: "Op" })
+        ));
+    }
+
+    #[test]
+    fn param_reads_are_one_based_and_out_of_range_is_none() {
+        let mut vm = Vm::new();
+        vm.bind_params(vec![Value::Integer(10), Value::Integer(20)]);
+        assert_eq!(vm.param(1), Some(&Value::Integer(10)));
+        assert_eq!(vm.param(2), Some(&Value::Integer(20)));
+        assert_eq!(vm.param(0), None);
+        assert_eq!(vm.param(3), None);
+        assert_eq!(vm.param(-1), None);
+    }
+
+    #[test]
+    fn cursor_mut_errors_when_slot_is_unopened() {
+        let mut vm = Vm::new();
+        assert!(matches!(
+            vm.cursor_mut(0),
+            Err(ExecError::CursorNotOpen { slot: 0 })
+        ));
+        vm.set_cursor(0, CursorSlot::Pseudo { register: 1 })
+            .unwrap();
+        assert!(vm.cursor_mut(0).is_ok());
+    }
+
+    #[test]
+    fn take_register_leaves_null_behind() {
+        let mut vm = Vm::new();
+        vm.set_register(0, Value::Integer(9)).unwrap();
+        let taken = vm.take_register(0).unwrap();
+        assert_eq!(taken, Value::Integer(9));
+        assert_eq!(*vm.register(0).unwrap(), Value::Null);
+        // Never-written register also takes as NULL without growing.
+        assert_eq!(vm.take_register(50).unwrap(), Value::Null);
+    }
 }

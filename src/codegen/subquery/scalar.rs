@@ -672,3 +672,257 @@ pub(crate) fn compile_in_subquery_multi(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::codegen::select::compile_select_with_catalog;
+    use crate::parser::{parse_select, ParseOutcome};
+    use crate::schema::{IndexSchema, IndexedColumn, TableSchema};
+
+    fn table(name: &str, root_page: u32, columns: &[&str], sql: &str) -> TableSchema {
+        TableSchema {
+            name: name.to_string(),
+            root_page,
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            without_rowid: false,
+            strict: false,
+            column_types: vec![String::new(); columns.len()],
+            column_collations: vec![],
+            is_virtual: false,
+            sql: sql.to_string(),
+            indexes: vec![],
+            rowid_alias: None,
+        }
+        .with_computed_rowid_alias()
+    }
+
+    fn select(sql: &str) -> Select {
+        match parse_select(sql) {
+            ParseOutcome::Accepted(s) => *s,
+            other => panic!("failed to parse {sql:?}: {other:?}"),
+        }
+    }
+
+    fn t() -> TableSchema {
+        table("t", 2, &["x"], "CREATE TABLE t(x)")
+    }
+
+    fn s_rowid() -> TableSchema {
+        table(
+            "s",
+            3,
+            &["id", "v"],
+            "CREATE TABLE s(id INTEGER PRIMARY KEY, v)",
+        )
+    }
+
+    fn s2_unique() -> TableSchema {
+        let mut s2 = table("s2", 4, &["k", "v"], "CREATE TABLE s2(k, v)");
+        s2.indexes.push(IndexSchema {
+            name: "idx_k".to_string(),
+            unique: true,
+            columns: vec![IndexedColumn {
+                name: "k".to_string(),
+                desc: false,
+                collation: Collation::Binary,
+            }],
+            root_page: 5,
+        });
+        s2
+    }
+
+    fn compile(sql: &str, catalog: &[TableSchema]) -> Result<crate::vdbe::Program, CodegenError> {
+        let sel = select(sql);
+        compile_select_with_catalog(&sel, &t(), catalog)
+    }
+
+    fn opcodes(program: &crate::vdbe::Program) -> Vec<Opcode> {
+        program.instructions.iter().map(|i| i.opcode).collect()
+    }
+
+    #[test]
+    fn scalar_subquery_plain_scan_with_where() {
+        let catalog = [t(), s_rowid()];
+        let program = compile("SELECT (SELECT v FROM s WHERE v > 0) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Rewind));
+        assert!(ops.contains(&Opcode::Next));
+    }
+
+    #[test]
+    fn scalar_subquery_correlated_rowid_seek() {
+        let catalog = [t(), s_rowid()];
+        let program =
+            compile("SELECT (SELECT v FROM s WHERE s.id = t.x) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::SeekRowid));
+    }
+
+    #[test]
+    fn scalar_subquery_correlated_unique_index_seek() {
+        let catalog = [t(), s2_unique()];
+        let program = compile(
+            "SELECT (SELECT v FROM s2 WHERE s2.k = t.x) FROM t",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::SeekIndexEq));
+        assert!(ops.contains(&Opcode::IdxRowid));
+        assert!(ops.contains(&Opcode::SeekRowid));
+    }
+
+    #[test]
+    fn scalar_subquery_with_aggregate() {
+        let catalog = [t(), s_rowid()];
+        let program = compile("SELECT (SELECT max(v) FROM s) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::AggStep));
+        assert!(ops.contains(&Opcode::AggFinal));
+    }
+
+    #[test]
+    fn scalar_subquery_from_less_computed_expression() {
+        let catalog = [t()];
+        let program = compile("SELECT (SELECT 1 + 1)", &catalog).unwrap();
+        assert!(opcodes(&program).contains(&Opcode::Copy));
+    }
+
+    #[test]
+    fn scalar_subquery_star_projection_is_unsupported() {
+        let catalog = [t(), s_rowid()];
+        let err = compile("SELECT (SELECT * FROM s) FROM t", &catalog).unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("exactly one expression column"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_plain_scan() {
+        let catalog = [t(), s_rowid()];
+        let program = compile("SELECT x FROM t WHERE EXISTS (SELECT 1 FROM s)", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Rewind));
+    }
+
+    #[test]
+    fn not_exists_plain_scan_with_where() {
+        let catalog = [t(), s_rowid()];
+        let program = compile(
+            "SELECT x FROM t WHERE NOT EXISTS (SELECT 1 FROM s WHERE v > 0)",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Rewind));
+        assert!(ops.contains(&Opcode::Next));
+    }
+
+    #[test]
+    fn exists_correlated_rowid_seek() {
+        let catalog = [t(), s_rowid()];
+        let program = compile(
+            "SELECT x FROM t WHERE EXISTS (SELECT 1 FROM s WHERE s.id = t.x)",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::SeekRowid));
+    }
+
+    #[test]
+    fn not_exists_correlated_unique_index_seek() {
+        let catalog = [t(), s2_unique()];
+        let program = compile(
+            "SELECT x FROM t WHERE NOT EXISTS (SELECT 1 FROM s2 WHERE s2.k = t.x)",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::SeekIndexEq));
+    }
+
+    #[test]
+    fn exists_from_less_is_unsupported() {
+        let catalog = [t()];
+        let err = compile("SELECT x FROM t WHERE EXISTS (SELECT 1)", &catalog).unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("EXISTS (SELECT ...) requires a FROM clause"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_subquery_hoisted_uncorrelated() {
+        let catalog = [t(), s_rowid()];
+        let program = compile("SELECT x FROM t WHERE x IN (SELECT v FROM s)", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Found));
+        assert!(ops.contains(&Opcode::OpenEphemeral));
+    }
+
+    #[test]
+    fn in_subquery_not_hoisted_when_not_a_bare_conjunct() {
+        let catalog = [t(), s_rowid()];
+        let program = compile(
+            "SELECT x FROM t WHERE (x IN (SELECT v FROM s)) OR (x IS NULL)",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Found));
+        assert!(ops.contains(&Opcode::Rewind));
+    }
+
+    #[test]
+    fn multi_column_in_subquery() {
+        let catalog = [t(), s_rowid()];
+        let program = compile(
+            "SELECT x FROM t WHERE (x, x) IN (SELECT id, v FROM s)",
+            &catalog,
+        )
+        .unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::IdxInsert));
+        assert!(ops.contains(&Opcode::Found));
+    }
+
+    #[test]
+    fn multi_column_in_subquery_arity_mismatch_is_unsupported() {
+        let catalog = [t(), s_rowid()];
+        let err = compile(
+            "SELECT x FROM t WHERE (x, x) IN (SELECT id FROM s)",
+            &catalog,
+        )
+        .unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("left-hand tuple has 2 column(s)"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_column_in_subquery_star_is_unsupported() {
+        let catalog = [t(), s_rowid()];
+        let err = compile(
+            "SELECT x FROM t WHERE (x, x) IN (SELECT * FROM s)",
+            &catalog,
+        )
+        .unwrap_err();
+        match err {
+            CodegenError::Unsupported { reason } => {
+                assert!(reason.contains("no * / table.*"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+}

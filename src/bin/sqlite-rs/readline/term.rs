@@ -74,3 +74,39 @@ pub fn cursor_to_col(col: usize) -> String {
 
 /// Clears from the cursor to the end of the line.
 pub const CLEAR_TO_EOL: &str = "\x1b[K";
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_to_col_formats_escape_sequence() {
+        assert_eq!(cursor_to_col(0), "\r\x1b[0C");
+        assert_eq!(cursor_to_col(42), "\r\x1b[42C");
+    }
+
+    #[test]
+    fn color_constants_are_expected_escape_codes() {
+        assert_eq!(RESET, "\x1b[0m");
+        assert_eq!(BOLD_BLUE, "\x1b[1;34m");
+        assert_eq!(GREEN, "\x1b[32m");
+        assert_eq!(CYAN, "\x1b[36m");
+        assert_eq!(GRAY, "\x1b[90m");
+        assert_eq!(YELLOW, "\x1b[33m");
+        assert_eq!(CLEAR_TO_EOL, "\x1b[K");
+    }
+
+    #[test]
+    fn write_flush_writes_to_stdout() {
+        write_flush("").unwrap();
+    }
+
+    // `enable()` falls back to `None` when stdin isn't a tty (piped input),
+    // which is exactly how `cargo test` runs — no controlling tty attached.
+    #[test]
+    fn raw_mode_enable_returns_none_without_tty() {
+        let result = RawMode::enable().unwrap();
+        assert!(result.is_none());
+    }
+}

@@ -89,3 +89,71 @@ impl From<FreelistError> for PagerError {
         PagerError::Freelist(source)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        assert!(PagerError::HotJournal {
+            path: "db.sqlite-journal".to_string()
+        }
+        .to_string()
+        .contains("hot rollback journal present at db.sqlite-journal"));
+        assert!(PagerError::Journal(JournalError::HeaderTooShort(3))
+            .to_string()
+            .contains("rollback journal is corrupt"));
+        assert!(PagerError::Wal {
+            path: "db.sqlite-wal".to_string(),
+            source: WalError::HeaderTooShort { len: 2 },
+        }
+        .to_string()
+        .contains("reading WAL at db.sqlite-wal"));
+        assert_eq!(
+            PagerError::Page(PageError::InvalidPageNumber).to_string(),
+            "invalid page number 0"
+        );
+        assert_eq!(
+            PagerError::Vfs(VfsError::NotFound {
+                path: "x".to_string()
+            })
+            .to_string(),
+            "file not found: x"
+        );
+        assert_eq!(
+            PagerError::Freelist(FreelistError::PageTooShort { offset: 1, len: 2 }).to_string(),
+            "freelist trunk page is 2 bytes, too short to read a field at offset 1"
+        );
+        assert_eq!(
+            PagerError::PendingTransaction.to_string(),
+            "cannot change journal_mode with a pending transaction"
+        );
+        assert_eq!(
+            PagerError::CheckpointIncomplete.to_string(),
+            "checkpoint did not fully back-fill the WAL while switching journal_mode out of WAL"
+        );
+    }
+
+    #[test]
+    fn from_conversions() {
+        let e: PagerError = PageError::InvalidPageNumber.into();
+        assert!(matches!(e, PagerError::Page(PageError::InvalidPageNumber)));
+
+        let e: PagerError = VfsError::NotFound {
+            path: "x".to_string(),
+        }
+        .into();
+        assert!(matches!(e, PagerError::Vfs(VfsError::NotFound { .. })));
+
+        let e: PagerError = FreelistError::PageTooShort { offset: 1, len: 2 }.into();
+        assert!(matches!(e, PagerError::Freelist(_)));
+    }
+
+    #[test]
+    fn implements_std_error() {
+        let err = PagerError::PendingTransaction;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+}

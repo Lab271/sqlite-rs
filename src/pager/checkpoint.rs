@@ -194,7 +194,7 @@ pub fn checkpoint_passive(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
     use crate::pager::wal::WalWriter;
@@ -317,5 +317,62 @@ mod tests {
 
         release_all(held);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn page_size_mismatch_is_an_error() {
+        let (vfs, db_path) = setup(512);
+        let wal_path = companion_path(&db_path, "-wal");
+        let header = WalHeader::new(true, 512, 0x5555, 0x6666, 1);
+        let mut writer = WalWriter::create(&vfs, &wal_path, header).unwrap();
+        writer.append_frame(1, &vec![0xAAu8; 512], 1).unwrap();
+        writer.sync().unwrap();
+
+        let err = checkpoint_passive(&vfs, &db_path, 1024).unwrap_err();
+        match err {
+            PagerError::Wal { source, .. } => {
+                assert!(matches!(
+                    source,
+                    wal::WalError::InvalidPageSize { page_size: 512 }
+                ));
+            }
+            other => panic!("expected PagerError::Wal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_wal_with_header_only_is_a_complete_no_op() {
+        let (vfs, db_path) = setup(512);
+        let wal_path = companion_path(&db_path, "-wal");
+        let header = WalHeader::new(true, 512, 0x7777, 0x8888, 1);
+        let writer = WalWriter::create(&vfs, &wal_path, header).unwrap();
+        writer.sync().unwrap();
+
+        let result = checkpoint_passive(&vfs, &db_path, 512).unwrap();
+        assert_eq!(
+            result,
+            CheckpointResult {
+                backfilled_frames: 0,
+                total_frames: 0,
+                checkpoint_complete: true,
+            }
+        );
+    }
+
+    #[test]
+    fn second_pass_with_no_new_frames_is_a_no_op() {
+        let (vfs, db_path) = setup(512);
+        let wal_path = companion_path(&db_path, "-wal");
+        let header = WalHeader::new(true, 512, 0x9999, 0xAAAA, 1);
+        let mut writer = WalWriter::create(&vfs, &wal_path, header).unwrap();
+        writer.append_frame(1, &vec![0xDDu8; 512], 1).unwrap();
+        writer.sync().unwrap();
+
+        let first = checkpoint_passive(&vfs, &db_path, 512).unwrap();
+        assert_eq!(first.backfilled_frames, 1);
+        assert!(first.checkpoint_complete);
+
+        let second = checkpoint_passive(&vfs, &db_path, 512).unwrap();
+        assert_eq!(second, first);
     }
 }
