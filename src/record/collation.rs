@@ -18,6 +18,7 @@ pub enum Collation {
 }
 
 /// Compares two strings under the given collation.
+#[inline]
 pub fn compare_text(a: &str, b: &str, collation: Collation) -> Ordering {
     match collation {
         Collation::Binary => a.as_bytes().cmp(b.as_bytes()),

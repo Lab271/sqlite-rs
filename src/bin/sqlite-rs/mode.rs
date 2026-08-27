@@ -9,13 +9,13 @@
 //! (one-shot CLI entry points, their own `-csv` flag already) are
 //! untouched, per the issue's explicit scope-down.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use sqlite_rs::format::{csv_quote, format_csv_value, format_query_value};
+use sqlite_rs::format::{csv_quote, write_csv_value, write_query_value};
 use sqlite_rs::record::Value;
 
 use crate::common::CSV_ROW_TERMINATOR;
-use crate::query::write_list_row;
 
 /// The REPL's `.mode` setting. `List` is the pre-existing default
 /// (pipe-delimited, `write_list_row`); the other three are new.
@@ -44,13 +44,17 @@ impl OutputMode {
 }
 
 /// Renders `v` for `column`/`line` mode display: reuses
-/// `format_query_value`'s `-list`-mode rendering (empty string for
+/// `write_query_value`'s `-list`-mode rendering (empty string for
 /// `NULL`, NUL-truncated text/blobs) converted lossily to `String` —
 /// both modes are terminal-display renderers, not `-list`'s
 /// binary-safe byte stream, so lossy UTF-8 is an acceptable
-/// approximation here.
-fn cell_string(v: &Value) -> String {
-    String::from_utf8_lossy(&format_query_value(v)).into_owned()
+/// approximation here. `scratch` is a caller-owned buffer (#591), reused
+/// across cells instead of `format_query_value`'s fresh `Vec<u8>` per
+/// call.
+fn cell_string(scratch: &mut Vec<u8>, v: &Value) -> String {
+    scratch.clear();
+    write_query_value(scratch, v);
+    String::from_utf8_lossy(scratch).into_owned()
 }
 
 /// Prints one REPL result set (`columns` — see
@@ -79,13 +83,30 @@ fn print_list(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> io::Result<()> {
+    // #591: one buffer reused across every row/header line instead of a
+    // fresh `Vec<Vec<u8>>` (plus each cell's own `Vec<u8>`) per row.
+    let mut buf: Vec<u8> = Vec::new();
     if headers {
-        let rendered: Vec<Vec<u8>> = columns.iter().map(|c| c.clone().into_bytes()).collect();
-        write_list_row(out, &rendered)?;
+        buf.clear();
+        for (i, c) in columns.iter().enumerate() {
+            if i > 0 {
+                buf.push(b'|');
+            }
+            buf.extend_from_slice(c.as_bytes());
+        }
+        buf.push(b'\n');
+        out.write_all(&buf)?;
     }
     for row in rows {
-        let rendered: Vec<Vec<u8>> = row.iter().map(format_query_value).collect();
-        write_list_row(out, &rendered)?;
+        buf.clear();
+        for (i, v) in row.iter().enumerate() {
+            if i > 0 {
+                buf.push(b'|');
+            }
+            write_query_value(&mut buf, v);
+        }
+        buf.push(b'\n');
+        out.write_all(&buf)?;
     }
     Ok(())
 }
@@ -96,13 +117,30 @@ fn print_csv(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> io::Result<()> {
+    // #591: one buffer reused across every row/header line instead of a
+    // fresh `Vec<String>` (plus a `join`) per row.
+    let mut line = String::new();
     if headers {
-        let rendered: Vec<String> = columns.iter().map(|c| csv_quote(c)).collect();
-        write!(out, "{}{CSV_ROW_TERMINATOR}", rendered.join(","))?;
+        line.clear();
+        for (i, c) in columns.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            line.push_str(&csv_quote(c));
+        }
+        line.push_str(CSV_ROW_TERMINATOR);
+        out.write_all(line.as_bytes())?;
     }
     for row in rows {
-        let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
-        write!(out, "{}{CSV_ROW_TERMINATOR}", rendered.join(","))?;
+        line.clear();
+        for (i, v) in row.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            write_csv_value(&mut line, v);
+        }
+        line.push_str(CSV_ROW_TERMINATOR);
+        out.write_all(line.as_bytes())?;
     }
     Ok(())
 }
@@ -126,9 +164,10 @@ fn print_column(
             *w = (*w).max(c.len());
         }
     }
+    let mut scratch: Vec<u8> = Vec::new();
     let rendered_rows: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| row.iter().map(cell_string).collect())
+        .map(|row| row.iter().map(|v| cell_string(&mut scratch, v)).collect())
         .collect();
     for row in &rendered_rows {
         for (i, cell) in row.iter().enumerate() {
@@ -145,7 +184,7 @@ fn print_column(
             if i.saturating_add(1) == num_cols {
                 line.push_str(cell);
             } else {
-                line.push_str(&format!("{cell:<width$}  "));
+                write!(line, "{cell:<width$}  ").unwrap_or(());
             }
         }
         writeln!(out, "{line}")
@@ -167,13 +206,18 @@ fn print_column(
 /// value with its column name, matching stock `sqlite3`).
 fn print_line(out: &mut impl Write, columns: &[String], rows: &[Vec<Value>]) -> io::Result<()> {
     let name_width = columns.iter().map(String::len).max().unwrap_or(0);
+    let mut scratch: Vec<u8> = Vec::new();
     for (row_i, row) in rows.iter().enumerate() {
         if row_i > 0 {
             writeln!(out)?;
         }
         for (i, value) in row.iter().enumerate() {
             let name = columns.get(i).map(String::as_str).unwrap_or("");
-            writeln!(out, "{name:<name_width$} = {}", cell_string(value))?;
+            writeln!(
+                out,
+                "{name:<name_width$} = {}",
+                cell_string(&mut scratch, value)
+            )?;
         }
     }
     Ok(())

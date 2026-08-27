@@ -54,8 +54,8 @@ use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor};
 use crate::record::{
-    decode_column, decode_record, decode_serial_value, encode_record, parse_header_into,
-    TextEncoding, Value,
+    decode_column, decode_record, decode_record_upto, decode_serial_value, encode_record,
+    parse_header_into, record_column_count, TextEncoding, Value,
 };
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
@@ -262,6 +262,14 @@ impl RowHeaderCache {
             self.valid = true;
         }
         Ok(())
+    }
+
+    /// Column count of the header last parsed by `ensure` — callers that
+    /// only need the record's trailing column (e.g. an index row's
+    /// appended rowid) use this to address it without decoding the rest.
+    fn column_count(&self) -> usize {
+        debug_assert!(self.valid, "column_count() called before ensure()");
+        self.entries.len()
     }
 
     fn column(
@@ -530,18 +538,22 @@ impl Vm {
 /// explicitly; a plain `P4::Int(n)` (every `SeekIndexEq` emission site
 /// that hasn't been taught about declared collations yet) defaults all
 /// `n` columns to [`Collation::Binary`], preserving prior behavior.
-fn seek_key_collations(
-    instr: &Instruction,
+/// Returns the key columns' collations for a seek/insert instruction —
+/// borrowed straight out of `instr.p4` for the common `P4::SeekKey` case
+/// (#591) rather than always cloning a fresh `Vec`; only the synthesized
+/// all-`Binary` fallback for `P4::Int` allocates.
+fn seek_key_collations<'a>(
+    instr: &'a Instruction,
     opcode: &'static str,
-) -> Result<Vec<Collation>, ExecError> {
+) -> Result<std::borrow::Cow<'a, [Collation]>, ExecError> {
     match &instr.p4 {
-        P4::SeekKey(collations) => Ok(collations.clone()),
+        P4::SeekKey(collations) => Ok(std::borrow::Cow::Borrowed(collations)),
         P4::Int(n) => {
             let n = usize::try_from(*n).map_err(|_| ExecError::MalformedInstruction {
                 opcode,
                 reason: format!("negative key column count {n}"),
             })?;
-            Ok(vec![Collation::Binary; n])
+            Ok(std::borrow::Cow::Owned(vec![Collation::Binary; n]))
         }
         other => Err(ExecError::MalformedInstruction {
             opcode,
@@ -1156,18 +1168,27 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             })?;
     let matched = match &found {
         Some(row) => {
-            let key = decode_record(&row.payload, encoding).map_err(|e| {
-                ExecError::MalformedInstruction {
+            // #591: only the probe-length prefix is ever compared, and
+            // `record_column_count` (header-only, no value decoding) is
+            // enough to know whether a trailing rowid column exists —
+            // no need to decode the whole record via `decode_record`.
+            let total_columns =
+                record_column_count(&row.payload).map_err(|e| ExecError::MalformedInstruction {
                     opcode: "SeekIndexEq",
                     reason: e.to_string(),
-                }
-            })?;
-            key.len() > probe.len()
-                && key
-                    .iter()
+                })?;
+            total_columns > probe.len() && {
+                let key = decode_record_upto(&row.payload, probe.len(), encoding).map_err(|e| {
+                    ExecError::MalformedInstruction {
+                        opcode: "SeekIndexEq",
+                        reason: e.to_string(),
+                    }
+                })?;
+                key.iter()
                     .zip(probe.iter())
                     .zip(collations.iter())
                     .all(|((k, p), &collation)| compare(k, p, collation).is_eq())
+            }
         }
         None => false,
     };
@@ -1185,13 +1206,22 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
 /// referenced table's rowid) into an `i64` rowid, for [`idx_rowid`] and
 /// the `IdxRewind`/`IdxLast`/`IdxNext`/`IdxPrev` scan opcodes' shared
 /// "have we got a row, and what's its rowid" question.
+///
+/// Decodes only the trailing column via `header_cache` (#591) rather than
+/// the whole record — the header parse is cheap (no value decoding), and
+/// only the last column's `Value` (plus one Rc for its allocation, if
+/// any) ever needs to be built.
 fn index_read_current_rowid(
-    vm: &Vm,
+    vm: &mut Vm,
     slot: i32,
     opcode: &'static str,
 ) -> Result<Option<i64>, ExecError> {
-    let current = match vm.cursor(slot)? {
-        CursorSlot::IndexRead(state) => &state.current,
+    // Type-checked (and short-circuited on "no current row") before
+    // touching `vm.db()` — a cursor-type mismatch or an unpositioned
+    // cursor must surface the same way whether or not a database is
+    // attached to this `Vm`.
+    match vm.cursor(slot)? {
+        CursorSlot::IndexRead(_) => {}
         other => {
             return Err(ExecError::CursorTypeMismatch {
                 opcode,
@@ -1200,18 +1230,32 @@ fn index_read_current_rowid(
                 expected: "index read cursor",
             })
         }
+    }
+    let encoding = vm.db()?.header.text_encoding;
+    let state = match vm.cursor_mut(slot)? {
+        CursorSlot::IndexRead(state) => state,
+        _ => unreachable!("cursor type already checked above"),
     };
-    let Some(row) = current else {
+    let Some(row) = &state.current else {
         return Ok(None);
     };
-    let encoding = vm.db()?.header.text_encoding;
-    let key =
-        decode_record(&row.payload, encoding).map_err(|e| ExecError::MalformedInstruction {
+    state
+        .header_cache
+        .ensure(&row.payload)
+        .map_err(|e| ExecError::MalformedInstruction {
             opcode,
             reason: e.to_string(),
         })?;
-    match key.last() {
-        Some(Value::Integer(rowid)) => Ok(Some(*rowid)),
+    let last = state.header_cache.column_count().wrapping_sub(1);
+    let rowid = state
+        .header_cache
+        .column(&row.payload, last, encoding)
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode,
+            reason: e.to_string(),
+        })?;
+    match rowid {
+        Value::Integer(rowid) => Ok(Some(rowid)),
         other => Err(ExecError::MalformedInstruction {
             opcode,
             reason: format!("index row's trailing rowid column is {other:?}"),
@@ -1701,7 +1745,7 @@ pub fn auto_index_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecEr
     let state = vm.auto_index_mut(instr.p1, "AutoIndexRowid")?;
     let (key, pos) = state
         .current
-        .clone()
+        .as_ref()
         .ok_or_else(|| ExecError::MalformedInstruction {
             opcode: "AutoIndexRowid",
             reason: "no current row on this automatic-index cursor (AutoIndexSeek missed, or no \
@@ -1710,8 +1754,8 @@ pub fn auto_index_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecEr
         })?;
     let rowid = state
         .entries
-        .get(&key)
-        .and_then(|rowids| rowids.get(pos))
+        .get(key)
+        .and_then(|rowids| rowids.get(*pos))
         .copied()
         .ok_or_else(|| ExecError::MalformedInstruction {
             opcode: "AutoIndexRowid",
@@ -1727,7 +1771,11 @@ pub fn auto_index_rowid(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecEr
 /// visited. Mirrors `IdxNext`'s "jump on found" shape.
 pub fn auto_index_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let state = vm.auto_index_mut(instr.p1, "AutoIndexNext")?;
-    let Some((key, pos)) = state.current.clone() else {
+    // #591: `take` moves the already-owned key `Vec<u8>` out of `current`
+    // instead of cloning it — `current` is unconditionally overwritten
+    // (to `Some((key, next_pos))` or `None`) before this function returns,
+    // so nothing is lost by taking it up front.
+    let Some((key, pos)) = state.current.take() else {
         return Ok(Step::Next);
     };
     let len = state.entries.get(&key).map_or(0, Vec::len);
@@ -1736,7 +1784,6 @@ pub fn auto_index_next(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecErr
         state.current = Some((key, next_pos));
         Ok(Step::Jump(to_pc(instr.p2)))
     } else {
-        state.current = None;
         Ok(Step::Next)
     }
 }

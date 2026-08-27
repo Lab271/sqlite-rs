@@ -125,6 +125,14 @@ pub fn decode_column(
     }
 }
 
+/// Column count of `payload`'s record — walks only the header (no value
+/// decoding), for callers that need to know how many columns a record has
+/// (e.g. "does this index row have a trailing rowid past the key prefix")
+/// without paying to decode any of them.
+pub fn record_column_count(payload: &[u8]) -> Result<usize, RecordError> {
+    Ok(parse_header(payload)?.len())
+}
+
 /// Decodes only the first `max_columns` columns of a record's payload —
 /// the header entries (serial types) for every column are walked to
 /// compute body offsets, but only the requested prefix's bodies are

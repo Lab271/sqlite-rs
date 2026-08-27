@@ -328,10 +328,6 @@ pub struct Vm {
     /// payload's allocation across every row a statement emits, instead
     /// of a fresh `Vec<u8>` per `MakeRecord` execution.
     record_scratch: Vec<u8>,
-    /// Reused `Vec<Value>` buffer for `ResultRow` (#465): amortizes the
-    /// output row's allocation across every row a statement emits,
-    /// instead of a fresh `Vec::with_capacity` per `ResultRow` execution.
-    row_scratch: Vec<Value>,
 }
 
 impl Default for Vm {
@@ -347,7 +343,6 @@ impl Default for Vm {
             params: Vec::new(),
             autocommit: true,
             record_scratch: Vec::new(),
-            row_scratch: Vec::new(),
         }
     }
 }
@@ -372,12 +367,6 @@ impl Vm {
     /// [`Vm::record_scratch`]'s field doc.
     pub(crate) fn record_scratch(&mut self) -> &mut Vec<u8> {
         &mut self.record_scratch
-    }
-
-    /// Reused scratch buffer for `ResultRow` (#465) — see
-    /// [`Vm::row_scratch`]'s field doc.
-    pub(crate) fn row_scratch(&mut self) -> &mut Vec<Value> {
-        &mut self.row_scratch
     }
 
     /// Builds a `Vm` that can service `OpenRead` against `source` (page
@@ -461,6 +450,7 @@ impl Vm {
     /// Validates a `[p1, p1+count)` register range's *count* operand
     /// (before any allocation sized by it), returning `count` as a
     /// `usize` on success.
+    #[inline]
     pub(crate) fn bounded_count(opcode: &'static str, count: i32) -> Result<usize, ExecError> {
         if !(0..=MAX_REGISTERS as i32).contains(&count) {
             return Err(ExecError::RegisterRangeTooLarge { opcode, count });
@@ -472,6 +462,7 @@ impl Vm {
     /// Reads register `reg`. Registers not yet written read as NULL —
     /// a register file has no implicit-clearing surprises to guard
     /// against (Requirement 2), only never-written cells.
+    #[inline]
     pub fn register(&self, reg: i32) -> Result<&Value, ExecError> {
         let idx = Self::index("register read", reg)?;
         Ok(self.registers.get(idx).unwrap_or(&Value::Null))
@@ -479,6 +470,7 @@ impl Vm {
 
     /// Writes register `reg`, growing the register file with NULL
     /// filler as needed.
+    #[inline]
     pub fn set_register(&mut self, reg: i32, value: Value) -> Result<(), ExecError> {
         let idx = Self::index("register write", reg)?;
         if idx >= self.registers.len() {
@@ -512,6 +504,7 @@ impl Vm {
     /// `codegen::select::aggregate::compile_grouped_scan`). No codegen
     /// path emits anything that reads a `ResultRow`-projected register
     /// again before that loop's next iteration reloads it.
+    #[inline]
     pub(crate) fn take_register(&mut self, reg: i32) -> Result<Value, ExecError> {
         let idx = Self::index("register read", reg)?;
         Ok(match self.registers.get_mut(idx) {

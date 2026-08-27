@@ -150,6 +150,28 @@ fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Same rendering as [`format_query_value`], appended onto a
+/// caller-supplied, cleared `buf` instead of returning a fresh `Vec<u8>`
+/// (#591) — lets a CLI row-rendering loop reuse one buffer across every
+/// cell/row of a result set instead of allocating per cell.
+pub fn write_query_value(buf: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => {}
+        Value::Integer(i) => buf.extend_from_slice(i.to_string().as_bytes()),
+        Value::Real(r) => buf.extend_from_slice(format_real(*r).as_bytes()),
+        Value::Text(s) => write_truncated_at_nul(buf, s.as_bytes()),
+        Value::Blob(b) => write_truncated_at_nul(buf, b),
+    }
+}
+
+fn write_truncated_at_nul(buf: &mut Vec<u8>, bytes: &[u8]) {
+    let bytes = match bytes.iter().position(|&b| b == 0) {
+        Some(i) => bytes.get(..i).unwrap_or(bytes),
+        None => bytes,
+    };
+    buf.extend_from_slice(bytes);
+}
+
 /// Renders a value for `-csv` mode (what `export` prints): empty string
 /// for NULL, and `sqlite3`'s own quoting rule — not plain RFC4180. See
 /// [`csv_char_forces_quote`] for the exact rule.
@@ -168,6 +190,20 @@ pub fn format_csv_value(v: &Value) -> String {
         Value::Real(r) => format_real(*r),
         Value::Text(s) => csv_quote(s),
         Value::Blob(b) => csv_quote(&format_blob(b)),
+    }
+}
+
+/// Same rendering as [`format_csv_value`], appended onto a caller-supplied,
+/// cleared `buf` instead of returning a fresh `String` (#591) — lets a CLI
+/// row-rendering loop reuse one buffer across every cell/row instead of
+/// allocating (plus a `Vec`+`join`) per row.
+pub fn write_csv_value(buf: &mut String, v: &Value) {
+    match v {
+        Value::Null => {}
+        Value::Integer(i) => buf.push_str(&i.to_string()),
+        Value::Real(r) => buf.push_str(&format_real(*r)),
+        Value::Text(s) => buf.push_str(&csv_quote(s)),
+        Value::Blob(b) => buf.push_str(&csv_quote(&format_blob(b))),
     }
 }
 
