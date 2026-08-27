@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Property-based coverage for the value-semantics kernel (spec 008,
 //! Requirements 1 and 5): affinity and numeric-coercion idempotence.
 //!

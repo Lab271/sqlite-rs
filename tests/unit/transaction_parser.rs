@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the V5 transaction-control parser: BEGIN/COMMIT/ROLLBACK
 //! (issue #356, spec 002-parser). Parsing only — codegen/execution of
 //! transactions is later V5 scope.

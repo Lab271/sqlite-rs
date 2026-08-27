@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Begin`/`Commit`/`Rollback` AST -> `Program` compilation (#360). Each
 //! compiles to a single control opcode, exactly like the DDL statements
 //! in the sibling `ddl` module: `Transaction` for `BEGIN`, `AutoCommit`

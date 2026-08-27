@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! In-memory `Vfs` implementation, for tests.
 
 use std::collections::HashMap;

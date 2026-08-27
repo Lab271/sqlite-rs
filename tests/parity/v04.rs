@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V04 parity: the relational core (#234's JOIN/subquery/GROUP BY/
 //! UNION ALL surface). Same five-dimension vocabulary and CLI-driven
 //! write/verify shape as `v03.rs`, adapted to a read-only multi-table

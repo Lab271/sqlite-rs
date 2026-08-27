@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end tests of the `sqlite-rs` **binary** (#55), as opposed to
 //! `dump_oracle_test.rs`'s library-level diff of the same rendering.
 //!

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! pomelo grammar for the V2 SELECT-core *slice* (spike 006, issue #57).
 //!
 //! Derived from `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`-tagged rules, and

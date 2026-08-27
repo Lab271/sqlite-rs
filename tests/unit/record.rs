@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Black-box tests of `sqlite_rs::record::*` — only public paths, exactly as
 //! an external consumer of the crate would see them. Note: `decode_serial_value`
 //! is intentionally not used here — it was demoted to `pub(crate)` as internal

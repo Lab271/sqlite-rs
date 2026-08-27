@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 mod level;
 
 use super::aggregate::{compile_joined_grouped_scan, select_has_aggregate};

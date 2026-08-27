@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! AST for the V2 SELECT-core slice plus the V3 DML/DDL slice (spec
 //! 002-parser Requirements 2-4), plus the V4 join slice (#237), the V4
 //! subquery-expression slice (#238), the V4 GROUP BY/HAVING slice

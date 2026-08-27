@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQLite database header (bytes 0-99 of the main database file).
 //!
 //! Page-1 trap: the 100-byte header occupies the start of page 1, but page

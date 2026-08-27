@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::super::join_access::{
     choose_auto_index_probe, choose_bloom_probe, choose_join_access, emit_join_row, JoinAccess,
 };

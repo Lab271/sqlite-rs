@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end oracle-diff tests for compound `SELECT` — `UNION ALL`
 //! (#240) and plain `UNION` (#377/#378) — via the `sqlite-rs` CLI's
 //! `exec`/`query` subcommands, mirroring `join_test.rs`'s

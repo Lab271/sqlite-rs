@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Parser-toolchain spike variant 003: LALRPOP (LR(1) generator, `.lalrpop` DSL,
 //! code-generated at build time by `build.rs`).
 

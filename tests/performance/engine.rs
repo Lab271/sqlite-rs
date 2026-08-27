@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Tier 1 (engine-to-engine) bench, per #111/#112: sqlite-rs vs libsqlite3
 //! via rusqlite, both in-process, prepared statements reused, output sunk
 //! into `black_box` (formatting excluded — see spec below).

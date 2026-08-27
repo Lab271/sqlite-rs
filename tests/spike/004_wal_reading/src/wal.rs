@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 // WAL frame reading — issue #7. Byte layout derived from SQLite's own
 // fileformat2.html (not documented anywhere in this repo's specs at the
 // time of writing; see findings.md).

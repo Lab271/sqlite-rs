@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal AST for the spike grammar subset (see
 //! `tests/spike/001_parser/grammar/sqlite-subset.ebnf`).
 //!

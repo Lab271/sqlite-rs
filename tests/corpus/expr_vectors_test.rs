@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spec 008 (value semantics, #77) scenario evidence: structural
 //! validation of the oracle-generated vectors under
 //! `tests/corpus/expr_vectors/`. These vectors are read by the VDBE

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Aggregate accumulator state for `AggStep`/`AggFinal` (spec 009,
 //! Requirement 12, #241). Mirrors `functions.rs`'s name-keyed registry
 //! shape, but an aggregate additionally threads a mutable [`AggState`]

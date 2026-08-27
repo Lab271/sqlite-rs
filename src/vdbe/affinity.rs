@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Type affinity: the five-way storage preference steered by a column's
 //! declared type (spec 008, Requirement 1;
 //! <https://www.sqlite.org/datatype3.html> §3.1).

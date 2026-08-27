@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Small helpers shared by every subcommand module: exit-code plumbing
 //! and the CSV row terminator convention.
 

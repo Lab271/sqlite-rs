@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! sqllogictest slice runner entry point. Run via `make test-sqllogictest`
 //! (`cargo test --test sqllogictest`) — kept separate from `make test`
 //! (same rationale as `corpus`/`parity`, see Cargo.toml): it shells out

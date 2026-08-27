@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #444 acceptance: covering-index scan and index-only `COUNT(*)`
 //! compile to `SeekIndexEq` + `Column` reads that never seek/decode
 //! the table row, and produce byte-for-byte the same output as the

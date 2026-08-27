@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #395 acceptance proof: a compiled SQL-level `BEGIN IMMEDIATE`/`BEGIN
 //! EXCLUSIVE` must visibly block a concurrent stock `sqlite3` writer at
 //! `BEGIN` time, not just at `COMMIT` — the same guarantee

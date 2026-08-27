@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Tab completion (#558): SQL keywords, dot-commands, and — when a
 //! live schema is supplied — table/column names.
 

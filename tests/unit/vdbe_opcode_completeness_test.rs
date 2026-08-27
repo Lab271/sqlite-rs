@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spec 009's opcode inventory vs. the harvested scope (#65, follow-up to
 //! #58/#87/#139). `tools/opcodes-v2.json` is the oracle-harvested 61-opcode
 //! set that pinned `Opcode`'s variants in the first place; this test is the

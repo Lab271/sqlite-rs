@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Cost model (#461, spec 011/Req 3): [`Stats`] decodes `sqlite_stat1`
 //! rows for one table into an in-memory shape, and [`estimate_scan_cost`]/
 //! [`estimate_index_cost`] turn those stats into a [`PlanCost`].

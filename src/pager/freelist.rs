@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Freelist trunk/leaf page parsing (SQLite file format, "Freelist
 //! Pages"), used by [`crate::pager::Pager::allocate_page`] and
 //! [`crate::pager::Pager::deallocate_page`]. Freelist pages are never part

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQL tokenizer (spec 002-parser Requirement 1).
 //!
 //! Converts SQL source text into a stream of [`Token`]s, each carrying

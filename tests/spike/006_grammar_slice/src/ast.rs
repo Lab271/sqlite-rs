@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! AST for the V2 SELECT-core slice (spike 006, issue #57).
 //!
 //! Scoped to `.openspec/grammar/sqlite.ebnf`'s `(* V2 *)`-tagged rules only:

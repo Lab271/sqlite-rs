@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the V3 DELETE parser (issue #191, spec 002-parser).
 
 #![allow(

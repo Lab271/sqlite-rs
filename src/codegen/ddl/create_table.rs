@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `CreateTable` AST -> `Program` compilation (#215). A single
 //! `Opcode::CreateTable` instruction does the entire job procedurally at
 //! exec time (allocate the root page, register the row in

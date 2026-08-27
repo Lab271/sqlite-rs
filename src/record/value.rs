@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use std::rc::Rc;
 
 /// A single decoded column value, per SQLite's dynamic type system.

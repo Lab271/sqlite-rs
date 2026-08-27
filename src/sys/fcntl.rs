@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Vendored `fcntl(F_SETLK`/`F_GETLK)` byte-range locking FFI (#563) —
 //! replaces `nix::fcntl`. SQLite's journal-mode lock ladder needs POSIX
 //! record locks; there is no pure-Rust or `std` equivalent, so the

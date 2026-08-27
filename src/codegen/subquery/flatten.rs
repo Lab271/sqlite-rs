@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `FROM`-subquery flattening (#566): merges a simple `FROM`-subquery
 //! directly into the enclosing query instead of materializing it, so
 //! base-table indexes stay visible to the planner. Runs once, right

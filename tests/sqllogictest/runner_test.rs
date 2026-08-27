@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Runs the vendored sqllogictest corpus (#70) — `select1.test`,
 //! `select2.test`, and every `evidence/*.test` under
 //! `tests/corpus/sql/vendor/sqllogictest/test/` — through

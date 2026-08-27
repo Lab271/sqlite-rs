@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The page-access layer between the [`Vfs`] and the b-tree cursor. See
 //! `.openspec/specs/007-pager/spec.md` for the requirements this
 //! implements.

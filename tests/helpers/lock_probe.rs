@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Test-only helper binary: a genuine second OS process that takes a
 //! `fcntl` byte-range lock, used by `src/vfs/lock.rs` and `src/vfs/shm.rs`'s
 //! tests (via `src/vfs/test_lock_probe.rs`) to observe lock contention that

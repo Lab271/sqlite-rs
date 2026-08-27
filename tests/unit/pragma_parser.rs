@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the PRAGMA parser carve-outs: `journal_mode` (#388),
 //! `integrity_check`/`quick_check` (#540, #541). Any other pragma name
 //! or value is `Unsupported`, not a hard parse error -- mirrors `WITH

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 // Spike #4 / #002 — de-risk Tier 0 READ CORE: walk a real SQLite file from raw
 // bytes to typed row values. Throwaway, single-file experiment (see
 // tests/spike/002_file_reading/findings.md for the write-up). Deliberately

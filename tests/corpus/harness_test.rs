@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Requirement 4 scenarios: every fixture reports a real outcome (not
 //! the old "always Skipped" stub) — the `invalid` family is expected
 //! failures, everything else must decode cleanly.

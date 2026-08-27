@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Update` AST -> `Program` compilation (#210, index maintenance #196,
 //! constraint re-validation #218). Mirrors `delete.rs`'s scan shape,
 //! but per matched row builds the new record from a mix of assigned

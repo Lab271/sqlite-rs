@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Cursor opcodes (spec 009, Requirement 4): real table cursors over
 //! V1's `TableCursor` (`OpenRead`/`Rewind`/`Last`/`Next`/`Column`/
 //! `Rowid`/`SeekRowid`/`NullRow`), an in-memory ephemeral index for

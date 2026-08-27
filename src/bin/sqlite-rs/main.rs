@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `sqlite-rs` CLI: `dump`, `export`, and `query` subcommands (issues
 //! #37, #95 — the V1 and V2 acceptance gates). Data goes to stdout
 //! (`dump`, `query`) or disk (`export`); anything gracefully skipped

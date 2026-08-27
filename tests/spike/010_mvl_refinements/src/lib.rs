@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike 010: `rust-refine` (mvl-lang/mvl-rust) proof-of-concept, standalone.
 //!
 //! Issue #371. See `findings.md` in this directory for the full narrative

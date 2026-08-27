@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Index b-tree delete (write path): entry delete plus underflow
 //! handling. Mirrors `delete.rs` (table delete) in spirit but not in
 //! mechanism — `insert.rs`'s module doc explains why: index b-tree

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Runs one SQL case against both engines and compares it across five
 //! dimensions. See issue #72 for the rationale behind each dimension's
 //! gating.

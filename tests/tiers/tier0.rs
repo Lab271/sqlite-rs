@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Tier 0 — READ CORE, the never-droppable contract (spec 001-architecture
 //! Requirement 4, `plan.md` Core Definition). Every test here must be
 //! green from day one, forever: this file must never carry `#[ignore]`

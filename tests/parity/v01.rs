@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V1 parity: "Open any .sqlite file, extract the data." Restates
 //! `tests/corpus/dump_oracle_test.rs`'s existing dump/schema comparisons
 //! as *mirror* claims under this suite's five-dimension vocabulary —

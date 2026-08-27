@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Insert` AST -> `Program` compilation (#195): builds on #194's write
 //! opcodes (`NewRowid`/`MakeRecord`/`Insert`/`Delete`) plus constraint
 //! checks (NOT NULL, PRIMARY KEY/rowid, CHECK, DEFAULT). Table

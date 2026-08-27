@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Non-recursive `WITH`-clause materialization (#376). Rather than
 //! teaching codegen a second table-materialization path, this rewrites
 //! a `WITH` clause away *before* codegen ever sees it: every `FROM`/

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end oracle-diff tests for `CREATE VIEW`/`DROP VIEW` storage
 //! and query expansion (#380) — via the `sqlite-rs` CLI's `exec`/`query`
 //! subcommands, mirroring `cte_test.rs`'s scratch-db-per-test shape. A

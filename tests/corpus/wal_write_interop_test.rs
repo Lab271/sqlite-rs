@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #386/#387 acceptance tests for the V6.2 WAL write path: crash-recovery
 //! behavior of our own [`WalWriter`]-produced frames, and the "vice versa"
 //! oracle-parity direction (`journal_interop_test.rs`'s pattern applied to

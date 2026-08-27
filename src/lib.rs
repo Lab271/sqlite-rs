@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! A binary-compatible Rust replication of SQLite: read (and, for WAL,
 //! write) the same on-disk file format and SQL dialect as the C library,
 //! targeting a memory-safe, extensible SQLite rather than a new engine.

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #464 (spec 011): an in-memory Bloom filter, addressed by `Vm`'s
 //! `filters` slot table (a disjoint address space from `cursors`,
 //! same shape as `agg_contexts` — see `Vm::filter`/`Vm::filter_add`)

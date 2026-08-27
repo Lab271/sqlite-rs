@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #296 acceptance: `SELECT ... ORDER BY <indexed col> [DESC] LIMIT n`
 //! compiles to an index-ordered scan (`IdxRewind`/`IdxNext` or
 //! `IdxLast`/`IdxPrev` + `IdxRowid` + `SeekRowid`) instead of the

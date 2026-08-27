@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the V2 SELECT-core parser (spec 002-parser
 //! Requirements 2-4).
 

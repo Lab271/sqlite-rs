@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `CREATE VIEW` query expansion (#380) — the catalog counterpart to
 //! [`super::cte::expand_with_clause`]: every `FROM`/`JOIN` table
 //! reference naming a catalog view becomes a `TableRefKind::Subquery`

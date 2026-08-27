@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Instruction format and the linear bytecode `Program` (spec 009,
 //! Requirement 1). `Opcode` enumerates the full frozen V2 opcode set
 //! (`tools/opcodes-v2.json`, 65 opcodes, oracle 3.53.4, #87/#139/#142/#137) —

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Raw POSIX fcntl byte-range locking, mirroring SQLite's os_unix.c exactly.
 //!
 //! Byte offsets verified against the real SQLite source (github.com/sqlite/sqlite,

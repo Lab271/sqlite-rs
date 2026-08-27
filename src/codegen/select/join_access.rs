@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::joins::LevelPlan;
 use super::limit_scan::{
     compile_limit_setup, emit_limit_guard, emit_offset_guard, is_rowid_reference,

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `sqlite_master` (and `sqlite_sequence`) write-path helpers for DDL
 //! execution: schema cookie bump, master-row insert/delete, and
 //! AUTOINCREMENT sequence tracking (#193). Lives inside `src/btree/`

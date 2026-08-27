@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #500 acceptance: a column/index-column declared `COLLATE NOCASE` (or
 //! `RTRIM`) is consulted by comparisons that don't spell out an explicit
 //! `COLLATE` in the query text — `SeekIndexEq`, the #450/#492

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Confirms the `mvl::ensures`/`mvl::requires` `assert!` injections
 //! actually fire correctly at runtime, independent of what `cargo mvl
 //! prove` reports about their static-proof `layer`. See `../findings.md`.

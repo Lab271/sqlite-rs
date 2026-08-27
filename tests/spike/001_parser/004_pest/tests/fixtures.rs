@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Fixture test for the pest spike variant: every statement in ../fixtures/valid.sql
 //! must parse, every statement in ../fixtures/invalid.sql must fail (never panic).
 

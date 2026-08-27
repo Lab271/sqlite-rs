@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V07 parity: correctness of the V7.2 planner/performance work
 //! (`.openspec/plan.md` epic #421, phase V7.2) — join ordering
 //! heuristics (#462/#470), skip-scan for non-leading index columns

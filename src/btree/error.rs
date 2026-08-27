@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use crate::pager::PagerError;
 use crate::record::RecordError;
 use crate::vfs::PageError;

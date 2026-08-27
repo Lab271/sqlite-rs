@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `ANALYZE` end-to-end acceptance (#461, spec 011): written via the CLI's
 //! `exec` subcommand against a scratch database, verified by reading
 //! `sqlite_stat1` back through `query` — same scratch-file-plus-CLI

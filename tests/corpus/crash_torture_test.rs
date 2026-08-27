@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #361 — V5's acceptance gate: repeated `kill -9` mid-write-loop must
 //! never leave the database in a state a real `sqlite3` considers
 //! corrupt. `write_loop_probe` (a genuine second OS process, like

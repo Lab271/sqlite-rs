@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #207 acceptance: `compile_insert` enforces UNIQUE constraints on
 //! non-rowid columns via the new `Opcode::NoConflict` real-index
 //! seek+branch primitive (`src/vdbe/cursor.rs::no_conflict`), honoring

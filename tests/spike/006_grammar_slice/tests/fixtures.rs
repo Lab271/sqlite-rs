@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use grammar_slice_spike::{Outcome, parse, split_statements};
 
 fn load(name: &str) -> String {

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The V2 scalar function set (spec 008, Requirement 6): pure
 //! `fn(&[Value]) -> Result<Value, FunctionError>` implementations plus a
 //! name+arity registry, ready for phase 3's `Function` opcode. Mirrors

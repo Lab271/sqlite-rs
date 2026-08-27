@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #360 acceptance proof: SQL-level `BEGIN`/`COMMIT`/`ROLLBACK` must
 //! actually gate whether writes persist, matching stock `sqlite3`'s
 //! behavior byte-for-byte at the row level. Before this ticket,

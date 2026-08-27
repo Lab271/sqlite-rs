@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Hand-rolled tokenizer for the V2 SELECT-core slice.
 //!
 //! Adapted from `tests/spike/001_parser/002_pomelo/src/tokenizer.rs`, trimmed

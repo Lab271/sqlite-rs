@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Unix `Vfs` implementation, backed by `std::fs`.
 
 use std::cell::RefCell;

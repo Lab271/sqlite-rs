@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Property-based tokenize/print roundtrip test for `src/parser/tokenizer.rs`.
 //!
 //! Lives outside `src/` for the same reason as `record_proptest.rs`:

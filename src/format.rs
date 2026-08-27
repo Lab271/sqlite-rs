@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQLite shell-parity value rendering: `dump`'s `.dump`-quote()-style
 //! output, `export`'s `-csv` mode, and `query`'s `-list`-mode parity
 //! (`format_query_value`). See `.openspec/specs/003-file-format`'s

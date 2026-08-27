@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Property-based tests fuzzing raw b-tree page bytes through
 //! `TableCursor` (issue #179).
 //!

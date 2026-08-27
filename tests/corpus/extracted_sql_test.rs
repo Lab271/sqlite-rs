@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Ratchets sqlite-rs's tokenizer and parser against the extracted external
 //! SQL corpus — issue #70, follow-up to #2.
 //!

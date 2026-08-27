@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Arithmetic opcodes (spec 009, Requirement 6): `Add`, `Subtract`,
 //! `Multiply`, `Divide`, `Remainder`, `BitAnd`, `BitOr`, `ShiftLeft`,
 //! `ShiftRight`, `Concat`, plus the unary `Not`/`BitNot`. Each reads its

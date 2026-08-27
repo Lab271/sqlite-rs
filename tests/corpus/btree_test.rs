@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Requirement 1/2 scenarios (spec 006-btree): full-table scans of the
 //! `btrees/` fixture family via the real corpus path (`oracle::corpus_dir`).
 //! Byte-level correctness (row content, overflow-chain SHA-256 parity) is

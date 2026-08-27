@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #574 acceptance: `SELECT ... ORDER BY <prefix cols>, <suffix cols>`
 //! where an index satisfies a strict *prefix* of the requested order
 //! (but not all of it) compiles to a per-prefix-group sort (walk the

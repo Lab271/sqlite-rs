@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal AST for the spike grammar subset (tests/spike/001_parser/grammar/sqlite-subset.ebnf).
 //!
 //! Deliberately smaller than the sketch in `.openspec/specs/002-parser/spec.md`: just

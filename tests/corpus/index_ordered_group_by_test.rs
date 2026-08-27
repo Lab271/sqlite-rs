@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #310 acceptance: an explicit `GROUP BY <indexed col(s)>` with no
 //! `WHERE` clause compiles to a direct index-ordered walk (`IdxRewind`/
 //! `IdxNext` + `IdxRowid` + `SeekRowid`) instead of

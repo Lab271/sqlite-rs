@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Raw-mode terminal handling and ANSI escape helpers (#558). Raw mode
 //! disables line buffering/canonical processing so the line editor sees
 //! every keypress (including arrows, which arrive as multi-byte escape

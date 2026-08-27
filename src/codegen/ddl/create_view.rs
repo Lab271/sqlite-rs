@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `CreateView` AST -> `Program` compilation (#380). Mirrors
 //! `create_table.rs`'s single `Opcode::CreateView` shape exactly, minus
 //! the b-tree root-page allocation `CreateTable` does — a view has no

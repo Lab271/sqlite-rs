@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V02 value-block parity mirror (issue #72): acceptance and output
 //! dimensions for the single-table `SELECT` surface `sqlite-rs query`
 //! compiles and executes (V2 phase 3C/#91 + phase 4A/#95). Schema and

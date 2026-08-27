@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Fixture conformance test for the pomelo spike variant.
 //!
 //! Reads the shared fixtures from `tests/spike/001_parser/fixtures/`:

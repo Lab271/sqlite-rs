@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The parser stack the lemon-rs driver template (`lempar.rs`) expects.
 //!
 //! The template hard-codes `use crate::parser::stack::Stack;` and drives it with

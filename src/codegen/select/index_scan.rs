@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard, LimitState};
 use super::order_by::{OrderByPlan, OrderByTarget};
 use super::projection::{compile_row_values, emit_row_via_sink, ResultColumnPlan};

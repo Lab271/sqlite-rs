@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Hand-rolled tokenizer for the spike SQL subset.
 //!
 //! Lemon only generates the parser; the lexer is always the grammar author's

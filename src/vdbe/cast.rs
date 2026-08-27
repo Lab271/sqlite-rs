@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `CAST` value conversion (spec 008, its own design study distinct from
 //! column-affinity coercion — #142): SQLite's `sqlite3VdbeMemCast`.
 //! Unlike [`crate::vdbe::affinity::apply_affinity`] (which only converts

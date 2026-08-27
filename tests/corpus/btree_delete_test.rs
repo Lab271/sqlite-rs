@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #169 acceptance: table b-tree delete (cell delete, page merge/collapse
 //! on underflow) must produce files stock `sqlite3` opens,
 //! `PRAGMA integrity_check`s cleanly, and reads back identically. Follows

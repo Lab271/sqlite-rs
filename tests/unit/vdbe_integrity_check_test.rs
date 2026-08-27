@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! End-to-end acceptance for `PRAGMA integrity_check`/`quick_check`
 //! (#540, #541): builds a small database purely through this crate's
 //! own write path (`CREATE TABLE`/`CREATE INDEX`/`INSERT`), then runs

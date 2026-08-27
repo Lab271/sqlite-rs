@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQL codegen: compiles a parsed [`crate::parser::ast::Select`] into a
 //! [`crate::vdbe::Program`] (spec 009, Requirements 7, 10, 11 — the
 //! convergence ticket #91, needing #89's VDBE core and #90's cursor/

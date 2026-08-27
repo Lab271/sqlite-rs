@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `PRAGMA integrity_check`/`quick_check` (#540, #541): walks every table
 //! and index b-tree plus the freelist chain, reporting structural
 //! problems in the same textual shape stock `sqlite3` uses -- a single

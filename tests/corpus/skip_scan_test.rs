@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #485 acceptance: `SELECT ... WHERE <non-leading indexed col> = ?`
 //! against a composite index compiles to a skip-scan (`IdxRewind`/
 //! `IdxNext` walking the whole index, `IdxRowid` + `SeekRowid` fetching

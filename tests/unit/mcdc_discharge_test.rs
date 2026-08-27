@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Validates that every `mcdc__<id>__vN_<description>` tagged test
 //! (#52, #368) still names a real obligation — the failure mode this
 //! guards against is silent: a code edit shifts a decision's line

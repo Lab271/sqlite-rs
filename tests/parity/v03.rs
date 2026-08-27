@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! V03 parity: the write path (#161's INSERT/UPDATE/DELETE +
 //! CREATE/DROP TABLE/INDEX surface, exposed via the `sqlite-rs exec`
 //! CLI subcommand, #215). Same five-dimension vocabulary as `v01.rs`/

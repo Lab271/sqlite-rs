@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! The three-way SELECT-core parse outcome (spec 002-parser
 //! Requirement 4), per spike 006 (#57)'s verdict: `sqlite3` only ever
 //! accepts or rejects, but sqlite-rs's V2 slice additionally needs to

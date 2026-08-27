@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Sorter opcodes (spec 009, Requirement 9): ORDER BY as its own
 //! in-memory opcode family, distinct from cursor scanning. Every
 //! candidate row is buffered via `SorterInsert` during an initial scan

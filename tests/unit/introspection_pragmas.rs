@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! CLI-surface tests for the 9 read-only introspection pragmas (#489):

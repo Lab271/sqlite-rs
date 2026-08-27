@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Control-flow opcodes (spec 009, Requirement 3): unconditional jump,
 //! one-shot guarding, subroutine call/return, NULL-testing conditional
 //! jumps, and the LIMIT/OFFSET counter family. Pure control flow — no

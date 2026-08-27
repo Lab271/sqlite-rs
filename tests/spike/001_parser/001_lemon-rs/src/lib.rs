@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! sqlite-rs parser spike, variant 001: **lemon-rs**.
 //!
 //! The SQL subset from `tests/spike/001_parser/grammar/sqlite-subset.ebnf`

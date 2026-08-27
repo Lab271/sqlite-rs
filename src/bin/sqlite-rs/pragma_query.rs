@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Read-only, result-set-producing introspection `PRAGMA`s (#489):
 //! `table_info`, `table_list`, `index_list`, `index_info`,
 //! `database_list`, `schema_version`, `user_version`, `page_size`,

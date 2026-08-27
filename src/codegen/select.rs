@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `Select` AST -> `Program` compilation (spec 009, Requirement 11's
 //! surrounding statement shape): `Init -> OpenRead -> Rewind -> [WHERE
 //! test, result columns, ResultRow] -> Next -> Halt`, with ORDER BY

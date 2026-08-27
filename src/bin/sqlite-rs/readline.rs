@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Hand-rolled line editor (#558), replacing `rustyline` (#551) so the
 //! CLI binary depends on nothing but `sqlite_rs::sys` (vendored terminal
 //! FFI, #563). Public surface mirrors what

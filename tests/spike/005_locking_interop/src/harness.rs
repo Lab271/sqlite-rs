@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Helpers for driving a real, stock `sqlite3` CLI process as the "other side"
 //! of each locking experiment.
 

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #172 cross-compat proof, the "vice versa" half: a rollback journal
 //! *we* write must be recoverable by a real `sqlite3`, not just the
 //! other way around (`tests/tiers/tier0.rs::t0_hot_journal_recovers_committed_state`

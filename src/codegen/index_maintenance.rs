@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Secondary-index maintenance shared by `INSERT`/`DELETE`/`UPDATE`
 //! codegen (#196): open a write cursor per index alongside the table
 //! cursor, and emit the `IdxInsert`/`IdxDelete` pair for a row's index

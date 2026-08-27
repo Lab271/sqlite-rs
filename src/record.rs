@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! SQLite record format decoding: varints, serial types, and the record
 //! header walk. Pure computation, no I/O — the b-tree layer hands this
 //! module raw payload bytes; this module never reads a page itself.

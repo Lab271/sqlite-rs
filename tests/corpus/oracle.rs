@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Pinned-oracle constants, plus the shared helpers for invoking a live
 //! read-only `sqlite3` as a differential oracle.
 //!

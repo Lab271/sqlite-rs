@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Enforces spec 001-architecture Requirement 1 (Layer Isolation), both
 //! scenarios:
 //! - "B-tree does not know SQL": Tier 0 core modules (schema, btree,

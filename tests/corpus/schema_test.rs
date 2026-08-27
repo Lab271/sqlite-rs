@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spec 002-parser Requirement 5 scenarios: `read_schema` integrates
 //! correctly through the corpus harness's own fixture-path resolution.
 //! Byte-level DDL-parsing correctness (column extraction, WITHOUT

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::super::join_access::{
     compile_join_level_for_sort, joined_column_offset, resolve_scope_column, JoinOrderPlan,
 };

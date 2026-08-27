@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 use super::*;
 /// Where an ORDER BY term's sort key comes from: a raw table column
 /// (known schema index, always present in the sorter's row tuple), or

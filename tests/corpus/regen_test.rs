@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Requirement 2, "Regeneration round-trip" scenario. Runs entirely in
 //! scratch directories via `FIXTURES_DIR` — never touches the committed
 //! corpus. Skips (prints and returns) when the pinned oracle isn't

@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `exec <file> "<SQL>"`: runs one or more `;`-separated statements
 //! (INSERT/UPDATE/DELETE/CREATE TABLE/DROP TABLE/CREATE INDEX/DROP
 //! INDEX/BEGIN/COMMIT/ROLLBACK) against a writable `Pager` (#215's

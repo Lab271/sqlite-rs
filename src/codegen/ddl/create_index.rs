@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! `CreateIndex` AST -> `Program` compilation (#215). A single
 //! `Opcode::CreateIndex` instruction allocates the index's root page,
 //! populates it with one entry per pre-existing row of the target table,
