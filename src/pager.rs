@@ -149,9 +149,14 @@ impl PageCache {
         self.tick
     }
 
-    fn get(&mut self, page_num: u32) -> Option<&Rc<[u8]>> {
+    fn get(&mut self, page_num: u32) -> Option<Rc<[u8]>> {
         let tick = self.next_tick();
-        self.entries.get_mut(&page_num)?.1 = tick;
+        // Single hash lookup per hit (#588): touch the tick and clone the
+        // `Rc` out of the same `get_mut` borrow, rather than re-looking
+        // the key up again after the heap push.
+        let entry = self.entries.get_mut(&page_num)?;
+        entry.1 = tick;
+        let page = Rc::clone(&entry.0);
         self.eviction_heap.push(Reverse((tick, page_num)));
         // A hit never evicts (only an over-capacity `insert` does), so a
         // hot working set that's touched over and over (e.g. `point_lookup`/
@@ -162,7 +167,7 @@ impl PageCache {
         if self.eviction_heap.len() > self.capacity.saturating_mul(4).max(16) {
             self.compact_eviction_heap();
         }
-        self.entries.get(&page_num).map(|entry| &entry.0)
+        Some(page)
     }
 
     fn compact_eviction_heap(&mut self) {
@@ -266,7 +271,11 @@ pub struct Pager {
     /// freshly recreated (`switch_journal_to_wal`) there.
     wal_shm: Option<AnyWalShm>,
     source: WritablePageSource,
-    wal_pages: HashMap<u32, Vec<u8>>,
+    /// Committed WAL overlay pages, shared as `Rc<[u8]>` so a read hit
+    /// hands out a refcount bump instead of copying `page_size` bytes
+    /// per read (#588) — these are immutable once committed, so sharing
+    /// is safe; a new commit replaces the entry wholesale.
+    wal_pages: HashMap<u32, Rc<[u8]>>,
     /// Pages fetched via [`Pager::get_page_mut`] since the last
     /// [`Pager::flush`], keyed by page number (#166). Also consulted by
     /// [`Pager::read_page`] ahead of `wal_pages`/`source` so an
@@ -707,7 +716,7 @@ impl Pager {
 
         for page_num in page_nums {
             if let Some(bytes) = self.dirty.remove(&page_num) {
-                self.wal_pages.insert(page_num, bytes);
+                self.wal_pages.insert(page_num, Rc::from(bytes));
             }
         }
         self.dirty.clear();
@@ -1072,12 +1081,12 @@ fn recover_hot_journal<V: Vfs>(
 /// Shared by [`Pager::read_page`] and [`Pager::get_page_mut`]: WAL overlay
 /// first, then the underlying file.
 fn read_page(
-    wal_pages: &HashMap<u32, Vec<u8>>,
+    wal_pages: &HashMap<u32, Rc<[u8]>>,
     source: &WritablePageSource,
     page_num: u32,
 ) -> Result<Vec<u8>, PageError> {
     if let Some(page) = wal_pages.get(&page_num) {
-        return Ok(page.clone());
+        return Ok(page.to_vec());
     }
     source.read_page(page_num).map(|bytes| bytes.to_vec())
 }
@@ -1091,7 +1100,7 @@ fn read_wal_pages<V: Vfs>(
     vfs: &V,
     path: &Path,
     page_size: u32,
-) -> Result<HashMap<u32, Vec<u8>>, PagerError> {
+) -> Result<HashMap<u32, Rc<[u8]>>, PagerError> {
     let wal_path = companion_path(path, "-wal");
     if !vfs.exists(&wal_path)? {
         return Ok(HashMap::new());
@@ -1123,7 +1132,10 @@ fn read_wal_pages<V: Vfs>(
     }
 
     let (pages, _committed_db_size) = wal::committed_pages(&header, &bytes);
-    Ok(pages)
+    Ok(pages
+        .into_iter()
+        .map(|(page_num, content)| (page_num, Rc::from(content)))
+        .collect())
 }
 
 impl PageSource for Pager {
@@ -1132,10 +1144,10 @@ impl PageSource for Pager {
             return Ok(Rc::from(page.as_slice()));
         }
         if let Some(page) = self.wal_pages.get(&page_num) {
-            return Ok(Rc::from(page.as_slice()));
+            return Ok(Rc::clone(page));
         }
         if let Some(cached) = self.page_cache.borrow_mut().get(page_num) {
-            return Ok(Rc::clone(cached));
+            return Ok(cached);
         }
         // #509: once the cache is full, every miss is also an eviction —
         // recycle the evicted page's buffer in place (`Rc::get_mut`,
@@ -1568,7 +1580,7 @@ mod tests {
         let mut cache = PageCache::new(2);
         assert_eq!(cache.get(1), None);
         cache.insert(1, (vec![1u8; 4]).into());
-        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8; 4])));
+        assert_eq!(cache.get(1), Some(Rc::from(vec![1u8; 4])));
     }
 
     #[test]
@@ -1577,12 +1589,12 @@ mod tests {
         cache.insert(1, (vec![1u8]).into());
         cache.insert(2, (vec![2u8]).into());
         // Touch page 1 so page 2 becomes the least-recently-used entry.
-        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8])));
+        assert_eq!(cache.get(1), Some(Rc::from(vec![1u8])));
         cache.insert(3, Rc::from(vec![3u8]));
 
-        assert_eq!(cache.get(1), Some(&Rc::from(vec![1u8])));
+        assert_eq!(cache.get(1), Some(Rc::from(vec![1u8])));
         assert_eq!(cache.get(2), None, "page 2 should have been evicted");
-        assert_eq!(cache.get(3), Some(&Rc::from(vec![3u8])));
+        assert_eq!(cache.get(3), Some(Rc::from(vec![3u8])));
     }
 
     #[test]

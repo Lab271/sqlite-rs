@@ -307,8 +307,13 @@ pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Ve
     let frame_size = FRAME_HEADER_LEN.saturating_add(header.page_size as usize);
     let mut offset = HEADER_LEN;
     let mut running = header.header_checksum;
-    let mut candidate: HashMap<u32, Vec<u8>> = HashMap::new();
-    let mut committed: HashMap<u32, Vec<u8>> = HashMap::new();
+    // One live page map plus an undo log of pre-images for every insert
+    // since the last commit frame — a commit just clears the log, and the
+    // unwind after the loop rolls back the uncommitted tail. This replaces
+    // cloning the whole map at every commit frame, which cost
+    // O(commits × pages × page_size) (#588).
+    let mut pages: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut undo: Vec<(u32, Option<Vec<u8>>)> = Vec::new();
     let mut committed_db_size = 0u32;
 
     while offset.saturating_add(frame_size) <= wal_bytes.len() {
@@ -351,17 +356,32 @@ pub fn committed_pages(header: &WalHeader, wal_bytes: &[u8]) -> (HashMap<u32, Ve
         }
         running = after_page;
 
-        candidate.insert(page_number, page_content.to_vec());
+        let pre_image = pages.insert(page_number, page_content.to_vec());
+        undo.push((page_number, pre_image));
 
         if db_size != 0 {
-            committed = candidate.clone();
+            undo.clear();
             committed_db_size = db_size;
         }
 
         offset = offset.saturating_add(frame_size);
     }
 
-    (committed, committed_db_size)
+    // Unwind the uncommitted tail in reverse so a page written more than
+    // once since the last commit frame ends up back at its committed
+    // content (or absent, if it was never committed at all).
+    for (page_number, pre_image) in undo.into_iter().rev() {
+        match pre_image {
+            Some(content) => {
+                pages.insert(page_number, content);
+            }
+            None => {
+                pages.remove(&page_number);
+            }
+        }
+    }
+
+    (pages, committed_db_size)
 }
 
 /// Walks every valid frame in `wal_bytes` (the same validity rules as
@@ -434,6 +454,10 @@ pub struct WalWriter {
     header: WalHeader,
     running: (u32, u32),
     offset: u64,
+    /// Reusable frame buffer for [`WalWriter::append_frame`] (#588): one
+    /// allocation per writer instead of one per frame, while keeping the
+    /// frame header + page as a single `write_at` (ADR-0026 unchanged).
+    scratch: Vec<u8>,
 }
 
 impl WalWriter {
@@ -446,6 +470,7 @@ impl WalWriter {
             running: header.header_checksum,
             offset: HEADER_LEN as u64,
             header,
+            scratch: Vec::new(),
         })
     }
 
@@ -476,13 +501,15 @@ impl WalWriter {
         frame_header[16..20].copy_from_slice(&after_page.0.to_be_bytes());
         frame_header[20..24].copy_from_slice(&after_page.1.to_be_bytes());
 
-        let mut buf = Vec::with_capacity(FRAME_HEADER_LEN.saturating_add(page_data.len()));
-        buf.extend_from_slice(&frame_header);
-        buf.extend_from_slice(page_data);
-        self.file.write_at(&buf, self.offset)?;
+        self.scratch.clear();
+        self.scratch
+            .reserve(FRAME_HEADER_LEN.saturating_add(page_data.len()));
+        self.scratch.extend_from_slice(&frame_header);
+        self.scratch.extend_from_slice(page_data);
+        self.file.write_at(&self.scratch, self.offset)?;
 
         self.running = after_page;
-        self.offset = self.offset.saturating_add(buf.len() as u64);
+        self.offset = self.offset.saturating_add(self.scratch.len() as u64);
         Ok(())
     }
 
@@ -522,6 +549,7 @@ impl WalWriter {
             header,
             running,
             offset,
+            scratch: Vec::new(),
         })
     }
 

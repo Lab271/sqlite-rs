@@ -25,8 +25,9 @@
 
 use crate::btree::{
     build_interior_cell, cell_bytes, collect_interior_entries, collect_leaf_cells, find_leaf_page,
-    local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell,
-    write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
+    local_payload_size, page1_header_start, put, read_page_type, scan_leaf_cells,
+    splice_insert_cell, write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE,
+    LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -132,38 +133,35 @@ fn insert_into_leaf(
     cell: Vec<u8>,
 ) -> Result<(), BtreeError> {
     let header_start = page1_header_start(leaf_page);
-    let buf = pager.get_page_mut(leaf_page)?.clone();
-    let mut cells = collect_leaf_cells(&buf, header_start, leaf_page, usable_size)?;
+    // Pre-scan without cloning the page or materializing any cell (#588):
+    // the fast path below only needs the insert position and a fit check,
+    // so the full `collect_leaf_cells` copy is deferred to the rebuild and
+    // split branches that actually move cells.
+    let buf = pager.get_page_mut(leaf_page)?;
+    let (insert_pos, num_cells, existing_bytes) =
+        scan_leaf_cells(buf, header_start, leaf_page, usable_size, rowid)?;
 
-    let mut insert_pos = cells.len();
-    for (i, (existing_rowid, _)) in cells.iter().enumerate() {
-        if *existing_rowid == rowid {
-            return Err(BtreeError::DuplicateRowid { rowid });
-        }
-        if *existing_rowid > rowid {
-            insert_pos = i;
-            break;
-        }
-    }
-    cells.insert(insert_pos, (rowid, cell.clone()));
-
-    let total_bytes: usize = cells.iter().map(|(_, c)| c.len()).sum();
     let header_len = 8;
     let needed = header_start
         .saturating_add(header_len)
-        .saturating_add(cells.len().saturating_mul(2))
-        .saturating_add(total_bytes);
+        .saturating_add(num_cells.saturating_add(1).saturating_mul(2))
+        .saturating_add(existing_bytes)
+        .saturating_add(cell.len());
     if needed <= page_len {
-        let buf = pager.get_page_mut(leaf_page)?;
         // Fast path: splice the new cell directly into the page (O(1)
         // relative to the other cells) when there's enough contiguous
         // free space. Falls back to a full rebuild — which also reclaims
         // any freeblock/fragmentation space — otherwise.
         if !splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)? {
+            let mut cells = collect_leaf_cells(buf, header_start, leaf_page, usable_size)?;
+            cells.insert(insert_pos, (rowid, cell));
             write_leaf_page(buf, header_start, leaf_page, &cell_bytes(cells))?;
         }
         return Ok(());
     }
+
+    let mut cells = collect_leaf_cells(buf, header_start, leaf_page, usable_size)?;
+    cells.insert(insert_pos, (rowid, cell));
 
     // Split: left keeps the lower half (including here if inserted there),
     // right (a freshly allocated page) takes the upper half.
@@ -220,8 +218,12 @@ fn insert_into_parent(
     };
 
     let header_start = page1_header_start(parent_page);
-    let buf = pager.get_page_mut(parent_page)?.clone();
-    let (mut entries, mut rightmost) = collect_interior_entries(&buf, header_start, parent_page)?;
+    // `collect_interior_entries` returns owned `(child, key)` pairs, so
+    // the page can be borrowed directly — no need to clone it (#588).
+    let (mut entries, mut rightmost) = {
+        let buf = pager.get_page_mut(parent_page)?;
+        collect_interior_entries(buf, header_start, parent_page)?
+    };
 
     match entries.iter().position(|(child, _)| *child == old_page) {
         Some(idx) => {

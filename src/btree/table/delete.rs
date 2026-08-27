@@ -28,10 +28,9 @@
 //! scratch write path does either.
 
 use crate::btree::{
-    build_interior_cell, cell_bytes, collect_interior_entries, collect_leaf_cells,
-    decode_cell_head, find_leaf_page, local_payload_size, page1_header_start, read_page_type,
-    read_u32, splice_delete_cell, write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE,
-    LEAF_TABLE,
+    build_interior_cell, cell_bytes, collect_interior_entries, collect_leaf_cells, find_leaf_cell,
+    find_leaf_page, page1_header_start, read_page_type, read_u32, splice_delete_cell,
+    write_interior_page, write_leaf_page, BtreeError, INTERIOR_TABLE, LEAF_TABLE,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -51,49 +50,29 @@ pub fn delete_row(
     let (ancestors, leaf_page) = find_leaf_page(pager, root_page, rowid)?;
 
     let header_start = page1_header_start(leaf_page);
-    let buf = pager.get_page_mut(leaf_page)?.clone();
-    let mut cells = collect_leaf_cells(&buf, header_start, leaf_page, usable_size)?;
+    // Zero-copy pre-scan (#588): the splice fast path only needs the
+    // cell's position and its overflow pointer, so the page is never
+    // cloned and no cell is materialized.
+    let buf = pager.get_page_mut(leaf_page)?;
+    let (pos, num_cells, overflow_page) =
+        find_leaf_cell(buf, header_start, leaf_page, usable_size, rowid)?
+            .ok_or(BtreeError::RowidNotFound { rowid })?;
 
-    let pos = cells
-        .iter()
-        .position(|(existing_rowid, _)| *existing_rowid == rowid)
-        .ok_or(BtreeError::RowidNotFound { rowid })?;
-    let removed_cell = &cells.get(pos).ok_or(BtreeError::RowidNotFound { rowid })?.1;
-    let overflow_page = cell_overflow_page(removed_cell, leaf_page, usable_size)?;
-
-    if cells.len() > 1 || ancestors.is_empty() {
+    if num_cells > 1 || ancestors.is_empty() {
         // Either the leaf still holds rows after this delete, or it's the
         // root itself (which can't be removed/collapsed — an empty root
         // leaf is a valid, empty table). Splice the one cell out in place
         // (O(1) relative to the page's other cells) rather than
         // collecting and rewriting every surviving cell.
-        let buf = pager.get_page_mut(leaf_page)?;
         splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, true)?;
         return free_overflow_chain(pager, overflow_page);
     }
 
-    cells.remove(pos);
-    let remaining = cell_bytes(cells);
-    let buf = pager.get_page_mut(leaf_page)?;
-    write_leaf_page(buf, header_start, leaf_page, &remaining)?;
+    // The page held exactly this one cell and has ancestors: it empties.
+    write_leaf_page(buf, header_start, leaf_page, &[])?;
     pager.deallocate_page(leaf_page)?;
     free_overflow_chain(pager, overflow_page)?;
     collapse_into_ancestors(pager, usable_size, root_page, &ancestors, leaf_page)
-}
-
-/// Returns the first overflow page referenced by a leaf cell (as produced
-/// by [`collect_leaf_cells`]), or `0` if the cell's payload fit entirely
-/// locally. `collect_leaf_cells` already trims each cell to exactly its
-/// local bytes plus (when present) the trailing 4-byte overflow pointer,
-/// so the pointer — when present — is always the cell's last 4 bytes.
-fn cell_overflow_page(cell: &[u8], page_num: u32, usable_size: u32) -> Result<u32, BtreeError> {
-    let (_, payload_len, tail_start) = decode_cell_head(cell, 0, page_num)?;
-    let local_size = local_payload_size(usable_size, payload_len) as usize;
-    if (local_size as u64) >= payload_len {
-        return Ok(0);
-    }
-    let ptr_start = tail_start.saturating_add(local_size);
-    read_u32(cell, ptr_start, page_num)
 }
 
 /// Walks an overflow chain starting at `first_page` (a no-op if it's `0`,
@@ -111,8 +90,11 @@ fn free_overflow_chain(pager: &mut Pager, first_page: u32) -> Result<(), BtreeEr
                 revisited_page: page_num,
             });
         }
-        let buf = pager.get_page_mut(page_num)?.clone();
-        let next = read_u32(&buf, 0, page_num)?;
+        // Only the 4-byte next-pointer is needed — never clone the page.
+        let next = {
+            let buf = pager.get_page_mut(page_num)?;
+            read_u32(buf, 0, page_num)?
+        };
         pager.deallocate_page(page_num)?;
         page_num = next;
     }
@@ -139,8 +121,10 @@ fn collapse_into_ancestors(
     };
 
     let header_start = page1_header_start(parent_page);
-    let buf = pager.get_page_mut(parent_page)?.clone();
-    let (mut entries, mut rightmost) = collect_interior_entries(&buf, header_start, parent_page)?;
+    let (mut entries, mut rightmost) = {
+        let buf = pager.get_page_mut(parent_page)?;
+        collect_interior_entries(buf, header_start, parent_page)?
+    };
 
     match entries.iter().position(|(child, _)| *child == emptied_page) {
         Some(idx) => {
@@ -210,8 +194,10 @@ fn splice_child(
     };
 
     let header_start = page1_header_start(parent_page);
-    let buf = pager.get_page_mut(parent_page)?.clone();
-    let (mut entries, mut rightmost) = collect_interior_entries(&buf, header_start, parent_page)?;
+    let (mut entries, mut rightmost) = {
+        let buf = pager.get_page_mut(parent_page)?;
+        collect_interior_entries(buf, header_start, parent_page)?
+    };
 
     match entries.iter_mut().find(|(child, _)| *child == old_child) {
         Some(entry) => entry.0 = new_child,

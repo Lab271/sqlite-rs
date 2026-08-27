@@ -6,6 +6,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Performance
+
+- Tier 0 storage hot paths shed their dominant copies (#588): WAL replay
+  (`wal::committed_pages`) uses an undo log instead of cloning the whole
+  page map at every commit frame; committed WAL overlay pages are shared
+  as `Rc<[u8]>` so WAL-mode reads no longer memcpy a page per read;
+  b-tree insert/delete pre-scan the borrowed page zero-copy
+  (`scan_leaf_cells`/`find_leaf_cell`) instead of cloning the page and
+  every cell before the splice fast path; plus a single-lookup page-cache
+  hit, preallocated overflow reassembly, a reused WAL frame buffer, and
+  page-ordered checkpoint backfill.
+
 ### Fixed
 
 - The CLI's two raw `BorrowedFd::borrow_raw(0)` blocks
