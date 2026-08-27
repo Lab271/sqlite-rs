@@ -30,3 +30,6 @@ __pycache__/
 
 # make vendor output (on-demand supply-chain inspection, not built from by default)
 /vendor/
+
+# mdBook build output (`make docs`)
+/docs/book/
