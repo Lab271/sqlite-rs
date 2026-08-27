@@ -65,6 +65,28 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Changed
 
+- Tier 2 query-pipeline performance (#590), no pipeline-structure or
+  output changes — every fix is intra-component and the corpus/parity
+  suites stay bit-exact. The tokenizer walks a byte cursor over its
+  source instead of materializing a `Vec<(usize, char)>` (~16× the
+  source size) up front, and identifier/number/parameter/string/quoted-
+  identifier scanners now slice the source directly rather than
+  rebuilding each token char-by-char — a string or quoted identifier
+  only allocates once a `''`/`""` escape actually appears in it.
+  `lookup_word` binary-searches the keyword table with an ASCII
+  case-insensitive comparator instead of heap-allocating an uppercased
+  copy of every identifier token, and `tokenize` pre-sizes its output
+  `Vec`. `TokenKind`'s rare `Blob`/`Param` variants are boxed, shrinking
+  the enum from ~40 to 32 bytes (guarded by `test_token_kind_size`) and
+  roughly halving token memory traffic. The parser gained
+  `advance_span()`, so the ~16 call sites that only need a token's span
+  no longer deep-clone its payload to immediately discard it. CTE and
+  view expansion return `Cow<Select>` rather than unconditionally
+  deep-cloning the entire `Select` AST: a SELECT with no `WITH` clause
+  and no view in scope now compiles with zero whole-AST clones, down
+  from two. Statement dispatch and `COLLATE` resolution compare with
+  `eq_ignore_ascii_case` instead of allocating uppercased copies.
+
 - Tier 1 schema performance (#589): `TableSchema` now carries a
   `rowid_alias: Option<usize>` field resolved once at schema-decode time
   (`rowid_alias_from_sql`), so codegen reads a field instead of re-parsing

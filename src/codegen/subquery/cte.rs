@@ -17,15 +17,17 @@
 //! `WITH RECURSIVE` is rejected by the parser already (#375) — nothing
 //! here needs to guard against it.
 
+use std::borrow::Cow;
+
 use crate::parser::ast::{CommonTableExpr, ResultColumn, Select, TableRef, TableRefKind};
 
 /// Rewrites away `select.with_clause`, if any — see the module doc.
-/// A `Select` with no `WITH` clause is returned unchanged (cloned, since
-/// every call site needs an owned value to keep resolving/compiling
-/// against).
-pub fn expand_with_clause(select: &Select) -> Select {
+/// A `Select` with no `WITH` clause is returned as `Cow::Borrowed`
+/// rather than a full AST clone — the common case for a query with no
+/// `WITH` clause at all (#590 item 6).
+pub fn expand_with_clause(select: &Select) -> Cow<'_, Select> {
     let Some(with) = &select.with_clause else {
-        return select.clone();
+        return Cow::Borrowed(select);
     };
 
     // Each CTE is resolved in declaration order, against every CTE
@@ -51,7 +53,7 @@ pub fn expand_with_clause(select: &Select) -> Select {
     let mut out = select.clone();
     out.with_clause = None;
     substitute_cte_refs(&mut out, &resolved);
-    out
+    Cow::Owned(out)
 }
 
 /// Substitutes every `FROM`/`JOIN` table reference in `select`'s own

@@ -110,6 +110,20 @@ impl Parser {
         tok
     }
 
+    /// Consumes the current token and returns only its [`Span`], without
+    /// cloning its `kind` — for the many call sites that only need the
+    /// span (e.g. to anchor an AST node), this skips a heap-allocating
+    /// clone of the token's payload (`String`/`Identifier`/boxed
+    /// `Blob`/`Param`) that `advance().span` would otherwise pay for and
+    /// immediately discard.
+    fn advance_span(&mut self) -> Span {
+        let span = self.peek().span;
+        if !matches!(self.peek().kind, TokenKind::Eof) {
+            self.pos = self.pos.saturating_add(1);
+        }
+        span
+    }
+
     fn at_kw(&self, kw: Keyword) -> bool {
         matches!(&self.peek().kind, TokenKind::Keyword(k) if *k == kw)
     }
@@ -125,7 +139,7 @@ impl Parser {
 
     fn expect_kw(&mut self, kw: Keyword) -> PResult<Span> {
         if self.at_kw(kw) {
-            Ok(self.advance().span)
+            Ok(self.advance_span())
         } else {
             let tok = self.peek().clone();
             Err(ParseFail::Invalid {
@@ -146,7 +160,7 @@ impl Parser {
 
     fn expect_punct(&mut self, kind: TokenKind, what: &str) -> PResult<Span> {
         if self.peek().kind == kind {
-            Ok(self.advance().span)
+            Ok(self.advance_span())
         } else {
             let tok = self.peek().clone();
             Err(ParseFail::Invalid {
@@ -194,7 +208,7 @@ impl Parser {
     fn identifier(&mut self) -> PResult<(String, Span)> {
         match self.peek().kind.clone() {
             TokenKind::Identifier(name) => {
-                let span = self.advance().span;
+                let span = self.advance_span();
                 Ok((name, span))
             }
             _ => {
@@ -491,7 +505,7 @@ impl Parser {
             without_rowid = true;
         } else if matches!(&self.peek().kind, TokenKind::Identifier(id) if id.eq_ignore_ascii_case("STRICT"))
         {
-            end = self.advance().span;
+            end = self.advance_span();
             strict = true;
         }
 
@@ -605,7 +619,7 @@ impl Parser {
             } else {
                 UnaryOp::Plus
             };
-            let start = self.advance().span;
+            let start = self.advance_span();
             let inner = self.literal_value()?;
             let span = join_span(start, inner.span);
             return Ok(DefaultValue::Literal(Expr {
@@ -648,7 +662,7 @@ impl Parser {
             TokenKind::Blob(b) => {
                 self.advance();
                 Ok(Expr {
-                    kind: ExprKind::Literal(Literal::Blob(b)),
+                    kind: ExprKind::Literal(Literal::Blob(*b)),
                     span: tok.span,
                 })
             }
@@ -895,7 +909,7 @@ impl Parser {
     /// Consumes `kw` if present, returning its span.
     fn opt_kw_span(&mut self, kw: Keyword) -> Option<Span> {
         if self.at_kw(kw) {
-            Some(self.advance().span)
+            Some(self.advance_span())
         } else {
             None
         }
@@ -953,11 +967,11 @@ impl Parser {
     fn pragma_journal_mode_value(&mut self) -> PResult<(PragmaJournalMode, Span)> {
         match self.peek().kind.clone() {
             TokenKind::Identifier(text) if text.eq_ignore_ascii_case("wal") => {
-                let span = self.advance().span;
+                let span = self.advance_span();
                 Ok((PragmaJournalMode::Wal, span))
             }
             TokenKind::Keyword(Keyword::DELETE) => {
-                let span = self.advance().span;
+                let span = self.advance_span();
                 Ok((PragmaJournalMode::Delete, span))
             }
             _ => self.unsupported("unsupported journal_mode value (only WAL/DELETE are supported)"),
@@ -1094,7 +1108,7 @@ impl Parser {
             if !self.at_kw(Keyword::UNION) {
                 break;
             }
-            let union_start = self.advance().span;
+            let union_start = self.advance_span();
             let op = if self.eat_kw(Keyword::ALL) {
                 CompoundOp::UnionAll
             } else {
@@ -1622,7 +1636,7 @@ impl Parser {
     fn not_expr(&mut self) -> PResult<Expr> {
         self.with_depth_guard(|this| {
             if this.at_kw(Keyword::NOT) {
-                let start = this.advance().span;
+                let start = this.advance_span();
                 if this.at_kw(Keyword::EXISTS) {
                     this.advance();
                     return this.exists_tail(start, true);
@@ -1673,7 +1687,7 @@ impl Parser {
                     }
                 }
                 TokenKind::Keyword(Keyword::ISNULL) => {
-                    let end = self.advance().span;
+                    let end = self.advance_span();
                     let span = join_span(lhs.span, end);
                     Expr {
                         kind: ExprKind::IsNull {
@@ -1684,7 +1698,7 @@ impl Parser {
                     }
                 }
                 TokenKind::Keyword(Keyword::NOTNULL) => {
-                    let end = self.advance().span;
+                    let end = self.advance_span();
                     let span = join_span(lhs.span, end);
                     Expr {
                         kind: ExprKind::IsNull {
@@ -1720,7 +1734,7 @@ impl Parser {
                 TokenKind::Keyword(Keyword::NOT) => match self.peek_at(1).kind.clone() {
                     TokenKind::Null => {
                         self.advance();
-                        let end = self.advance().span;
+                        let end = self.advance_span();
                         let span = join_span(lhs.span, end);
                         Expr {
                             kind: ExprKind::IsNull {
@@ -2070,7 +2084,7 @@ impl Parser {
                 _ => None,
             };
             if let Some(op) = op {
-                let start = this.advance().span;
+                let start = this.advance_span();
                 let inner = this.unary_expr()?;
                 let span = join_span(start, inner.span);
                 // `9223372036854775808` has no positive i64
@@ -2127,7 +2141,7 @@ impl Parser {
             TokenKind::Blob(b) => {
                 self.advance();
                 Ok(Expr {
-                    kind: ExprKind::Literal(Literal::Blob(b)),
+                    kind: ExprKind::Literal(Literal::Blob(*b)),
                     span: tok.span,
                 })
             }
@@ -2154,7 +2168,7 @@ impl Parser {
             }
             TokenKind::Param(p) => {
                 self.advance();
-                let kind = match p {
+                let kind = match *p {
                     Param::Anonymous => ParamKind::Anonymous,
                     Param::Numbered(n) => ParamKind::Numbered(n),
                     Param::Colon(s) => ParamKind::Colon(s),
@@ -2287,7 +2301,7 @@ impl Parser {
     }
 
     fn case_expr(&mut self) -> PResult<Expr> {
-        let start = self.advance().span; // CASE
+        let start = self.advance_span(); // CASE
         let operand = if self.at_kw(Keyword::WHEN) {
             None
         } else {
@@ -2320,7 +2334,7 @@ impl Parser {
     }
 
     fn cast_expr(&mut self) -> PResult<Expr> {
-        let start = self.advance().span; // CAST
+        let start = self.advance_span(); // CAST
         self.expect_punct(TokenKind::LParen, "'(' after CAST")?;
         let inner = self.expr()?;
         self.expect_kw(Keyword::AS)?;

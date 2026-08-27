@@ -96,12 +96,20 @@ pub(crate) fn expr_affinity(scope: &Scope, expr: &Expr) -> Option<Affinity> {
 /// unrecognized collation names fall back to `None` (BINARY default).
 pub(crate) fn collation_of(expr: &Expr) -> Option<Collation> {
     match &expr.kind {
-        ExprKind::Collate { collation, .. } => match collation.to_ascii_uppercase().as_str() {
-            "BINARY" => Some(Collation::Binary),
-            "NOCASE" => Some(Collation::NoCase),
-            "RTRIM" => Some(Collation::RTrim),
-            _ => None,
-        },
+        ExprKind::Collate { collation, .. } => {
+            // `eq_ignore_ascii_case` rather than an uppercased copy —
+            // collation names are ASCII, and this runs per COLLATE
+            // expression during codegen (#590 item 8).
+            if collation.eq_ignore_ascii_case("BINARY") {
+                Some(Collation::Binary)
+            } else if collation.eq_ignore_ascii_case("NOCASE") {
+                Some(Collation::NoCase)
+            } else if collation.eq_ignore_ascii_case("RTRIM") {
+                Some(Collation::RTrim)
+            } else {
+                None
+            }
+        }
         ExprKind::Paren(inner) => collation_of(inner),
         _ => None,
     }
