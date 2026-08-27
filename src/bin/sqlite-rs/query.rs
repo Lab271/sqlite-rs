@@ -103,6 +103,7 @@ pub(crate) fn compile_select_program(
             is_virtual: false,
             sql: String::new(),
             indexes: vec![],
+            rowid_alias: None,
         };
         let program =
             compile_select_with_catalog(select, &no_table, &[]).map_err(|e| e.to_string())?;

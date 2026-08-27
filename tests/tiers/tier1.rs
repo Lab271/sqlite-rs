@@ -167,7 +167,9 @@ fn t1_single_table_where_matches_oracle() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     let select = match parse_select("SELECT a FROM t WHERE b > 5") {
         ParseOutcome::Accepted(s) => *s,
         other => panic!("expected parse to succeed, got {other:?}"),

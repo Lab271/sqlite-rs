@@ -108,6 +108,29 @@ pub struct TableSchema {
     /// graceful-degradation rule as unparseable DDL elsewhere in this
     /// reader (#211).
     pub indexes: Vec<IndexSchema>,
+    /// The rowid-alias column index (0-based into `columns`), resolved
+    /// once at schema-decode time by [`rowid_alias_from_sql`] — SQLite's
+    /// single-`INTEGER PRIMARY KEY` special case (see
+    /// `src/btree/mod.rs`'s module doc). Codegen reads this field per
+    /// column reference, so it must be a field, not a re-parse of `sql`
+    /// on every call (#589).
+    pub rowid_alias: Option<usize>,
+}
+
+impl TableSchema {
+    /// Recomputes [`TableSchema::rowid_alias`] from `sql`/`without_rowid`
+    /// — for callers (tests, synthetic schemas) that build a
+    /// `TableSchema` literal by hand instead of going through
+    /// [`read_schema`], which resolves the field at decode time (#589).
+    #[must_use]
+    pub fn with_computed_rowid_alias(mut self) -> Self {
+        self.rowid_alias = if self.is_virtual {
+            None
+        } else {
+            rowid_alias_from_sql(&self.sql, self.without_rowid)
+        };
+        self
+    }
 }
 
 /// A minimally-parsed `CREATE INDEX` entry, naive in the same sense as
@@ -148,7 +171,23 @@ pub fn read_schema<P: PageSource>(
     cursor: &mut TableCursor<P>,
     encoding: TextEncoding,
 ) -> Result<Vec<TableSchema>, DdlError> {
-    let mut schemas = Vec::new();
+    read_schema_and_views(cursor, encoding).map(|(schemas, _)| schemas)
+}
+
+/// Walks `sqlite_master` once and returns both the `type = 'table'`
+/// entries (as [`read_schema`] would) and the `type = 'view'` entries
+/// (as [`read_views`] would). Callers that need both catalogs —
+/// `compile_statement` takes both — should use this instead of two
+/// separate b-tree walks (#589).
+pub fn read_schema_and_views<P: PageSource>(
+    cursor: &mut TableCursor<P>,
+    encoding: TextEncoding,
+) -> Result<(Vec<TableSchema>, Vec<ViewSchema>), DdlError> {
+    let mut schemas: Vec<TableSchema> = Vec::new();
+    let mut views = Vec::new();
+    // Table name → position in `schemas`, so index attachment below is
+    // a hash lookup instead of an O(indexes × tables) linear scan (#589).
+    let mut table_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut pending_indexes: Vec<(String, IndexSchema)> = Vec::new();
     let mut row = cursor.first_row()?;
     while let Some(r) = row {
@@ -157,18 +196,29 @@ pub fn read_schema<P: PageSource>(
             return Err(DdlError::MalformedRow(values.len()));
         }
         match text(values.first()) {
-            "table" => schemas.push(table_schema(&values)),
+            "table" => {
+                let schema = table_schema(&values);
+                table_pos.insert(schema.name.clone(), schemas.len());
+                schemas.push(schema);
+            }
             "index" => pending_indexes.extend(index_schema(&values)),
+            "view" => views.push(ViewSchema {
+                name: text(values.get(1)).to_string(),
+                sql: text(values.get(4)).to_string(),
+            }),
             _ => {}
         }
         row = cursor.next_row()?;
     }
     for (table_name, index) in pending_indexes {
-        if let Some(schema) = schemas.iter_mut().find(|t| t.name == table_name) {
+        if let Some(schema) = table_pos
+            .get(&table_name)
+            .and_then(|&pos| schemas.get_mut(pos))
+        {
             schema.indexes.push(index);
         }
     }
-    Ok(schemas)
+    Ok((schemas, views))
 }
 
 /// Walks `sqlite_master` via `cursor` (root_page = 1) and returns every
@@ -257,10 +307,12 @@ fn table_schema(values: &[Value]) -> TableSchema {
             is_virtual: true,
             sql: sql.to_string(),
             indexes: Vec::new(),
+            rowid_alias: None,
         };
     }
 
     let parsed = parse_create_table(sql).unwrap_or_default();
+    let rowid_alias = rowid_alias_from_sql(sql, parsed.without_rowid);
     TableSchema {
         name,
         root_page,
@@ -272,6 +324,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: Vec::new(),
+        rowid_alias,
     }
 }
 
@@ -307,10 +360,44 @@ fn index_schema(values: &[Value]) -> Option<(String, IndexSchema)> {
     ))
 }
 
+/// Whether `s` starts with `prefix`, ASCII-case-insensitively, without
+/// allocating an uppercased copy (#589). `prefix` must be ASCII (all
+/// callers pass SQL keywords), so slicing `s` at `prefix.len()` either
+/// lands on a char boundary or `get` returns `None` — never a panic.
+fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// If `s` ends with `suffix` ASCII-case-insensitively, the byte index
+/// where the suffix starts (i.e. `s.get(..idx)` strips it) —
+/// allocation-free (#589), same ASCII-`suffix` char-boundary reasoning
+/// as [`starts_with_ignore_case`].
+fn suffix_start_ignore_case(s: &str, suffix: &str) -> Option<usize> {
+    let split = s.len().checked_sub(suffix.len())?;
+    s.get(split..)?
+        .eq_ignore_ascii_case(suffix)
+        .then_some(split)
+}
+
+/// Byte offset of the first ASCII-case-insensitive occurrence of
+/// `needle` in `haystack`, allocation-free (#589) — the caller-facing
+/// contract matches `haystack.to_ascii_uppercase().find(needle)` for an
+/// ASCII `needle`.
+fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let end = haystack.len().checked_sub(needle.len())?;
+    (0..=end).find(|&i| {
+        haystack
+            .get(i..i.saturating_add(needle.len()))
+            .is_some_and(|window| window.eq_ignore_ascii_case(needle))
+    })
+}
+
 fn is_unique_index(sql: &str) -> bool {
-    sql.trim_start()
-        .to_ascii_uppercase()
-        .starts_with("CREATE UNIQUE INDEX")
+    starts_with_ignore_case(sql.trim_start(), "CREATE UNIQUE INDEX")
 }
 
 /// Splits a single indexed-column definition (`col`, `col DESC`, `col
@@ -320,20 +407,18 @@ fn is_unique_index(sql: &str) -> bool {
 /// module's "nothing more than the corpus needs" scope.
 fn indexed_column(def: &str) -> IndexedColumn {
     let mut span = def.trim();
-    let upper = span.to_ascii_uppercase();
     let mut desc = false;
-    if let Some(rest) = upper.strip_suffix(" DESC") {
+    if let Some(split) = suffix_start_ignore_case(span, " DESC") {
         desc = true;
-        span = span[..rest.len()].trim_end();
-    } else if let Some(rest) = upper.strip_suffix(" ASC") {
-        span = span[..rest.len()].trim_end();
+        span = span.get(..split).unwrap_or(span).trim_end();
+    } else if let Some(split) = suffix_start_ignore_case(span, " ASC") {
+        span = span.get(..split).unwrap_or(span).trim_end();
     }
 
     let collation = column_collation(span);
 
-    let upper = span.to_ascii_uppercase();
-    if let Some(pos) = upper.find(" COLLATE ") {
-        span = span[..pos].trim_end();
+    if let Some(pos) = find_ignore_case(span, " COLLATE ") {
+        span = span.get(..pos).unwrap_or(span).trim_end();
     }
 
     IndexedColumn {
@@ -351,22 +436,25 @@ fn indexed_column(def: &str) -> IndexedColumn {
 /// [`Collation::Binary`] when absent or unrecognized — matching SQLite's
 /// own BINARY default.
 fn column_collation(def: &str) -> Collation {
-    let upper = def.to_ascii_uppercase();
-    let Some(pos) = upper.find("COLLATE") else {
+    let Some(pos) = find_ignore_case(def, "COLLATE") else {
         return Collation::Binary;
     };
-    let rest = def[pos.saturating_add("COLLATE".len())..].trim_start();
+    let rest = def
+        .get(pos.saturating_add("COLLATE".len())..)
+        .unwrap_or("")
+        .trim_start();
     let name = rest
         .split_whitespace()
         .next()
         .unwrap_or("")
         .trim_matches(['"', '`', '['].as_ref())
         .trim_matches([']'].as_ref());
-    match name.to_ascii_uppercase().as_str() {
-        "BINARY" => Collation::Binary,
-        "NOCASE" => Collation::NoCase,
-        "RTRIM" => Collation::RTrim,
-        _ => Collation::Binary,
+    if name.eq_ignore_ascii_case("NOCASE") {
+        Collation::NoCase
+    } else if name.eq_ignore_ascii_case("RTRIM") {
+        Collation::RTrim
+    } else {
+        Collation::Binary
     }
 }
 
@@ -378,9 +466,7 @@ fn text(v: Option<&Value>) -> &str {
 }
 
 fn is_virtual_table(sql: &str) -> bool {
-    sql.trim_start()
-        .to_ascii_uppercase()
-        .starts_with("CREATE VIRTUAL TABLE")
+    starts_with_ignore_case(sql.trim_start(), "CREATE VIRTUAL TABLE")
 }
 
 #[derive(Default)]
@@ -424,12 +510,12 @@ fn parse_create_table(sql: &str) -> Option<ParsedCreateTable> {
 /// KEY`) don't start with the keyword — the column name comes first —
 /// so this check doesn't false-positive on those.
 fn is_table_constraint(def: &str) -> bool {
-    let upper = def.trim().to_ascii_uppercase();
-    upper.starts_with("PRIMARY KEY")
-        || upper.starts_with("UNIQUE")
-        || upper.starts_with("FOREIGN KEY")
-        || upper.starts_with("CHECK")
-        || upper.starts_with("CONSTRAINT")
+    let trimmed = def.trim();
+    starts_with_ignore_case(trimmed, "PRIMARY KEY")
+        || starts_with_ignore_case(trimmed, "UNIQUE")
+        || starts_with_ignore_case(trimmed, "FOREIGN KEY")
+        || starts_with_ignore_case(trimmed, "CHECK")
+        || starts_with_ignore_case(trimmed, "CONSTRAINT")
 }
 
 /// Replaces the contents of quoted regions (`'...'`, `"..."`,
@@ -543,7 +629,7 @@ fn column_list_span(sql: &str) -> Option<(usize, usize)> {
 
 /// The single top-level-comma splitter behind both
 /// [`parse_create_table`]'s `columns` and [`column_defs`]. These two
-/// MUST agree position-for-position: [`rowid_alias_column`] returns an
+/// MUST agree position-for-position: [`rowid_alias_from_sql`] returns an
 /// index into `column_defs`, and `src/codegen/expr.rs` resolves that
 /// index against `TableSchema::columns`. Two copies of this loop would
 /// let the lists drift and silently mis-target the rowid substitution,
@@ -599,10 +685,11 @@ pub fn column_type(def: &str) -> String {
     def.split_whitespace()
         .skip(1)
         .take_while(|word| {
-            let upper = word.to_ascii_uppercase();
-            !CONSTRAINT_KEYWORDS
-                .iter()
-                .any(|kw| upper == *kw || upper.starts_with(&format!("{kw}(")))
+            !CONSTRAINT_KEYWORDS.iter().any(|kw| {
+                word.eq_ignore_ascii_case(kw)
+                    || (starts_with_ignore_case(word, kw)
+                        && word.as_bytes().get(kw.len()) == Some(&b'('))
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -612,7 +699,7 @@ pub fn column_type(def: &str) -> String {
 /// list into raw per-column definition strings, in declared order —
 /// re-derived from `schema.sql` rather than kept alongside `columns`,
 /// which holds names only — `src/dump.rs` needs each column's declared
-/// type text, and [`rowid_alias_column`] needs its full constraint
+/// type text, and [`rowid_alias_from_sql`] needs its full constraint
 /// text. Shares [`split_top_level_commas`] and [`is_table_constraint`]
 /// with [`parse_create_table`], so the two column lists cannot drift.
 pub fn column_defs(schema: &TableSchema) -> Vec<&str> {
@@ -624,7 +711,7 @@ pub fn column_defs(schema: &TableSchema) -> Vec<&str> {
 
 /// Every top-level def in the column list, column definitions and
 /// table-level constraints alike — the raw material [`column_defs`]
-/// filters down and [`rowid_alias_column`] additionally needs the
+/// filters down and [`rowid_alias_from_sql`] additionally needs the
 /// constraint side of (to recognize a table-level `PRIMARY KEY(col)`).
 fn all_defs(schema: &TableSchema) -> Vec<&str> {
     let Some((start, end)) = column_list_span(&schema.sql) else {
@@ -636,15 +723,6 @@ fn all_defs(schema: &TableSchema) -> Vec<&str> {
     split_top_level_commas(inner)
 }
 
-/// The table-level constraint defs `column_defs` filters out — the
-/// counterpart `rowid_alias_column` scans for a `PRIMARY KEY(col)` form.
-fn table_constraint_defs(schema: &TableSchema) -> Vec<&str> {
-    all_defs(schema)
-        .into_iter()
-        .filter(|def| is_table_constraint(def))
-        .collect()
-}
-
 /// Whether `def` is a column definition carrying an inline
 /// `INTEGER PRIMARY KEY` (excluding the `DESC` form, which SQLite does
 /// not treat as a rowid alias). Scans the quote/comment-masked text
@@ -653,19 +731,22 @@ fn table_constraint_defs(schema: &TableSchema) -> Vec<&str> {
 fn is_integer_primary_key_inline(def: &str) -> bool {
     let masked = mask_quotes_and_comments(def);
     let masked = std::str::from_utf8(&masked).unwrap_or_default();
-    let upper = masked.to_ascii_uppercase();
-    let is_pk = upper
+    let is_pk = masked
         .split(|c: char| !c.is_alphanumeric())
         .collect::<Vec<_>>()
         .windows(2)
-        .any(|w| w == ["PRIMARY", "KEY"]);
+        .any(|w| matches!(w, [a, b] if a.eq_ignore_ascii_case("PRIMARY") && b.eq_ignore_ascii_case("KEY")));
     is_pk
-        && upper.split_whitespace().any(|w| w == "INTEGER")
+        && masked
+            .split_whitespace()
+            .any(|w| w.eq_ignore_ascii_case("INTEGER"))
         // `INTEGER PRIMARY KEY DESC` is deliberately NOT a rowid
         // alias in SQLite — the DESC form gets its own b-tree index
         // and the column is stored normally, so substituting the
         // cursor's rowid would return values that aren't there.
-        && !upper.split_whitespace().any(|w| w == "DESC")
+        && !masked
+            .split_whitespace()
+            .any(|w| w.eq_ignore_ascii_case("DESC"))
 }
 
 /// Whether `def` declares an `INTEGER` type (masked, so a string literal
@@ -674,16 +755,14 @@ fn is_integer_column(def: &str) -> bool {
     let masked = mask_quotes_and_comments(def);
     let masked = std::str::from_utf8(&masked).unwrap_or_default();
     masked
-        .to_ascii_uppercase()
         .split_whitespace()
-        .any(|w| w == "INTEGER")
+        .any(|w| w.eq_ignore_ascii_case("INTEGER"))
 }
 
 /// If `constraint` is a table-level `PRIMARY KEY(col)` naming exactly
 /// one column, returns that column's (unquoted) name.
 fn primary_key_single_column(constraint: &str) -> Option<String> {
-    let upper = constraint.trim_start().to_ascii_uppercase();
-    if !upper.starts_with("PRIMARY KEY") {
+    if !starts_with_ignore_case(constraint.trim_start(), "PRIMARY KEY") {
         return None;
     }
     let open = constraint.find('(')?;
@@ -707,16 +786,32 @@ fn primary_key_single_column(constraint: &str) -> Option<String> {
 /// 0-based column index to substitute, if any.
 ///
 /// Detection is textual and shares this module's documented naivety —
-/// see the `known_fragile_*` tests below for the two forms it still
-/// gets wrong. That matters more than it used to: `src/codegen/expr.rs`
-/// now emits `Rowid` instead of `Column` based on this answer, so a
-/// wrong index is a wrong query result, not just wrong `dump` output.
-pub(crate) fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
-    if schema.without_rowid {
+/// see the `known_fragile_*` tests in `src/dump.rs` for the two forms it
+/// still gets wrong. That matters more than it used to:
+/// `src/codegen/expr.rs` now emits `Rowid` instead of `Column` based on
+/// this answer, so a wrong index is a wrong query result, not just wrong
+/// `dump` output.
+///
+/// Runs once per table at schema-decode time ([`TableSchema::rowid_alias`]
+/// caches the answer); everything after decode reads the field (#589).
+pub fn rowid_alias_from_sql(sql: &str, without_rowid: bool) -> Option<usize> {
+    if without_rowid {
         return None;
     }
-    let defs = column_defs(schema);
-    for (idx, def) in defs.iter().enumerate() {
+    let (start, end) = column_list_span(sql)?;
+    let inner = sql.get(start..end)?;
+    // Partition column defs from table-level constraints in one pass —
+    // the pre-#589 code derived each list with its own full re-parse.
+    let mut columns: Vec<&str> = Vec::new();
+    let mut constraints: Vec<&str> = Vec::new();
+    for def in split_top_level_commas(inner) {
+        if is_table_constraint(def) {
+            constraints.push(def);
+        } else {
+            columns.push(def);
+        }
+    }
+    for (idx, def) in columns.iter().enumerate() {
         if is_integer_primary_key_inline(def) {
             return Some(idx);
         }
@@ -725,10 +820,10 @@ pub(crate) fn rowid_alias_column(schema: &TableSchema) -> Option<usize> {
     // as a rowid alias when it names the table's one and only column,
     // and that column is INTEGER-typed (a composite key, or a second
     // column, rules it out).
-    if let [only] = defs.as_slice() {
+    if let [only] = columns.as_slice() {
         if is_integer_column(only) {
             let col_name = column_name(only);
-            let is_alias = table_constraint_defs(schema)
+            let is_alias = constraints
                 .iter()
                 .filter_map(|c| primary_key_single_column(c))
                 .any(|pk_col| pk_col.eq_ignore_ascii_case(&col_name));

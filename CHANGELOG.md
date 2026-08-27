@@ -25,6 +25,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Changed
 
+- Tier 1 schema performance (#589): `TableSchema` now carries a
+  `rowid_alias: Option<usize>` field resolved once at schema-decode time
+  (`rowid_alias_from_sql`), so codegen reads a field instead of re-parsing
+  the full CREATE TABLE DDL on every column/expression reference. The
+  ddl_reader hot helpers (`column_type`, `is_table_constraint`,
+  `column_collation`, `indexed_column`, keyword prefix checks) compare
+  with `eq_ignore_ascii_case` instead of allocating uppercased copies;
+  index→table attachment in `read_schema` is a hash lookup instead of a
+  linear scan. New `read_schema_and_views` walks `sqlite_master` once for
+  both catalogs, and the CLI's `exec` loop caches the decoded catalog
+  across statements, invalidating only after `CREATE`/`DROP`/`ALTER` —
+  pure-DML/SELECT scripts no longer re-read the schema per statement.
+
 - Correlated `EXISTS`/`NOT EXISTS` subqueries (`compile_exists`,
   `src/codegen/subquery/scalar.rs`) now reuse #434's
   `choose_join_access` seek detection: a `WHERE` clause that's a single

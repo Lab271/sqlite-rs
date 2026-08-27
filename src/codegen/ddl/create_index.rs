@@ -107,7 +107,9 @@ mod tests {
             is_virtual: false,
             sql: "CREATE TABLE t(a INTEGER, b TEXT)".to_string(),
             indexes: vec![],
+            rowid_alias: None,
         }
+        .with_computed_rowid_alias()
     }
 
     #[test]

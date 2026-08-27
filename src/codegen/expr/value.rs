@@ -5,7 +5,7 @@
 use super::cond::compile_cond;
 use crate::codegen::{CodegenError, CondTargets, Emitter, RegAlloc, Scope, Target};
 use crate::parser::ast::{BinaryOp, Expr, ExprKind, Literal, ParamKind, UnaryOp};
-use crate::schema::{rowid_alias_column, TableSchema};
+use crate::schema::TableSchema;
 use crate::vdbe::{affinity_of, Affinity, Collation, Instruction, Opcode, P4};
 
 /// Reads column `idx` of the row at `cursor` into `dest`, emitting
@@ -27,7 +27,7 @@ pub(crate) fn emit_column_read(
     idx: usize,
     dest: i32,
 ) -> Result<(), CodegenError> {
-    if rowid_alias_column(schema) == Some(idx) {
+    if schema.rowid_alias == Some(idx) {
         em.emit(Instruction::new(Opcode::Rowid, cursor, dest, 0));
         return Ok(());
     }

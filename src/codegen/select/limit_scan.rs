@@ -99,7 +99,8 @@ pub(crate) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
     {
         return true;
     }
-    rowid_alias_column(schema)
+    schema
+        .rowid_alias
         .and_then(|idx| schema.columns.get(idx))
         .is_some_and(|col| col.eq_ignore_ascii_case(name))
 }
@@ -283,7 +284,7 @@ pub(super) fn find_covering_index(
     // has one) is the rowid — every index leaf entry already carries it,
     // so it's covered by *any* index on this table, not just one that
     // happens to declare it as a column.
-    let rowid_col = rowid_alias_column(schema).and_then(|idx| schema.columns.get(idx));
+    let rowid_col = schema.rowid_alias.and_then(|idx| schema.columns.get(idx));
     let covers = |name: &str| {
         index
             .columns

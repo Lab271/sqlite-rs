@@ -144,6 +144,7 @@ fn subquery_result_schema(
         is_virtual: false,
         sql: String::new(),
         indexes: Vec::new(),
+        rowid_alias: None,
     }
 }
 

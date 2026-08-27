@@ -123,7 +123,9 @@ fn not_null_violation_halts_and_inserts_nothing() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     let err = run_insert(
         &path,
@@ -158,7 +160,9 @@ fn valid_row_round_trips() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,
@@ -197,7 +201,9 @@ fn default_value_applied_when_column_omitted() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,
@@ -239,7 +245,9 @@ fn check_violation_halts() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     let err = run_insert(
         &path,
@@ -286,7 +294,9 @@ fn primary_key_conflict_aborts_by_default() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,
@@ -332,7 +342,9 @@ fn primary_key_conflict_or_ignore_skips_the_row() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,
@@ -375,7 +387,9 @@ fn primary_key_conflict_or_replace_overwrites_the_row() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,
@@ -418,7 +432,9 @@ fn omitted_rowid_alias_is_auto_assigned() {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     run_insert(
         &path,

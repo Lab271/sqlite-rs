@@ -133,7 +133,9 @@ fn schema(sql: &str) -> TableSchema {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
+        rowid_alias: None,
     }
+    .with_computed_rowid_alias()
 }
 
 fn schema_with_columns(sql: &str, columns: &[&str], column_types: &[&str]) -> TableSchema {
@@ -148,7 +150,9 @@ fn schema_with_columns(sql: &str, columns: &[&str], column_types: &[&str]) -> Ta
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
+        rowid_alias: None,
     }
+    .with_computed_rowid_alias()
 }
 
 #[test]

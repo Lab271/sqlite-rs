@@ -41,7 +41,9 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         is_virtual: false,
         sql: sql.to_string(),
         indexes: vec![],
+        rowid_alias: None,
     }
+    .with_computed_rowid_alias()
 }
 
 fn compile(sql: &str, schema: &TableSchema) -> Program {
@@ -210,6 +212,9 @@ fn non_rowid_column_equality_does_not_use_seek_rowid() {
 fn without_rowid_table_never_substitutes_rowid() {
     let mut s = schema(IPK_DDL, &["id", "name"]);
     s.without_rowid = true;
+    // `rowid_alias` is resolved at construction (#589) — recompute
+    // after mutating `without_rowid`.
+    let s = s.with_computed_rowid_alias();
     let program = compile("SELECT id FROM t", &s);
     assert!(uses(&program, Opcode::Column));
     assert!(!uses(&program, Opcode::Rowid));

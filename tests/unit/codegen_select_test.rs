@@ -70,7 +70,9 @@ fn bare_table(name: &str) -> TableSchema {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
+        rowid_alias: None,
     }
+    .with_computed_rowid_alias()
 }
 
 /// #539: `EXPLAIN QUERY PLAN` on a `UNION`/`UNION ALL` compound reports
@@ -170,7 +172,9 @@ fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 
@@ -205,7 +209,9 @@ fn empty_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 
@@ -398,7 +404,9 @@ fn nulls_fixture(label: &str) -> (PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 
@@ -560,7 +568,9 @@ fn order_by_collate_nocase_is_case_insensitive() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     let rows = our_rows(
         &path,
         &schema,
@@ -743,7 +753,9 @@ fn order_by_limit_compiles_a_bounded_sorter_and_matches_full_sort() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
 
     let select = match parse_select("SELECT a FROM t ORDER BY a DESC LIMIT 5;") {
         ParseOutcome::Accepted(s) => *s,
@@ -939,7 +951,9 @@ fn group_by_fixture(label: &str) -> (PathBuf, TableSchema) {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     (path, schema)
 }
 
@@ -992,7 +1006,9 @@ fn min_max_aggregate_honours_collate_nocase() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     let rows = our_rows(
         &path,
         &schema,
@@ -1037,7 +1053,9 @@ fn group_by_boundary_honours_collate_nocase() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
-    };
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
     let mut rows = our_rows(
         &path,
         &schema,

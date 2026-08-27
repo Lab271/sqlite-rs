@@ -279,7 +279,9 @@ mod tests {
             is_virtual: false,
             sql: "CREATE TABLE sqlite_stat1(tbl,idx,stat)".to_string(),
             indexes: vec![],
-        }];
+            rowid_alias: None,
+        }
+        .with_computed_rowid_alias()];
 
         let all_stats = load_stats(&pager, &header, &schemas);
         let stats = all_stats.get("t").unwrap();
