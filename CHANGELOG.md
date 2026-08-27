@@ -6,6 +6,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Fixed
+
+- DROP TABLE/DROP INDEX (`free_btree_pages_inner`) leaked overflow-page
+  chains hanging off individual cells — only the tree's own leaf/interior
+  pages were freed. Table leaf, index leaf, and index interior cells now
+  have their first overflow page located and their whole chain walked
+  and deallocated before the tree structure itself is freed.
+
 ### Docs
 
 - Audited all 11 specs for drift between prose and implementation and fixed
