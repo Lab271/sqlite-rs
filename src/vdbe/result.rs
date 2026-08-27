@@ -168,16 +168,17 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// `ResultRow`: yields the contiguous register range `[P1, P1+P2)` as
 /// one output row to the statement's caller.
 ///
-/// Reuses `vm.row_scratch` (#465) across calls to amortize the output
-/// row's `Vec` allocation, and takes each register's value (leaving
-/// `Value::Null` behind) instead of cloning it — safe because every
-/// scan loop reloads its projected registers (via `Column`/`Rowid`/
-/// literal-load opcodes) before the next `ResultRow` reads them again.
+/// Takes each register's value (leaving `Value::Null` behind) instead of
+/// cloning it — safe because every scan loop reloads its projected
+/// registers (via `Column`/`Rowid`/literal-load opcodes) before the next
+/// `ResultRow` reads them again. (#465 added a `row_scratch` buffer meant
+/// to amortize this `Vec`'s allocation across calls, but nothing ever
+/// returned a drained row's buffer to it — every call still allocated a
+/// fresh `Vec` while also paying the `mem::take` overhead. #591 removed
+/// the dead field; this allocates directly.)
 pub fn result_row(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
     let count = Vm::bounded_count("ResultRow", instr.p2)?;
-    let mut row = std::mem::take(vm.row_scratch());
-    row.clear();
-    row.reserve(count);
+    let mut row = Vec::with_capacity(count);
     for i in 0..count {
         let reg = instr
             .p1
@@ -284,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn result_row_reuses_scratch_buffer_across_calls() {
-        // #465: the row_scratch buffer is handed out and returned across
-        // successive ResultRow calls without leaking or corrupting state.
+    fn result_row_accumulates_across_calls() {
+        // #591: successive ResultRow calls each produce an independent
+        // row without leaking or corrupting state from prior calls.
         let mut vm = Vm::new();
         for round in 0..3i64 {
             vm.set_register(0, Value::Integer(round)).unwrap();

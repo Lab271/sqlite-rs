@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 
 use crate::record::{compare_text, Collation, Value};
 
+#[inline]
 fn value_rank(v: &Value) -> u8 {
     match v {
         Value::Null => 0,
@@ -46,6 +47,7 @@ fn compare_int_real(i: i64, r: f64) -> Ordering {
 
 /// Total order over `Value`s: NULL < numeric < text < blob, per spec 008
 /// Requirement 2. `collation` governs text-vs-text comparisons only.
+#[inline]
 pub fn compare(a: &Value, b: &Value, collation: Collation) -> Ordering {
     let (ra, rb) = (value_rank(a), value_rank(b));
     if ra != rb {

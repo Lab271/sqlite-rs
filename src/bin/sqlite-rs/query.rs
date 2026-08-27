@@ -21,7 +21,7 @@ use sqlite_rs::codegen::{
     CodegenError, EqpRow,
 };
 use sqlite_rs::dump;
-use sqlite_rs::format::{format_csv_value, format_query_value};
+use sqlite_rs::format::{write_csv_value, write_query_value};
 use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
 use sqlite_rs::schema::{read_schema, read_views, TableSchema, ViewSchema};
@@ -302,17 +302,35 @@ fn finish_query(
     };
 
     let mut stdout = io::BufWriter::new(io::stdout().lock());
+    // #591: one buffer reused across every row instead of a fresh
+    // `Vec`/`String` (plus a `join`) per row.
+    let mut line = String::new();
+    let mut list_buf: Vec<u8> = Vec::new();
     for row in &rows {
         if csv {
-            let rendered: Vec<String> = row.iter().map(format_csv_value).collect();
-            if let Err(e) = write!(stdout, "{}{CSV_ROW_TERMINATOR}", rendered.join(",")) {
+            line.clear();
+            for (i, v) in row.iter().enumerate() {
+                if i > 0 {
+                    line.push(',');
+                }
+                write_csv_value(&mut line, v);
+            }
+            line.push_str(CSV_ROW_TERMINATOR);
+            if let Err(e) = stdout.write_all(line.as_bytes()) {
                 return fatal(path, &e);
             }
         } else {
             // `-list` mode: raw blob bytes may not be valid UTF-8, so this
             // writes bytes directly rather than going through `String`.
-            let rendered: Vec<Vec<u8>> = row.iter().map(format_query_value).collect();
-            if let Err(e) = write_list_row(&mut stdout, &rendered) {
+            list_buf.clear();
+            for (i, v) in row.iter().enumerate() {
+                if i > 0 {
+                    list_buf.push(b'|');
+                }
+                write_query_value(&mut list_buf, v);
+            }
+            list_buf.push(b'\n');
+            if let Err(e) = stdout.write_all(&list_buf) {
                 return fatal(path, &e);
             }
         }

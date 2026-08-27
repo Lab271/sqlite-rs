@@ -6,6 +6,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-08-27
+
+### Performance
+
+- Tier 3 (VDBE/CLI) execution fixes (#591): the #465 `row_scratch`
+  `ResultRow` buffer was inert (`mem::take` had no return path, so every
+  row already allocated fresh) — removed the dead field. Index scans
+  (`idx_rowid`/`IdxRewind`/etc.) decode only the trailing rowid column via
+  the existing header cache instead of fully decoding every index record;
+  `SeekIndexEq` decodes only the compared key prefix via
+  `decode_record_upto` plus a header-only column count. Seek/insert
+  collations are borrowed out of the instruction's `P4` instead of cloned
+  per call, and `AutoIndexNext`/`AutoIndexRowid` no longer clone their
+  encoded key `Vec` per call. CLI `-list`/`-csv`/`column`/`line` rendering
+  reuse one line buffer across rows instead of allocating (plus a `join`)
+  per row. `#[inline]` added to the hot comparison and register-accessor
+  functions.
+
 ## [0.18.3] - 2026-08-27
 
 ### Fixed
