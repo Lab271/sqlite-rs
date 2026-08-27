@@ -121,9 +121,17 @@ A column declared exactly `INTEGER PRIMARY KEY` is not stored in the record (SQL
 - WHEN the cursor decodes a row's payload via `record::decode_record`
 - THEN the alias column's decoded value MUST be `Value::Null` (faithful to the stored bytes), and callers needing the real value MUST substitute the row's own `rowid`
 
-**Tests:** `src/schema/ddl_reader.rs` (planned)
+**Tests:** `src/btree.rs::rowid_alias_column_decodes_as_null_not_substituted`
 
-Covered functionally once #34 (DDL reader) lands and can identify the alias column; flagging here rather than leaving this scenario unlinked.
+#### Scenario: A higher layer substitutes the alias column with the row's own rowid
+
+- GIVEN a table with an `INTEGER PRIMARY KEY` column, queried via `SELECT`
+- WHEN the alias column is projected (directly or via `SELECT *`), including through a covering-index scan where the value comes from an index leaf's own rowid rather than a table lookup
+- THEN the returned value MUST be the row's actual rowid, byte-identical to the pinned oracle's value, never the `Value::Null` this layer returns
+
+**Tests:** `src/dump.rs::tests::rowid_alias_detects_plain_integer_primary_key`, `tests/corpus/no_stats_optimizations_test.rs::covering_index_select_star_with_rowid_alias_matches_oracle`, `tests/corpus/no_stats_optimizations_test.rs::covering_index_select_star_with_rowid_alias_non_unique_duplicates_matches_oracle`
+
+Substitution landed via #34 (DDL reader)'s `rowid_alias_from_sql`/`TableSchema::rowid_alias`, now wired through `src/codegen/select/projection.rs`, `src/codegen/stmt/insert.rs`, and `src/codegen/stmt/update.rs` — this requirement's original "(planned)" note was stale; the two scenarios above are both discharged.
 
 ### Requirement 5: Index B-Tree Page Format [MUST]
 

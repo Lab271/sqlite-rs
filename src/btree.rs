@@ -1797,6 +1797,24 @@ mod tests {
         assert!(cursor.next_row().unwrap().is_none());
     }
 
+    /// 006-btree Requirement 4: a plain `INTEGER PRIMARY KEY` column isn't
+    /// stored in the record at all — SQLite encodes it as `NULL` and
+    /// expects a higher layer to substitute the cell's own rowid. This
+    /// layer must decode it faithfully as `Value::Null`, never attempt
+    /// schema-aware substitution itself (it has no schema information).
+    #[test]
+    fn rowid_alias_column_decodes_as_null_not_substituted() {
+        let mut cursor = open_cursor("select_parity.db");
+        let row = cursor.first_row().unwrap().unwrap();
+        assert_eq!(row.rowid, 1);
+        let values = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(
+            values[0],
+            Value::Null,
+            "the rowid-alias column must decode as NULL at this layer, not the rowid"
+        );
+    }
+
     #[test]
     fn table_multipage_full_scan_matches_oracle() {
         let mut cursor = open_cursor("table_multipage.db");
