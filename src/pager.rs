@@ -1018,13 +1018,13 @@ fn journal_mode_from_page1(page1: &[u8]) -> JournalMode {
 /// `page1[18] = ...`.
 fn patch_journal_mode_bytes(page1: &mut [u8], value: [u8; 2]) -> Result<(), PagerError> {
     let len = page1.len();
-    let slice = page1
-        .get_mut(18..20)
-        .ok_or(PagerError::Page(PageError::ShortRead {
+    let slice = page1.get_mut(18..20).ok_or({
+        PagerError::Page(PageError::ShortRead {
             page_num: 1,
             expected: 20,
             got: len,
-        }))?;
+        })
+    })?;
     slice.copy_from_slice(&value);
     Ok(())
 }

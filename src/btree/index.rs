@@ -629,9 +629,11 @@ pub(super) fn descend_index_tree(
                     interior_page: page_num,
                     entry_child: entries
                         .get(entry_index)
-                        .ok_or(BtreeError::Internal(
-                            "entry_index must be in bounds: it was just found via .position()",
-                        ))?
+                        .ok_or({
+                            BtreeError::Internal(
+                                "entry_index must be in bounds: it was just found via .position()",
+                            )
+                        })?
                         .0,
                 });
             }
