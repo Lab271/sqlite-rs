@@ -1,0 +1,15 @@
+[book]
+title = "sqlite-rs Documentation"
+authors = ["Ilja Heitlager"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+git-repository-url = "https://github.com/iheitlager/sqlite-rs"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
