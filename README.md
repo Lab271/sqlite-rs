@@ -75,7 +75,7 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 
 ## Status
 
-**Version 0.18.4** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase.
+**Version 0.18.5** — see [CHANGELOG.md](CHANGELOG.md). One minor version per completed plan phase.
 
 | Phase | Version | Status |
 |-------|---------|--------|
@@ -85,7 +85,7 @@ See [.openspec/plan.md](.openspec/plan.md) for the full breakdown and [.openspec
 | V4 — JOINs & aggregates | 0.13.0 | ✅ Complete |
 | V5 — Transactions | 0.14.0–0.15.0 | ✅ Complete |
 | V6 — WAL & CTEs | 0.16.0–0.17.0 | ✅ Complete |
-| V7 — Polish & compatibility | 0.18.x | 🔄 In progress |
+| V7 — Polish & compatibility | 0.18.x | ✅ Complete |
 
 ### Performance
 
