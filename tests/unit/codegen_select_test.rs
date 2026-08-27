@@ -1302,6 +1302,7 @@ fn plain_group_by_compiles_the_hash_aggregation_strategy() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
+        rowid_alias: None,
     };
     let select = match parse_select("SELECT bucket, count(*), sum(x) FROM t GROUP BY bucket;") {
         ParseOutcome::Accepted(s) => *s,
@@ -1355,6 +1356,7 @@ fn distinct_aggregate_group_by_still_compiles_the_sorter_strategy() {
         is_virtual: false,
         sql: String::new(),
         indexes: vec![],
+        rowid_alias: None,
     };
     let select = match parse_select("SELECT bucket, count(DISTINCT x) FROM t GROUP BY bucket;") {
         ParseOutcome::Accepted(s) => *s,
