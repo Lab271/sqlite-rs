@@ -3814,12 +3814,58 @@ mod tests {
         assert_eq!(step, Step::Jump(99));
     }
 
+    /// Distinct from `seek_index_eq_misses_and_jumps_to_p2`: probing 0
+    /// (below every key: 1, 2, 3) still gives the underlying b-tree
+    /// `seek` a row to land on (its ">=" floor, the lowest key, 1) —
+    /// unlike probing past the end, which returns no row at all. This
+    /// exercises the separate re-check (#591) that a landed-on row's
+    /// probed-length prefix actually equals the probe, catching a
+    /// probe that falls strictly between (or below) real keys.
+    #[test]
+    fn seek_index_eq_lands_on_a_row_whose_prefix_does_not_match_and_jumps_to_p2() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(0)).unwrap();
+        let step = seek_index_eq(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexEq, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
     #[test]
     fn idx_rowid_without_a_prior_seek_errors() {
         let mut vm = writable_vm_with_index_entries(1);
         open_index_read(&mut vm, 0);
         let err = idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn idx_rowid_errors_when_trailing_column_is_not_an_integer() {
+        let mut vm = writable_vm_with_index_entries(1);
+        open_index_read(&mut vm, 0);
+        let CursorSlot::IndexRead(state) = vm.cursor_mut(0).unwrap() else {
+            panic!("expected an index-read cursor");
+        };
+        // Hand-fabricates a current row whose only (and thus trailing)
+        // column isn't the integer rowid a real index entry always
+        // carries there — the malformed-input path `IdxRowid` must
+        // still error on, rather than a well-formed index page would
+        // ever produce on its own.
+        state.set_current(Some(btree::IndexRow {
+            payload: btree::Payload::Owned(encode_record(
+                &[Value::Text(Rc::from("not-a-rowid"))],
+                TextEncoding::Utf8,
+            )),
+        }));
+        let err = idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap_err();
+        assert!(
+            matches!(err, ExecError::MalformedInstruction { .. }),
+            "expected a MalformedInstruction error, got: {err:?}"
+        );
     }
 
     #[test]
@@ -4026,6 +4072,13 @@ mod tests {
         let mut vm = open_vm("table_multipage.db");
         count(&mut vm, &Instruction::new(Opcode::Count, 2, 10, 0)).unwrap();
         assert_eq!(*vm.register(10).unwrap(), Value::Integer(3000));
+    }
+
+    #[test]
+    fn count_opcode_rejects_a_negative_root_page() {
+        let mut vm = open_vm("table_multipage.db");
+        let err = count(&mut vm, &Instruction::new(Opcode::Count, -1, 10, 0)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
     }
 
     #[test]
