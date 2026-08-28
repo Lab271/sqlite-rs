@@ -1,7 +1,7 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
 use super::super::join_access::{
-    choose_auto_index_probe, choose_bloom_probe, choose_join_access, emit_join_row, JoinAccess,
+    choose_auto_index_probe, choose_join_access, emit_join_row, JoinAccess,
 };
 use super::super::limit_scan::{emit_limit_guard, emit_offset_guard, LimitState};
 use super::super::*;
@@ -243,31 +243,12 @@ where
     // check, building a transient automatic index over `binding`'s join
     // column can turn this level's scan into a seek, same as a real
     // index would — see [`choose_auto_index_probe`]'s gating (`ANALYZE`
-    // stats required). Tried before the Bloom pre-check below: an
-    // automatic index makes both hits *and* misses cheap, so it
-    // strictly subsumes what the Bloom filter buys a plain full scan.
+    // stats required).
     let auto_index_probe = if single_check_access.is_none() {
         match plan.checks.as_slice() {
             [check] => check.constraint.as_ref().and_then(|constraint| {
                 let prior = exec_bindings.get(..level)?;
                 choose_auto_index_probe(binding, constraint, prior)
-            }),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // #464 (spec 011): when no structural seek exists for this level's
-    // single check, a Bloom-filter pre-check can still let a per-outer
-    // row that's a guaranteed miss skip this level's `Rewind`/`Next`
-    // scan entirely — see [`choose_bloom_probe`]'s gating (`ANALYZE`
-    // stats required, so a stats-free database emits none of this).
-    let bloom_probe = if single_check_access.is_none() && auto_index_probe.is_none() {
-        match plan.checks.as_slice() {
-            [check] => check.constraint.as_ref().and_then(|constraint| {
-                let prior = exec_bindings.get(..level)?;
-                choose_bloom_probe(binding, constraint, prior)
             }),
             _ => None,
         }
@@ -350,9 +331,8 @@ where
         }
         None if auto_index_probe.is_some() => {
             // #545: build a transient automatic index over `binding`'s
-            // join column (a one-time `Once`-guarded pre-pass, same
-            // guard shape as the Bloom pre-pass below), then probe it
-            // instead of a `Rewind`/`Next` full scan. Unlike a real
+            // join column (a one-time `Once`-guarded pre-pass), then
+            // probe it instead of a `Rewind`/`Next` full scan. Unlike a real
             // index's `SeekIndexEq` + recheck-then-`IdxNext` shape
             // (#450), the `AutoIndexSeek`/`AutoIndexRowid`/
             // `AutoIndexNext` primitives are an exact-key multi-map, so
@@ -487,40 +467,6 @@ where
         }
         None => {
             let rewind_end = em.new_label();
-
-            if let Some(bloom) = &bloom_probe {
-                // One-time pre-pass (guarded by `Once`, so it only
-                // actually scans `cursor` the first time this
-                // recursion level's code runs, however many outer
-                // combinations reach it) that inserts every one of
-                // `binding`'s own rows into the filter, before the
-                // ordinary per-outer-row `Filter` check below ever
-                // runs against it.
-                let once_addr = em.emit(Instruction::new(Opcode::Once, 0, 0, 0));
-                let prescan_end = em.new_label();
-                let prescan_rewind = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
-                em.patch_p2(prescan_rewind, prescan_end);
-                let prescan_loop = em.new_label();
-                em.place(prescan_loop);
-                let key_reg = reg.alloc();
-                emit_column_read(em, &binding.schema, cursor, bloom.key_column, key_reg)?;
-                em.emit(Instruction::with_p4(
-                    Opcode::FilterAdd,
-                    cursor,
-                    0,
-                    key_reg,
-                    P4::Int(i64::try_from(bloom.rows).unwrap_or(i64::MAX)),
-                ));
-                let prescan_next = em.emit(Instruction::new(Opcode::Next, cursor, 0, 0));
-                em.patch_p2(prescan_next, prescan_loop);
-                em.place(prescan_end);
-                em.patch_p2(once_addr, prescan_end);
-
-                let scope = join_scope(orig_bindings, null_mask, pos_of, catalog, dedup_star);
-                let probe_reg = compile_value(em, reg, &scope, &bloom.probe)?;
-                let filter_addr = em.emit(Instruction::new(Opcode::Filter, cursor, 0, probe_reg));
-                em.patch_p2(filter_addr, rewind_end);
-            }
 
             let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, cursor, 0, 0));
             em.patch_p2(rewind_addr, rewind_end);

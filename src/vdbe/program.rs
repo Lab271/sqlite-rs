@@ -399,26 +399,6 @@ pub enum Opcode {
     /// Advances hash-aggregation cursor `P1` to its next group, jumping
     /// to `P2` if there was one.
     HashAggNext,
-    // #464 (spec 011): a probabilistic pre-check for a join level's
-    // nested-loop scan when no rowid/unique-index seek is structurally
-    // available (`choose_join_access` returned `None`) -- like
-    // `NoConflict`/`SeekIndexEq` above, postdates the V2 oracle harvest
-    // (no cost-model-driven join optimization existed then), so
-    // excluded from `ALL` but fully dispatched and
-    // exhaustiveness-checked -- see `crate::vdbe::filter`'s doc for the
-    // exact no-false-negative contract these two rely on.
-    /// Inserts register `P3`'s value into bloom-filter slot `P1`
-    /// (lazily created, sized from `P4::Int`'s expected-item-count
-    /// hint, on first use).
-    FilterAdd,
-    /// Jumps to `P2` when register `P3`'s value is definitely absent
-    /// from bloom-filter slot `P1`, and falls through otherwise (a
-    /// true match, or one this filter can't rule out). Never
-    /// inserted/tested for anything but a `Value::Integer` key (see
-    /// `crate::vdbe::filter`'s doc for why), so a non-integer join
-    /// column simply never benefits, but is never wrongly excluded
-    /// either.
-    Filter,
 }
 
 impl Opcode {
@@ -609,9 +589,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::HashAggStep
         | Opcode::HashAggRewind
         | Opcode::HashAggData
-        | Opcode::HashAggNext
-        | Opcode::FilterAdd
-        | Opcode::Filter => {}
+        | Opcode::HashAggNext => {}
     }
 }
 

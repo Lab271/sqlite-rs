@@ -14,8 +14,7 @@ decisions instead of the purely structural pattern-matching it uses today
 (`src/codegen/select/join_access.rs::choose_join_access`).
 
 Assigned to **V7** (`.openspec/plan.md:267`). Enables #470 (join ordering
-heuristics), skip-scan optimization, and bloom-filter decisions — none of
-which are in scope here.
+heuristics) and skip-scan optimization — none of which are in scope here.
 
 Refs: #461
 
@@ -230,55 +229,39 @@ rows in the same reordered execution order this produces.
 
 **Tests:** `tests/corpus/analyze_test.rs::join_order_reorders_by_analyze_row_counts`
 
-### Requirement 6: Bloom-Filter Pre-Check for Unindexed Join Levels [MUST]
+### Requirement 6: Automatic-Index Probe for Unindexed Join Levels [MUST]
 
 When a join level's single `ON` equality has no structural rowid/unique-
 index seek available (`choose_join_access` returns `None`) and `ANALYZE`
-records at least `join_access::MIN_ROWS_TO_BLOOM` rows for that level's
-table, `compile_join_level_traverse` (`src/codegen/select/joins/level.rs`)
-MUST preface that level's `Rewind`/`Next` scan with a one-time (`Once`-
-guarded) `FilterAdd` pre-pass over the table's join-key column and a
-per-outer-row `Filter` check that skips the scan entirely on a definite
-miss. The underlying `FilterAdd`/`Filter` opcodes (`crate::vdbe::filter`)
-MUST NOT produce a false negative for any `Value`: only an exact-match
-`Value::Integer` key is ever hashed, and any other type (or a filter that
-has ever seen one) always reports "maybe present" rather than risk
-excluding a value real join semantics would still match. A database with
-no `ANALYZE` history, or a table below the row threshold, MUST compile
-with no `FilterAdd`/`Filter` opcode at all — byte-for-byte the pre-#464
-program.
+stats show building a transient index over that level's join column is
+worthwhile (`crate::planner::is_automatic_index_worthwhile`),
+`compile_join_level_traverse` (`src/codegen/select/joins/level.rs`) MUST
+preface that level's scan with a transient automatic index build
+(`OpenEphemeral` + `AutoIndexInsert` pre-pass, then `AutoIndexSeek` per
+outer row) instead of a plain `Rewind`/`Next` scan. A database with no
+`ANALYZE` history, or a table too small to be worthwhile, MUST compile
+with no `OpenEphemeral`/`AutoIndexSeek` opcode for this level at all.
 
-**Implementation:** `src/vdbe/filter.rs::BloomFilterState`,
-`src/codegen/select/join_access.rs::choose_bloom_probe`,
+(#464/#623: this level previously had a second, Bloom-filter-based
+pre-check strategy, `choose_bloom_probe`/`Opcode::Filter`/`FilterAdd`.
+It gated on the identical row threshold and equality shape as the
+automatic-index probe above, which is tried first and strictly subsumes
+it — an automatic index makes both hits *and* misses cheap, so no input
+could ever reach the Bloom branch. #623 removed it as dead code rather
+than keep an unreachable "defensive fallback" that no test could
+exercise; see this spec's git history for the removed
+requirement/scenario text.)
+
+**Implementation:**
+`src/codegen/select/join_access.rs::choose_auto_index_probe`,
 `src/codegen/select/joins/level.rs::compile_join_level_traverse`
 
-#### Scenario: Bloom pre-check is superseded by automatic indexing, not reachable today
+#### Scenario: Automatic index prefaces an unindexed join level once ANALYZE has run
 
-- GIVEN `ANALYZE` stats recording a table with more rows than
-  `MIN_ROWS_TO_BLOOM`, joined on a plain (non-indexed) equality (this
-  scenario's original title, "Unindexed join level gets a Bloom pre-check
-  once ANALYZE has run," assumed the Bloom path would actually compile in
-  — since #545 that's no longer true)
+- GIVEN `ANALYZE` stats recording a table large enough to be worthwhile,
+  joined on a plain (non-indexed) equality
 - WHEN that join is compiled
-- THEN `compile_join_level_traverse` tries `choose_auto_index_probe`
-  first (`src/codegen/select/joins/level.rs`); because it gates on the
-  same structural equality shape and the same row threshold as
-  `choose_bloom_probe` (`MIN_ROWS_TO_AUTO_INDEX == MIN_ROWS_TO_BLOOM ==
-  25`), any input that would satisfy the Bloom pre-check's conditions
-  satisfies the automatic-index probe's conditions first — the program
-  contains `OpenEphemeral`/`AutoIndexSeek`, never `FilterAdd`/`Filter`,
-  for this exact case. The Bloom codegen path (`choose_bloom_probe`,
-  `crate::vdbe::filter`) is retained as a defensive fallback — it would
-  activate if the two thresholds or gating conditions ever diverged —
-  but is not exercised by any reachable input today, so no scenario
-  claims it "fires" in the current build.
+- THEN the program contains `OpenEphemeral`/`AutoIndexSeek` for that
+  level, and the join still returns the same rows as the oracle
 
 **Tests:** `tests/corpus/analyze_test.rs::automatic_index_prefaces_unindexed_join_level_once_analyzed`
-
-#### Scenario: Small or stats-free tables never get a Bloom pre-check
-
-- GIVEN a table below `MIN_ROWS_TO_BLOOM` rows (with or without `ANALYZE`)
-- WHEN a plain-equality join against it is compiled
-- THEN the program contains no `FilterAdd`/`Filter` opcode
-
-**Tests:** `tests/corpus/analyze_test.rs::bloom_filter_is_skipped_below_row_threshold`
