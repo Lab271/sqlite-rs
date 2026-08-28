@@ -15,7 +15,6 @@ mod control;
 mod cursor;
 mod exec;
 pub mod explain;
-mod filter;
 mod functions;
 mod hash_agg;
 mod pragma;
