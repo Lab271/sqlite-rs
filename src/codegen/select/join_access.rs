@@ -144,14 +144,13 @@ pub(in crate::codegen) struct AutoIndexProbe {
 /// (#545, sqlite.org/optoverview.html#autoindex) once
 /// [`choose_join_access`] has already ruled out a structural seek
 /// against a real index — same top-level-equality shape (a single
-/// `binding.column = <safe probe>` `ON` clause) as that function and
-/// [`choose_bloom_probe`], additionally gated on
+/// `binding.column = <safe probe>` `ON` clause) as that function,
+/// additionally gated on
 /// [`crate::planner::is_automatic_index_worthwhile`] judging `binding`'s
 /// `ANALYZE` stats large enough that building the transient index once
 /// beats repeatedly nested-loop-scanning the table — no stats at all,
 /// or too few rows, and this returns `None` (same "stats-free database
-/// is byte-for-byte unaffected" guarantee [`choose_bloom_probe`] and
-/// [`choose_join_access`] both make).
+/// is byte-for-byte unaffected" guarantee [`choose_join_access`] makes).
 pub(in crate::codegen) fn choose_auto_index_probe(
     binding: &TableBinding,
     on_expr: &Expr,
@@ -180,71 +179,6 @@ pub(in crate::codegen) fn choose_auto_index_probe(
     Some(AutoIndexProbe {
         probe: other_side.clone(),
         key_column,
-    })
-}
-
-/// #464 (spec 011): the smallest table size an `ANALYZE`-recorded row
-/// count must clear before a level's nested-loop scan is worth
-/// prefacing with a Bloom-filter pre-pass — below this, the pre-pass's
-/// own one-time full scan of the table plus a `Filter` check per outer
-/// row is more overhead than the `Rewind`/`Next` scan it might skip.
-const MIN_ROWS_TO_BLOOM: u64 = 25;
-
-/// A Bloom-filter pre-check picked for a join level whose nested-loop
-/// scan [`choose_join_access`] couldn't turn into a seek — see
-/// [`choose_bloom_probe`].
-pub(in crate::codegen) struct BloomProbe {
-    /// The expression to hash and test against the filter each time
-    /// this level's own scan would otherwise start (`prior_bindings`
-    /// only — see [`expr_is_safe_join_probe`]).
-    pub(in crate::codegen) probe: Expr,
-    /// `binding`'s own column the filter is built from (one `FilterAdd`
-    /// per row, in a one-time pre-pass over `binding`'s cursor).
-    pub(in crate::codegen) key_column: usize,
-    /// `ANALYZE`'s row-count estimate for `binding`'s table — sizes the
-    /// filter's bit array (`FilterAdd`'s `P4::Int` hint).
-    pub(in crate::codegen) rows: u64,
-}
-
-/// Picks a Bloom-filter pre-check for join level `binding` once
-/// [`choose_join_access`] has already ruled out a structural seek —
-/// same top-level-equality shape (a single `binding.column = <safe
-/// probe>` `ON` clause) as that function, gated additionally on
-/// `ANALYZE` stats recording at least [`MIN_ROWS_TO_BLOOM`] rows for
-/// `binding`'s table (no stats at all, or too few rows, and this
-/// returns `None` — a stats-free database is therefore byte-for-byte
-/// unaffected by this optimization's mere existence, same guarantee
-/// #461 makes for `choose_join_access` itself).
-pub(in crate::codegen) fn choose_bloom_probe(
-    binding: &TableBinding,
-    on_expr: &Expr,
-    prior_bindings: &[TableBinding],
-) -> Option<BloomProbe> {
-    let rows = binding.stats.table_rows()?;
-    if rows < MIN_ROWS_TO_BLOOM {
-        return None;
-    }
-    let (lhs, rhs) = top_level_equality_operands(on_expr)?;
-    let (this_side, other_side) = if matches!(&lhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
-    {
-        (lhs, rhs)
-    } else if matches!(&rhs.kind, ExprKind::Column { table, name, .. } if column_belongs_to_binding(binding, table.as_deref(), name))
-    {
-        (rhs, lhs)
-    } else {
-        return None;
-    };
-    if !expr_is_safe_join_probe(other_side, prior_bindings) {
-        return None;
-    }
-    let ExprKind::Column { name, .. } = &this_side.kind else {
-        return None;
-    };
-    let key_column = column_index(&binding.schema, name)?;
-    Some(BloomProbe {
-        probe: other_side.clone(),
-        key_column,
-        rows,
     })
 }
 
@@ -1065,66 +999,6 @@ mod tests {
         t1b.stats = stats;
         let on_expr = eq(col(Some("t1"), "id"), col(Some("t1"), "id"));
         assert!(choose_auto_index_probe(&t1b, &on_expr, &[]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_requires_min_rows() {
-        let t0 = binding(schema("t0", &["id"], vec![]), None);
-        let mut t1b = binding(schema("t1", &["key"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "5".to_string())]);
-        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[t0]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_none_when_no_stats() {
-        let t0 = binding(schema("t0", &["id"], vec![]), None);
-        let t1b = binding(schema("t1", &["key"], vec![]), None);
-        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[t0]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_picks_when_rows_large_enough() {
-        let t0 = binding(schema("t0", &["id"], vec![]), None);
-        let mut t1b = binding(schema("t1", &["id", "key"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
-        let on_expr = eq(col(Some("t1"), "key"), col(Some("t0"), "id"));
-        let probe = choose_bloom_probe(&t1b, &on_expr, &[t0]).unwrap();
-        assert_eq!(probe.key_column, 1);
-        assert_eq!(probe.rows, 1000);
-    }
-
-    #[test]
-    fn choose_bloom_probe_none_when_equality_fails() {
-        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
-        let on_expr = col(Some("t1"), "id");
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_none_when_neither_side_belongs() {
-        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
-        let on_expr = eq(col(Some("other"), "x"), col(Some("other2"), "y"));
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_none_when_probe_unsafe() {
-        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
-        let on_expr = eq(col(Some("t1"), "id"), col(Some("t1"), "id"));
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
-    }
-
-    #[test]
-    fn choose_bloom_probe_none_when_column_unknown_to_schema() {
-        let mut t1b = binding(schema("t1", &["id"], vec![]), None);
-        t1b.stats = Stats::from_stat1_rows(vec![(None, "1000".to_string())]);
-        let on_expr = eq(col(Some("t1"), "missing"), lit_int(1));
-        assert!(choose_bloom_probe(&t1b, &on_expr, &[]).is_none());
     }
 
     #[test]

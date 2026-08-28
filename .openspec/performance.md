@@ -35,7 +35,7 @@ sqlite-rs benchmarks against the sqlite3 oracle (v3.53.4) on a 1MB fixture (16,7
 | V5 | Transactions (BEGIN/COMMIT) | 24× write improvement |
 | V6 | WAL mode | Concurrent readers |
 | V7.1 | Lazy payload reassembly | full_scan 3.6× → 1.3× |
-| V7.2 | Join ordering + Bloom filter | join 11× → 2× |
+| V7.2 | Join ordering + Bloom filter (superseded by automatic indexing, #545; removed #623) | join 11× → 2× |
 | V7.2 | Correlated subquery cache | 785× → 2× |
 | V7.3 | Record encode scratch buffer | 25% write improvement |
 | V7 | Compile-path optimizations | Tokenizer 50% faster |

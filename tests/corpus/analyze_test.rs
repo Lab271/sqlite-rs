@@ -44,8 +44,8 @@ fn exec_ok(db: &Path, sql: &str) {
 }
 
 /// The `-explain` bytecode listing for `db`/`sql` -- used below to
-/// check for `FilterAdd`/`Filter` opcodes (#464), which `EXPLAIN QUERY
-/// PLAN`'s human-readable summary doesn't surface.
+/// check for opcodes that `EXPLAIN QUERY PLAN`'s human-readable summary
+/// doesn't surface.
 fn explain(db: &Path, sql: &str) -> String {
     let output = Command::new(CLI)
         .arg("query")
@@ -336,14 +336,12 @@ fn join_order_prefers_seekable_inner_over_smaller_outer() {
     assert_eq!(rows, "1|a\n2|b\n3|a\n4|b\n5|a\n", "got: {rows}");
 }
 
-/// #464 (spec 011): once `ANALYZE` shows a join level's table has
+/// #545 (spec 011): once `ANALYZE` shows a join level's table has
 /// enough rows and no rowid/unique-index seek is structurally
 /// available, the compiled program prefaces that level's nested-loop
-/// scan -- since #545, a transient automatic index (`OpenEphemeral` +
-/// `AutoIndexSeek`) rather than a `FilterAdd`/`Filter` Bloom pre-pass,
-/// since an automatic index makes both hits and misses cheap and so is
-/// tried first (see `join_access::choose_auto_index_probe`) -- and the
-/// join still returns the same rows as the oracle.
+/// scan with a transient automatic index (`OpenEphemeral` +
+/// `AutoIndexSeek`, see `join_access::choose_auto_index_probe`) -- and
+/// the join still returns the same rows as the oracle.
 #[test]
 fn automatic_index_prefaces_unindexed_join_level_once_analyzed() {
     let Some(db) = seed_db("auto-index") else {
@@ -359,7 +357,6 @@ fn automatic_index_prefaces_unindexed_join_level_once_analyzed() {
     let plan = explain(&db, "SELECT * FROM t1 JOIN t2 ON t1.a = t2.x");
     assert!(plan.contains("OpenEphemeral"), "got: {plan}");
     assert!(plan.contains("AutoIndexSeek"), "got: {plan}");
-    assert!(!plan.contains("FilterAdd"), "got: {plan}");
 
     let rows = run_query(
         &db,
@@ -437,25 +434,6 @@ fn eqp_reports_automatic_index_once_analyzed() {
         "got: {plan}"
     );
     assert!(!plan.contains("SCAN t1"), "got: {plan}");
-}
-
-/// #464 (spec 011): below [`join_access::MIN_ROWS_TO_BLOOM`]'s
-/// threshold (or without `ANALYZE` at all), no `FilterAdd`/`Filter`
-/// opcode is emitted -- the pre-pass's overhead isn't worth it for a
-/// small table, and a stats-free database is byte-for-byte unaffected.
-#[test]
-fn bloom_filter_is_skipped_below_row_threshold() {
-    let Some(db) = seed_db("bloom-filter-small") else {
-        return skip_no_oracle("bloom_filter_is_skipped_below_row_threshold");
-    };
-    exec_ok(&db, "CREATE TABLE t1(a INTEGER)");
-    exec_ok(&db, "CREATE TABLE t2(x INTEGER)");
-    exec_ok(&db, "INSERT INTO t1 VALUES (1), (2), (3)");
-    exec_ok(&db, "INSERT INTO t2 VALUES (2)");
-    exec_ok(&db, "ANALYZE");
-
-    let plan = explain(&db, "SELECT * FROM t1 JOIN t2 ON t1.a = t2.x");
-    assert!(!plan.contains("FilterAdd"), "got: {plan}");
 }
 
 /// Verifies `sql`'s rows against the pinned oracle after `ANALYZE` has

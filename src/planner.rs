@@ -163,9 +163,8 @@ pub fn estimate_index_cost(index_name: &str, stats: &Stats) -> PlanCost {
 /// #autoindex) — building the index costs one full scan of the table up
 /// front, so it only pays for itself once the table is big enough that
 /// repeatedly nested-loop-scanning it (once per outer row) would cost
-/// more overall. Mirrors [`MIN_ROWS_TO_BLOOM`]-style thresholds
-/// elsewhere in this codebase (`codegen::select::join_access`): a small
-/// table's full scan is already cheap, so skip the extra machinery.
+/// more overall: a small table's full scan is already cheap, so skip
+/// the extra machinery.
 const MIN_ROWS_TO_AUTO_INDEX: u64 = 25;
 
 /// Whether building a transient automatic index (#545) for `stats`'
