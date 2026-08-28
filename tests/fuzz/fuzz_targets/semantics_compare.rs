@@ -64,7 +64,7 @@ fn decode_value(data: &[u8]) -> Option<(Value, &[u8])> {
             let len = (len as usize).min(rest.len());
             let (text, rest) = rest.split_at(len);
             Some((
-                Value::Text(String::from_utf8_lossy(text).into_owned()),
+                Value::Text(String::from_utf8_lossy(text).into_owned().into()),
                 rest,
             ))
         }
@@ -72,7 +72,7 @@ fn decode_value(data: &[u8]) -> Option<(Value, &[u8])> {
             let (&len, rest) = rest.split_first()?;
             let len = (len as usize).min(rest.len());
             let (blob, rest) = rest.split_at(len);
-            Some((Value::Blob(blob.to_vec()), rest))
+            Some((Value::Blob(blob.to_vec().into()), rest))
         }
     }
 }

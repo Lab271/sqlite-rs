@@ -8,9 +8,9 @@ use sqlite_rs::record::Value;
 use sqlite_rs::vdbe::call_function;
 
 const NAMES: &[&str] = &[
-    "length", "upper", "lower", "substr", "abs", "coalesce", "ifnull", "nullif",
-    "typeof", "hex", "unhex", "quote", "min", "max", "round", "sign", "instr",
-    "trim", "ltrim", "rtrim", "replace", "zeroblob", "iif",
+    "length", "upper", "lower", "substr", "abs", "coalesce", "ifnull", "nullif", "typeof", "hex",
+    "unhex", "quote", "min", "max", "round", "sign", "instr", "trim", "ltrim", "rtrim", "replace",
+    "zeroblob", "iif",
 ];
 
 fn decode_value(bytes: &[u8], pos: &mut usize) -> Value {
@@ -42,7 +42,7 @@ fn decode_value(bytes: &[u8], pos: &mut usize) -> Value {
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .unwrap_or_default();
             *pos = pos.saturating_add(len);
-            Value::Text(s)
+            Value::Text(s.into())
         }
         _ => {
             let len = (*bytes.get(*pos).unwrap_or(&0) as usize) % 8;
@@ -52,7 +52,7 @@ fn decode_value(bytes: &[u8], pos: &mut usize) -> Value {
                 .unwrap_or(&[])
                 .to_vec();
             *pos = pos.saturating_add(len);
-            Value::Blob(b)
+            Value::Blob(b.into())
         }
     }
 }

@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install check-deny check-audit check-license-headers update vendor sbom sbom-dev supply-chain check-grammar-drift check-mvl-limit version version-pin check-mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance check-assurance traceability coverage check-coverage mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
+.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install check-deny check-audit check-license-headers update vendor sbom sbom-dev supply-chain check-grammar-drift check-mvl-limit version version-pin check-mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance check-assurance traceability coverage check-coverage mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select fuzz-scalar-functions fuzz-vdbe-exec fuzz-semantics-compare fuzz-smoke spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -390,18 +390,59 @@ mutants: ## Run cargo-mutants over $(MUTANTS_FILE), report to target/mutants.out
 
 FUZZ_SECONDS ?= 60
 
+# Every target passes TWO corpus dirs: tests/fuzz/corpus/<name> first
+# (the libFuzzer-grown corpus, gitignored, where newly discovered inputs
+# get saved — libFuzzer always writes into the FIRST corpus dir it's
+# given) and tests/fuzz/seeds/<name> second, read-only (real crash/
+# regression inputs and a few hand-picked structurally-valid seeds,
+# committed to git — see tests/fuzz/seeds/README.md). Passing only the
+# seeds dir would make libFuzzer treat IT as the writable corpus instead
+# and fill it with generated inputs — see the README's note (#615).
 fuzz-btree: ## Run the b-tree cursor fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
+	@mkdir -p tests/fuzz/corpus/btree_cursor
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz btree_cursor tests/fuzz/corpus/btree_cursor tests/fuzz/seeds/btree_cursor -- -max_total_time=$(FUZZ_SECONDS)
 
 fuzz-wal: ## Run the WAL frame parsing fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz wal_frames -- -max_total_time=$(FUZZ_SECONDS)
+	@mkdir -p tests/fuzz/corpus/wal_frames
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz wal_frames tests/fuzz/corpus/wal_frames tests/fuzz/seeds/wal_frames -- -max_total_time=$(FUZZ_SECONDS)
 
 fuzz-decode-record: ## Run the record-decoder fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 003 Req 6)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz decode_record -- -max_total_time=$(FUZZ_SECONDS)
+	@mkdir -p tests/fuzz/corpus/decode_record
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz decode_record tests/fuzz/corpus/decode_record tests/fuzz/seeds/decode_record -- -max_total_time=$(FUZZ_SECONDS)
 
 fuzz-parse-select: ## Run the SELECT-core parser fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 002 Req 2-4)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz parse_select -- -max_total_time=$(FUZZ_SECONDS)
+	@mkdir -p tests/fuzz/corpus/parse_select
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz parse_select tests/fuzz/corpus/parse_select tests/fuzz/seeds/parse_select -- -max_total_time=$(FUZZ_SECONDS)
 
+# -rss_limit_mb raised from libFuzzer's 2048 default: zeroblob() legitimately
+# allocates up to MAX_BLOB_LEN (~1GB, matching SQLite's SQLITE_MAX_LENGTH
+# default — see src/vdbe/functions.rs), and ASan's allocator quarantines
+# freed blocks rather than returning them to the OS, so repeated ~1GB
+# zeroblob calls across fuzz iterations accumulate RSS well past 2048MB
+# with no actual leak. Confirmed not a real bug (src/vdbe/functions.rs's
+# `zeroblob_clamps_oversized_length` test already covers the clamp).
+fuzz-scalar-functions: ## Run the scalar-function dispatch fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration)
+	@mkdir -p tests/fuzz/corpus/scalar_functions
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz scalar_functions tests/fuzz/corpus/scalar_functions tests/fuzz/seeds/scalar_functions -- -max_total_time=$(FUZZ_SECONDS) -rss_limit_mb=4096
+
+fuzz-vdbe-exec: ## Run the VDBE opcode-execution fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 009's no-panic-totality obligation, #89)
+	@mkdir -p tests/fuzz/corpus/vdbe_exec
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz vdbe_exec tests/fuzz/corpus/vdbe_exec tests/fuzz/seeds/vdbe_exec -- -max_total_time=$(FUZZ_SECONDS)
+
+fuzz-semantics-compare: ## Run the value-comparison total-order property fuzz target (requires cargo-fuzz + nightly; FUZZ_SECONDS to change duration; discharges spec 008 Req 2)
+	@mkdir -p tests/fuzz/corpus/semantics_compare
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz semantics_compare tests/fuzz/corpus/semantics_compare tests/fuzz/seeds/semantics_compare -- -max_total_time=$(FUZZ_SECONDS)
+
+FUZZ_TARGETS := btree_cursor wal_frames decode_record parse_select scalar_functions vdbe_exec semantics_compare
+FUZZ_SMOKE_SECONDS ?= 15
+
+fuzz-smoke: ## Short crash-only run of every fuzz target (CI gate; FUZZ_SMOKE_SECONDS per target, default 15s)
+	@for t in $(FUZZ_TARGETS); do \
+		echo "--- fuzz-smoke: $$t ($(FUZZ_SMOKE_SECONDS)s) ---"; \
+		mkdir -p "tests/fuzz/corpus/$$t"; \
+		cargo +nightly fuzz run --fuzz-dir tests/fuzz "$$t" "tests/fuzz/corpus/$$t" "tests/fuzz/seeds/$$t" \
+			-- -max_total_time=$(FUZZ_SMOKE_SECONDS) -rss_limit_mb=4096 || exit 1; \
+	done
 
 # === Spikes ===
 

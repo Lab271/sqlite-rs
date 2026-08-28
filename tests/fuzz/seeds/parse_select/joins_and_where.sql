@@ -1,0 +1,1 @@
+SELECT a, b FROM t1 JOIN t2 ON t1.id = t2.id WHERE a > 1 AND b IS NOT NULL ORDER BY a LIMIT 10;

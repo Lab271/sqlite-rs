@@ -6,8 +6,33 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Fixed
+
+- `compare()`'s REAL ordering reported NaN as "equal" to every other value
+  (`partial_cmp().unwrap_or(Ordering::Equal)`), breaking the total-order
+  contract's transitivity (spec 008 Req 2) whenever a NaN sat between two
+  ordinary reals. Also fixed `compare_int_real`'s NaN handling, which
+  disagreed with the REAL-vs-REAL fix's convention (integer-vs-NaN and
+  real-vs-NaN now both treat NaN as the numeric class's maximum). Found by
+  `tests/fuzz/fuzz_targets/semantics_compare.rs` once it was actually
+  wired into CI (`make fuzz-smoke`) — both crashing inputs are now
+  committed seeds under `tests/fuzz/seeds/semantics_compare/`.
+- `tests/fuzz/fuzz_targets/scalar_functions.rs` and `semantics_compare.rs`
+  didn't compile — both predated the `Value::Text`/`Value::Blob` API
+  change from `String`/`Vec<u8>` to `Rc<str>`/`Rc<[u8]>`, so neither fuzz
+  target had run since. Found while wiring `make fuzz-smoke` into CI.
+
 ### Added
 
+- Fuzzing gap-closing pass: `make fuzz-smoke` runs a short crash-only pass
+  of every `tests/fuzz/fuzz_targets/*.rs` target and is now a blocking CI
+  job, catching a crash before merge instead of only when someone
+  remembers to run `make fuzz-*` by hand. Added `make fuzz-scalar-functions`
+  /`fuzz-vdbe-exec`/`fuzz-semantics-compare` Makefile targets for the 3
+  fuzz binaries that previously had none. Every target now also seeds
+  from a committed `tests/fuzz/seeds/<target>/` directory (see its
+  README) instead of starting from nothing each run — `tests/fuzz/corpus/`
+  (the libFuzzer-grown corpus) stays gitignored as before.
 - Extended MC/DC scan scope (spec 005-assurance) to `src/vdbe/program.rs`
   and `src/vdbe/control.rs` — the opcode-dispatch layer every query
   executes through, previously the highest-leverage gap since only
