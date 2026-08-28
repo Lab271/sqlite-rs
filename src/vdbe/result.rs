@@ -142,7 +142,8 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         P4::Affinity(bytes) => bytes,
         _ => &[],
     };
-    let mut values = Vec::with_capacity(count);
+    let mut values = std::mem::take(vm.make_record_values_scratch());
+    values.clear();
     for i in 0..count {
         let reg = instr
             .p1
@@ -158,9 +159,17 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         values.push(value);
     }
     let mut scratch = std::mem::take(vm.record_scratch());
-    encode_record_into(&values, TextEncoding::Utf8, &mut scratch);
+    let mut encode_scratch = std::mem::take(vm.encode_scratch());
+    encode_record_into(
+        &values,
+        TextEncoding::Utf8,
+        &mut scratch,
+        &mut encode_scratch,
+    );
     let payload: Rc<[u8]> = Rc::from(scratch.as_slice());
     *vm.record_scratch() = scratch;
+    *vm.encode_scratch() = encode_scratch;
+    *vm.make_record_values_scratch() = values;
     vm.set_register(instr.p3, Value::Blob(payload))?;
     Ok(Step::Next)
 }

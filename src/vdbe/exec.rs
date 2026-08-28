@@ -324,6 +324,16 @@ pub struct Vm {
     /// payload's allocation across every row a statement emits, instead
     /// of a fresh `Vec<u8>` per `MakeRecord` execution.
     record_scratch: Vec<u8>,
+    /// Reused register-value buffer for `MakeRecord` (#631) — same
+    /// rationale as `record_scratch`, for the `Vec<Value>` collected
+    /// from the source register range before encoding.
+    make_record_values_scratch: Vec<Value>,
+    /// Reused per-column `(serial_type, body_len)` buffer for
+    /// `MakeRecord` (#631) — `encode_record_into` computes one entry
+    /// per column before writing the header/bodies; reusing this across
+    /// every row (like the profiled fix to the *decode* side's
+    /// equivalent `entries` buffer) avoids a `Vec` allocation per row.
+    encode_scratch: Vec<(u64, usize)>,
 }
 
 impl Default for Vm {
@@ -338,6 +348,8 @@ impl Default for Vm {
             params: Vec::new(),
             autocommit: true,
             record_scratch: Vec::new(),
+            make_record_values_scratch: Vec::new(),
+            encode_scratch: Vec::new(),
         }
     }
 }
@@ -362,6 +374,18 @@ impl Vm {
     /// [`Vm::record_scratch`]'s field doc.
     pub(crate) fn record_scratch(&mut self) -> &mut Vec<u8> {
         &mut self.record_scratch
+    }
+
+    /// Reused register-value buffer for `MakeRecord` (#631) — see
+    /// [`Vm::make_record_values_scratch`]'s field doc.
+    pub(crate) fn make_record_values_scratch(&mut self) -> &mut Vec<Value> {
+        &mut self.make_record_values_scratch
+    }
+
+    /// Reused per-column encode buffer for `MakeRecord` (#631) — see
+    /// [`Vm::encode_scratch`]'s field doc.
+    pub(crate) fn encode_scratch(&mut self) -> &mut Vec<(u64, usize)> {
+        &mut self.encode_scratch
     }
 
     /// Builds a `Vm` that can service `OpenRead` against `source` (page
