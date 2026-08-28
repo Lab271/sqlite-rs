@@ -102,11 +102,19 @@ mod tests {
         write_flush("").unwrap();
     }
 
-    // `enable()` falls back to `None` when stdin isn't a tty (piped input),
-    // which is exactly how `cargo test` runs — no controlling tty attached.
+    // `enable()` falls back to `None` when stdin isn't a tty (piped
+    // input) -- true for most `cargo test` invocations, but not a run
+    // inside an interactive terminal session, where stdin genuinely is
+    // a tty and `enable()` correctly returns `Some`. Assert against
+    // reality (`termios::is_tty`) rather than assuming no controlling
+    // tty is ever attached.
     #[test]
-    fn raw_mode_enable_returns_none_without_tty() {
+    fn raw_mode_enable_matches_actual_tty_state() {
         let result = RawMode::enable().unwrap();
-        assert!(result.is_none());
+        assert_eq!(
+            result.is_some(),
+            termios::is_tty(termios::stdin_fd()),
+            "RawMode::enable() should return Some(_) iff stdin is a tty"
+        );
     }
 }
