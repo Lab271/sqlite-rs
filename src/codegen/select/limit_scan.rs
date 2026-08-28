@@ -227,10 +227,10 @@ fn flatten_or_disjuncts(expr: &Expr) -> Vec<&Expr> {
 /// disqualifies the whole chain, since a fast path can only skip rows
 /// the WHERE clause would exclude anyway — it must never accept a
 /// disjunct it can't also enforce.
-fn or_chain_equality_operands<'a>(
-    expr: &'a Expr,
-    column_matches: &dyn Fn(&Expr) -> bool,
-) -> Option<Vec<&'a Expr>> {
+fn or_chain_equality_operands<F>(expr: &Expr, column_matches: F) -> Option<Vec<&Expr>>
+where
+    F: Fn(&Expr) -> bool,
+{
     let disjuncts = flatten_or_disjuncts(expr);
     if disjuncts.len() < 2 {
         return None;
@@ -322,7 +322,7 @@ where
             match resolve_rowid_constant(schema, &constants) {
                 Some(value) => vec![value],
                 None => {
-                    match or_chain_equality_operands(where_expr, &|e| is_rowid_reference(schema, e))
+                    match or_chain_equality_operands(where_expr, |e| is_rowid_reference(schema, e))
                     {
                         Some(or_operands) => or_operands.into_iter().cloned().collect(),
                         None => return Ok(false),
@@ -466,7 +466,7 @@ pub(super) fn find_covering_index(
                 let leading = idx.columns.first()?;
                 let matches =
                     |e: &Expr| where_col(e).is_some_and(|n| n.eq_ignore_ascii_case(&leading.name));
-                let operands = or_chain_equality_operands(where_expr, &matches)?;
+                let operands = or_chain_equality_operands(where_expr, matches)?;
                 Some((index_position, operands.into_iter().cloned().collect()))
             })?,
     };
@@ -1296,7 +1296,7 @@ mod tests {
             eq(col("x"), lit_int(3)),
         );
         let operands =
-            or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).unwrap();
+            or_chain_equality_operands(&where_expr, |e| where_col(e) == Some("x")).unwrap();
         assert_eq!(resolved_ints(operands), vec![1, 2, 3]);
     }
 
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn or_chain_equality_operands_rejects_mixed_columns() {
         let where_expr = or(eq(col("x"), lit_int(1)), eq(col("y"), lit_int(2)));
-        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
+        assert!(or_chain_equality_operands(&where_expr, |e| where_col(e) == Some("x")).is_none());
     }
 
     /// A single equality (no `OR` at all) is not an OR-chain — that
@@ -1313,7 +1313,7 @@ mod tests {
     #[test]
     fn or_chain_equality_operands_rejects_non_chain() {
         let where_expr = eq(col("x"), lit_int(1));
-        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
+        assert!(or_chain_equality_operands(&where_expr, |e| where_col(e) == Some("x")).is_none());
     }
 
     /// A non-equality disjunct (`x < 5`) disqualifies the whole chain —
@@ -1324,6 +1324,6 @@ mod tests {
             eq(col("x"), lit_int(1)),
             binary(BinaryOp::Lt, col("x"), lit_int(5)),
         );
-        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
+        assert!(or_chain_equality_operands(&where_expr, |e| where_col(e) == Some("x")).is_none());
     }
 }
