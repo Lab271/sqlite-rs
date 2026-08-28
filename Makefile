@@ -122,7 +122,7 @@ mcdc-obligations: ## Regenerate the committed MC/DC obligations snapshot (tests/
 	cargo-mvl-mcdc scan -o tests/mcdc/obligations.json $(MCDC_FILES)
 	@echo "wrote tests/mcdc/obligations.json — commit it alongside the source change that shifted line numbers"
 
-test-mcdc: mcdc-obligations ## MC/DC dashboard for the scanned file set (VERBOSE=1 for per-obligation detail — #52, #368)
+test-mcdc: mcdc-obligations ## MC/DC dashboard for the scanned file set; fails if any multi-leaf obligation is undischarged (VERBOSE=1 for per-obligation detail — #52, #368)
 	# `harvest` re-runs `cargo test` itself and joins on tagged test names
 	# regardless of overall suite pass/fail (per-test outcome, not exit
 	# status) — the tagged tests are ordinary #[test] fns already run
