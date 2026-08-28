@@ -4,7 +4,7 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [Unreleased]
+## [0.18.6] - 2026-08-28
 
 ### Fixed
 
@@ -104,6 +104,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 - `tests/fuzz/fuzz_targets/btree_cursor.rs`'s `FuzzPageSource` implemented
   the pre-`Rc<[u8]>` `PageSource::read_page` signature, breaking
   `make fuzz-btree`. Updated to return `Rc<[u8]>`.
+- `raw_mode_enable_returns_none_without_tty` hard-asserted `RawMode::enable()`
+  always returns `None`, on the assumption that `cargo test` never runs
+  with a controlling tty attached. True for a piped/CI invocation, false
+  the moment the test binary runs interactively in a real terminal
+  session (e.g. `make coverage` run by hand) — `enable()` correctly
+  returned `Some(_)` there, and the test failed on correct behavior.
+  Renamed `raw_mode_enable_matches_actual_tty_state`; now asserts against
+  `termios::is_tty` instead of a hardcoded assumption.
 
 ### Docs
 
@@ -174,6 +182,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   `check-assurance`), replacing a previous mix of bare names and an
   inconsistent `-gate` suffix. Updated every caller (CI workflow,
   Makefile dependency chains, doc references).
+- Removed the Bloom-filter join-probe path (#623, ADR-0033):
+  `choose_bloom_probe`/`BloomProbe`, `Opcode::Filter`/`FilterAdd`, and
+  `src/vdbe/filter.rs` implemented #464's join-level Bloom pre-check, but
+  #545's automatic-index probe shares the identical row threshold and
+  gating conditions and is always tried first, so the Bloom path has
+  compiled into zero real programs since #545 landed. Spec 011 moves
+  from 6 to 5 requirements.
+- Backfilled `src/vdbe/cursor.rs`'s and `src/vdbe/program.rs`'s highest-
+  leverage coverage gaps (`OpenWrite`'s `IndexWrite` branch, several
+  `CursorTypeMismatch`/`MalformedInstruction` arms, `IdxRowid`'s
+  non-integer-trailing-column error, `seek_index_eq`'s prefix-mismatch
+  branch, `Program::is_empty`): `vdbe/cursor.rs` regions 88.58% → 89.35%,
+  functions 68.88% → 71.49%, lines 85.30% → 86.51%.
 
 ## [0.18.5] - 2026-08-27
 
