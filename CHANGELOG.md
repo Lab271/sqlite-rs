@@ -24,6 +24,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Added
 
+- Constant propagation and OR-to-IN conversion for WHERE-clause index
+  eligibility (spec 012-query-constraints Req 1-2, #605):
+  `src/codegen/select/limit_scan.rs::propagate_constants` lets `a = b AND
+  b = 5` (direct or a multi-hop chain) drive the rowid-seek,
+  covering-index, and skip-scan fast paths using the propagated literal,
+  exactly as if the query had written `a = 5` directly; `::or_chain_equality_operands`
+  lets `x = 1 OR x = 2 OR x = 3` (equalities against the same column)
+  probe once per value via the existing `SeekRowid`/`SeekIndexEq`
+  opcodes, instead of falling back to a full table scan — no new VDBE
+  opcode needed, since a chain of pure equalities is just a finite list
+  of point seeks (see ADR-0033). #606's LIKE/BETWEEN/IN range-seek work
+  is out of scope here (needs a genuine new range-seek opcode) and is
+  tracked separately as spec 012 Requirement 3.
 - Fuzzing gap-closing pass: `make fuzz-smoke` runs a short crash-only pass
   of every `tests/fuzz/fuzz_targets/*.rs` target and is now a blocking CI
   job, catching a crash before merge instead of only when someone
