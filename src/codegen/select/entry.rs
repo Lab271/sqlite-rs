@@ -195,7 +195,7 @@ pub(super) fn compile_select_no_from(
 /// numbers and its own `OpenRead` already emitted) and substitute a
 /// different per-row `sink` in place of `ResultRow`. Generic over `sink`
 /// (rather than a `dyn FnMut` trait object) per this codebase's
-/// qualified-subset gate (`make mvl-limit`) — no dynamic dispatch.
+/// qualified-subset gate (`make check-mvl-limit`) — no dynamic dispatch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_select_scan<F>(
     em: &mut Emitter,

@@ -203,7 +203,7 @@ pub(crate) fn open_wal_shm(shm_path: &Path) -> io::Result<UnixWalShm> {
 /// `unix.rs`): a plain module-level `static` must be `Sync`, which an
 /// `Rc`-based type never is regardless of contents — `thread_local!` would
 /// avoid that, but its macro invocation falls outside `src/vfs/shm.rs`'s
-/// qualified-subset allowlist (`make mvl-limit`, issue #23), so a real
+/// qualified-subset allowlist (`make check-mvl-limit`, issue #23), so a real
 /// `static` it is. Real cross-thread contention never happens in
 /// practice (this crate has no threads), so the `Mutex` here is `Sync`-
 /// satisfying scaffolding, not a concurrency mechanism in active use.

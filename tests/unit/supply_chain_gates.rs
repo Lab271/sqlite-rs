@@ -34,7 +34,7 @@ fn workflow() -> String {
 fn ci_enforces_locked_resolution_and_deny_check() {
     let workflow = workflow();
     assert!(
-        workflow.contains("make deny") || workflow.contains("cargo deny check"),
+        workflow.contains("make check-deny") || workflow.contains("cargo deny check"),
         "CI must run a cargo-deny gate (advisories/licenses/bans/sources)"
     );
     assert!(

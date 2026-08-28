@@ -883,7 +883,7 @@ where
     // re-matching `OrderByTarget::Column` inside the per-row loop
     // below) so that loop has no "already-rejected, can't happen"
     // branch to justify with an `unreachable!` the qualified-subset
-    // gate (`make mvl-limit`) doesn't allow.
+    // gate (`make check-mvl-limit`) doesn't allow.
     let Some(group_col_indices): Option<Vec<usize>> = group_targets
         .iter()
         .map(|t| match t {

@@ -78,7 +78,7 @@ pub(crate) struct SorterState {
 // Methods rather than free functions so the borrow of `self` elides: a free
 // `fn(vm: &Vm, opcode: &'static str) -> Result<&SorterState, _>` has two input
 // lifetime positions and so needs an explicit parameter, which is outside the
-// qualified subset (`make mvl-limit`). The `&self` elision rule resolves it.
+// qualified subset (`make check-mvl-limit`). The `&self` elision rule resolves it.
 impl Vm {
     fn sorter_mut(
         &mut self,

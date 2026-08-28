@@ -94,7 +94,7 @@ fn subquery_output_columns(
 /// (rather than returning both together) because a function borrowing
 /// from two different reference parameters (`subquery` here, `catalog`
 /// there) can't have its output lifetime elided, and this codebase's
-/// `make mvl-limit` gate forbids writing an explicit lifetime to spell
+/// `make check-mvl-limit` gate forbids writing an explicit lifetime to spell
 /// it out.
 pub(super) fn subquery_own_table_refs(subquery: &Select) -> Result<Vec<&TableRef>, CodegenError> {
     let Some(from) = &subquery.from else {

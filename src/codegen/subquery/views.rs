@@ -70,7 +70,7 @@ pub fn resolve_views(views: &[crate::schema::ViewSchema]) -> Vec<ResolvedView> {
 /// A method (rather than a free function taking `select: &Select,
 /// views: &[ResolvedView]`) specifically so the returned `Cow<'_,
 /// Select>`'s lifetime elides to the receiver's alone — the qualified
-/// subset (`make mvl-limit`) denies explicit lifetime parameters, and a
+/// subset (`make check-mvl-limit`) denies explicit lifetime parameters, and a
 /// free function with two independently-lifetimed reference parameters
 /// has no elided borrow to tie an elided `Cow<'_, _>` to.
 pub trait ExpandViews {

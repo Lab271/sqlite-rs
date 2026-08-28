@@ -536,7 +536,7 @@ pub(crate) fn column_plans(
 /// literal `VALUES`/`DEFAULT VALUES` row's `Expr` at that position, or
 /// (#208) the SELECT-projected row's `pos`-th register — generic
 /// (rather than a boxed/`dyn` closure) per this codebase's
-/// qualified-subset gate (`make mvl-limit`).
+/// qualified-subset gate (`make check-mvl-limit`).
 #[allow(clippy::too_many_arguments)]
 fn compile_row(
     em: &mut Emitter,

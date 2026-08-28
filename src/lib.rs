@@ -13,7 +13,7 @@
 //! for the full V4→V7.3 progression.
 //!
 //! `include_str!` can't pull the README in directly here: `src/` is a
-//! qualified Rust subset checked by `make mvl-limit` (mvl-rust rust-limit),
+//! qualified Rust subset checked by `make check-mvl-limit` (mvl-rust rust-limit),
 //! which doesn't allowlist that macro.
 // `src/vfs/lock.rs` and `src/vfs/shm.rs` used to need a scoped
 // `#![allow(unsafe_code)]` for raw `fcntl`/`mmap`/`fork` calls (#50), then
