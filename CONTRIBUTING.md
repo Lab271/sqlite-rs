@@ -35,7 +35,7 @@ you'll use often:
 | `make test-corpus` | Fixture corpus / oracle harness against a pinned real `sqlite3` |
 | `make test-tiers` | Tier 0–3 conformance suite (see `.openspec/specs/001-architecture`) |
 | `make lint` | clippy + formatting |
-| `make verify` | Full gate: coverage, supply-chain (`deny`), qualified-subset (`mvl-limit`), module layout |
+| `make verify` | Full gate: coverage (`check-coverage`), supply-chain (`check-deny`), qualified-subset (`check-mvl-limit`), module layout (`check-mod-files`) |
 | `make assurance` | Spec → code → test traceability dashboard |
 
 `make test-corpus`, `make test-parity`, and `make test-sqllogictest` shell out
@@ -55,7 +55,7 @@ Design context lives in `.openspec/`, not in code comments:
 - `.openspec/grammar/sqlite.ebnf` — the EBNF grammar the parser is built
   from, re-derived from a pinned `parse.y`
 
-If your change touches parser grammar, run `make grammar-drift` before
+If your change touches parser grammar, run `make check-grammar-drift` before
 committing. If it touches a spec requirement, add or update the requirement's
 `Tests:` links — `make assurance` flags dead links.
 
@@ -69,7 +69,7 @@ committing. If it touches a spec requirement, add or update the requirement's
   `arithmetic_side_effects`, and `mod_module_files` at the lint level (see
   `Cargo.toml`'s `[lints.clippy]`) — these aren't suggestions, they're gates.
 - No `foo/mod.rs` files — use `foo.rs` next to `foo/` (modern per-file module
-  style). Enforced by `mod_module_files` and `make mod-files`.
+  style). Enforced by `mod_module_files` and `make check-mod-files`.
 - Every claim about SQLite-compatible behavior is backed by a byte-level diff
   against the pinned oracle, not by intuition — see `tests/corpus/`.
 
@@ -91,7 +91,7 @@ Conventional prefixes: `feat:`, `fix:`, `chore:`, `refactor:`, `test:`,
 - If your change closes an architectural alternative, add an ADR
   (`.openspec/adr/NNNN-title.md`) in the same PR.
 - CI runs `make verify`, `make lint`, and the spec/grammar/version gates
-  (`make assurance-gate`, `make grammar-drift`, `make version-pin`) — a PR
+  (`make check-assurance`, `make check-grammar-drift`, `make version-pin`) — a PR
   that doesn't pass these won't merge.
 
 ## Reporting bugs and requesting features

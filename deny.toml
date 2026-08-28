@@ -1,6 +1,6 @@
 # Supply-chain gate (issue #26, spec 005-assurance Requirement 3). Installed
 # at zero runtime dependencies — the cheapest possible moment. Run via
-# `make deny` / `cargo deny check`.
+# `make check-deny` / `cargo deny check`.
 
 # Unix-only project (the `nix` crate dependency alone rules out Windows).
 # Without this, cargo-deny resolves the full dependency graph across every

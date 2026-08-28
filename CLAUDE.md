@@ -62,7 +62,7 @@ a trivial budget.
   (`(* V2 *)`, `(* V3 *)`, …) and a `[parse.y:LINE rulename]` origin
   annotation. Future-block rules stay listed as stubs so the coverage
   denominator remains visible.
-- **Run `make grammar-drift` before committing grammar changes.**
+- **Run `make check-grammar-drift` before committing grammar changes.**
   `tools/grammar_drift.py` validates every annotation against the pinned
   parse.y (rule exists, cited line within ±5) and reports per-V-block
   coverage. Drift (unknown rule, stale line citation) is a spec bug — fix
@@ -144,7 +144,7 @@ these conventions in sync with how #56 is actually structured:
   next to `foo/` — instead of `foo/mod.rs`. Tracked by #73.
 - Enforced two ways: `self_named_module_files = "deny"` in
   `[lints.clippy]` (Cargo.toml) catches it under `make lint`, and a
-  `mod-files` Makefile gate is a dependency-free backstop for anyone
+  `check-mod-files` Makefile gate is a dependency-free backstop for anyone
   running gates without clippy.
 - Genuinely vendored third-party source under `tests/spike/` (e.g.
   `tests/spike/.../lemon-rs/third_party/lemon`, the C lemon tool itself)
