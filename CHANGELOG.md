@@ -39,6 +39,11 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   mistaken for a regression). V8+ files (`fkey*`, `trigger[1,3-9]`,
   `window*`, `gencol*`, `without_rowid*`, `strict*`) deliberately excluded —
   those features aren't implemented yet.
+- `make test-tcl`/`make test-sqllogictest` now print the corpus's file/
+  statement/coverage numbers directly (via `--nocapture`, now the default
+  for these two targets) instead of requiring a separate
+  `make extract-sql-corpus`/`cat tools/sqllogictest-status.json`/
+  `make assurance` step to see them.
 
 ### Fixed
 
