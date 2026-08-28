@@ -913,6 +913,44 @@ fn rowid_equality_against_bound_parameter_seeks() {
     std::fs::remove_file(&path).ok();
 }
 
+/// #605: constant propagation through an `AND`-conjunction — `rowid = a
+/// AND a = 2` deduces `rowid = 2` and still takes the `SeekRowid` fast
+/// path, not a full `Rewind`/`Next` scan.
+#[test]
+fn rowid_equality_propagates_through_and_conjunction() {
+    let (path, schema) = scratch_fixture_labeled("seek_rowid_propagated");
+    let select = match parse_select("SELECT a, b, name FROM t WHERE rowid = a AND a = 2;") {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekRowid"),
+        "expected SeekRowid via constant propagation: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "Rewind"),
+        "propagated SeekRowid fast path must not also emit a Rewind/Next scan: {rows:?}"
+    );
+
+    let our = our_rows(
+        &path,
+        &schema,
+        "SELECT a, b, name FROM t WHERE rowid = a AND a = 2;",
+    )
+    .expect("query should compile and execute");
+    assert_eq!(
+        our,
+        vec![vec![
+            Value::Integer(2),
+            Value::Integer(5),
+            Value::Text("bb".to_string().into())
+        ]]
+    );
+    std::fs::remove_file(&path).ok();
+}
+
 /// #239: `GROUP BY` / `HAVING` fixture — `cat` groups rows unevenly (2
 /// `"x"`, 1 `"y"`, 3 `"z"`) with an interspersed `NULL` `val`, exercising
 /// `count`/`sum`/`avg`/`min`/`max`, multi-column grouping, `HAVING`, and

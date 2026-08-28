@@ -6,6 +6,7 @@ use super::projection::{
 };
 use super::*;
 use crate::planner::{is_skip_scan_worthwhile, Stats};
+use std::collections::HashMap;
 /// LIMIT/OFFSET counters, set up once before the scan loop starts.
 pub(super) struct LimitState {
     offset_reg: Option<i32>,
@@ -93,6 +94,10 @@ pub(crate) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
     let ExprKind::Column { name, .. } = &expr.kind else {
         return false;
     };
+    is_rowid_reference_name(schema, name)
+}
+
+fn is_rowid_reference_name(schema: &TableSchema, name: &str) -> bool {
     if name.eq_ignore_ascii_case("rowid")
         || name.eq_ignore_ascii_case("_rowid_")
         || name.eq_ignore_ascii_case("oid")
@@ -103,6 +108,108 @@ pub(crate) fn is_rowid_reference(schema: &TableSchema, expr: &Expr) -> bool {
         .rowid_alias
         .and_then(|idx| schema.columns.get(idx))
         .is_some_and(|col| col.eq_ignore_ascii_case(name))
+}
+
+/// An operand `top_level_equality_operands`/[`propagate_constants`] will
+/// hand to a seek/probe fast path — an integer literal or a bind
+/// parameter. Anything else (a string literal needing numeric-affinity
+/// coercion, a sub-expression, a named parameter) is left for the
+/// ordinary scan rather than risk miscompiling a case these paths
+/// weren't built to handle.
+fn is_supported_seek_operand(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Literal(Literal::Integer(_))
+            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+    )
+}
+
+/// Flattens nested top-level `AND` conjuncts of `expr` into their leaf
+/// conjuncts (in left-to-right order) — `a AND b AND c` yields `[a, b,
+/// c]`; anything that isn't a top-level `AND` (including a single bare
+/// condition) yields `[expr]` itself.
+fn flatten_and_conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } => {
+            let mut conjuncts = flatten_and_conjuncts(lhs);
+            conjuncts.extend(flatten_and_conjuncts(rhs));
+            conjuncts
+        }
+        _ => vec![expr],
+    }
+}
+
+/// Constant propagation (#605): resolves every column reachable — by a
+/// chain of top-level `AND`-conjoined equalities in `where_expr` — to a
+/// literal/bind-parameter constant, keyed by lowercased column name. For
+/// `a = b AND b = 5`, both `a` and `b` resolve to the literal `5`, so a
+/// fast path probing on `a` can use it exactly as if the query had
+/// written `a = 5` directly. Only pure `column = column` and `column =
+/// <supported operand>` top-level equalities feed the propagation —
+/// mixed operators (comparisons, `OR`, function calls) are left alone,
+/// so this never changes the WHERE clause's own semantics, only what a
+/// fast path is allowed to assume about it.
+pub(crate) fn propagate_constants(where_expr: &Expr) -> HashMap<String, Expr> {
+    let mut direct: HashMap<String, Expr> = HashMap::new();
+    let mut column_links: Vec<(String, String)> = Vec::new();
+    for conjunct in flatten_and_conjuncts(where_expr) {
+        let Some((lhs, rhs)) = top_level_equality_operands(conjunct) else {
+            continue;
+        };
+        match (where_col(lhs), where_col(rhs)) {
+            (Some(name), None) if is_supported_seek_operand(rhs) => {
+                direct.insert(name.to_ascii_lowercase(), rhs.clone());
+            }
+            (None, Some(name)) if is_supported_seek_operand(lhs) => {
+                direct.insert(name.to_ascii_lowercase(), lhs.clone());
+            }
+            (Some(a), Some(b)) => {
+                column_links.push((a.to_ascii_lowercase(), b.to_ascii_lowercase()));
+            }
+            _ => {}
+        }
+    }
+    // Fixed-point propagation across `column = column` links: each pass
+    // may resolve a new column from one already known, so keep going
+    // until a full pass resolves nothing new. Conjunct counts in
+    // practice are small, so the naive O(n^2) worst case never matters.
+    loop {
+        let mut changed = false;
+        for (a, b) in &column_links {
+            if let Some(value) = direct.get(a).cloned() {
+                if direct.insert(b.clone(), value).is_none() {
+                    changed = true;
+                }
+            }
+            if let Some(value) = direct.get(b).cloned() {
+                if direct.insert(a.clone(), value).is_none() {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    direct
+}
+
+/// Looks up the rowid's resolved constant (per [`propagate_constants`])
+/// among its recognized aliases (`rowid`/`_rowid_`/`oid`, or the table's
+/// `INTEGER PRIMARY KEY` alias column), in that fixed order — so lookup
+/// is deterministic even if more than one alias somehow resolved.
+fn resolve_rowid_constant(schema: &TableSchema, constants: &HashMap<String, Expr>) -> Option<Expr> {
+    for name in ["rowid", "_rowid_", "oid"] {
+        if let Some(value) = constants.get(name) {
+            return Some(value.clone());
+        }
+    }
+    let alias = schema.rowid_alias.and_then(|idx| schema.columns.get(idx))?;
+    constants.get(&alias.to_ascii_lowercase()).cloned()
 }
 
 /// Emits `Integer`/`Variable` + `SeekRowid` in place of the
@@ -140,29 +247,32 @@ where
     let Some(where_expr) = &select.where_clause else {
         return Ok(false);
     };
-    let Some((lhs, rhs)) = top_level_equality_operands(where_expr) else {
-        return Ok(false);
+    let direct_operand = top_level_equality_operands(where_expr).and_then(|(lhs, rhs)| {
+        if is_rowid_reference(schema, lhs) {
+            Some(rhs)
+        } else if is_rowid_reference(schema, rhs) {
+            Some(lhs)
+        } else {
+            None
+        }
+    });
+    // #605: falls back to constant propagation through an `AND`
+    // conjunction (`rowid = a AND a = 5`) when the rowid isn't equated
+    // to a supported operand directly.
+    let owned_operand;
+    let operand = match direct_operand {
+        Some(operand) if is_supported_seek_operand(operand) => operand,
+        _ => {
+            let constants = propagate_constants(where_expr);
+            match resolve_rowid_constant(schema, &constants) {
+                Some(value) => {
+                    owned_operand = value;
+                    &owned_operand
+                }
+                None => return Ok(false),
+            }
+        }
     };
-    let operand = if is_rowid_reference(schema, lhs) {
-        rhs
-    } else if is_rowid_reference(schema, rhs) {
-        lhs
-    } else {
-        return Ok(false);
-    };
-    // Bounded to the issue's in-scope shapes: an integer literal, or a
-    // bare/numbered bind parameter. Anything else (a string literal
-    // needing numeric-affinity coercion, a sub-expression, a named
-    // parameter) falls back to the ordinary scan rather than risk
-    // miscompiling a case this fast path wasn't built to handle.
-    let is_supported_operand = matches!(
-        &operand.kind,
-        ExprKind::Literal(Literal::Integer(_))
-            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
-    );
-    if !is_supported_operand {
-        return Ok(false);
-    }
 
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
@@ -255,29 +365,24 @@ pub(super) fn find_covering_index(
         return None;
     }
     let where_expr = select.where_clause.as_ref()?;
-    let (lhs, rhs) = top_level_equality_operands(where_expr)?;
-    let (where_col_name, operand) = match (where_col(lhs), where_col(rhs)) {
-        (Some(name), _) => (name, rhs),
-        (_, Some(name)) => (name, lhs),
-        _ => return None,
-    };
-    let is_supported_operand = matches!(
-        &operand.kind,
-        ExprKind::Literal(Literal::Integer(_))
-            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
-    );
-    if !is_supported_operand {
-        return None;
-    }
+    // #605: constant propagation lets an equality against a leading
+    // index column resolve through an `AND`-conjoined chain
+    // (`idx_col = a AND a = 5`), not just a direct literal/param operand.
+    let constants = propagate_constants(where_expr);
     // A non-`UNIQUE` index's leading column can match more than one row
     // (#450) — `try_compile_covering_index_scan` walks every duplicate
     // via `IdxNext` after the initial `SeekIndexEq`, so uniqueness is no
     // longer a precondition here, just the leading-column match.
-    let index_position = schema.indexes.iter().position(|idx| {
-        idx.columns
-            .first()
-            .is_some_and(|c| c.name.eq_ignore_ascii_case(where_col_name))
-    })?;
+    let (index_position, operand) =
+        schema
+            .indexes
+            .iter()
+            .enumerate()
+            .find_map(|(index_position, idx)| {
+                let leading = idx.columns.first()?;
+                let operand = constants.get(&leading.name.to_ascii_lowercase())?;
+                Some((index_position, operand.clone()))
+            })?;
     let index = schema.indexes.get(index_position)?;
     let result_names = bare_result_column_names(select, schema)?;
     // #535: the table's own `INTEGER PRIMARY KEY` alias column (when it
@@ -297,7 +402,7 @@ pub(super) fn find_covering_index(
     }
     Some(CoveringIndexMatch {
         index_position,
-        operand: operand.clone(),
+        operand,
     })
 }
 
@@ -471,20 +576,8 @@ pub(super) fn find_skip_scan_index(
         return None;
     }
     let where_expr = select.where_clause.as_ref()?;
-    let (lhs, rhs) = top_level_equality_operands(where_expr)?;
-    let (where_col_name, operand) = match (where_col(lhs), where_col(rhs)) {
-        (Some(name), _) => (name, rhs),
-        (_, Some(name)) => (name, lhs),
-        _ => return None,
-    };
-    let is_supported_operand = matches!(
-        &operand.kind,
-        ExprKind::Literal(Literal::Integer(_))
-            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
-    );
-    if !is_supported_operand {
-        return None;
-    }
+    // #605: same constant-propagation fallback as `find_covering_index`.
+    let constants = propagate_constants(where_expr);
     schema
         .indexes
         .iter()
@@ -493,7 +586,7 @@ pub(super) fn find_skip_scan_index(
             let column_position = index
                 .columns
                 .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(where_col_name))?;
+                .position(|c| constants.contains_key(&c.name.to_ascii_lowercase()))?;
             if column_position == 0 {
                 // The leading column is a covering-index/rowid-seek match,
                 // not a skip-scan one.
@@ -502,10 +595,12 @@ pub(super) fn find_skip_scan_index(
             if !is_skip_scan_worthwhile(&index.name, stats) {
                 return None;
             }
+            let matched_name = &index.columns.get(column_position)?.name;
+            let operand = constants.get(&matched_name.to_ascii_lowercase())?.clone();
             Some(SkipScanMatch {
                 index_position,
                 column_position,
-                operand: operand.clone(),
+                operand,
             })
         })
 }
@@ -942,4 +1037,122 @@ where
     let sorted_next = em.emit(Instruction::new(Opcode::SorterNext, cursors.sort, 0, 0));
     em.patch_p2(sorted_next, sorted_loop);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ast::{BinaryOp, Literal};
+    use crate::parser::tokenizer::Span;
+
+    fn span() -> Span {
+        Span {
+            line: 0,
+            column: 0,
+            offset: 0,
+            len: 0,
+        }
+    }
+
+    fn col(name: &str) -> Expr {
+        Expr {
+            kind: ExprKind::Column {
+                table: None,
+                catalog: None,
+                name: name.to_string(),
+            },
+            span: span(),
+        }
+    }
+
+    fn lit_int(n: i64) -> Expr {
+        Expr {
+            kind: ExprKind::Literal(Literal::Integer(n)),
+            span: span(),
+        }
+    }
+
+    fn binary(op: BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr {
+            kind: ExprKind::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            span: span(),
+        }
+    }
+
+    fn eq(lhs: Expr, rhs: Expr) -> Expr {
+        binary(BinaryOp::Eq, lhs, rhs)
+    }
+
+    fn and(lhs: Expr, rhs: Expr) -> Expr {
+        binary(BinaryOp::And, lhs, rhs)
+    }
+
+    fn resolved(constants: &HashMap<String, Expr>, name: &str) -> Option<i64> {
+        match constants.get(name)?.kind {
+            ExprKind::Literal(Literal::Integer(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// #605: `a = b AND b = 5` propagates the literal to both `a` and `b`.
+    #[test]
+    fn propagate_constants_resolves_direct_chain() {
+        let where_expr = and(eq(col("a"), col("b")), eq(col("b"), lit_int(5)));
+        let constants = propagate_constants(&where_expr);
+        assert_eq!(resolved(&constants, "a"), Some(5));
+        assert_eq!(resolved(&constants, "b"), Some(5));
+    }
+
+    /// #605: propagation follows a multi-hop chain (`a = b AND b = c AND
+    /// c = 5`), not just a single indirection.
+    #[test]
+    fn propagate_constants_resolves_transitive_chain() {
+        let where_expr = and(
+            and(eq(col("a"), col("b")), eq(col("b"), col("c"))),
+            eq(col("c"), lit_int(7)),
+        );
+        let constants = propagate_constants(&where_expr);
+        assert_eq!(resolved(&constants, "a"), Some(7));
+        assert_eq!(resolved(&constants, "b"), Some(7));
+        assert_eq!(resolved(&constants, "c"), Some(7));
+    }
+
+    /// A single top-level equality (no `AND`) still resolves — the
+    /// pre-existing, non-compound shape must keep working exactly as it
+    /// did before propagation existed.
+    #[test]
+    fn propagate_constants_resolves_single_equality() {
+        let where_expr = eq(col("a"), lit_int(1));
+        let constants = propagate_constants(&where_expr);
+        assert_eq!(resolved(&constants, "a"), Some(1));
+    }
+
+    /// An `OR`-joined condition must not propagate: `a = b OR b = 5`
+    /// does not imply `a = 5`, so neither should end up in the map.
+    #[test]
+    fn propagate_constants_ignores_or() {
+        let where_expr = binary(
+            BinaryOp::Or,
+            eq(col("a"), col("b")),
+            eq(col("b"), lit_int(5)),
+        );
+        let constants = propagate_constants(&where_expr);
+        assert!(constants.is_empty());
+    }
+
+    /// A non-equality conjunct (`a < 5`) must not feed the map, even
+    /// alongside an otherwise-propagating equality chain.
+    #[test]
+    fn propagate_constants_ignores_non_equality_conjuncts() {
+        let where_expr = and(
+            eq(col("a"), col("b")),
+            binary(BinaryOp::Lt, col("b"), lit_int(5)),
+        );
+        let constants = propagate_constants(&where_expr);
+        assert!(constants.is_empty());
+    }
 }
