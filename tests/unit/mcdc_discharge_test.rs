@@ -50,6 +50,8 @@ const MCDC_FILES: &[&str] = &[
     "src/parser/tokenizer.rs",
     "src/vdbe/exec.rs",
     "src/record/encode.rs",
+    "src/vdbe/program.rs",
+    "src/vdbe/control.rs",
 ];
 
 fn manifest_path(rel: &str) -> String {

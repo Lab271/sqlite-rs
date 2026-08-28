@@ -43,6 +43,25 @@ def parse_records(raw: str) -> list[dict]:
     raise ValueError("unterminated JSON array in harvest output")
 
 
+def summary_line(use_color: bool, multi_leaf: list[dict], undischarged: list[dict]) -> str:
+    """Final pass/fail line — the one thing a CI gate or a human skimming
+    scrollback needs: are all real (multi-leaf) MC/DC obligations in the
+    scanned file set discharged, and if not, which files still owe vectors.
+    """
+    if not undischarged:
+        return color(use_color, GREEN, f"SUMMARY: PASS — {len(multi_leaf)}/{len(multi_leaf)} multi-leaf obligations discharged")
+
+    files = sorted({r["file"] for r in undischarged})
+    file_list = ", ".join(files)
+    discharged_count = len(multi_leaf) - len(undischarged)
+    return color(
+        use_color,
+        RED,
+        f"SUMMARY: FAIL — {discharged_count}/{len(multi_leaf)} multi-leaf obligations discharged; "
+        f"{len(undischarged)} outstanding in {len(files)} file(s): {file_list}",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", action="store_true", help="binary action list instead of the dashboard table")
@@ -67,6 +86,8 @@ def main() -> int:
     print(f"  overall discharged:       {total_discharged}/{len(records)} "
           f"({100 * total_discharged / len(records):.1f}%)")
 
+    undischarged = [r for r in multi_leaf if not r["discharged"]]
+
     if not args.verbose:
         if multi_leaf:
             print()
@@ -78,8 +99,10 @@ def main() -> int:
                       f"{r['vectors_discharged']}/{r['vectors_required']} vectors fulfilled  "
                       f"({r['file']}:{r['line']})")
         print()
-        print("Run with VERBOSE=1 for a binary per-obligation action list.")
-        return 0
+        print(summary_line(use_color, multi_leaf, undischarged))
+        if not undischarged:
+            print("Run with VERBOSE=1 for a binary per-obligation action list.")
+        return 1 if undischarged else 0
 
     # Single-leaf branches and compiler-void obligations are out of scope by
     # convention (see dashboard counts above) — verbose mode only breaks
@@ -104,7 +127,9 @@ def main() -> int:
         for t in failing_tests:
             print(f"{color(use_color, RED, 'FIX TEST')}    {tag} {loc} -- {t['name']} is failing")
 
-    return 0
+    print()
+    print(summary_line(use_color, multi_leaf, undischarged))
+    return 1 if undischarged else 0
 
 
 if __name__ == "__main__":

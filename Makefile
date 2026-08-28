@@ -96,10 +96,12 @@ test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .
 
 # Scanned file set for `test-mcdc`. Grown module-by-module as tagged
 # obligations land: btree (#52), then vdbe/functions, parser/grammar,
-# parser/tokenizer, vdbe/exec, record/encode (#368).
+# parser/tokenizer, vdbe/exec, record/encode (#368), then vdbe/program +
+# vdbe/control (opcode dispatch, fix/mcdc-scope).
 MCDC_FILES := src/btree.rs src/btree/*.rs src/btree/table/*.rs src/btree/index/*.rs \
 	src/vdbe/functions.rs src/parser/grammar.rs src/parser/tokenizer.rs \
-	src/vdbe/exec.rs src/record/encode.rs
+	src/vdbe/exec.rs src/record/encode.rs \
+	src/vdbe/program.rs src/vdbe/control.rs
 
 # Committed obligations snapshot (tests/mcdc/obligations.json), analogous
 # to the corpus fixtures (spec 004): checked into git so
@@ -120,7 +122,7 @@ mcdc-obligations: ## Regenerate the committed MC/DC obligations snapshot (tests/
 	cargo-mvl-mcdc scan -o tests/mcdc/obligations.json $(MCDC_FILES)
 	@echo "wrote tests/mcdc/obligations.json — commit it alongside the source change that shifted line numbers"
 
-test-mcdc: mcdc-obligations ## MC/DC dashboard for the scanned file set (VERBOSE=1 for per-obligation detail — #52, #368)
+test-mcdc: mcdc-obligations ## MC/DC dashboard for the scanned file set; fails if any multi-leaf obligation is undischarged (VERBOSE=1 for per-obligation detail — #52, #368)
 	# `harvest` re-runs `cargo test` itself and joins on tagged test names
 	# regardless of overall suite pass/fail (per-test outcome, not exit
 	# status) — the tagged tests are ordinary #[test] fns already run
