@@ -1,4 +1,4 @@
-# 0033 — The embedding API owns the connection; the `sqlx` driver stays out of tree
+# 0034 — The embedding API owns the connection; the `sqlx` driver stays out of tree
 
 **Status:** Proposed · **Date:** 2026-08-28
 
@@ -23,7 +23,7 @@ driving consumer (SQE, which stores Iceberg catalog pointers in SQLite) is
 working around it with SELECT-then-UPDATE in a transaction, sound only while a
 single writer is guaranteed.
 
-Spec 012 defines the surface and makes the counter its Requirement 1. This ADR
+Spec 013 defines the surface and makes the counter its Requirement 1. This ADR
 records what that closes.
 
 ## Decision
@@ -56,7 +56,7 @@ so `libsqlite3-sys` links here. Every existing consumer in every language would
 work unchanged. Rejected: it reintroduces the `unsafe` boundary the crate exists
 to remove, needs a carve-out larger than `src/sys/`, returns the error surface
 to null-pointer semantics, and forces the C threading contract on a design that
-gets to choose one. Defensible later, on top of spec 012; a bad substitute for
+gets to choose one. Defensible later, on top of spec 013; a bad substitute for
 it.
 
 **Cloning rusqlite's API.** Rejected: `.openspec/README.md` already commits to
@@ -78,11 +78,11 @@ crate can track `sqlx` 0.9, 0.10 and 1.0 while this API stays still.
 
 **Async connections.** Rejected for now, not on principle: `sqlx` drivers run
 blocking work on their own executor, so async buys the driving consumer nothing,
-and an async pager is a storage decision spec 012 must not pre-empt.
+and an async pager is a storage decision spec 013 must not pre-empt.
 
 ## Consequences
 
-- Spec 012 needs its own value block. It sits outside the V1--V12 ladder (those
+- Spec 013 needs its own value block. It sits outside the V1--V12 ladder (those
   deliver SQL surface, it delivers consumability) and is a prerequisite for V7's
   stated demo, so it belongs before V8. One minor per phase (ADR-0006) implies
   its own minor.
@@ -99,5 +99,5 @@ and an async pager is a storage decision spec 012 must not pre-empt.
   auto-created `sqlite_autoindex_*`. The second also affects this crate's own
   byte-compatibility claim, which makes it the highest-value item in the set.
 - Consumer statement sets become fixture families under spec 004's harness
-  (spec 012/Req-6), so "an application can use this" is measured rather than
+  (spec 013/Req-6), so "an application can use this" is measured rather than
   asserted.

@@ -5,7 +5,7 @@ status: draft
 date: 2026-08-28
 ---
 
-# 012 — Embedding API
+# 013 — Embedding API
 
 The public surface an application links against. Everything below is additive:
 a rows-affected count, a connection and statement facade, a `Send + Sync`
@@ -20,7 +20,7 @@ query engine that stores catalog pointers in SQLite; cited as *SQE* where its
 measured need pins a decision). Requirement 1 is the one item on this list a
 consumer cannot work around.
 
-Decisions and rejected alternatives: ADR-0033.
+Decisions and rejected alternatives: ADR-0034.
 
 ## Scope and inheritance
 
@@ -168,7 +168,7 @@ handle MUST release them on drop, which `Pager` already does.
 *SQE* opens its catalog as `sqlite://<path>?mode=rwc` and expects the file to
 appear on first use; a first-run laptop has no `empty.db` to copy.
 
-**Implementation:** `src/api.rs::Connection::open`, `::open_with` (planned)
+**Implementation:** `src/api.rs::Connection::open` (planned), plus `::open_with`
 
 **Tests:** `tests/unit/api_connection_test.rs` (planned)
 
@@ -202,7 +202,7 @@ frequency, so compiling once saves nothing measurable; a handle owning its slots
 is what stops a transposed argument list writing a valid row that points at the
 wrong table.
 
-**Implementation:** `src/api.rs::Statement`, `::Row` (planned)
+**Implementation:** `src/api.rs::Statement` (planned), plus `::Row`
 
 **Tests:** `tests/unit/api_statement_test.rs` (planned)
 
@@ -285,7 +285,8 @@ Retryable errors belong here too: spec 007's `VfsError::Locked` MUST surface as
 a distinct, documented busy variant, and a busy timeout MUST be settable per
 connection.
 
-**Implementation:** `src/api.rs::Transaction`, `::Connection::pragma`, `::ApiError` (planned)
+**Implementation:** `src/api.rs::Transaction` (planned), plus `::Connection::pragma`
+and `::ApiError`
 
 **Tests:** `tests/unit/api_transaction_test.rs`, `tests/unit/api_durability_test.rs` (planned)
 
@@ -335,8 +336,8 @@ parameters, `SELECT ... UNION` over two namespace sources, `LIMIT 1` existence
 probes, a conditional `UPDATE`, and `DELETE`. Every statement in it lands in V2
 through V4. The gap was never SQL coverage.
 
-**Implementation:** `src/lib.rs` module docs, `CHANGELOG.md` policy,
-`tests/corpus/fixtures/consumers/sqe/` (planned)
+**Implementation:** `src/lib.rs` (planned) — module docs, plus `CHANGELOG.md`
+policy and `tests/corpus/fixtures/consumers/sqe/`
 
 **Tests:** `tests/unit/api_surface_test.rs`, `tests/corpus/consumer_sqe_test.rs` (planned)
 
@@ -402,8 +403,8 @@ and its cursors without waiting for the rest.
 ## Not in this spec
 
 - **A `sqlx` driver.** Out of tree (`sqlx-sqlite-rs`), so this crate's empty
-  `[dependencies]` stays empty. Rationale and rejected alternatives: ADR-0033.
-- **A C ABI, a rusqlite-shaped API, an `Arc` pager.** ADR-0033.
+  `[dependencies]` stays empty. Rationale and rejected alternatives: ADR-0034.
+- **A C ABI, a rusqlite-shaped API, an `Arc` pager.** ADR-0034.
 - **Async connections.** Blocking; `sqlx` drivers run blocking work on their own
   executor, and an async pager is a storage decision.
 - **The PRAGMA catalogue.** plan.md V7 owns the list and its tiers; Requirement
