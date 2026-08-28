@@ -6,6 +6,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+
+- Extended MC/DC scan scope (spec 005-assurance) to `src/vdbe/program.rs`
+  and `src/vdbe/control.rs` — the opcode-dispatch layer every query
+  executes through, previously the highest-leverage gap since only
+  `vdbe/exec.rs` was covered, not the surrounding dispatch/control
+  machinery. `tools/mcdc_report.py` now also prints a final
+  `SUMMARY: PASS/FAIL` line and returns a non-zero exit code when any
+  multi-leaf obligation is undischarged, so `make test-mcdc` fails a
+  build instead of silently reporting a gap. All 43/43 multi-leaf
+  obligations in the scanned file set are now discharged, including the
+  two (`btree_1081`, `encode_68`) left over from the prior refresh.
+
 ### Fixed
 
 - DROP TABLE/DROP INDEX (`free_btree_pages_inner`) leaked overflow-page
