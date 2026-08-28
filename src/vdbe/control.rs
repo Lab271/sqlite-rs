@@ -656,6 +656,50 @@ mod tests {
         assert_eq!(init(&instr).unwrap(), Step::Next);
     }
 
+    /// MC/DC vector (obligation `control_215`, `try_to_integer`'s REAL
+    /// guard `r.fract() == 0.0 && r.is_finite() && in_i64_range(*r)`):
+    /// all three leaves true — an integral, finite, in-range REAL
+    /// converts losslessly.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__control_215__v1_all_true_integral_real() {
+        assert_eq!(try_to_integer(&Value::Real(3.0)), Some(3));
+    }
+
+    /// MC/DC vector (obligation `control_215`): leaf A (`r.fract() ==
+    /// 0.0`) false — a non-integral REAL never converts, regardless of
+    /// the other leaves. Independence pair for A against
+    /// `mcdc__control_215__v1_all_true_integral_real`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__control_215__v2_fractional_real() {
+        assert_eq!(try_to_integer(&Value::Real(3.5)), None);
+    }
+
+    /// MC/DC vector (obligation `control_215`): leaf B (`r.is_finite()`)
+    /// false — `f64::INFINITY` is the guard leaf B exists for, even
+    /// though `INFINITY.fract()` is itself `NaN` (so leaf A also
+    /// short-circuits false here; no finite value has a non-zero-`fract`
+    /// exception to this, since `fract()` on any non-finite float is
+    /// always `NaN`, never `0.0`). Kept as the documented vector for B
+    /// against `mcdc__control_215__v1_all_true_integral_real` since it
+    /// is the only reachable case exercising that leaf's intent.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__control_215__v3_non_finite_real() {
+        assert_eq!(try_to_integer(&Value::Real(f64::INFINITY)), None);
+    }
+
+    /// MC/DC vector (obligation `control_215`): leaves A and B true,
+    /// leaf C (`in_i64_range(*r)`) false — an integral, finite REAL
+    /// too large to represent as `i64`. Independence pair for C against
+    /// `mcdc__control_215__v1_all_true_integral_real`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__control_215__v4_out_of_i64_range() {
+        assert_eq!(try_to_integer(&Value::Real(1e300)), None);
+    }
+
     #[test]
     fn value_kind_names_all_variants() {
         assert_eq!(value_kind(&Value::Null), "NULL");

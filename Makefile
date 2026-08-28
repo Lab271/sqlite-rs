@@ -96,10 +96,12 @@ test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .
 
 # Scanned file set for `test-mcdc`. Grown module-by-module as tagged
 # obligations land: btree (#52), then vdbe/functions, parser/grammar,
-# parser/tokenizer, vdbe/exec, record/encode (#368).
+# parser/tokenizer, vdbe/exec, record/encode (#368), then vdbe/program +
+# vdbe/control (opcode dispatch, fix/mcdc-scope).
 MCDC_FILES := src/btree.rs src/btree/*.rs src/btree/table/*.rs src/btree/index/*.rs \
 	src/vdbe/functions.rs src/parser/grammar.rs src/parser/tokenizer.rs \
-	src/vdbe/exec.rs src/record/encode.rs
+	src/vdbe/exec.rs src/record/encode.rs \
+	src/vdbe/program.rs src/vdbe/control.rs
 
 # Committed obligations snapshot (tests/mcdc/obligations.json), analogous
 # to the corpus fixtures (spec 004): checked into git so
