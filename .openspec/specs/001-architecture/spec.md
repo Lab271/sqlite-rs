@@ -242,26 +242,24 @@ A `WindowsVfs` (`os_win.c` equivalent) is planned but not yet implemented.
 
 **Estimated lines:** ~8,000
 
-**VFS trait:**
+**VFS trait** (as actually defined in `src/vfs.rs`; abbreviated to the read/write/lock surface — the WAL `-shm` coordination methods (`claim_wal_read_lock`, `claim_wal_checkpoint_lock`, `active_wal_reader_marks`, `publish_wal_backfill`/`read_wal_backfill`, `claim_wal_write_lock`, `publish_wal_mx_frame`, `open_wal_shm`) are omitted here for brevity — see the source for the full trait):
 
 ```rust
 trait Vfs {
-    fn open(&self, path: &Path, flags: OpenFlags) -> Result<Box<dyn File>>;
-    fn delete(&self, path: &Path) -> Result<()>;
+    fn open_read(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
+    fn open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
+    fn create_or_open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>>;
     fn exists(&self, path: &Path) -> Result<bool>;
-    fn full_path(&self, path: &Path) -> Result<PathBuf>;
-    fn random(&self, buf: &mut [u8]);
-    fn current_time(&self) -> f64;
+    fn delete(&self, path: &Path) -> Result<()>;
 }
 
-trait File {
-    fn read(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
-    fn write(&self, buf: &[u8], offset: u64) -> Result<usize>;
-    fn truncate(&self, size: u64) -> Result<()>;
-    fn sync(&self, flags: SyncFlags) -> Result<()>;
+trait VfsFile {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
+    fn write_at(&self, buf: &[u8], offset: u64) -> Result<()>;
+    fn truncate(&self, len: u64) -> Result<()>;
+    fn sync(&self) -> Result<()>;
     fn size(&self) -> Result<u64>;
-    fn lock(&self, level: LockLevel) -> Result<()>;
-    fn unlock(&self, level: LockLevel) -> Result<()>;
+    fn lock_shared(&self) -> Result<FileLock>;
 }
 ```
 

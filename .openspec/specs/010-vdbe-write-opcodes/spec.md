@@ -325,12 +325,12 @@ before the row's own `Insert`, dispatching `ON CONFLICT`
 
 ## Related regimes
 
-- Tier suite: `tests/tiers/tier2.rs`'s `t2_crud_round_trips_on_rowid_tables`
-  stub covers full CRUD (including `UPDATE`, not part of this ticket's
-  opcode set) — left `#[ignore]`; a future ticket adding `UPDATE`
-  support (likely compiled as `Delete`+`Insert` or a dedicated opcode)
-  should flip it once the full round trip is codegen-reachable, not just
-  hand-assembled as this spec's tests do.
+- Tier suite: `tests/tiers/tier2.rs::t2_crud_round_trips_on_rowid_tables`
+  covers full CRUD including `UPDATE` (not part of this ticket's opcode
+  set, which stops at `Insert`/`Delete`/`IdxInsert`/`NewRowid`) exercised
+  through the real codegen/CLI path rather than hand-assembled — landed
+  by #217 (compiling `UPDATE` via `src/codegen/stmt/update.rs`) and is no
+  longer `#[ignore]`d.
 - Parity suite (#72, VM-diff against oracle `EXPLAIN`): none of this
   spec's three new opcodes (`OpenWrite`/`Insert`/`NewRowid`) were
   harvested from a V2-era oracle, so they carry no parity-suite
