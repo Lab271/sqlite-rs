@@ -262,3 +262,51 @@ Refs: 001/Req-4, 007/Req-1, 007/Req-4.
 - THEN it transparently rolls back to the pre-transaction content and deletes the journal, with no explicit recovery command needed
 
 **Tests:** `tests/corpus/journal_interop_test.rs::our_journal_recovers_through_stock_sqlite3`
+
+### Requirement 7: PASSIVE WAL Checkpoint [MUST]
+
+Tier 3 (V6 Slim, epic #354, #386; ADR-0025), built on top of Requirement 3's WAL-frame reading. `checkpoint_passive` MUST copy every committed WAL frame up to the oldest active reader's published mark (`active_wal_reader_marks`, guarded by `claim_wal_checkpoint_lock`) into the main database file, in frame order, then publish the new backfill boundary (`publish_wal_backfill`). It MUST NOT wait for a lagging reader to finish — a reader still pinned to an older frame simply bounds how far a given pass can go (`CheckpointResult::checkpoint_complete = false`), rather than blocking; FULL/RESTART checkpoint modes are out of scope, deferred to V7. A missing, empty, or sub-header-length `-wal` file is not an error: it MUST return a `CheckpointResult` reporting zero frames, already complete. A WAL page size that doesn't match `expected_page_size` MUST return `Err`, never panic or checkpoint a mismatched-page-size WAL.
+
+**Implementation:** `src/pager/checkpoint.rs::checkpoint_passive`
+
+**Tests:** inline `#[cfg(test)]` in `src/pager/checkpoint.rs`
+
+#### Scenario: No WAL file is a complete no-op
+
+- GIVEN a database path with no adjacent `-wal` file
+- WHEN `checkpoint_passive` runs
+- THEN it returns `CheckpointResult { backfilled_frames: 0, total_frames: 0, checkpoint_complete: true }`
+
+**Tests:** `src/pager/checkpoint.rs::tests::no_wal_file_is_a_complete_no_op`, `src/pager/checkpoint.rs::tests::empty_wal_with_header_only_is_a_complete_no_op`
+
+#### Scenario: Every frame backfills when no reader is active
+
+- GIVEN a WAL with several committed frames and no active reader marks
+- WHEN `checkpoint_passive` runs
+- THEN every frame is copied into the main file and `checkpoint_complete` is `true`
+
+**Tests:** `src/pager/checkpoint.rs::tests::backfills_all_frames_when_no_readers_active`
+
+#### Scenario: An active reader's mark bounds the checkpoint
+
+- GIVEN a WAL with committed frames beyond an active reader's published mark
+- WHEN `checkpoint_passive` runs
+- THEN only frames up to that mark are backfilled, and `checkpoint_complete` is `false`
+
+**Tests:** `src/pager/checkpoint.rs::tests::reader_mark_bounds_the_checkpoint`
+
+#### Scenario: A page-size mismatch errors rather than checkpointing garbage
+
+- GIVEN a WAL header whose page size does not match `expected_page_size`
+- WHEN `checkpoint_passive` runs
+- THEN it returns `Err`, and the main file is left untouched
+
+**Tests:** `src/pager/checkpoint.rs::tests::page_size_mismatch_is_an_error`
+
+#### Scenario: A second pass with no new frames is a no-op
+
+- GIVEN a WAL already fully checkpointed by a prior pass
+- WHEN `checkpoint_passive` runs again with no new frames written
+- THEN it reports the same backfill boundary and `checkpoint_complete: true`, writing nothing new
+
+**Tests:** `src/pager/checkpoint.rs::tests::second_pass_with_no_new_frames_is_a_no_op`
