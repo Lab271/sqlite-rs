@@ -190,6 +190,7 @@ mod joins;
 mod limit_scan;
 mod order_by;
 mod projection;
+mod range_scan;
 
 pub use entry::{
     compile_select, compile_select_compound, compile_select_with_catalog,

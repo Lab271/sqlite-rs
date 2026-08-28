@@ -173,6 +173,23 @@ pub enum Opcode {
     /// Reads the trailing rowid column off index cursor `P1`'s
     /// currently-seeked entry into register `P2`.
     IdxRowid,
+    // #606: real-index range-seek primitives, for `BETWEEN`/`IN`/
+    // `LIKE`-prefix query-planner fast paths (ADR-0034). Unlike
+    // `SeekIndexEq` (exact-key-or-miss), `SeekIndexGE` accepts landing on
+    // any key `>=` the probe; `IdxCompareGT` is the matching "have we
+    // walked past the upper bound yet" stop check for `IdxNext`-driven
+    // range walks over the same real index cursor (distinct from the
+    // ephemeral-cursor `IdxLE` above). Postdates the V2 oracle harvest,
+    // so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked, like `SeekIndexEq`/`IdxRowid` above.
+    /// Seeks index cursor `P1` to the first entry whose key (built from
+    /// registers `P3..P3+P4`) is `>=` the probe, jumping to `P2` if no
+    /// such entry exists.
+    SeekIndexGE,
+    /// Compares index cursor `P1`'s current entry's leading `P4` columns
+    /// against the key built from registers `P3..P3+P4`, jumping to `P2`
+    /// if the current key is strictly greater than the probe.
+    IdxCompareGT,
     // #296: index-ordered scan — walks a matching index's b-tree
     // directly (forward or backward) in place of `Rewind`/`Next` +
     // sorter opcodes, so `ORDER BY <indexed col> [DESC] LIMIT n` never
@@ -532,6 +549,8 @@ fn _exhaustive(o: Opcode) {
         | Opcode::NoConflict
         | Opcode::SeekIndexEq
         | Opcode::IdxRowid
+        | Opcode::SeekIndexGE
+        | Opcode::IdxCompareGT
         | Opcode::IdxRewind
         | Opcode::IdxLast
         | Opcode::IdxNext

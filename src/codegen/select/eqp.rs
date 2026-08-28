@@ -265,82 +265,100 @@ pub fn explain_query_plan(
         } else {
             None
         };
-        let detail = match (
-            access,
-            covering
-                .as_ref()
-                .and_then(|m| binding.schema.indexes.get(m.index_position)),
-            skip_scan
-                .as_ref()
-                .and_then(|m| binding.schema.indexes.get(m.index_position))
-                .zip(skip_scan.as_ref().map(|m| m.column_position)),
-        ) {
-            (_, Some(index), _) => format!(
-                "SEARCH {} USING COVERING INDEX {} ({}=?)",
-                eqp_display_name(table_ref),
-                index.name,
-                index
-                    .columns
-                    .first()
-                    .map_or_else(String::new, |c| c.name.clone())
-            ),
-            (None, None, Some((index, column_position))) => {
-                // Oracle sqlite3's own skip-scan EQP text, confirmed
-                // empirically (sqlite3 3.51.0): `SEARCH t USING INDEX
-                // idx (ANY(category) AND price=?)` -- one `ANY(col)`
-                // per unconstrained leading column, then `col=?` for
-                // the actually-probed column.
-                let parts: Vec<String> = index
-                    .columns
-                    .get(..column_position)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|c| format!("ANY({})", c.name))
-                    .chain(std::iter::once(format!(
-                        "{}=?",
-                        index
-                            .columns
-                            .get(column_position)
-                            .map_or_else(String::new, |c| c.name.clone())
-                    )))
-                    .collect();
-                format!(
-                    "SEARCH {} USING INDEX {} ({})",
+        // #606: BETWEEN/IN/LIKE-prefix range-seek fast paths, checked
+        // with the same precedence as `compile_direct_scan`'s dispatch
+        // (rowid seek, covering index, then these) — only applies to
+        // the outermost table's own `WHERE` clause, like the checks
+        // above.
+        let range_seek = if level == 0 && access.is_none() && covering.is_none() {
+            super::range_scan::find_range_seek_detail(
+                &binding.schema,
+                select,
+                &eqp_display_name(table_ref),
+            )
+        } else {
+            None
+        };
+        let detail = if let Some(range_detail) = range_seek {
+            range_detail
+        } else {
+            match (
+                access,
+                covering
+                    .as_ref()
+                    .and_then(|m| binding.schema.indexes.get(m.index_position)),
+                skip_scan
+                    .as_ref()
+                    .and_then(|m| binding.schema.indexes.get(m.index_position))
+                    .zip(skip_scan.as_ref().map(|m| m.column_position)),
+            ) {
+                (_, Some(index), _) => format!(
+                    "SEARCH {} USING COVERING INDEX {} ({}=?)",
                     eqp_display_name(table_ref),
                     index.name,
-                    parts.join(" AND ")
-                )
-            }
-            // #545/#547: this level builds a transient automatic index
-            // rather than falling back to a plain scan -- real sqlite3's
-            // own wording for the equivalent case (confirmed empirically,
-            // sqlite3 3.51.0): `SEARCH t USING AUTOMATIC COVERING INDEX
-            // (col=?)`, no index name (it has none).
-            (None, None, None) => match &auto_index_probe {
-                Some(AutoIndexProbe { key_column, .. }) => format!(
-                    "SEARCH {} USING AUTOMATIC COVERING INDEX ({}=?)",
-                    eqp_display_name(table_ref),
-                    binding
-                        .schema
+                    index
                         .columns
-                        .get(*key_column)
-                        .map_or_else(String::new, |c| c.clone())
+                        .first()
+                        .map_or_else(String::new, |c| c.name.clone())
                 ),
-                None => format!("SCAN {}", eqp_display_name(table_ref)),
-            },
-            (Some(JoinAccess::Rowid(_)), None, _) => format!(
-                "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
-                eqp_display_name(table_ref)
-            ),
-            (Some(JoinAccess::UniqueIndex { index, .. }), None, _) => format!(
-                "SEARCH {} USING INDEX {} ({}=?)",
-                eqp_display_name(table_ref),
-                index.name,
-                index
-                    .columns
-                    .first()
-                    .map_or_else(String::new, |c| c.name.clone())
-            ),
+                (None, None, Some((index, column_position))) => {
+                    // Oracle sqlite3's own skip-scan EQP text, confirmed
+                    // empirically (sqlite3 3.51.0): `SEARCH t USING INDEX
+                    // idx (ANY(category) AND price=?)` -- one `ANY(col)`
+                    // per unconstrained leading column, then `col=?` for
+                    // the actually-probed column.
+                    let parts: Vec<String> = index
+                        .columns
+                        .get(..column_position)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|c| format!("ANY({})", c.name))
+                        .chain(std::iter::once(format!(
+                            "{}=?",
+                            index
+                                .columns
+                                .get(column_position)
+                                .map_or_else(String::new, |c| c.name.clone())
+                        )))
+                        .collect();
+                    format!(
+                        "SEARCH {} USING INDEX {} ({})",
+                        eqp_display_name(table_ref),
+                        index.name,
+                        parts.join(" AND ")
+                    )
+                }
+                // #545/#547: this level builds a transient automatic index
+                // rather than falling back to a plain scan -- real sqlite3's
+                // own wording for the equivalent case (confirmed empirically,
+                // sqlite3 3.51.0): `SEARCH t USING AUTOMATIC COVERING INDEX
+                // (col=?)`, no index name (it has none).
+                (None, None, None) => match &auto_index_probe {
+                    Some(AutoIndexProbe { key_column, .. }) => format!(
+                        "SEARCH {} USING AUTOMATIC COVERING INDEX ({}=?)",
+                        eqp_display_name(table_ref),
+                        binding
+                            .schema
+                            .columns
+                            .get(*key_column)
+                            .map_or_else(String::new, |c| c.clone())
+                    ),
+                    None => format!("SCAN {}", eqp_display_name(table_ref)),
+                },
+                (Some(JoinAccess::Rowid(_)), None, _) => format!(
+                    "SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
+                    eqp_display_name(table_ref)
+                ),
+                (Some(JoinAccess::UniqueIndex { index, .. }), None, _) => format!(
+                    "SEARCH {} USING INDEX {} ({}=?)",
+                    eqp_display_name(table_ref),
+                    index.name,
+                    index
+                        .columns
+                        .first()
+                        .map_or_else(String::new, |c| c.name.clone())
+                ),
+            }
         };
         let row_id = next_id;
         next_id = next_id.saturating_add(1);

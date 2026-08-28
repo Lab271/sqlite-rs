@@ -22,19 +22,31 @@
 
 use sqlite_rs::codegen::{compile_select, CodegenError};
 use sqlite_rs::parser::{parse_select, ParseOutcome};
-use sqlite_rs::schema::TableSchema;
-use sqlite_rs::vdbe::{Opcode, Program};
+use sqlite_rs::schema::{IndexSchema, IndexedColumn, TableSchema};
+use sqlite_rs::vdbe::{Collation, Opcode, Program};
 
 /// `columns` must list exactly what `sql`'s column-definition list
 /// declares — `column_index` resolves names against this vector while
 /// `rowid_alias_column` re-derives its answer from `sql`, and the two
 /// are only meaningful together.
 fn schema(sql: &str, columns: &[&str]) -> TableSchema {
+    // Every caller in this file declares `id INTEGER`/`name TEXT` (see
+    // `PLAIN_DDL`/`IPK_DDL`) — matching that here (rather than leaving
+    // this empty) lets #606's range-seek fast paths, which consult
+    // declared column affinity before trusting a seek operand, actually
+    // recognize the in-scope shapes these tests compile.
+    let column_types = columns
+        .iter()
+        .map(|c| match *c {
+            "name" => "TEXT".to_string(),
+            _ => "INTEGER".to_string(),
+        })
+        .collect();
     TableSchema {
         name: "t".to_string(),
         root_page: 2,
         columns: columns.iter().map(|c| (*c).to_string()).collect(),
-        column_types: vec![],
+        column_types,
         column_collations: vec![],
         without_rowid: false,
         strict: false,
@@ -44,6 +56,24 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         rowid_alias: None,
     }
     .with_computed_rowid_alias()
+}
+
+/// Same as [`schema`], but with a single non-`UNIQUE` index declared on
+/// `indexed_col` — for #606's range-seek fast-path shape tests, which
+/// need `find_leading_index` to actually find a match.
+fn schema_with_index(sql: &str, columns: &[&str], indexed_col: &str) -> TableSchema {
+    let mut s = schema(sql, columns);
+    s.indexes.push(IndexSchema {
+        name: format!("idx_{indexed_col}"),
+        unique: false,
+        columns: vec![IndexedColumn {
+            name: indexed_col.to_string(),
+            desc: false,
+            collation: Collation::Binary,
+        }],
+        root_page: 3,
+    });
+    s
 }
 
 fn compile(sql: &str, schema: &TableSchema) -> Program {
@@ -366,6 +396,109 @@ fn empty_in_list_is_statically_false_without_null_probes() {
     let s = schema(PLAIN_DDL, &["id", "name"]);
     let program = compile("SELECT name FROM t WHERE id IN ()", &s);
     assert!(!uses(&program, Opcode::IsNull));
+}
+
+// ---------------------------------------------------------------
+// #606: BETWEEN/IN/LIKE/GLOB index range-seek fast paths — opcode-shape
+// assertions for the in-scope shape (SeekIndexGE/IdxCompareGT/
+// SeekIndexEq present, ordinary Ge/Le/Eq filter machinery absent) and
+// the documented fallback shapes (ordinary filter machinery present,
+// no new opcodes emitted).
+// ---------------------------------------------------------------
+
+#[test]
+fn between_on_indexed_column_compiles_to_a_range_seek() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "id");
+    let program = compile("SELECT name FROM t WHERE id BETWEEN 1 AND 10", &s);
+    assert!(uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::IdxCompareGT));
+    assert!(!uses(&program, Opcode::Ge));
+    assert!(!uses(&program, Opcode::Le));
+}
+
+#[test]
+fn between_on_an_unindexed_column_falls_back_to_ge_and_le() {
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id BETWEEN 1 AND 10", &s);
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Ge) && uses(&program, Opcode::Le));
+}
+
+#[test]
+fn between_nested_in_or_falls_back_to_ge_and_le() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "id");
+    let program = compile(
+        "SELECT name FROM t WHERE id BETWEEN 1 AND 10 OR name = 'x'",
+        &s,
+    );
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Ge) && uses(&program, Opcode::Le));
+}
+
+#[test]
+fn in_list_on_indexed_column_compiles_to_seek_index_eq_chain() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "id");
+    let program = compile("SELECT name FROM t WHERE id IN (1, 2, 3)", &s);
+    assert!(uses(&program, Opcode::SeekIndexEq));
+    assert!(!uses(&program, Opcode::IsNull));
+}
+
+#[test]
+fn in_list_on_an_unindexed_column_falls_back_to_the_null_guard_machinery() {
+    let s = schema(PLAIN_DDL, &["id", "name"]);
+    let program = compile("SELECT name FROM t WHERE id IN (1, 2)", &s);
+    assert!(!uses(&program, Opcode::SeekIndexEq));
+    assert!(count(&program, Opcode::IsNull) >= 3);
+}
+
+#[test]
+fn like_prefix_on_indexed_column_compiles_to_a_range_seek() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name LIKE 'foo%'", &s);
+    assert!(uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::IdxCompareGT));
+    assert!(!uses(&program, Opcode::Function));
+}
+
+#[test]
+fn like_leading_wildcard_falls_back_to_the_like_function() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name LIKE '%foo'", &s);
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Function));
+}
+
+#[test]
+fn like_with_underscore_wildcard_falls_back_to_the_like_function() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name LIKE 'fo_%'", &s);
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Function));
+}
+
+#[test]
+fn like_without_a_trailing_wildcard_falls_back_to_the_like_function() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name LIKE 'foo'", &s);
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Function));
+}
+
+#[test]
+fn like_with_escape_clause_falls_back_to_the_like_function() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name LIKE 'foo%' ESCAPE '\\'", &s);
+    assert!(!uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::Function));
+}
+
+#[test]
+fn glob_prefix_on_indexed_column_compiles_to_a_range_seek() {
+    let s = schema_with_index(PLAIN_DDL, &["id", "name"], "name");
+    let program = compile("SELECT id FROM t WHERE name GLOB 'foo*'", &s);
+    assert!(uses(&program, Opcode::SeekIndexGE));
+    assert!(uses(&program, Opcode::IdxCompareGT));
+    assert!(!uses(&program, Opcode::Function));
 }
 
 // ---------------------------------------------------------------
