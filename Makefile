@@ -86,10 +86,10 @@ test-parity: ## Run the per-V-block parity mirror against a pinned real sqlite3 
 	cargo test --locked --test parity
 
 test-sqllogictest: ## Run the sqllogictest slice against a pinned real sqlite3, refreshing tools/sqllogictest-status.json (#96)
-	cargo test --locked --test sqllogictest
+	cargo test --locked --test sqllogictest -- --nocapture
 
 test-tcl: ## Run the TCL-sourced extracted-SQL corpus checks (tokenizer totality, no-false-invalid) standalone
-	cargo test --locked --test extracted_sql_corpus tcl
+	cargo test --locked --test extracted_sql_corpus tcl -- --nocapture
 
 test-tiers: ## Run the tier conformance suite standalone (tier0..tier3 — see .openspec/specs/001-architecture Tier Model)
 	cargo test --locked --test tier0 --test tier1 --test tier2 --test tier3

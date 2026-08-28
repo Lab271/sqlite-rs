@@ -193,6 +193,30 @@ fn sqllogictest_slice() {
 
     write_status_json(&tallies);
 
+    // Mirrors `tools/assurance.py`'s "sqllogictest slice:" line so the number
+    // is visible from `make test-sqllogictest` directly, not only via a
+    // separate `make assurance`/`cat tools/sqllogictest-status.json` step.
+    let total_pass: usize = tallies.iter().map(|t| t.pass).sum();
+    let total_skip: usize = tallies.iter().map(|t| t.skip).sum();
+    let total_fail: usize = tallies.iter().map(|t| t.fail).sum();
+    let attempted = total_pass + total_fail;
+    let queries = attempted + total_skip;
+    println!(
+        "sqllogictest slice: {EXPECTED_FILE_COUNT} vendored files, \
+         {total_pass}/{attempted} passing ({:.1}%), {attempted}/{queries} \
+         attempted ({:.1}% of corpus)",
+        if attempted == 0 {
+            0.0
+        } else {
+            100.0 * total_pass as f64 / attempted as f64
+        },
+        if queries == 0 {
+            0.0
+        } else {
+            100.0 * attempted as f64 / queries as f64
+        }
+    );
+
     // A truncated or mis-vendored `.test` parses to zero records, which
     // would otherwise report 0/0/0 for that file and still go green —
     // silently dropping corpus coverage with nothing to notice it. Files
