@@ -237,10 +237,10 @@ fn group_by_over_zero_rows_matches_oracle() {
 
 /// A `WHERE` clause present makes the index fast path decline under
 /// this MVP's conservative guardrail (matching #296's own) — confirms
-/// the fallback (#570's hash aggregation) still yields correct rows,
-/// not just that the fast path does.
+/// the fallback (the sorter, #631) still yields correct rows, not just
+/// that the fast path does.
 #[test]
-fn group_by_with_where_falls_back_to_hash_aggregation_and_still_matches_oracle() {
+fn group_by_with_where_falls_back_to_the_sorter_and_still_matches_oracle() {
     let Some(oracle) = pinned_oracle() else {
         skip_no_oracle("index_ordered_group_by");
         return;
@@ -265,17 +265,17 @@ fn group_by_with_where_falls_back_to_hash_aggregation_and_still_matches_oracle()
     };
     let program = compile_select(&select, &schema).unwrap();
     let opcodes: Vec<Opcode> = program.instructions.iter().map(|i| i.opcode).collect();
-    // #570: the index fast path still declines a WHERE-guarded GROUP BY
-    // (no cardinality estimate to judge an index walk against a filtered
-    // table scan), but the fallback is now hash aggregation rather than
-    // the sorter — either way, not the index walk this file is about.
+    // #570/#631: the index fast path still declines a WHERE-guarded
+    // GROUP BY (no cardinality estimate to judge an index walk against
+    // a filtered table scan), and the fallback is the sorter — either
+    // way, not the index walk this file is about.
     assert!(
         !opcodes.contains(&Opcode::IdxRewind),
         "expected the index fast path to decline a WHERE-guarded GROUP BY, got: {opcodes:?}"
     );
     assert!(
-        opcodes.contains(&Opcode::HashAggOpen),
-        "expected the hash-aggregation fallback for a WHERE-guarded GROUP BY, got: {opcodes:?}"
+        opcodes.contains(&Opcode::SorterOpen),
+        "expected the sorter fallback for a WHERE-guarded GROUP BY, got: {opcodes:?}"
     );
     assert_eq!(
         our_rows(&db, &header, &schema, sql),
@@ -284,10 +284,10 @@ fn group_by_with_where_falls_back_to_hash_aggregation_and_still_matches_oracle()
 }
 
 /// A `GROUP BY` over a computed expression (not a bare column) has no
-/// corresponding index column to match against — falls back to #570's
-/// hash aggregation, still correct.
+/// corresponding index column to match against — falls back to the
+/// sorter (#631), still correct.
 #[test]
-fn group_by_over_expression_falls_back_to_hash_aggregation_and_still_matches_oracle() {
+fn group_by_over_expression_falls_back_to_the_sorter_and_still_matches_oracle() {
     let Some(oracle) = pinned_oracle() else {
         skip_no_oracle("index_ordered_group_by");
         return;
@@ -312,15 +312,15 @@ fn group_by_over_expression_falls_back_to_hash_aggregation_and_still_matches_ora
     };
     let program = compile_select(&select, &schema).unwrap();
     let opcodes: Vec<Opcode> = program.instructions.iter().map(|i| i.opcode).collect();
-    // #570: as above — the index walk has no column to match a computed
-    // GROUP BY expression against, and hash aggregation picks it up.
+    // #570/#631: as above — the index walk has no column to match a
+    // computed GROUP BY expression against, and the sorter picks it up.
     assert!(
         !opcodes.contains(&Opcode::IdxRewind),
         "expected the index fast path to decline a computed GROUP BY, got: {opcodes:?}"
     );
     assert!(
-        opcodes.contains(&Opcode::HashAggOpen),
-        "expected the hash-aggregation fallback for a computed GROUP BY expression, got: {opcodes:?}"
+        opcodes.contains(&Opcode::SorterOpen),
+        "expected the sorter fallback for a computed GROUP BY expression, got: {opcodes:?}"
     );
     assert_eq!(
         our_rows(&db, &header, &schema, sql),

@@ -4,6 +4,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.7] - 2026-08-29
+
+### Fixed
+
+- `group_by_agg` ran 4.12x slower than the pinned oracle despite
+  sqlite-rs's HashAgg strategy (#570) being algorithmically better than
+  a sort-then-group approach — profiling found the real cost was
+  decode-side overhead (a fresh `Vec` allocation per row for the sort
+  key, decoding columns past the key, pseudo cursors re-parsing a row's
+  record header on every `Column` read, and `MakeRecord`'s encode path
+  allocating a fresh serial-type buffer per row), not the opcode
+  family. With those fixed, the Sorter strategy now beats HashAgg
+  outright, so GROUP BY dispatch switches back to it (#631).
+  `group_by_agg`: 6.38ms (HashAgg) -> 5.04ms (Sorter, fixed) on the 1MB
+  fixture, vs the oracle's 1.52ms (was 4.12x, now ~3.3x). A companion
+  spike (`tests/spike/013_raw_pointer_comparator/`) confirmed sqlite3's
+  raw-pointer sort-key comparator trick (`vdbesort.c`) is not the
+  reason for the remaining gap — a safe specialized decode path is
+  7.5-24.6x faster than the general one, while `unsafe` raw pointers
+  buy only ~2% on top of that.
+
 ## [0.18.6] - 2026-08-28
 
 ### Fixed

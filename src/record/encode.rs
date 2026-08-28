@@ -194,33 +194,39 @@ fn write_body_into(value: &Value, serial_type: u64, encoding: TextEncoding, out:
 /// spec 003 exactly (reused as-is for `MakeRecord`'s in-memory rows).
 pub fn encode_record(values: &[Value], encoding: TextEncoding) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_record_into(values, encoding, &mut out);
+    let mut serial_types = Vec::new();
+    encode_record_into(values, encoding, &mut out, &mut serial_types);
     out
 }
 
-/// Like [`encode_record`], but writes into a caller-owned buffer instead of
-/// allocating a fresh `Vec<u8>`. `out` is cleared first; callers that reuse
-/// the same buffer across calls (e.g. once per row in a hot loop) amortize
-/// its capacity instead of paying a `realloc` per row.
+/// Like [`encode_record`], but writes into caller-owned buffers instead of
+/// allocating fresh ones. `out`/`serial_types` are cleared first; callers
+/// that reuse the same buffers across calls (e.g. once per row in a hot
+/// loop, like `MakeRecord`'s `Vm::encode_scratch`, #631) amortize both
+/// allocations instead of paying a fresh one per row.
 ///
-/// Computes each column's serial type/body-length up front (no per-column
-/// `Vec<u8>` allocation — only fixed-size ints and lengths), then writes
-/// the header and bodies directly into `out` in two passes. This avoids
-/// the allocator churn of building a `Vec<(u64, Vec<u8>)>` of per-column
-/// bodies plus a separate serial-type-bytes buffer per row, which
-/// dominated `SorterInsert`/`MakeRecord` profiles under GROUP BY/ORDER BY
-/// workloads (#572).
-pub fn encode_record_into(values: &[Value], encoding: TextEncoding, out: &mut Vec<u8>) {
+/// Computes each column's serial type/body-length up front into
+/// `serial_types` (no per-column `Vec<u8>` allocation — only fixed-size
+/// ints and lengths), then writes the header and bodies directly into
+/// `out` in two passes. This avoids the allocator churn of building a
+/// `Vec<(u64, Vec<u8>)>` of per-column bodies plus a separate
+/// serial-type-bytes buffer per row, which dominated `SorterInsert`/
+/// `MakeRecord` profiles under GROUP BY/ORDER BY workloads (#572);
+/// reusing `serial_types` itself (rather than collecting a fresh one
+/// per call) closes the remaining allocation #631 found still there.
+pub fn encode_record_into(
+    values: &[Value],
+    encoding: TextEncoding,
+    out: &mut Vec<u8>,
+    serial_types: &mut Vec<(u64, usize)>,
+) {
     out.clear();
-
-    let serial_types: Vec<(u64, usize)> = values
-        .iter()
-        .map(|v| serial_type_and_body_len(v, encoding))
-        .collect();
+    serial_types.clear();
+    serial_types.extend(values.iter().map(|v| serial_type_and_body_len(v, encoding)));
 
     let mut header_body_len = 0usize;
     let mut bodies_len = 0usize;
-    for (st, len) in &serial_types {
+    for (st, len) in serial_types.iter() {
         header_body_len = header_body_len.saturating_add(varint_len(*st));
         bodies_len = bodies_len.saturating_add(*len);
     }
@@ -236,10 +242,10 @@ pub fn encode_record_into(values: &[Value], encoding: TextEncoding, out: &mut Ve
     out.reserve(header_len.saturating_add(bodies_len));
     #[allow(clippy::cast_possible_truncation)]
     write_varint_into(header_len as u64, out);
-    for (st, _) in &serial_types {
+    for (st, _) in serial_types.iter() {
         write_varint_into(*st, out);
     }
-    for (value, (st, _)) in values.iter().zip(&serial_types) {
+    for (value, (st, _)) in values.iter().zip(serial_types.iter()) {
         write_body_into(value, *st, encoding, out);
     }
 }

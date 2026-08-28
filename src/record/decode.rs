@@ -146,7 +146,22 @@ pub fn decode_record_upto(
     max_columns: usize,
     encoding: TextEncoding,
 ) -> Result<Vec<Value>, RecordError> {
-    let entries = parse_header(payload)?;
+    let mut entries = Vec::new();
+    decode_record_upto_into(payload, max_columns, encoding, &mut entries)
+}
+
+/// Like [`decode_record_upto`], but parses the header into a
+/// caller-supplied (cleared) scratch `Vec` instead of allocating a new
+/// one per call — for a hot loop that calls this once per row (e.g. the
+/// sorter's per-`SorterInsert` key decode), reusing the same backing
+/// allocation avoids a `Vec` grow/realloc on every row.
+pub(crate) fn decode_record_upto_into(
+    payload: &[u8],
+    max_columns: usize,
+    encoding: TextEncoding,
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<Vec<Value>, RecordError> {
+    parse_header_into(payload, entries)?;
     let n = max_columns.min(entries.len());
     let mut values = Vec::with_capacity(n);
     for &(serial_type, offset) in entries.iter().take(n) {
@@ -154,6 +169,89 @@ pub fn decode_record_upto(
         values.push(value);
     }
     Ok(values)
+}
+
+/// Decodes only the columns listed in `wanted` (in any order/spread,
+/// duplicates allowed) — the header entries (serial types/offsets) for
+/// every column are still walked (cheap: varint decodes only, no value
+/// bodies touched), but [`decode_serial_value`] only runs for `wanted`'s
+/// indices. The result has exactly `wanted.len()` values, in `wanted`'s
+/// own order (an out-of-range index decodes as `Value::Null`) — not one
+/// slot per record column like [`decode_record_upto_into`], so a caller
+/// (e.g. the sorter's per-`SorterInsert` key decode, #631) that only
+/// ever wants a handful of columns out of a much wider row gets a
+/// correspondingly small allocation, addressed by `wanted`'s own
+/// position rather than the column's original index. Unlike
+/// [`decode_record_upto_into`], a `wanted` index doesn't have to be a
+/// small contiguous prefix — the sort key can (and often does) sit past
+/// other columns the row also carries, without paying to decode any of
+/// them just to reach it.
+pub(crate) fn decode_record_only_into(
+    payload: &[u8],
+    wanted: &[usize],
+    encoding: TextEncoding,
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<Vec<Value>, RecordError> {
+    if let [only] = wanted {
+        return Ok(vec![decode_single_column(payload, *only, encoding)?]);
+    }
+    parse_header_into(payload, entries)?;
+    let mut values = Vec::with_capacity(wanted.len());
+    for &idx in wanted {
+        let value = match entries.get(idx) {
+            Some(&(serial_type, offset)) => {
+                decode_serial_value(serial_type, payload, offset, encoding)?.0
+            }
+            None => Value::Null,
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Single-key fast path for [`decode_record_only_into`] (#631 spike,
+/// mirroring sqlite3's specialized sort-key comparators in
+/// `vdbesort.c`, adapted to this codebase's decode-once-at-insert
+/// design and `unsafe_code = "deny"`): walks the header column by
+/// column exactly like [`parse_header_into`] does, but never
+/// materializes it into an `entries` `Vec` at all — stops the walk the
+/// instant `idx`'s own header entry is reached, decodes just that one
+/// column, and returns. For the overwhelmingly common case (one GROUP
+/// BY/ORDER BY key column, not several), this skips every per-column
+/// `Vec::push` [`parse_header_into`] would otherwise do, including for
+/// the columns skipped over on the way to `idx`.
+fn decode_single_column(
+    payload: &[u8],
+    idx: usize,
+    encoding: TextEncoding,
+) -> Result<Value, RecordError> {
+    let (header_len, n) = decode_varint_at(payload, 0)?;
+    let header_len = header_len as usize;
+    if header_len < n {
+        return Err(RecordError::HeaderTooShort {
+            declared: header_len,
+            varint_len: n,
+        });
+    }
+    let mut pos = n;
+    let mut body_pos = header_len;
+    let mut col = 0usize;
+    while pos < header_len {
+        let (serial_type, len) = decode_varint_at(payload, pos)?;
+        if pos.saturating_add(len) > header_len {
+            return Err(RecordError::HeaderOverrun {
+                offset: pos,
+                header_len,
+            });
+        }
+        pos = pos.saturating_add(len);
+        if col == idx {
+            return Ok(decode_serial_value(serial_type, payload, body_pos, encoding)?.0);
+        }
+        body_pos = body_pos.saturating_add(serial_type_len(serial_type));
+        col = col.saturating_add(1);
+    }
+    Ok(Value::Null)
 }
 
 /// Number of body bytes a serial type occupies, without decoding the
@@ -638,6 +736,37 @@ mod tests {
                 full[..n]
             );
         }
+    }
+
+    #[test]
+    fn decode_record_only_into_single_wanted_matches_the_general_path() {
+        // #631 spike: `decode_record_only_into`'s single-key fast path
+        // (`decode_single_column`) must agree with decoding every
+        // column the general way, for a key at every position —
+        // leading, middle, and trailing — not just index 0.
+        let payload = record_bytes(&[
+            (1, &[42]),
+            (0, &[]),
+            (13 + 2 * 5, b"hello"),
+            (7, &2.5f64.to_be_bytes()),
+        ]);
+        let full = decode_record(&payload, TextEncoding::Utf8).unwrap();
+        let mut entries = Vec::new();
+        for (idx, expected) in full.iter().enumerate() {
+            let single =
+                decode_record_only_into(&payload, &[idx], TextEncoding::Utf8, &mut entries)
+                    .unwrap();
+            assert_eq!(single, vec![expected.clone()], "index {idx}");
+        }
+    }
+
+    #[test]
+    fn decode_record_only_into_single_wanted_out_of_range_is_null() {
+        let payload = record_bytes(&[(1, &[42]), (0, &[])]);
+        let mut entries = Vec::new();
+        let result =
+            decode_record_only_into(&payload, &[100], TextEncoding::Utf8, &mut entries).unwrap();
+        assert_eq!(result, vec![Value::Null]);
     }
 
     #[test]

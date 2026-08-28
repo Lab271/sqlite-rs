@@ -43,7 +43,7 @@ use std::cmp::Ordering;
 
 #[cfg(test)]
 use crate::record::decode_record;
-use crate::record::{decode_record_upto, TextEncoding, Value};
+use crate::record::{decode_record_only_into, TextEncoding, Value};
 use crate::vdbe::compare::compare;
 use crate::vdbe::cursor::CursorSlot;
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
@@ -68,11 +68,20 @@ pub(crate) struct SorterState {
     sorted: bool,
     pos: usize,
     bound: Option<usize>,
-    /// One past the highest `SortKeyColumn.index` across `keys` (#507) —
-    /// `SorterInsert` decodes only this many leading columns per row,
-    /// since `compare_rows` never reads past it. Computed once at
-    /// `SorterOpen` rather than per insert.
-    decode_upto: usize,
+    /// `keys`' column indices, computed once at `SorterOpen` (#507,
+    /// refined #631) — `SorterInsert` decodes only these specific
+    /// columns per row, since `compare_rows` never reads any other.
+    /// Deliberately not just "decode the first N columns" (#507's
+    /// original scheme): a key can sit past other columns a row
+    /// carries (e.g. a GROUP BY key that isn't `schema`'s first
+    /// column), and decoding every column up to it just to reach one
+    /// late index defeats the point of skipping columns at all.
+    key_indices: Vec<usize>,
+    /// Scratch record-header buffer reused by every `SorterInsert`'s key
+    /// decode (#631) — passing this into
+    /// `decode_record_only_into`/`parse_header_into` instead of letting
+    /// each call allocate its own `Vec` avoids an allocation per row.
+    header_entries: Vec<(u64, usize)>,
 }
 
 // Methods rather than free functions so the borrow of `self` elides: a free
@@ -137,11 +146,7 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             }
         }
     };
-    let decode_upto = keys
-        .iter()
-        .map(|k| k.index.saturating_add(1))
-        .max()
-        .unwrap_or(0);
+    let key_indices: Vec<usize> = keys.iter().map(|k| k.index).collect();
     vm.set_cursor(
         instr.p1,
         CursorSlot::Sorter(SorterState {
@@ -150,7 +155,8 @@ pub fn sorter_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             sorted: false,
             pos: 0,
             bound,
-            decode_upto,
+            key_indices,
+            header_entries: Vec::new(),
         }),
     )?;
     Ok(Step::Next)
@@ -186,7 +192,12 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     match state.bound {
         Some(0) => {}
         Some(n) if state.buffer.len() >= n => {
-            let new_values = decode_bytes_upto("SorterInsert", &blob, state.decode_upto)?;
+            let new_values = decode_bytes_upto(
+                "SorterInsert",
+                &blob,
+                &state.key_indices,
+                &mut state.header_entries,
+            )?;
             let is_better = state.buffer.first().is_some_and(|(_, worst)| {
                 compare_rows(&new_values, worst, &state.keys) == Ordering::Less
             });
@@ -198,7 +209,12 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             }
         }
         _ => {
-            let values = decode_bytes_upto("SorterInsert", &blob, state.decode_upto)?;
+            let values = decode_bytes_upto(
+                "SorterInsert",
+                &blob,
+                &state.key_indices,
+                &mut state.header_entries,
+            )?;
             state.buffer.push((blob, values));
             if state.bound.is_some() {
                 let last = state.buffer.len().saturating_sub(1);
@@ -276,9 +292,10 @@ fn heap_sift_down(buf: &mut [SorterRow], mut i: usize, keys: &[SortKeyColumn]) {
 fn decode_bytes_upto(
     opcode: &'static str,
     bytes: &[u8],
-    max_columns: usize,
+    wanted: &[usize],
+    header_entries: &mut Vec<(u64, usize)>,
 ) -> Result<Vec<Value>, ExecError> {
-    decode_record_upto(bytes, max_columns, TextEncoding::Utf8).map_err(|e| {
+    decode_record_only_into(bytes, wanted, TextEncoding::Utf8, header_entries).map_err(|e| {
         ExecError::MalformedInstruction {
             opcode,
             reason: e.to_string(),
@@ -289,11 +306,15 @@ fn decode_bytes_upto(
 /// The sort order two already-decoded rows fall in per `keys`' per-column
 /// direction/collation/NULLS placement — shared by `SorterSort`'s full
 /// sort and `SorterInsert`'s bounded top-K eviction (#129), so both see
-/// the exact same ordering.
+/// the exact same ordering. `a`/`b` hold exactly `keys.len()` values,
+/// one per key in the same order (#631's `decode_record_only_into`
+/// contract) — addressed by position here, not by `key.index` (the
+/// key's original schema-column index, no longer `a`/`b`'s own layout
+/// now that they're key-only rather than full-row-width).
 fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKeyColumn]) -> Ordering {
-    for key in keys {
-        let av = a.first_n(key);
-        let bv = b.first_n(key);
+    for (pos, key) in keys.iter().enumerate() {
+        let av = a.get(pos).unwrap_or(&Value::Null);
+        let bv = b.get(pos).unwrap_or(&Value::Null);
         let ord = match (av, bv) {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => {
@@ -392,16 +413,6 @@ pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// at this key's column index, or NULL if the row is shorter than the
 /// key descriptor implies" without a separate free function shadowing
 /// `Vec<Value>::get`.
-trait FirstN {
-    fn first_n(&self, key: &SortKeyColumn) -> &Value;
-}
-
-impl FirstN for [Value] {
-    fn first_n(&self, key: &SortKeyColumn) -> &Value {
-        self.get(key.index).unwrap_or(&Value::Null)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -735,15 +746,15 @@ mod tests {
 
     #[test]
     fn sort_key_past_column_zero_with_trailing_payload_columns_still_compares_correctly() {
-        // #507: SorterInsert now decodes only through the sort key's
-        // highest column index, computed at SorterOpen as
-        // `decode_upto`. Rows here carry a leading payload column (index
-        // 0, never read by the comparator), the sort key at index 1, and
-        // a trailing payload column (index 2, also never read) — this
-        // guards against `decode_upto` being miscomputed as "the first
-        // key's index" or "column 0" instead of the true max over every
-        // key, which would silently compare against the wrong column or
-        // panic on an out-of-bounds index.
+        // #507/#631: SorterInsert now decodes only the sort key's own
+        // column indices (`key_indices`, computed at SorterOpen). Rows
+        // here carry a leading payload column (index 0, never read by
+        // the comparator), the sort key at index 1, and a trailing
+        // payload column (index 2, also never read) — this guards
+        // against `key_indices` being miscomputed as "column 0" or "the
+        // first N columns" instead of the key's actual index, which
+        // would silently compare against the wrong column or panic on
+        // an out-of-bounds index.
         let mut vm = Vm::new();
         open_bounded_sorter(
             &mut vm,

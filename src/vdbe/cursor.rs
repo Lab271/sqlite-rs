@@ -54,8 +54,8 @@ use std::rc::Rc;
 
 use crate::btree::{self, IndexCursor, TableCursor};
 use crate::record::{
-    decode_column, decode_record, decode_record_upto, decode_serial_value, encode_record,
-    parse_header_into, record_column_count, TextEncoding, Value,
+    decode_record, decode_record_upto, decode_serial_value, encode_record, parse_header_into,
+    record_column_count, TextEncoding, Value,
 };
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
 use crate::vdbe::program::{Instruction, P4};
@@ -105,6 +105,17 @@ pub(crate) enum CursorSlot {
     EphemeralAutoIndex(AutoIndexState),
     Pseudo {
         register: i32,
+        /// Header cache for the blob currently in `register` (#631) —
+        /// a pseudo cursor's row (e.g. a sorter's `SorterData` output)
+        /// is typically read via several separate `Column` opcodes
+        /// before the register changes again, and without this each of
+        /// those calls re-walked the header and re-allocated its own
+        /// entries `Vec` from scratch (`decode_column`'s `parse_header`)
+        /// — same wasted-reparse shape [`RowHeaderCache`] already fixed
+        /// for table cursors. Valid only while `cached_blob` still
+        /// points at the same allocation as `register`'s current value.
+        header_cache: RowHeaderCache,
+        cached_blob: Option<Rc<[u8]>>,
     },
     Sorter(crate::vdbe::sorter::SorterState),
     /// A hash-aggregation table (#570) — opened by `HashAggOpen`, the
@@ -244,7 +255,7 @@ impl std::fmt::Debug for TableCursorState {
 /// reuses the existing allocation via `Vec::clear` instead of
 /// reallocating.
 #[derive(Debug, Default)]
-struct RowHeaderCache {
+pub(crate) struct RowHeaderCache {
     entries: Vec<(u64, usize)>,
     valid: bool,
 }
@@ -782,7 +793,14 @@ pub fn open_dup(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
 /// needs no special case for sorter-sourced (or otherwise
 /// already-computed) rows.
 pub fn open_pseudo(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
-    vm.set_cursor(instr.p1, CursorSlot::Pseudo { register: instr.p2 })?;
+    vm.set_cursor(
+        instr.p1,
+        CursorSlot::Pseudo {
+            register: instr.p2,
+            header_cache: RowHeaderCache::default(),
+            cached_blob: None,
+        },
+    )?;
     Ok(Step::Next)
 }
 
@@ -916,27 +934,59 @@ fn read_row_column(
     idx: usize,
     opcode: &'static str,
 ) -> Result<Value, ExecError> {
-    // Pseudo and ephemeral-table cursors need no header cache (a pseudo
-    // cursor's record blob is already fully decoded per read; an
-    // ephemeral-table row is stored as already-decoded `Value`s) — handle
-    // them here against an immutable borrow, so the cache-bearing arms
-    // below can take a mutable one without the two ever overlapping.
-    match vm.cursor(slot)? {
-        CursorSlot::Pseudo { register } => {
-            let register = *register;
-            return match vm.register(register)? {
-                Value::Blob(bytes) => decode_column(bytes, idx, TextEncoding::Utf8).map_err(|e| {
-                    ExecError::MalformedInstruction {
-                        opcode,
-                        reason: e.to_string(),
-                    }
-                }),
-                other => Err(ExecError::MalformedInstruction {
+    // A pseudo cursor's row is a register's blob, which can be read by
+    // several separate `Column` opcodes before the register changes
+    // again (#631) — resolve which blob it is now (an immutable borrow
+    // of `vm`), then take a mutable borrow of the cursor slot to reuse
+    // its header cache across those reads, same shape as the
+    // cache-bearing table-cursor arm below. Ephemeral-table cursors
+    // need no cache at all (a row is already stored as decoded
+    // `Value`s) — handled here too against the initial immutable
+    // borrow, before the mutable-borrow block starts.
+    if let CursorSlot::Pseudo { register, .. } = vm.cursor(slot)? {
+        let register = *register;
+        let bytes = match vm.register(register)? {
+            Value::Blob(bytes) => bytes.clone(),
+            other => {
+                return Err(ExecError::MalformedInstruction {
                     opcode,
                     reason: format!("pseudo-cursor register holds {other:?}, not a record blob"),
-                }),
-            };
-        }
+                })
+            }
+        };
+        return match vm.cursor_mut(slot)? {
+            CursorSlot::Pseudo {
+                header_cache,
+                cached_blob,
+                ..
+            } => {
+                if !cached_blob.as_ref().is_some_and(|b| Rc::ptr_eq(b, &bytes)) {
+                    header_cache.invalidate();
+                    *cached_blob = Some(bytes.clone());
+                }
+                header_cache
+                    .ensure(&bytes)
+                    .map_err(|e| ExecError::MalformedInstruction {
+                        opcode,
+                        reason: e.to_string(),
+                    })?;
+                header_cache
+                    .column(&bytes, idx, TextEncoding::Utf8)
+                    .map_err(|e| ExecError::MalformedInstruction {
+                        opcode,
+                        reason: e.to_string(),
+                    })
+            }
+            other => Err(ExecError::CursorTypeMismatch {
+                opcode,
+                slot,
+                found: other.type_name(),
+                expected: "pseudo cursor",
+            }),
+        };
+    }
+
+    match vm.cursor(slot)? {
         CursorSlot::EphemeralTable(state) => {
             let rows = state.try_rows(opcode)?;
             return Ok(state
@@ -3026,7 +3076,12 @@ mod tests {
             "index write cursor"
         );
         assert_eq!(
-            CursorSlot::Pseudo { register: 0 }.type_name(),
+            CursorSlot::Pseudo {
+                register: 0,
+                header_cache: RowHeaderCache::default(),
+                cached_blob: None,
+            }
+            .type_name(),
             "pseudo cursor"
         );
     }

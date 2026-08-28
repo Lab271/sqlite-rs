@@ -15,6 +15,9 @@ pub(super) use accum::{
     collect_aggregates, emit_agg_step, flush_group, read_pseudo_column, read_row_columns_into,
     AggSlot,
 };
+// #631 spike: no longer wired into GROUP BY dispatch (see entry.rs),
+// kept for possible reuse; `allow` avoids `-D warnings` failing lint.
+#[allow(unused_imports)]
 pub(in crate::codegen::select) use hash::try_compile_hash_grouped_scan;
 pub(crate) use join::compile_joined_grouped_scan;
 
