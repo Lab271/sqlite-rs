@@ -37,6 +37,9 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   a removed entry's overflow chain at all (table delete already did);
   index entries essentially never overflowed under the old, too-generous
   threshold, so the gap was never exercised.
+- `tests/fuzz/fuzz_targets/btree_cursor.rs`'s `FuzzPageSource` implemented
+  the pre-`Rc<[u8]>` `PageSource::read_page` signature, breaking
+  `make fuzz-btree`. Updated to return `Rc<[u8]>`.
 
 ### Docs
 
@@ -82,12 +85,6 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
     `CodegenError::CircularView`, `src/vdbe/collation.rs` →
     `src/record/collation.rs`, and three `path:line` citations in 011.
 
-### Fix
-
-- `tests/fuzz/fuzz_targets/btree_cursor.rs`'s `FuzzPageSource` implemented
-  the pre-`Rc<[u8]>` `PageSource::read_page` signature, breaking
-  `make fuzz-btree`. Updated to return `Rc<[u8]>`.
-
 ### Chore
 
 - Regenerated the MC/DC obligations snapshot (`tests/mcdc/obligations.json`)
@@ -99,6 +96,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   source line numbers, silently reducing real MC/DC discharge on the
   scanned file set to near zero. Now correctly reports 40/42 real MC/DC
   obligations discharged; `btree_966` and `encode_68` remain undischarged.
+- Added a license-header gate (`tools/license_headers.py`, `make
+  check-license-headers`) checking every tracked `.rs` file (vendored
+  `third_party/` exempt) for the `Copyright 2026 Schuberg Philis` /
+  `SPDX-License-Identifier: Apache-2.0` header pair; backfilled it on the
+  7 files that were missing it. Dropped the unused `"MIT"` entry from
+  `deny.toml`'s license allow list (`cargo deny` was warning
+  `license-not-encountered` — nothing in the resolved graph needs it).
+- Renamed every pass/fail Makefile gate to a consistent `check-*` prefix
+  (`deny`→`check-deny`, `audit`→`check-audit`, `grammar-drift`→
+  `check-grammar-drift`, `mvl-limit`→`check-mvl-limit`, `mod-files`→
+  `check-mod-files`, `coverage-gate`→`check-coverage`, `assurance-gate`→
+  `check-assurance`), replacing a previous mix of bare names and an
+  inconsistent `-gate` suffix. Updated every caller (CI workflow,
+  Makefile dependency chains, doc references).
 
 ## [0.18.5] - 2026-08-27
 
