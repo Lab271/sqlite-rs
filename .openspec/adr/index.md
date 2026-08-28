@@ -37,3 +37,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0031](0031-vendor-nix-subset.md) | Vendor a `nix` subset: reintroduce a single, narrow `unsafe` boundary | 2026-08-26 |
 | [0032](0032-hash-group-by-second-strategy.md) | Hash `GROUP BY` is a second strategy with its own opcode family, and still emits groups in key order | 2026-08-27 |
 | [0033](0033-constant-propagation-and-or-to-in-extend-fast-paths-in-place.md) | Constant propagation and OR-to-IN extend existing equality fast paths in place; only genuine range seeks wait for a new opcode | 2026-08-28 |
+| [0034](0034-index-range-seeks.md) | Real-index range seeks for `BETWEEN`/`IN`/`LIKE`-prefix (`SeekIndexGE`/`IdxCompareGT`) | 2026-08-28 |

@@ -145,6 +145,10 @@ name = "codegen_update"
 path = "tests/unit/codegen_update_test.rs"
 
 [[test]]
+name = "range_scan"
+path = "tests/unit/range_scan_test.rs"
+
+[[test]]
 name = "tokenizer_proptest"
 path = "tests/proptest/tokenizer_proptest.rs"
 

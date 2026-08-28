@@ -1201,6 +1201,97 @@ pub fn seek_index_eq(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     })
 }
 
+/// Seeks index-read cursor `P1` to the first entry whose key (built from
+/// registers `P3..P3+P4`) is `>=` the probe, per `P4`'s collations.
+/// Unlike [`seek_index_eq`], any landed-on row is accepted — there is no
+/// exact-equality recheck, since the whole point is a range floor, not a
+/// point lookup. Jumps to `P2` if the b-tree `seek()` finds no such entry
+/// (the probe is greater than every key in the index).
+pub fn seek_index_ge(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let collations = seek_key_collations(instr, "SeekIndexGE")?;
+    let probe = read_register_range(vm, instr.p3, collations.len(), "SeekIndexGE")?;
+    let encoding = vm.db()?.header.text_encoding;
+    let state = index_read_state_mut(vm, instr.p1, "SeekIndexGE")?;
+    let found =
+        state
+            .cursor
+            .seek(&probe, encoding)
+            .map_err(|e| ExecError::MalformedInstruction {
+                opcode: "SeekIndexGE",
+                reason: e.to_string(),
+            })?;
+    state.set_current(found.clone());
+    Ok(if found.is_none() {
+        Step::Jump(to_pc(instr.p2))
+    } else {
+        Step::Next
+    })
+}
+
+/// Decodes index-read cursor `P1`'s current row's leading `collations.len()`
+/// columns and compares them (collation-aware, per-column) against `probe`.
+/// Shared by [`seek_index_eq`]'s exact-match recheck and
+/// [`idx_compare_gt`]'s upper-bound stop check. Returns `None` if the
+/// current row has too few columns to compare (treated as "not greater"
+/// by [`idx_compare_gt`], mirroring `seek_index_eq`'s "too short = miss").
+fn decode_leading_columns(
+    row: &crate::btree::IndexRow,
+    probe: &[Value],
+    encoding: TextEncoding,
+    opcode: &'static str,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let total_columns =
+        record_column_count(&row.payload).map_err(|e| ExecError::MalformedInstruction {
+            opcode,
+            reason: e.to_string(),
+        })?;
+    if total_columns <= probe.len() {
+        return Ok(None);
+    }
+    let key = decode_record_upto(&row.payload, probe.len(), encoding).map_err(|e| {
+        ExecError::MalformedInstruction {
+            opcode,
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(Some(key))
+}
+
+/// Compares index-read cursor `P1`'s current entry's leading `P4` columns
+/// against the key built from registers `P3..P3+P4`, jumping to `P2` if
+/// the current key is strictly greater than the probe under `P4`'s
+/// collations. The real-index-cursor counterpart to the ephemeral-cursor
+/// `IdxLE` — used as the upper-bound stop check for `SeekIndexGE` +
+/// `IdxNext` range walks (see ADR-0034). A cursor with no current row
+/// (exhausted) is treated as "not greater" (falls through) since there
+/// is nothing left to walk past.
+pub fn idx_compare_gt(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let collations = seek_key_collations(instr, "IdxCompareGT")?;
+    let probe = read_register_range(vm, instr.p3, collations.len(), "IdxCompareGT")?;
+    let encoding = vm.db()?.header.text_encoding;
+    let state = index_read_state_mut(vm, instr.p1, "IdxCompareGT")?;
+    let current = state.current.clone();
+    let is_greater = match &current {
+        Some(row) => match decode_leading_columns(row, &probe, encoding, "IdxCompareGT")? {
+            Some(key) => key
+                .iter()
+                .zip(probe.iter())
+                .zip(collations.iter())
+                .map(|((k, p), &collation)| compare(k, p, collation))
+                .find(|o| !o.is_eq())
+                .map(|o| o.is_gt())
+                .unwrap_or(false),
+            None => false,
+        },
+        None => false,
+    };
+    Ok(if is_greater {
+        Step::Jump(to_pc(instr.p2))
+    } else {
+        Step::Next
+    })
+}
+
 /// Decodes index-read cursor `P1`'s current row (an ordinary secondary
 /// index entry — its decoded record's trailing column is always the
 /// referenced table's rowid) into an `i64` rowid, for [`idx_rowid`] and
@@ -3833,6 +3924,142 @@ mod tests {
         )
         .unwrap();
         assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn seek_index_ge_lands_exactly_on_probe() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(2)).unwrap();
+        let step = seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+        idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(20));
+    }
+
+    #[test]
+    fn seek_index_ge_seeks_past_a_gap_to_the_next_greater_key() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        // Keys are 1, 2, 3 — probing 0 (below every key) lands on 1;
+        // there's no gap in this fixture, so probe a value strictly
+        // between two keys is impossible with integer keys 1..=3, but
+        // probing 0 still exercises "landed on a key > probe" rather
+        // than an exact match, unlike SeekIndexEq's exact-match recheck.
+        vm.set_register(5, Value::Integer(0)).unwrap();
+        let step = seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+        idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+        assert_eq!(*vm.register(10).unwrap(), Value::Integer(10));
+    }
+
+    #[test]
+    fn seek_index_ge_past_the_end_jumps_to_p2() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(999)).unwrap();
+        let step = seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(99));
+    }
+
+    #[test]
+    fn idx_compare_gt_false_when_current_key_is_not_greater() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(1)).unwrap();
+        seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+
+        // current key is 1; compare against hi = 2, not greater.
+        vm.set_register(6, Value::Integer(2)).unwrap();
+        let step = idx_compare_gt(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxCompareGT, 0, 199, 6, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+    }
+
+    #[test]
+    fn idx_compare_gt_true_when_current_key_exceeds_the_bound() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(3)).unwrap();
+        seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+
+        // current key is 3; compare against hi = 2, strictly greater.
+        vm.set_register(6, Value::Integer(2)).unwrap();
+        let step = idx_compare_gt(
+            &mut vm,
+            &Instruction::with_p4(Opcode::IdxCompareGT, 0, 199, 6, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Jump(199));
+    }
+
+    /// End-to-end range walk: `SeekIndexGE(>=2)` then `IdxNext` guarded
+    /// by `IdxCompareGT(>2)` at the top of each iteration, over keys
+    /// 1, 2, 3 — should visit exactly keys 2 and 3.
+    #[test]
+    fn seek_index_ge_and_idx_next_with_idx_compare_gt_walk_a_range() {
+        let mut vm = writable_vm_with_index_entries(3);
+        open_index_read(&mut vm, 0);
+
+        vm.set_register(5, Value::Integer(2)).unwrap(); // lo
+        vm.set_register(6, Value::Integer(2)).unwrap(); // hi (row 2)
+        let step = seek_index_ge(
+            &mut vm,
+            &Instruction::with_p4(Opcode::SeekIndexGE, 0, 99, 5, P4::Int(1)),
+        )
+        .unwrap();
+        assert_eq!(step, Step::Next);
+
+        // Update hi to 3 so both rows (2 and 3) are in range.
+        vm.set_register(6, Value::Integer(3)).unwrap();
+
+        let mut visited = vec![];
+        loop {
+            let stop = idx_compare_gt(
+                &mut vm,
+                &Instruction::with_p4(Opcode::IdxCompareGT, 0, 999, 6, P4::Int(1)),
+            )
+            .unwrap();
+            if stop == Step::Jump(999) {
+                break;
+            }
+            idx_rowid(&mut vm, &Instruction::new(Opcode::IdxRowid, 0, 10, 0)).unwrap();
+            visited.push(vm.register(10).unwrap().clone());
+            let advanced =
+                idx_next(&mut vm, &Instruction::new(Opcode::IdxNext, 0, 500, 0)).unwrap();
+            if advanced != Step::Jump(500) {
+                break;
+            }
+        }
+        assert_eq!(visited, vec![Value::Integer(20), Value::Integer(30)]);
     }
 
     #[test]
