@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Spike 013: does sqlite3's raw-pointer sort-key comparator trick
 //! (`vdbesort.c`'s `vdbeSorterCompareInt`) actually explain the
 //! remaining ~2.6-3.6x gap between sqlite-rs and the oracle on

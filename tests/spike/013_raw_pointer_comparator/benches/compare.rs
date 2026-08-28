@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 // Spike 013: head-to-head of the three comparators in `src/lib.rs`.
 // `make bench` (or `cargo bench`) runs this.
 use std::cmp::Ordering;
