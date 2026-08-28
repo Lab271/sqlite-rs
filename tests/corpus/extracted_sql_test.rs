@@ -213,14 +213,21 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 ///
 /// - `temp.sqlite_master` — schema-qualified name with a keyword schema
 /// - `SELECT (VALUES(1),(2))` — VALUES in expression position
-/// - `SELECT release FROM savepoint` — non-reserved keywords used as
-///   identifiers (SQLite's `%fallback ID`)
+///
+/// The third historical case, `SELECT release FROM savepoint`
+/// (non-reserved keywords used as identifiers, SQLite's `%fallback ID`),
+/// dropped out of the sampled corpus when the vendored TCL/sqllogictest
+/// subset widened past V4 (joins/subqueries/aggregates) up through V7
+/// (transactions/pragmas/CTEs) — coincidental corpus churn under the
+/// per-shape/per-category caps, not a parser fix. The underlying bug is
+/// still real; re-raise this baseline back to 3 if a future re-widening
+/// resurfaces it rather than treating this drop as the fix.
 ///
 /// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
 /// never raise it without a documented cause like the #240/#257/#403 bumps
 /// above. A raise means a regression that reclassified valid SQL as
 /// malformed.
-const SELECT_INVALID_BASELINE: usize = 3;
+const SELECT_INVALID_BASELINE: usize = 2;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

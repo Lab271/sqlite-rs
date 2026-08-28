@@ -1,10 +1,13 @@
 -- Extracted by tools/extract_sql_corpus.py from the vendored SQLite
 -- TCL suite subset (version 3.53.4) under tests/corpus/sql/vendor/tcl/.
 -- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70).
+UPDATE t2 SET b=0
 UPDATE tbl3 SET a = 'G' where a = 'g'
 UPDATE mytable SET geom = X'1234'
 UPDATE y SET f1 = 'x' WHERE f1 = 1
 UPDATE sqlite_schema SET sql='CREATE TABLE t1(a INT, b TEXT)' WHERE name LIKE 't1'
+UPDATE sqlite_master SET sql='nonsense' WHERE name='sqlite_stat1'
+UPDATE sqlite_stat4 SET sample = substr(sample, 0, 4)
 UPDATE OR IGNORE t1 SET a=1000
 UPDATE OR REPLACE t1 SET a=1001
 UPDATE abc SET a=a+1
@@ -30,6 +33,11 @@ UPDATE t4 SET y='lots of data for the row where x=' || x || ' and y=' || y || ' 
 UPDATE t1 SET a = randstr(10,10) WHERE (rowid%4)==0
 UPDATE t6 SET a='xyz'
 UPDATE t6 SET a=1
+UPDATE sqlite_schema SET rootpage=(SELECT rootpage FROM saved_schema WHERE name='t2bcd') WHERE name='t1bcd'
+UPDATE sqlite_schema SET rootpage=(SELECT rootpage FROM saved_schema WHERE name='t1bcd') WHERE name='t2bcd'
+UPDATE t1 SET a = randstr(10,10)
+UPDATE t2 SET c=c+1
+UPDATE t2 SET c=c-1
 UPDATE t1 SET c='bellum' WHERE c='pax' RETURNING rowid, b, '|'
 UPDATE t2 SET b='123' WHERE b='abc' RETURNING (SELECT b FROM t1)
 UPDATE t2 SET b='123' WHERE b='abc' RETURNING b
@@ -37,6 +45,11 @@ UPDATE t1 SET b=9 WHERE a=1 RETURNING a, b, 'x'
 UPDATE t3 SET f=e+100 RETURNING 'U', e, f
 UPDATE t1 SET x=x+1 RETURNING x, affinity(x)
 UPDATE bug SET x=NULL WHERE id = 20 RETURNING quote(x), x IS NULL
+UPDATE t1 SET a = 2, b = 3, c = 4
+UPDATE t1 SET b = randstr(1000,1000)
+UPDATE t1 SET b = b||randstr(1000,1000)
+UPDATE t1 SET b = b||randstr(10,1000)
+UPDATE t1 SET b=b+(SELECT y FROM t2 WHERE x=a)
 UPDATE savepoint SET release = 5
 UPDATE tbl SET a = a * 10, b = b * 10
 UPDATE tbl SET b = 1, c = 10

@@ -5,6 +5,9 @@ DELETE FROM objlist
 DELETE FROM tbl2
 DELETE FROM t1
 DELETE FROM t2
+DELETE FROM sqlite_stat1
+DELETE FROM t3
+DELETE FROM t4
 DELETE FROM abc WHERE a = 4
 DELETE FROM table1 WHERE f1=3
 DELETE FROM 'table1' WHERE f1=3
@@ -13,8 +16,6 @@ DELETE FROM table1
 DELETE FROM table2
 DELETE FROM table1 WHERE f1>7
 DELETE FROM table2 WHERE f1>7
-DELETE FROM t3
-DELETE FROM t4
 DELETE FROM t5
 DELETE FROM t1 WHERE a='1' AND b='2'
 DELETE FROM t11 AS xyz WHERE EXISTS(SELECT 1 FROM t11 WHERE t11.a>xyz.a AND t11.b<=xyz.b)
@@ -47,6 +48,7 @@ DELETE FROM t1 WHERE rowid%2
 DELETE FROM t7b
 DELETE FROM t7c
 DELETE FROM t2 WHERE d IS NOT NULL
+DELETE FROM aux.abc
 DELETE FROM t1 WHERE c='bellum' RETURNING rowid, *, '|'
 DELETE FROM t1 WHERE a<>'xray' RETURNING a, b, '@'
 DELETE FROM log
@@ -55,6 +57,8 @@ DELETE FROM t1 RETURNING x, affinity(x)
 DELETE FROM t1 WHERE a<>3 RETURNING a, (SELECT min(a) FROM t1), (SELECT max(a) FROM t1), (SELECT round(avg(a),2) FROM t1)
 DELETE FROM t1 RETURNING a, (SELECT min(a) FROM t1), (SELECT max(a) FROM t1), (SELECT round(avg(a),2) FROM t1)
 DELETE FROM t1 RETURNING a, (SELECT min(t2.a)+t1.a*100 FROM t1 AS t2), (SELECT max(t2.a)+t1.a*100 FROM t1 AS t2), (SELECT round(avg(t2.a),2)+t1.a*100 FROM t1 AS t2)
+DELETE FROM t5 WHERE x=1 OR x=2
+DELETE FROM t1 WHERE x>4
 DELETE FROM rlog; DELETE FROM tbl; INSERT INTO tbl VALUES (100, 100); INSERT INTO tbl VALUES (300, 200); CREATE TRIGGER delete_before_row BEFORE DELETE ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), old.a, old.b, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), 0, 0); END; CREATE TRIGGER delete_after_row AFTER DELETE ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), old.a, old.b, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), 0, 0); END
 DELETE FROM tbl
 DELETE FROM rlog; CREATE TRIGGER insert_before_row BEFORE INSERT ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), 0, 0, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), new.a, new.b); END; CREATE TRIGGER insert_after_row AFTER INSERT ON tbl FOR EACH ROW BEGIN INSERT INTO rlog VALUES ( (SELECT coalesce(max(idx),0) + 1 FROM rlog), 0, 0, (SELECT coalesce(sum(a),0) FROM tbl), (SELECT coalesce(sum(b),0) FROM tbl), new.a, new.b); END

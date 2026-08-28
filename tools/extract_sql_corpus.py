@@ -86,9 +86,10 @@ SQLITE_URL = (
 CACHE_DIR = REPO_ROOT / "target"
 
 # Curated vendored subsets. sqllogictest's evidence/ files are hand-written and
-# statement-type diverse; select1/2 are the largest hand-written query files
-# that stay a sane size (select3/4/5 and every random/ + index/ file are
-# multi-megabyte generated output and stay out of the repo).
+# statement-type diverse; select1-5 are the hand-written query files that stay
+# a sane size (every random/ + index/ file is multi-megabyte generated output
+# and stays out of the repo — see vendor/README.md). select3/4/5 push past the
+# V2 single-table slice into joins/subqueries/aggregates (V4, .openspec/plan.md).
 VENDOR_SQLLOGICTEST = [
     "test/evidence/in1.test",
     "test/evidence/in2.test",
@@ -104,17 +105,29 @@ VENDOR_SQLLOGICTEST = [
     "test/evidence/slt_lang_update.test",
     "test/select1.test",
     "test/select2.test",
+    "test/select3.test",
+    "test/select4.test",
+    "test/select5.test",
 ]
 
-# TCL files chosen to cover every statement category. This suite — not
-# sqllogictest, which is query-focused and whose DML is incidental setup — is
-# where DML and DDL diversity actually lives, so the DML/DDL selection here is
-# deliberately broader than the SELECT selection.
+# TCL files chosen to cover every statement category, widened past the V4
+# single-table gate up through V7 per .openspec/plan.md's own corpus
+# citations (V4: `join*.test`, `select2-8.test`, `subquery*.test`,
+# `with*.test` non-recursive, `aggnested.test`; V6/V7: recursive CTEs
+# deferred to V7 (`with3-6.test`); V7: `pragma*.test`, `savepoint*.test`,
+# `analyze.test`). This suite — not sqllogictest, which is query-focused and
+# whose DML is incidental setup — is where DML and DDL diversity actually
+# lives, so the DML/DDL selection here is deliberately broader than the
+# SELECT selection.
 VENDOR_TCL = [
-    # SELECT and expression surface
+    # SELECT and expression surface (V1-V4)
     "select1.test", "select2.test", "select3.test", "select4.test", "select5.test",
+    "select6.test", "select7.test", "select8.test",
     "expr.test", "func.test", "func2.test", "cast.test", "between.test", "in.test",
-    "join.test", "distinct.test", "orderby1.test", "with1.test", "with2.test",
+    "join.test", "join2.test", "join3.test", "subquery.test", "subquery2.test",
+    "aggnested.test", "distinct.test", "orderby1.test",
+    # CTEs: non-recursive (V6) through recursive (deferred to V7)
+    "with1.test", "with2.test", "with3.test", "with4.test", "with5.test", "with6.test",
     # INSERT / UPDATE / DELETE
     "insert.test", "insert2.test", "insert3.test", "insert4.test", "insert5.test",
     "update.test", "update2.test", "delete.test", "delete2.test", "delete4.test",
@@ -123,6 +136,8 @@ VENDOR_TCL = [
     "table.test", "createtab.test", "alter.test", "altertab.test", "altertab2.test",
     "altertab3.test", "view.test", "index.test", "index3.test", "index4.test",
     "index6.test", "index7.test", "trigger2.test",
+    # V7: transactions/pragmas/introspection
+    "savepoint.test", "savepoint2.test", "pragma.test", "pragma2.test", "analyze.test",
 ]
 
 CATEGORIES = ["select", "insert", "update", "delete", "ddl"]

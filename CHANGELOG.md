@@ -19,6 +19,27 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   obligations in the scanned file set are now discharged, including the
   two (`btree_1081`, `encode_68`) left over from the prior refresh.
 
+### Chore
+
+- Widened the vendored TCL and sqllogictest corpora (#70) past their
+  original V2/V3 single-table scope up through V7, per `.openspec/plan.md`'s
+  own per-block corpus citations: sqllogictest 14 → 17 files (adds
+  `select3-5.test`, joins/subqueries/aggregates); TCL 43 → 60 files (adds
+  V4 `join2/3.test`, `subquery.test`, `subquery2.test`, `select6-8.test`,
+  `aggnested.test`; V6/V7 `with3-6.test` non-recursive through recursive
+  CTEs; V7 `savepoint.test`, `savepoint2.test`, `pragma.test`,
+  `pragma2.test`, `analyze.test`). `tests/sqllogictest/runner_test.rs`'s
+  `EXPECTED_FILE_COUNT` and doc comments updated; `tools/sqllogictest-status.json`
+  regenerated (34.0% corpus coverage, up from 56.8% of a much smaller
+  denominator — pass rate stays 100% of what's attempted). One coincidental
+  ratchet update: `SELECT_INVALID_BASELINE` 3 → 2 in
+  `tests/corpus/extracted_sql_test.rs` (a known misclassified statement
+  dropped out of the resampled corpus under the per-shape cap, not a parser
+  fix — noted inline so a future re-widening that resurfaces it isn't
+  mistaken for a regression). V8+ files (`fkey*`, `trigger[1,3-9]`,
+  `window*`, `gencol*`, `without_rowid*`, `strict*`) deliberately excluded —
+  those features aren't implemented yet.
+
 ### Fixed
 
 - DROP TABLE/DROP INDEX (`free_btree_pages_inner`) leaked overflow-page

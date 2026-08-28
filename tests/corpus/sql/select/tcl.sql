@@ -1,6 +1,27 @@
 -- Extracted by tools/extract_sql_corpus.py from the vendored SQLite
 -- TCL suite subset (version 3.53.4) under tests/corpus/sql/vendor/tcl/.
 -- Do not edit by hand; run `make extract-sql-corpus` to regenerate (#70).
+SELECT (SELECT sum(x+(SELECT y)) FROM bb) FROM aa
+SELECT (SELECT sum(x+y) FROM bb) FROM aa
+SELECT min((SELECT count(y) FROM ty)) FROM tx
+SELECT max((SELECT a FROM (SELECT count(*) AS a FROM ty) AS s)) FROM tx
+SELECT ( SELECT total( (SELECT b FROM x1) ) ) FROM x2
+SELECT ( SELECT total( (SELECT 2 FROM x1) ) ) FROM x2
+SELECT( SELECT max(b) LIMIT ( SELECT total( (SELECT a FROM t1) ) ) ) FROM t2
+WITH c AS(SELECT a) SELECT(SELECT(SELECT string_agg(b, b) LIMIT(SELECT 0.100000 * AVG(DISTINCT(SELECT 0 FROM a ORDER BY b, b, b)))) FROM a GROUP BY b, b, b) FROM a EXCEPT SELECT b FROM a ORDER BY b, b, b
+SELECT ( SELECT t2.b FROM (SELECT t2.b AS c FROM t1) GROUP BY 1 HAVING t2.b ) FROM t2 GROUP BY 'constant_string'
+SELECT ( SELECT c FROM (SELECT t2.b AS c FROM t1) GROUP BY c HAVING t2.b ) FROM t2 GROUP BY 'constant_string'
+SELECT sum(amount), name from invoice group by name having (select v > 6 from (select sum(amount) v) t)
+SELECT (select 1 from (select sum(amount))) FROM invoice
+SELECT (SELECT y FROM (SELECT sum(x) AS y) AS t2 ) FROM t1
+SELECT ( SELECT y FROM ( SELECT z AS y FROM (SELECT sum(x) AS z) AS t2 ) ) FROM t1
+SELECT ( SELECT a FROM ( SELECT y AS a FROM ( SELECT z AS y FROM (SELECT sum(x) AS z) AS t2 ) ) ) FROM t1
+WITH out(i, j, k) AS ( VALUES(1234, 5678, 9012) ) SELECT ( SELECT ( SELECT min(abc) = ( SELECT ( SELECT 1234 fROM (SELECT abc) ) ) FROM ( SELECT sum( out.i ) + ( SELECT sum( out.i ) ) AS abc FROM (SELECT out.j) ) ) ) FROM out
+SELECT ( SELECT min(y) + (SELECT x) FROM ( SELECT sum(a) AS x, b AS y FROM t2 ) ) FROM t1
+SELECT ( SELECT min(y) + (SELECT (SELECT x)) FROM ( SELECT sum(a) AS x, b AS y FROM t2 ) ) FROM t1
+SELECT ( SELECT (SELECT x) FROM ( SELECT sum(a) AS x, b AS y FROM t2 ) GROUP BY y ) FROM t1
+SELECT ( SELECT (SELECT (SELECT x)) FROM ( SELECT sum(a) AS x, b AS y FROM t2 ) GROUP BY y ) FROM t1
+SELECT * FROM t0 WHERE EXISTS (SELECT 1 FROM t1 GROUP BY c3 HAVING ( SELECT count(*) FROM (SELECT 1 UNION ALL SELECT sum(DISTINCT c1) ) ) ) BETWEEN 1 AND 1
 SELECT type, name, tbl_name FROM objlist ORDER BY tbl_name, type desc, name
 SELECT * FROM t4 WHERE a = 'main'
 SELECT * FROM t4 WHERE a = 'aux'
@@ -71,6 +92,18 @@ SELECT sql FROM sqlite_schema WHERE type='view'
 WITH s(i) AS ( SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<50000 ) INSERT INTO t1 SELECT NULL, i, 5.0 FROM s
 SELECT rr FROM t1 LIMIT 1
 SELECT sql FROM sqlite_schema
+SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat1'
+SELECT * FROM sqlite_stat1 WHERE idx NOT NULL
+SELECT * FROM sqlite_stat1
+SELECT * FROM sqlite_stat1 ORDER BY idx
+SELECT idx, stat FROM sqlite_stat1 ORDER BY idx
+SELECT * FROM t4 WHERE x=1234
+SELECT DISTINCT idx FROM sqlite_stat1 ORDER BY 1
+SELECT DISTINCT tbl FROM sqlite_stat1 ORDER BY 1
+SELECT DISTINCT idx FROM sqlite_stat4 ORDER BY 1
+SELECT DISTINCT tbl FROM sqlite_stat4 ORDER BY 1
+SELECT tbl FROM sqlite_stat1 WHERE idx IS NULL ORDER BY tbl
+SELECT * FROM t1 WHERE b>7223372036854775
 SELECT * FROM t1 LEFT JOIN t2 ON (x BETWEEN 1 AND 3)
 SELECT * FROM t1 LEFT JOIN t2 ON (x BETWEEN 5 AND 7)
 SELECT x'616263'
@@ -524,7 +557,6 @@ SELECT a FROM t1 WHERE b='ab005xy' COLLATE nocase
 SELECT name FROM sqlite_master WHERE tbl_name='t1' ORDER BY name
 SELECT name FROM sqlite_master WHERE tbl_name LIKE 't2_' ORDER BY name
 SELECT count(a), count(b) FROM t1
-SELECT idx, stat FROM sqlite_stat1 ORDER BY idx
 SELECT count(*) FROM t2 WHERE a IS NOT NULL
 SELECT b FROM t2 WHERE a=15
 SELECT b FROM t2 WHERE a=15 AND a<100
@@ -725,14 +757,56 @@ SELECT * FROM t0 JOIN v0 ON w=z RIGHT JOIN t1 ON true INNER JOIN t2 ON y IS z
 SELECT * FROM t0 JOIN v0 ON w=z RIGHT JOIN t1 ON true INNER JOIN t2 ON +y IS z
 SELECT a1 FROM vchain ORDER BY a1
 SELECT a1, b2 FROM vchain ORDER BY a1
+SELECT * FROM t1 NATURAL JOIN t2 NATURAL JOIN t3
+SELECT * FROM t1 NATURAL JOIN t2 NATURAL LEFT OUTER JOIN t3
+SELECT * FROM t1 NATURAL LEFT OUTER JOIN t2 NATURAL JOIN t3
+SELECT * FROM t2 NATURAL RIGHT OUTER JOIN t1 NATURAL JOIN t3
+SELECT * FROM t1 NATURAL LEFT OUTER JOIN (t2 NATURAL JOIN t3)
+SELECT a, b, c, d FROM t2 NATURAL JOIN t3 NATURAL RIGHT JOIN t1
+SELECT v1, v3 FROM c1 LEFT JOIN c2 ON (c2.k=v1) LEFT JOIN c3 ON (c3.k=v2)
+SELECT v1, v3 FROM c1 LEFT JOIN c2 ON (c2.k=v1) LEFT JOIN c3 ON (c3.k=v1+1)
+SELECT DISTINCT v1, v3 FROM c1 LEFT JOIN c2 LEFT JOIN c3 ON (c3.k=v1+1)
+SELECT v1, v3 FROM c1 LEFT JOIN c2 LEFT JOIN c3 ON (c3.k=v1+1)
+SELECT a.x FROM t1 AS a LEFT JOIN t1 AS b ON (a.x=b.x) LEFT JOIN t2 AS c ON (a.x=c.x)
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<10) INSERT INTO t1(x) SELECT x FROM c
+SELECT a.x, c.x FROM t1 AS a LEFT JOIN t1 AS b ON (a.x=b.x) LEFT JOIN t2 AS c ON (a.x=c.x)
+SELECT * FROM test
+SELECT * FROM t0 LEFT JOIN t1 WHERE (t1.c0 BETWEEN 0 AND 0) > ('' AND t0.c0)
+SELECT typeof(c0), c0 FROM v0 WHERE c0>='0'
+SELECT * FROM t0, v0 WHERE v0.c0 >= '0'
+SELECT * FROM t0 LEFT JOIN v0 WHERE v0.c0 >= '0'
+SELECT * FROM t0 LEFT JOIN v0 ON v0.c0 >= '0'
+SELECT * FROM t0 LEFT JOIN v0 ON v0.c0 >= '0' WHERE TRUE UNION SELECT 0,0 WHERE 0
+SELECT ccc, ccc IS NULL AS ddd FROM t1 LEFT JOIN v2
+SELECT ( SELECT 1 FROM t2 LEFT JOIN (SELECT x AS v FROM t3) ON 500=v WHERE (v OR FALSE) ) FROM t1
+SELECT ( SELECT 1 FROM t2 LEFT JOIN (SELECT x AS v FROM t3) ON 500=v WHERE (v) ) FROM t1
+SELECT * FROM t1 LEFT JOIN t3 ON y=z
+WITH RECURSIVE c(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM c WHERE n<100) INSERT INTO t1(a) SELECT n FROM c
+SELECT t1.a1, t2.d2 FROM (t1 LEFT JOIN t3 ON t3.e3=t1.b1) JOIN t2 ON t2.c2=t1.a1 WHERE t1.a1=33 ORDER BY t2.d2 DESC
 SELECT 5 UNION ALL SELECT 3 ORDER BY 1
 SELECT 986 AS x GROUP BY X ORDER BY X
 SELECT ( SELECT 'hardware' FROM ( SELECT 'software' ORDER BY 'firmware' ASC, 'sportswear' DESC ) GROUP BY 1 HAVING length(b) ) FROM abc
 WITH cnt(i) AS ( SELECT 1 UNION ALL SELECT i+1 FROM cnt WHERE i<10000 ) INSERT INTO t1 SELECT i%2, randomblob(500) FROM cnt
 SELECT (SELECT x||y FROM t2, t1 ORDER BY x, y)
 SELECT b, rowid, '^' FROM t10 ORDER BY b, a LIMIT 4
+SELECT rowid, * from t2
+SELECT integrity_check AS x FROM pragma_integrity_check ORDER BY 1
+SELECT * FROM sqlite_temp_master
+SELECT * FROM aux.t1
+SELECT * FROM temp_store_directory_test
+SELECT * FROM temp_table
+SELECT * FROM sqlite_master
+select * from sqlite_master
 SELECT *, '|' FROM t1
 SELECT * FROM log
+SELECT count(*) FROM blobs
+SELECT x FROM blobs WHERE rowid = 2
+SELECT name FROM sqlite_master
+SELECT name FROM aux1.sqlite_master
+SELECT name FROM aux2.sqlite_master
+SELECT 'a', * FROM t1
+SELECT 'b', * FROM t3
+SELECT count(*) FROM t3
 SELECT f1 FROM test1
 SELECT f2 FROM test1
 SELECT f2, f1 FROM test1
@@ -796,7 +870,6 @@ SELECT * FROM sqlite_master WHERE rowid=10
 SELECT * FROM sqlite_master WHERE rowid<10
 SELECT * FROM sqlite_master WHERE rowid<=10
 SELECT * FROM sqlite_master WHERE rowid>=10
-SELECT * FROM sqlite_master
 SELECT 10 IN (SELECT rowid FROM sqlite_master)
 SELECT 2 IN (SELECT a FROM t1)
 SELECT * FROM t1,(SELECT * FROM t2 WHERE y=2 ORDER BY y,z)
@@ -928,76 +1001,3 @@ SELECT count(x) FROM t1 WHERE x>100
 SELECT min(x) FROM t1 WHERE x>100
 SELECT max(x) FROM t1 WHERE x>100
 SELECT sum(x) FROM t1 WHERE x>100
-SELECT a FROM t2 GROUP BY a
-SELECT a FROM t2 WHERE a>2 GROUP BY a
-SELECT a, b FROM t2 GROUP BY a, b
-SELECT a, b FROM t2 GROUP BY a
-SELECT max(c), b*a, b, a FROM t2 GROUP BY b*a, b, a
-SELECT count(x), y FROM t3 GROUP BY y ORDER BY 1
-SELECT max(x), count(x), y, z FROM t4 GROUP BY y, z ORDER BY 1
-SELECT count(*), count(x) as cnt FROM t4 GROUP BY y ORDER BY cnt
-SELECT a, count(b) FROM t8a, t8b WHERE b=t8b.rowid GROUP BY a ORDER BY a
-SELECT a, count(b) FROM t8a, t8b WHERE b=+t8b.rowid GROUP BY a ORDER BY a
-SELECT t8a.a, count(t8a.b) FROM t8a, t8b WHERE t8a.b=t8b.rowid GROUP BY 1 ORDER BY 1
-SELECT a, count(*) FROM t8a, t8b WHERE b=+t8b.rowid GROUP BY a ORDER BY a
-SELECT a, count(b) FROM t8a, t8b WHERE b<x GROUP BY a ORDER BY a
-SELECT a, count(t8a.b) FROM t8a, t8b WHERE b=t8b.rowid GROUP BY a ORDER BY 2
-SELECT a, count(b) FROM t8a, t8b GROUP BY a ORDER BY 2
-SELECT a, count(*) FROM t8a, t8b GROUP BY a ORDER BY 2
-SELECT quote(a), quote(b), '|' FROM t1 GROUP BY a, abs(b)
-SELECT sql FROM sqlite_master WHERE type!='meta'
-SELECT name, tbl_name, type FROM sqlite_master WHERE type!='meta'
-SELECT name, tbl_name, type from sqlite_master WHERE type!='meta'
-SELECT * FROM sqlite_master WHERE type!='meta'
-SELECT name FROM "sqlite_master" WHERE type!='meta'
-SELECT name as "X" FROM sqlite_master WHERE type!='meta'
-SELECT sql FROM sqlite_master WHERE type=='table'
-SELECT * FROM weird
-SELECT release FROM savepoint
-SELECT typeof(a), typeof(b), typeof(c), typeof(d), typeof(e), typeof(f), typeof(g), typeof(h) FROM t7 LIMIT 1
-SELECT typeof(a+b), typeof(a||b), typeof(c+d), typeof(c||d) FROM t7 LIMIT 1
-SELECT sql FROM sqlite_master WHERE tbl_name = 't8'
-SELECT * FROM tablet8
-SELECT rowid, x FROM t16
-SELECT p, q, '|' FROM t3 ORDER BY p
-SELECT name FROM t19 ORDER BY name
-SELECT * FROM rlog ORDER BY idx
-SELECT * FROM clog ORDER BY idx
-SELECT * FROM rlog
-SELECT * FROM tblA
-SELECT * FROM tblB
-SELECT * FROM tblC
-select * from tbl
-SELECT * from tbl
-SELECT * FROM tlog
-SELECT * FROM v1log
-SELECT * FROM test1 ORDER BY f1
-SELECT * FROM test1 ORDER BY F1
-SELECT * FROM test1 ORDER BY f1,f2
-SELECT * FROM test1 WHERE f1==78 ORDER BY f1,f2
-SELECT * FROM test1 WHERE f1==778 ORDER BY f1,f2
-SELECT * FROM test1 WHERE f2==89 ORDER BY f1,f2
-SELECT * FROM test1 WHERE f2==88 ORDER BY f1,f2
-SELECT b,e FROM t1
-SELECT a,e FROM t1
-SELECT count(*) FROM t2
-SELECT count(*) FROM t2 WHERE a=rowid
-SELECT count(*) FROM t2 WHERE a=rowid+1
-SELECT * FROM t16 ORDER BY +a
-SELECT * FROM t1 ORDER BY vkey, c5
-SELECT x FROM t1 WHERE x<100 ORDER BY x
-SELECT a, c FROM t4 ORDER BY a
-SELECT * FROM b1 ORDER BY a
-SELECT * FROM c1 ORDER BY a
-SELECT * FROM x1
-SELECT * FROM d1
-SELECT quote(x), quote(y), '|' FROM t1
-SELECT *, 'x' FROM t1 ORDER BY b, a
-SELECT a, b FROM t2 ORDER BY a
-SELECT *, 'x' FROM t1 ORDER BY a
-WITH nx(a,b) AS (VALUES(1,8),(2,11),(3,1),(2,15),(1,4),(1,99)) INSERT INTO t1(a,b) SELECT a, b FROM nx WHERE true ON CONFLICT(a) DO UPDATE SET b=excluded.b, c=c+1 WHERE t1.b<excluded.b
-WITH nx(a,b) AS (VALUES(1,8),(2,11),(3,1),(2,15),(1,4),(1,99)) INSERT INTO main.t1 AS t2(a,b) SELECT a, b FROM nx WHERE true ON CONFLICT(a) DO UPDATE SET b=excluded.b, c=t2.c+1 WHERE t2.b<excluded.b
-SELECT * FROM record
-SELECT * FROM v1 ORDER BY a
-SELECT * FROM v1temp ORDER BY a
-SELECT name, type FROM pragma_table_list('v1')
