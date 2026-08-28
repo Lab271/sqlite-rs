@@ -171,18 +171,21 @@ pub(crate) fn decode_record_upto_into(
     Ok(values)
 }
 
-/// Decodes only the columns listed in `wanted` (in any order/spread) —
-/// the header entries (serial types/offsets) for every column are still
-/// walked (cheap: varint decodes only, no value bodies touched), but
-/// [`decode_serial_value`] only runs for `wanted`'s indices. Positions
-/// not in `wanted` come back as `Value::Null` placeholders, matching
-/// [`decode_record_upto_into`]'s convention for callers (e.g. the
-/// sorter's per-`SorterInsert` key decode, #631) that only ever read
-/// specific indices back out (`SortKeyColumn.index` via `first_n`) and
-/// so never observe the placeholder. Unlike [`decode_record_upto_into`],
-/// a `wanted` index doesn't have to be a small contiguous prefix — the
-/// sort key can (and often does) sit past other columns the row also
-/// carries, without paying to decode any of them just to reach it.
+/// Decodes only the columns listed in `wanted` (in any order/spread,
+/// duplicates allowed) — the header entries (serial types/offsets) for
+/// every column are still walked (cheap: varint decodes only, no value
+/// bodies touched), but [`decode_serial_value`] only runs for `wanted`'s
+/// indices. The result has exactly `wanted.len()` values, in `wanted`'s
+/// own order (an out-of-range index decodes as `Value::Null`) — not one
+/// slot per record column like [`decode_record_upto_into`], so a caller
+/// (e.g. the sorter's per-`SorterInsert` key decode, #631) that only
+/// ever wants a handful of columns out of a much wider row gets a
+/// correspondingly small allocation, addressed by `wanted`'s own
+/// position rather than the column's original index. Unlike
+/// [`decode_record_upto_into`], a `wanted` index doesn't have to be a
+/// small contiguous prefix — the sort key can (and often does) sit past
+/// other columns the row also carries, without paying to decode any of
+/// them just to reach it.
 pub(crate) fn decode_record_only_into(
     payload: &[u8],
     wanted: &[usize],
@@ -190,13 +193,15 @@ pub(crate) fn decode_record_only_into(
     entries: &mut Vec<(u64, usize)>,
 ) -> Result<Vec<Value>, RecordError> {
     parse_header_into(payload, entries)?;
-    let mut values = vec![Value::Null; entries.len()];
+    let mut values = Vec::with_capacity(wanted.len());
     for &idx in wanted {
-        if let (Some(&(serial_type, offset)), Some(slot)) = (entries.get(idx), values.get_mut(idx))
-        {
-            let (value, _) = decode_serial_value(serial_type, payload, offset, encoding)?;
-            *slot = value;
-        }
+        let value = match entries.get(idx) {
+            Some(&(serial_type, offset)) => {
+                decode_serial_value(serial_type, payload, offset, encoding)?.0
+            }
+            None => Value::Null,
+        };
+        values.push(value);
     }
     Ok(values)
 }

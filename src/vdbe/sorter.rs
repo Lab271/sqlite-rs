@@ -306,11 +306,15 @@ fn decode_bytes_upto(
 /// The sort order two already-decoded rows fall in per `keys`' per-column
 /// direction/collation/NULLS placement — shared by `SorterSort`'s full
 /// sort and `SorterInsert`'s bounded top-K eviction (#129), so both see
-/// the exact same ordering.
+/// the exact same ordering. `a`/`b` hold exactly `keys.len()` values,
+/// one per key in the same order (#631's `decode_record_only_into`
+/// contract) — addressed by position here, not by `key.index` (the
+/// key's original schema-column index, no longer `a`/`b`'s own layout
+/// now that they're key-only rather than full-row-width).
 fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKeyColumn]) -> Ordering {
-    for key in keys {
-        let av = a.first_n(key);
-        let bv = b.first_n(key);
+    for (pos, key) in keys.iter().enumerate() {
+        let av = a.get(pos).unwrap_or(&Value::Null);
+        let bv = b.get(pos).unwrap_or(&Value::Null);
         let ord = match (av, bv) {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => {
@@ -409,16 +413,6 @@ pub fn sorter_data(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
 /// at this key's column index, or NULL if the row is shorter than the
 /// key descriptor implies" without a separate free function shadowing
 /// `Vec<Value>::get`.
-trait FirstN {
-    fn first_n(&self, key: &SortKeyColumn) -> &Value;
-}
-
-impl FirstN for [Value] {
-    fn first_n(&self, key: &SortKeyColumn) -> &Value {
-        self.get(key.index).unwrap_or(&Value::Null)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
