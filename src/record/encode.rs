@@ -338,4 +338,32 @@ mod tests {
     fn mcdc__encode_33__v3_groups_caps_at_eight() {
         assert_eq!(encode_varint((1u64 << 56) - 1).len(), 8);
     }
+
+    /// MC/DC vector (obligation `encode_68`, `varint_len`'s mirror of
+    /// `encode_33`'s decision `groups < 8 && value >= (1u64 << (7 *
+    /// groups))`): both leaves true on the loop's first check.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__encode_68__v1_groups_grows() {
+        assert_eq!(varint_len(200), 2);
+    }
+
+    /// MC/DC vector (obligation `encode_68`): leaf A (`groups < 8`) true,
+    /// leaf B false on the first check — the loop body never runs.
+    /// Independence pair for B against `mcdc__encode_68__v1_groups_grows`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__encode_68__v2_groups_stays_one() {
+        assert_eq!(varint_len(50), 1);
+    }
+
+    /// MC/DC vector (obligation `encode_68`): leaf A false (`groups`
+    /// reaches 8, short-circuiting B) — a value under the 9-byte-form
+    /// threshold large enough to grow all the way to 8 groups.
+    /// Independence pair for A against `mcdc__encode_68__v1_groups_grows`.
+    #[test]
+    #[allow(non_snake_case)]
+    fn mcdc__encode_68__v3_groups_caps_at_eight() {
+        assert_eq!(varint_len(1u64 << 55), 8);
+    }
 }
