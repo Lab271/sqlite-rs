@@ -127,16 +127,18 @@ fn column_affinity(schema: &TableSchema, col_name: &str) -> Affinity {
         .map_or(Affinity::Blob, |ty| affinity_of(ty))
 }
 
-/// Finds an index of `schema` whose *leading* column matches `col_name`
-/// — mirrors `limit_scan.rs::find_covering_index`'s index lookup. Only
-/// the leading column of the match is ever probed/compared by the
-/// opcodes these fast paths emit, so a multi-column index still works
-/// (just as a leading-column-only lookup).
-pub(super) fn find_leading_index<'a>(
-    schema: &'a TableSchema,
-    col_name: &str,
-) -> Option<(usize, &'a IndexSchema)> {
-    schema.indexes.iter().enumerate().find(|(_, idx)| {
+/// Finds the position (into `schema.indexes`) of an index whose
+/// *leading* column matches `col_name` — mirrors
+/// `limit_scan.rs::find_covering_index`'s index lookup. Only the
+/// leading column of the match is ever probed/compared by the opcodes
+/// these fast paths emit, so a multi-column index still works (just as
+/// a leading-column-only lookup). Returns a position rather than a
+/// borrowed `&IndexSchema` (an explicit lifetime parameter would be
+/// needed to return one, past this codebase's qualified-language-subset
+/// limit, `tools/mvl-limit`) — every caller already re-fetches via
+/// `schema.indexes.get(position)` right after.
+pub(super) fn find_leading_index(schema: &TableSchema, col_name: &str) -> Option<usize> {
+    schema.indexes.iter().position(|idx| {
         idx.columns
             .first()
             .is_some_and(|c| c.name.eq_ignore_ascii_case(col_name))
@@ -248,7 +250,7 @@ where
     if !is_supported_operand(lo) || !is_supported_operand(hi) {
         return Ok(false);
     }
-    let Some((index_position, _)) = find_leading_index(schema, col_name) else {
+    let Some(index_position) = find_leading_index(schema, col_name) else {
         return Ok(false);
     };
     let Some(index) = schema.indexes.get(index_position) else {
@@ -409,7 +411,7 @@ where
     let Some(prefix) = like_literal_prefix(pattern_str, *glob) else {
         return Ok(false);
     };
-    let Some((index_position, _)) = find_leading_index(schema, col_name) else {
+    let Some(index_position) = find_leading_index(schema, col_name) else {
         return Ok(false);
     };
     let Some(index) = schema.indexes.get(index_position) else {
@@ -534,7 +536,7 @@ where
     if !list.iter().all(is_supported_operand) {
         return Ok(false);
     }
-    let Some((index_position, _)) = find_leading_index(schema, col_name) else {
+    let Some(index_position) = find_leading_index(schema, col_name) else {
         return Ok(false);
     };
     let Some(index) = schema.indexes.get(index_position) else {
@@ -635,7 +637,8 @@ pub(super) fn find_range_seek_detail(
             if !is_supported_operand(lo) || !is_supported_operand(hi) {
                 return None;
             }
-            let (_, index) = find_leading_index(schema, col_name)?;
+            let index_position = find_leading_index(schema, col_name)?;
+            let index = schema.indexes.get(index_position)?;
             let affinity = column_affinity(schema, col_name);
             if !operand_matches_column_affinity(lo, affinity)
                 || !operand_matches_column_affinity(hi, affinity)
@@ -659,7 +662,8 @@ pub(super) fn find_range_seek_detail(
                 return None;
             };
             like_literal_prefix(pattern_str, *glob)?;
-            let (_, index) = find_leading_index(schema, col_name)?;
+            let index_position = find_leading_index(schema, col_name)?;
+            let index = schema.indexes.get(index_position)?;
             if column_affinity(schema, col_name) != Affinity::Text {
                 return None;
             }
@@ -677,7 +681,8 @@ pub(super) fn find_range_seek_detail(
                 return None;
             }
             let col_name = where_col(expr)?;
-            let (_, index) = find_leading_index(schema, col_name)?;
+            let index_position = find_leading_index(schema, col_name)?;
+            let index = schema.indexes.get(index_position)?;
             let affinity = column_affinity(schema, col_name);
             if !list
                 .iter()
