@@ -61,6 +61,12 @@ compare-and-swap or a non-durable commit makes a table unreachable rather than
 slow. Requirements 1 and 5, plus the composite-key prerequisite, are the
 correctness core; the rest is safety and ergonomics.
 
+That consumer is now adding a second, different use of the same crate: attaching
+an arbitrary SQLite database and exposing its tables as queryable relations, so
+a user can join one against an Iceberg table. Arbitrary schemas, arbitrary
+affinities, arbitrary row counts. Requirement 7 exists because of it, and it is
+the only requirement here driven by a read path rather than a pointer store.
+
 ## What is missing today
 
 Each line is checkable against the tree at 0.18.5.
@@ -79,6 +85,10 @@ Each line is checkable against the tree at 0.18.5.
    ADR-0015 left in place, which a public facade would make reachable.
 6. **A durability contract.** `Pager` syncs (`src/pager.rs:589,597,697,782`)
    but nothing states what is guaranteed, and `synchronous` has no handler.
+7. **Incremental row access.** `execute_with_db` and
+   `execute_with_db_and_params` return `Vec<Vec<Value>>` (`src/vdbe/exec.rs:1073,
+   1093`), so a result set is fully materialized before the caller sees a row.
+   Nothing in `src/vdbe/` offers a step or iterator API.
 
 ## Prerequisites owned elsewhere
 
@@ -87,11 +97,27 @@ They are listed so nobody plans around the wrong gap.
 
 - **`CREATE TABLE IF NOT EXISTS` is ignored after parsing.** `if_not_exists`
   appears only in `src/parser/grammar.rs` and `src/parser/printer.rs`.
-- **A composite `PRIMARY KEY`/`UNIQUE` table constraint is not enforced and no
-  `sqlite_autoindex_*` is created** (`src/codegen/stmt/insert.rs` documents
-  this). Two consequences: duplicates are accepted where stock SQLite raises a
-  constraint error, and the schema diverges from what the oracle writes for the
-  same DDL, which Requirement 6's acceptance check will surface.
+- **A composite `PRIMARY KEY`/`UNIQUE` table constraint is not enforced, no
+  `sqlite_autoindex_*` is created, and an existing one is not maintained.** Now
+  measured rather than inferred (0.18.5 against stock `sqlite3` 3.51.0), and it
+  is worse than a missing feature: writing into a stock-created table with a
+  declared composite PK leaves rows out of the autoindex, after which the oracle
+  undercounts and `integrity_check` reports rows missing, while the write
+  returns success. Creating the same DDL here yields a file the oracle calls
+  "malformed (11)" on any write. A table with no declared PK and a named
+  `CREATE UNIQUE INDEX` round-trips cleanly in both directions with uniqueness
+  enforced by both. The mechanism is `src/schema/ddl_reader.rs`'s deliberate
+  skip of an index whose `sqlite_master.sql` is NULL, which is right for a read
+  and data loss for a write. Spec 010 Requirement 8 states the write-side rule;
+  creating the autoindex stays V3/V7's. **This is the highest-priority item in
+  or around this spec**, because it is a silent-corruption bug against a valid
+  SQLite file rather than an ergonomic gap, and because Requirement 6's
+  byte-identity scenario cannot pass while it stands.
+
+  *SQE*'s response, for reference: its catalog schema drops the declared
+  composite primary key in favour of a named unique index, and its adapter
+  refuses writes to any catalog carrying an `sqlite_autoindex_*`. Both are
+  workarounds for this item and come out when it closes.
 
 ## Requirements
 
@@ -331,6 +357,47 @@ through V4. The gap was never SQL coverage.
   identical files modulo documented header fields
 
 **Tests:** `tests/corpus/consumer_sqe_test.rs::catalog_statements_match_oracle` (planned)
+
+### Requirement 7: Incremental Row Access [MUST]
+
+A statement MUST yield rows incrementally, as `sqlite3_step()` does. Today
+`execute_with_db` and `execute_with_db_and_params` return `Vec<Vec<Value>>`, so
+the engine allocates an entire result set before the caller sees the first row,
+and there is no step or iterator API to fall back to.
+
+For a pointer store that is invisible: a dozen rows, once per commit. For any
+consumer reading a database as a data source it is the difference between a
+usable API and an unusable one. *SQE* is adding exactly that use, attaching
+arbitrary SQLite files so a user can query and join their tables; against a
+million-row table the current shape materializes the whole table before the
+first batch exists. Its interim answer is a configurable row ceiling with an
+error beyond it, which is honest and narrow, and it comes off when this lands.
+
+Memory MUST be bounded by the rows the caller has actually pulled, not by the
+result set, and abandoning a partially-read statement MUST release its resources
+and its cursors without waiting for the rest.
+
+**Implementation:** `src/api.rs::Statement::next_row` (planned), or an `Iterator` impl
+
+**Tests:** `tests/unit/api_streaming_test.rs` (planned)
+
+#### Scenario: A large result is read without materializing it
+
+- GIVEN a table with a row count well above any sensible buffer
+- WHEN the first ten rows are read and the statement is dropped
+- THEN peak allocation is proportional to the ten rows rather than the table,
+  and the ten values match the pinned oracle's first ten
+
+**Tests:** `tests/unit/api_streaming_test.rs::partial_read_is_bounded` (planned)
+
+#### Scenario: Abandoning a statement releases it
+
+- GIVEN a statement read halfway
+- WHEN it is dropped
+- THEN its cursors are released and a subsequent write on the same connection
+  proceeds
+
+**Tests:** `tests/unit/api_streaming_test.rs::abandoned_statement_releases_cursors` (planned)
 
 ## Not in this spec
 
