@@ -1141,12 +1141,19 @@ mod tests {
     fn cursor_slots_and_registers_are_disjoint() {
         let mut vm = Vm::new();
         vm.set_register(0, Value::Integer(1)).unwrap();
-        vm.set_cursor(0, CursorSlot::Pseudo { register: 99 })
-            .unwrap();
+        vm.set_cursor(
+            0,
+            CursorSlot::Pseudo {
+                register: 99,
+                header_cache: Default::default(),
+                cached_blob: None,
+            },
+        )
+        .unwrap();
         assert_eq!(*vm.register(0).unwrap(), Value::Integer(1));
         assert!(matches!(
             vm.cursor(0).unwrap(),
-            CursorSlot::Pseudo { register: 99 }
+            CursorSlot::Pseudo { register: 99, .. }
         ));
     }
 
@@ -1816,8 +1823,15 @@ mod tests {
             vm.cursor_mut(0),
             Err(ExecError::CursorNotOpen { slot: 0 })
         ));
-        vm.set_cursor(0, CursorSlot::Pseudo { register: 1 })
-            .unwrap();
+        vm.set_cursor(
+            0,
+            CursorSlot::Pseudo {
+                register: 1,
+                header_cache: Default::default(),
+                cached_blob: None,
+            },
+        )
+        .unwrap();
         assert!(vm.cursor_mut(0).is_ok());
     }
 

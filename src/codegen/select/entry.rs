@@ -227,19 +227,12 @@ where
         )? {
             return Ok(());
         }
-        // #570: with no covering index to walk in group order, hash
-        // aggregation folds each row into its group in one O(n) pass —
-        // strictly cheaper than buffering and sorting every row just to
-        // make each group's rows adjacent. Falls through to
-        // `compile_grouped_scan` (the always-correct general path) for
-        // the shapes it deliberately does not cover; `GROUP BY` combined
-        // with `ORDER BY` never reaches here at all (rejected above), so
-        // there is no free-ordering-from-the-sorter case to give up.
-        if super::aggregate::try_compile_hash_grouped_scan(
-            em, reg, select, schema, cursors, end_label, catalog, sink,
-        )? {
-            return Ok(());
-        }
+        // #631 spike: prefer the Sorter-backed `compile_grouped_scan`
+        // path over #570's HashAgg opcodes — sqlite3's own C
+        // implementation gets this fast via the Sorter, so the gap is
+        // implementation overhead to hunt down, not the algorithm.
+        // `try_compile_hash_grouped_scan` (hash.rs) and its opcodes are
+        // kept intact, just not wired into this dispatch.
         return compile_grouped_scan(
             em, reg, select, schema, cursors, end_label, catalog, false, None, sink,
         );

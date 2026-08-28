@@ -1322,13 +1322,14 @@ fn group_by_expression() {
 }
 
 /// #570: a plain `GROUP BY` (no covering index to walk in group order,
-/// no `DISTINCT` aggregate) compiles to the hash-aggregation strategy —
-/// one O(n) fold pass, no sorter — rather than
-/// `compile_grouped_scan`'s buffer-and-sort pipeline. Compile-only:
-/// the oracle row diffs live in
+/// no `DISTINCT` aggregate) compiles to the Sorter-backed
+/// `compile_grouped_scan` strategy (#631) rather than #570's HashAgg
+/// opcodes — sequential post-sort iteration beats HashAgg's scattered
+/// hash lookups in practice, despite the latter's better big-O.
+/// Compile-only: the oracle row diffs live in
 /// `tests/corpus/hash_group_by_test.rs`.
 #[test]
-fn plain_group_by_compiles_the_hash_aggregation_strategy() {
+fn plain_group_by_compiles_the_sorter_strategy() {
     let schema = TableSchema {
         name: "t".to_string(),
         root_page: 2,
@@ -1352,12 +1353,11 @@ fn plain_group_by_compiles_the_hash_aggregation_strategy() {
         .map(|r| r.opcode)
         .collect();
     for expected in [
-        "HashAggOpen",
-        "HashAggFind",
-        "HashAggStep",
-        "HashAggRewind",
-        "HashAggData",
-        "HashAggNext",
+        "SorterOpen",
+        "SorterInsert",
+        "SorterSort",
+        "SorterData",
+        "SorterNext",
     ] {
         assert!(
             opcodes.contains(&expected),
@@ -1365,15 +1365,16 @@ fn plain_group_by_compiles_the_hash_aggregation_strategy() {
         );
     }
     assert!(
-        !opcodes.contains(&"SorterOpen"),
-        "hash aggregation should not also open a sorter, got: {opcodes:?}"
+        !opcodes.contains(&"HashAggOpen"),
+        "plain GROUP BY should use the sorter strategy, not hash aggregation, got: {opcodes:?}"
     );
-    // One `HashAggStep` per aggregate call, folded inline during the
-    // single scan pass — the whole point of the strategy.
+    // Two `AggStep`s per aggregate call — one on the new-group init branch,
+    // one on the continuing-group branch — for the two aggregate calls
+    // (count(*), sum(x)) in this query.
     assert_eq!(
-        opcodes.iter().filter(|o| **o == "HashAggStep").count(),
-        2,
-        "expected one HashAggStep per aggregate call, got: {opcodes:?}"
+        opcodes.iter().filter(|o| **o == "AggStep").count(),
+        4,
+        "expected AggStep on both the new-group and continuing branches for each aggregate call, got: {opcodes:?}"
     );
 }
 

@@ -42,7 +42,7 @@ use super::{
 ///   *boundary* row, which only exists when a group's rows are
 ///   adjacent. Interleaved rows would need one dedup set per live
 ///   group; until that exists, these fall back to the sorter.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, dead_code, unused)]
 pub(in crate::codegen::select) fn try_compile_hash_grouped_scan<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,

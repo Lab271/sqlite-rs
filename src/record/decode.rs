@@ -146,12 +146,57 @@ pub fn decode_record_upto(
     max_columns: usize,
     encoding: TextEncoding,
 ) -> Result<Vec<Value>, RecordError> {
-    let entries = parse_header(payload)?;
+    let mut entries = Vec::new();
+    decode_record_upto_into(payload, max_columns, encoding, &mut entries)
+}
+
+/// Like [`decode_record_upto`], but parses the header into a
+/// caller-supplied (cleared) scratch `Vec` instead of allocating a new
+/// one per call — for a hot loop that calls this once per row (e.g. the
+/// sorter's per-`SorterInsert` key decode), reusing the same backing
+/// allocation avoids a `Vec` grow/realloc on every row.
+pub(crate) fn decode_record_upto_into(
+    payload: &[u8],
+    max_columns: usize,
+    encoding: TextEncoding,
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<Vec<Value>, RecordError> {
+    parse_header_into(payload, entries)?;
     let n = max_columns.min(entries.len());
     let mut values = Vec::with_capacity(n);
     for &(serial_type, offset) in entries.iter().take(n) {
         let (value, _) = decode_serial_value(serial_type, payload, offset, encoding)?;
         values.push(value);
+    }
+    Ok(values)
+}
+
+/// Decodes only the columns listed in `wanted` (in any order/spread) —
+/// the header entries (serial types/offsets) for every column are still
+/// walked (cheap: varint decodes only, no value bodies touched), but
+/// [`decode_serial_value`] only runs for `wanted`'s indices. Positions
+/// not in `wanted` come back as `Value::Null` placeholders, matching
+/// [`decode_record_upto_into`]'s convention for callers (e.g. the
+/// sorter's per-`SorterInsert` key decode, #631) that only ever read
+/// specific indices back out (`SortKeyColumn.index` via `first_n`) and
+/// so never observe the placeholder. Unlike [`decode_record_upto_into`],
+/// a `wanted` index doesn't have to be a small contiguous prefix — the
+/// sort key can (and often does) sit past other columns the row also
+/// carries, without paying to decode any of them just to reach it.
+pub(crate) fn decode_record_only_into(
+    payload: &[u8],
+    wanted: &[usize],
+    encoding: TextEncoding,
+    entries: &mut Vec<(u64, usize)>,
+) -> Result<Vec<Value>, RecordError> {
+    parse_header_into(payload, entries)?;
+    let mut values = vec![Value::Null; entries.len()];
+    for &idx in wanted {
+        if let (Some(&(serial_type, offset)), Some(slot)) = (entries.get(idx), values.get_mut(idx))
+        {
+            let (value, _) = decode_serial_value(serial_type, payload, offset, encoding)?;
+            *slot = value;
+        }
     }
     Ok(values)
 }

@@ -1,11 +1,13 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-//! #570 acceptance: an explicit `GROUP BY` with no covering index
-//! compiles to a single-pass hash aggregation (`HashAggOpen`/
-//! `HashAggFind`/`HashAggStep`/`HashAggRewind`/`HashAggData`/
-//! `HashAggNext`) instead of `compile_grouped_scan`'s
-//! `SorterOpen`/full-table-buffer/`SorterSort` pipeline, and produces
-//! byte-for-byte the same rows as the pinned oracle.
+//! #631 acceptance: an explicit `GROUP BY` with no covering index
+//! compiles to the Sorter-backed `compile_grouped_scan` pipeline
+//! (`SorterOpen`/`SorterInsert`/`SorterSort`/`SorterData`/
+//! `SorterNext`) rather than #570's single-pass hash aggregation
+//! (`HashAggOpen`/...), and produces byte-for-byte the same rows as
+//! the pinned oracle. `try_compile_hash_grouped_scan` (hash.rs) is
+//! kept intact but no longer wired into GROUP BY dispatch — see
+//! `src/codegen/select/entry.rs`.
 //!
 //! The correctness risk this file exists to cover is *group identity*:
 //! hash grouping decides which rows share a group by canonical key
@@ -120,10 +122,10 @@ fn our_rows(db: &Path, header: &DatabaseHeader, schema: &TableSchema, sql: &str)
         .join("\n")
 }
 
-/// Confirms the hash path was actually taken (not merely correct by
-/// accident via the sorter): the compiled program opens a
-/// hash-aggregation table and never a sorter.
-fn assert_hash_grouped(schema: &TableSchema, sql: &str) {
+/// Confirms the sorter path was actually taken (not merely correct by
+/// accident via hash aggregation): the compiled program opens a
+/// sorter and never a hash-aggregation table.
+fn assert_sorter_grouped(schema: &TableSchema, sql: &str) {
     let select = match parse_select(sql) {
         ParseOutcome::Accepted(s) => *s,
         other => panic!("expected {sql:?} to parse, got {other:?}"),
@@ -131,18 +133,18 @@ fn assert_hash_grouped(schema: &TableSchema, sql: &str) {
     let program = compile_select(&select, schema).unwrap_or_else(|e| panic!("compiling: {e}"));
     let opcodes: Vec<Opcode> = program.instructions.iter().map(|i| i.opcode).collect();
     assert!(
-        opcodes.contains(&Opcode::HashAggOpen),
-        "expected a hash-aggregated GROUP BY for {sql:?}, got: {opcodes:?}"
+        opcodes.contains(&Opcode::SorterOpen),
+        "expected a sorter-backed GROUP BY for {sql:?}, got: {opcodes:?}"
     );
     assert!(
-        !opcodes.contains(&Opcode::SorterOpen),
-        "expected no sorter for a hash-aggregated GROUP BY {sql:?}, got: {opcodes:?}"
+        !opcodes.contains(&Opcode::HashAggOpen),
+        "expected no hash aggregation for a sorter-backed GROUP BY {sql:?}, got: {opcodes:?}"
     );
 }
 
-/// Compiles, checks the hash path fired, and diffs against the oracle.
+/// Compiles, checks the sorter path fired, and diffs against the oracle.
 fn check(oracle: &PathBuf, db: &PathBuf, header: &DatabaseHeader, schema: &TableSchema, sql: &str) {
-    assert_hash_grouped(schema, sql);
+    assert_sorter_grouped(schema, sql);
     assert_eq!(
         our_rows(db, header, schema, sql),
         oracle_rows(oracle, db, sql),
@@ -346,7 +348,7 @@ fn empty_result_set_matches_oracle() {
     let schema = table_schema(&db, &header, "t");
 
     let sql = "SELECT bucket, count(*) FROM t GROUP BY bucket";
-    assert_hash_grouped(&schema, sql);
+    assert_sorter_grouped(&schema, sql);
     assert_eq!(our_rows(&db, &header, &schema, sql), "");
     assert_eq!(oracle_rows(&oracle, &db, sql), "");
 
@@ -363,7 +365,7 @@ fn empty_result_set_matches_oracle() {
     let header2 = read_header(&db2, page_size2);
     let schema2 = table_schema(&db2, &header2, "t");
     let sql2 = "SELECT bucket, count(*) FROM t WHERE x > 100 GROUP BY bucket";
-    assert_hash_grouped(&schema2, sql2);
+    assert_sorter_grouped(&schema2, sql2);
     assert_eq!(our_rows(&db2, &header2, &schema2, sql2), "");
     assert_eq!(oracle_rows(&oracle, &db2, sql2), "");
 }
