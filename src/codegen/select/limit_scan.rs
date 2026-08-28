@@ -198,6 +198,61 @@ pub(crate) fn propagate_constants(where_expr: &Expr) -> HashMap<String, Expr> {
     direct
 }
 
+/// Flattens nested top-level `OR` conjuncts of `expr` into their leaf
+/// disjuncts (in left-to-right order) — mirrors [`flatten_and_conjuncts`]
+/// for `OR` instead of `AND`.
+fn flatten_or_disjuncts(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::Binary {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+        } => {
+            let mut disjuncts = flatten_or_disjuncts(lhs);
+            disjuncts.extend(flatten_or_disjuncts(rhs));
+            disjuncts
+        }
+        _ => vec![expr],
+    }
+}
+
+/// OR-to-IN conversion (#605): when `where_expr` is a top-level `OR`
+/// chain of at least two equalities, all against the same column
+/// (recognized via `column_matches`) and each against a supported
+/// literal/bind-parameter operand, returns that operand list — letting a
+/// seek-based fast path probe once per value instead of falling back to
+/// a full scan. `x = 1 OR x = 2 OR x = 3` yields `[1, 2, 3]`; any
+/// disjunct that isn't a pure equality against the same column (a
+/// different column, a compound sub-condition, an unsupported operand)
+/// disqualifies the whole chain, since a fast path can only skip rows
+/// the WHERE clause would exclude anyway — it must never accept a
+/// disjunct it can't also enforce.
+fn or_chain_equality_operands<'a>(
+    expr: &'a Expr,
+    column_matches: &dyn Fn(&Expr) -> bool,
+) -> Option<Vec<&'a Expr>> {
+    let disjuncts = flatten_or_disjuncts(expr);
+    if disjuncts.len() < 2 {
+        return None;
+    }
+    let mut operands = Vec::with_capacity(disjuncts.len());
+    for disjunct in disjuncts {
+        let (lhs, rhs) = top_level_equality_operands(disjunct)?;
+        let operand = if column_matches(lhs) {
+            rhs
+        } else if column_matches(rhs) {
+            lhs
+        } else {
+            return None;
+        };
+        if !is_supported_seek_operand(operand) {
+            return None;
+        }
+        operands.push(operand);
+    }
+    Some(operands)
+}
+
 /// Looks up the rowid's resolved constant (per [`propagate_constants`])
 /// among its recognized aliases (`rowid`/`_rowid_`/`oid`, or the table's
 /// `INTEGER PRIMARY KEY` alias column), in that fixed order — so lookup
@@ -257,43 +312,57 @@ where
         }
     });
     // #605: falls back to constant propagation through an `AND`
-    // conjunction (`rowid = a AND a = 5`) when the rowid isn't equated
-    // to a supported operand directly.
-    let owned_operand;
-    let operand = match direct_operand {
-        Some(operand) if is_supported_seek_operand(operand) => operand,
+    // conjunction (`rowid = a AND a = 5`), then to OR-to-IN conversion
+    // (`rowid = 1 OR rowid = 2`), when the rowid isn't equated to a
+    // supported operand directly.
+    let operands: Vec<Expr> = match direct_operand {
+        Some(operand) if is_supported_seek_operand(operand) => vec![operand.clone()],
         _ => {
             let constants = propagate_constants(where_expr);
             match resolve_rowid_constant(schema, &constants) {
-                Some(value) => {
-                    owned_operand = value;
-                    &owned_operand
+                Some(value) => vec![value],
+                None => {
+                    match or_chain_equality_operands(where_expr, &|e| is_rowid_reference(schema, e))
+                    {
+                        Some(or_operands) => or_operands.into_iter().cloned().collect(),
+                        None => return Ok(false),
+                    }
                 }
-                None => return Ok(false),
             }
         }
     };
 
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
-    let value_reg = compile_value(em, reg, &scope, operand)?;
-    let seek_addr = em.emit(Instruction::new(
-        Opcode::SeekRowid,
-        cursors.table,
-        0,
-        value_reg,
-    ));
-    em.patch_p2(seek_addr, end_label);
+    let mut operands = operands.into_iter().peekable();
+    while let Some(operand) = operands.next() {
+        let value_reg = compile_value(em, reg, &scope, &operand)?;
+        let seek_addr = em.emit(Instruction::new(
+            Opcode::SeekRowid,
+            cursors.table,
+            0,
+            value_reg,
+        ));
+        let not_found = if operands.peek().is_some() {
+            em.new_label()
+        } else {
+            end_label
+        };
+        em.patch_p2(seek_addr, not_found);
 
-    let row_skip = em.new_label();
-    if let Some(limit) = &limit {
-        emit_offset_guard(em, limit, row_skip);
+        let row_skip = em.new_label();
+        if let Some(limit) = &limit {
+            emit_offset_guard(em, limit, row_skip);
+        }
+        if let Some(limit) = &limit {
+            emit_limit_guard(em, limit, end_label);
+        }
+        emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
+        em.place(row_skip);
+        if not_found != end_label {
+            em.place(not_found);
+        }
     }
-    if let Some(limit) = &limit {
-        emit_limit_guard(em, limit, end_label);
-    }
-    emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)?;
-    em.place(row_skip);
     Ok(true)
 }
 
@@ -337,10 +406,12 @@ fn where_col(expr: &Expr) -> Option<&str> {
 
 /// A [`find_covering_index`] match: which of `schema.indexes` was
 /// matched (by position, not reference — see that function's doc for
-/// why) plus a clone of the probe operand expression.
+/// why) plus a clone of the probe operand expression(s) — more than one
+/// when an OR-chain of equalities (#605) resolved to the same leading
+/// column.
 pub(super) struct CoveringIndexMatch {
     pub(super) index_position: usize,
-    pub(super) operand: Expr,
+    pub(super) operands: Vec<Expr>,
 }
 
 /// Finds an index of `schema` usable as a covering-index scan (#444,
@@ -373,16 +444,32 @@ pub(super) fn find_covering_index(
     // (#450) — `try_compile_covering_index_scan` walks every duplicate
     // via `IdxNext` after the initial `SeekIndexEq`, so uniqueness is no
     // longer a precondition here, just the leading-column match.
-    let (index_position, operand) =
-        schema
+    let direct = schema
+        .indexes
+        .iter()
+        .enumerate()
+        .find_map(|(index_position, idx)| {
+            let leading = idx.columns.first()?;
+            let operand = constants.get(&leading.name.to_ascii_lowercase())?;
+            Some((index_position, vec![operand.clone()]))
+        });
+    // #605: OR-to-IN conversion — an OR-chain of equalities all against
+    // the same leading column probes once per value instead of falling
+    // back to a full scan.
+    let (index_position, operands) = match direct {
+        Some(found) => found,
+        None => schema
             .indexes
             .iter()
             .enumerate()
             .find_map(|(index_position, idx)| {
                 let leading = idx.columns.first()?;
-                let operand = constants.get(&leading.name.to_ascii_lowercase())?;
-                Some((index_position, operand.clone()))
-            })?;
+                let matches =
+                    |e: &Expr| where_col(e).is_some_and(|n| n.eq_ignore_ascii_case(&leading.name));
+                let operands = or_chain_equality_operands(where_expr, &matches)?;
+                Some((index_position, operands.into_iter().cloned().collect()))
+            })?,
+    };
     let index = schema.indexes.get(index_position)?;
     let result_names = bare_result_column_names(select, schema)?;
     // #535: the table's own `INTEGER PRIMARY KEY` alias column (when it
@@ -402,7 +489,7 @@ pub(super) fn find_covering_index(
     }
     Some(CoveringIndexMatch {
         index_position,
-        operand,
+        operands,
     })
 }
 
@@ -438,7 +525,7 @@ where
 {
     let Some(CoveringIndexMatch {
         index_position,
-        operand,
+        operands,
     }) = find_covering_index(schema, select)
     else {
         return Ok(false);
@@ -446,7 +533,6 @@ where
     let Some(index) = schema.indexes.get(index_position) else {
         return Ok(false);
     };
-    let operand = &operand;
     // Re-derived rather than threaded through `find_covering_index`'s
     // return value: `bare_result_column_names` is infallible once
     // `find_covering_index` has already returned `Some`.
@@ -460,84 +546,114 @@ where
 
     let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     let limit = compile_limit_setup(em, reg, &scope, select)?;
-    let value_reg = compile_value(em, reg, &scope, operand)?;
     let leading_collation = index
         .columns
         .first()
         .map_or(Collation::Binary, |c| c.collation);
-    let seek_addr = em.emit(Instruction::with_p4(
-        Opcode::SeekIndexEq,
-        index_cursor,
-        0,
-        value_reg,
-        P4::SeekKey(vec![leading_collation]),
-    ));
-    em.patch_p2(seek_addr, end_label);
 
-    let loop_start = em.new_label();
-    em.place(loop_start);
-
-    let row_skip = em.new_label();
-    if let Some(limit) = &limit {
-        emit_offset_guard(em, limit, row_skip);
-    }
-    if let Some(limit) = &limit {
-        emit_limit_guard(em, limit, end_label);
-    }
-
-    let mut regs = Vec::with_capacity(result_names.len());
-    for name in &result_names {
-        let r = reg.alloc();
-        match index
-            .columns
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case(name))
-        {
-            Some(col_idx) => em.emit(Instruction::new(
-                Opcode::Column,
-                index_cursor,
-                i32::try_from(col_idx).unwrap_or(0),
-                r,
-            )),
-            // #535: not one of the index's own columns — must be the
-            // rowid-alias column `covers()` (in `find_covering_index`)
-            // let through, retrievable from the index leaf's own rowid
-            // rather than a declared column.
-            None => em.emit(Instruction::new(Opcode::IdxRowid, index_cursor, r, 0)),
+    // #605: one probe per resolved operand — a single value in the
+    // common case, or one per value of an OR-to-IN-converted chain.
+    // `not_found` is where a mismatch/exhaustion for *this* operand
+    // continues: the next operand's fresh `SeekIndexEq`, or `end_label`
+    // once there are no more.
+    let mut operands = operands.into_iter().peekable();
+    while let Some(operand) = operands.next() {
+        let not_found = if operands.peek().is_some() {
+            em.new_label()
+        } else {
+            end_label
         };
-        regs.push(r);
+
+        let value_reg = compile_value(em, reg, &scope, &operand)?;
+        let seek_addr = em.emit(Instruction::with_p4(
+            Opcode::SeekIndexEq,
+            index_cursor,
+            0,
+            value_reg,
+            P4::SeekKey(vec![leading_collation]),
+        ));
+        em.patch_p2(seek_addr, not_found);
+
+        let loop_start = em.new_label();
+        em.place(loop_start);
+
+        let row_skip = em.new_label();
+        if let Some(limit) = &limit {
+            emit_offset_guard(em, limit, row_skip);
+        }
+        if let Some(limit) = &limit {
+            emit_limit_guard(em, limit, end_label);
+        }
+
+        let mut regs = Vec::with_capacity(result_names.len());
+        for name in &result_names {
+            let r = reg.alloc();
+            match index
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name))
+            {
+                Some(col_idx) => em.emit(Instruction::new(
+                    Opcode::Column,
+                    index_cursor,
+                    i32::try_from(col_idx).unwrap_or(0),
+                    r,
+                )),
+                // #535: not one of the index's own columns — must be the
+                // rowid-alias column `covers()` (in `find_covering_index`)
+                // let through, retrievable from the index leaf's own rowid
+                // rather than a declared column.
+                None => em.emit(Instruction::new(Opcode::IdxRowid, index_cursor, r, 0)),
+            };
+            regs.push(r);
+        }
+        let (first, count) = match regs.first() {
+            Some(&first) => (first, i32::try_from(regs.len()).unwrap_or(0)),
+            None => (reg.alloc(), 0),
+        };
+        sink(em, reg, first, count)?;
+
+        // A `UNIQUE` index's single match falls straight out here on the
+        // very first `IdxNext` (nothing shares its key); a non-`UNIQUE`
+        // index's duplicate-key siblings loop back to `loop_start` for as
+        // long as the leading column keeps matching the probe (#450).
+        // Exhausting the index entirely (`IdxNext` failing) is handled
+        // the same as a leading-column mismatch (`not_found`): either
+        // way, this operand's matches are done, but another OR-chain
+        // operand may still have its own fresh seek to try.
+        em.place(row_skip);
+        let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+        let recheck = em.new_label();
+        em.patch_p2(next_addr, recheck);
+        let exhausted = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(exhausted, not_found);
+
+        em.place(recheck);
+        let leading = reg.alloc();
+        em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
+        // Reuses `leading_collation` (#500) — the same declared `COLLATE`
+        // `SeekIndexEq`'s own probe comparison just above already used, so
+        // the recheck never disagrees with the seek that feeds it.
+        let eq_addr = em.emit(Instruction::with_p4(
+            Opcode::Eq,
+            leading,
+            0,
+            value_reg,
+            p4_coll_seq(leading_collation, Affinity::Blob),
+        ));
+        em.patch_p2(eq_addr, loop_start);
+        // Eq's fallthrough (leading column no longer matches this
+        // operand's value) needs an explicit jump to `not_found` — unlike
+        // the single-operand original, more code may follow in program
+        // order (the next operand's own seek), so this can no longer
+        // rely on physically falling into `end_label`.
+        let mismatch = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(mismatch, not_found);
+
+        if not_found != end_label {
+            em.place(not_found);
+        }
     }
-    let (first, count) = match regs.first() {
-        Some(&first) => (first, i32::try_from(regs.len()).unwrap_or(0)),
-        None => (reg.alloc(), 0),
-    };
-    sink(em, reg, first, count)?;
-
-    // A `UNIQUE` index's single match falls straight out here on the
-    // very first `IdxNext` (nothing shares its key); a non-`UNIQUE`
-    // index's duplicate-key siblings loop back to `loop_start` for as
-    // long as the leading column keeps matching the probe (#450).
-    em.place(row_skip);
-    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
-    let recheck = em.new_label();
-    em.patch_p2(next_addr, recheck);
-    let exhausted = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
-    em.patch_p2(exhausted, end_label);
-
-    em.place(recheck);
-    let leading = reg.alloc();
-    em.emit(Instruction::new(Opcode::Column, index_cursor, 0, leading));
-    // Reuses `leading_collation` (#500) — the same declared `COLLATE`
-    // `SeekIndexEq`'s own probe comparison just above already used, so
-    // the recheck never disagrees with the seek that feeds it.
-    let eq_addr = em.emit(Instruction::with_p4(
-        Opcode::Eq,
-        leading,
-        0,
-        value_reg,
-        p4_coll_seq(leading_collation, Affinity::Blob),
-    ));
-    em.patch_p2(eq_addr, loop_start);
 
     Ok(true)
 }
@@ -1040,6 +1156,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::parser::ast::{BinaryOp, Literal};
@@ -1154,5 +1271,59 @@ mod tests {
         );
         let constants = propagate_constants(&where_expr);
         assert!(constants.is_empty());
+    }
+
+    fn or(lhs: Expr, rhs: Expr) -> Expr {
+        binary(BinaryOp::Or, lhs, rhs)
+    }
+
+    fn resolved_ints(operands: Vec<&Expr>) -> Vec<i64> {
+        operands
+            .into_iter()
+            .map(|e| match e.kind {
+                ExprKind::Literal(Literal::Integer(n)) => n,
+                _ => panic!("expected integer literal, got {e:?}"),
+            })
+            .collect()
+    }
+
+    /// #605: `x = 1 OR x = 2 OR x = 3` converts to the operand list
+    /// `[1, 2, 3]` for a fast path to probe once per value.
+    #[test]
+    fn or_chain_equality_operands_collects_same_column_chain() {
+        let where_expr = or(
+            or(eq(col("x"), lit_int(1)), eq(col("x"), lit_int(2))),
+            eq(col("x"), lit_int(3)),
+        );
+        let operands =
+            or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).unwrap();
+        assert_eq!(resolved_ints(operands), vec![1, 2, 3]);
+    }
+
+    /// A disjunct against a *different* column disqualifies the whole
+    /// chain — a fast path that only probes `x` can't also enforce `y`.
+    #[test]
+    fn or_chain_equality_operands_rejects_mixed_columns() {
+        let where_expr = or(eq(col("x"), lit_int(1)), eq(col("y"), lit_int(2)));
+        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
+    }
+
+    /// A single equality (no `OR` at all) is not an OR-chain — that
+    /// shape is handled by the direct-equality path instead.
+    #[test]
+    fn or_chain_equality_operands_rejects_non_chain() {
+        let where_expr = eq(col("x"), lit_int(1));
+        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
+    }
+
+    /// A non-equality disjunct (`x < 5`) disqualifies the whole chain —
+    /// a fast path built only for point probes can't also enforce it.
+    #[test]
+    fn or_chain_equality_operands_rejects_non_equality_disjunct() {
+        let where_expr = or(
+            eq(col("x"), lit_int(1)),
+            binary(BinaryOp::Lt, col("x"), lit_int(5)),
+        );
+        assert!(or_chain_equality_operands(&where_expr, &|e| where_col(e) == Some("x")).is_none());
     }
 }
