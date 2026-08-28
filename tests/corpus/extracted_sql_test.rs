@@ -94,6 +94,26 @@ fn all_statements_for(source: Option<&str>) -> Vec<(PathBuf, String)> {
     out
 }
 
+/// Recursively counts `*.test` files under `dir` — the vendored subsets are
+/// flat for `tcl/` but nest a `test/evidence/` subdirectory for
+/// `sqllogictest/` (mirrors upstream's own layout), so a single
+/// non-recursive `read_dir` would undercount the latter.
+fn count_vendored_test_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            count = count.saturating_add(count_vendored_test_files(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("test") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 /// The corpus must actually be present and non-trivial for each source — a
 /// silently empty extraction would make every other test here vacuously
 /// pass. Named per-source (`_tcl`/`_sqllogictest`) so `make test-tcl`/
@@ -101,6 +121,31 @@ fn all_statements_for(source: Option<&str>) -> Vec<(PathBuf, String)> {
 /// just one.
 fn assert_corpus_present(source: &str, min_statements: usize) {
     let statements = all_statements_for(Some(source));
+    let vendor_files = count_vendored_test_files(&sql_dir().join("vendor").join(source));
+    let counts: Vec<String> = CATEGORIES
+        .iter()
+        .map(|category| {
+            format!(
+                "{category}={}",
+                statements
+                    .iter()
+                    .filter(
+                        |(p, _)| p.file_stem().and_then(|s| s.to_str()) == Some(source)
+                            && p.parent()
+                                .and_then(|d| d.file_name())
+                                .and_then(|d| d.to_str())
+                                == Some(category)
+                    )
+                    .count()
+            )
+        })
+        .collect();
+    println!(
+        "extracted {source} corpus: {vendor_files} vendored .test file(s) -> \
+         {} statements ({})",
+        statements.len(),
+        counts.join(", ")
+    );
     assert!(
         statements.len() > min_statements,
         "expected a substantial extracted {source} corpus, found {} statements — \
@@ -127,9 +172,10 @@ fn extracted_corpus_is_present_sqllogictest() {
 
 /// Invariant 1: the tokenizer is total over real SQLite-accepted SQL.
 fn assert_tokenizes_without_error(source: &str) {
+    let statements = all_statements_for(Some(source));
     let mut failures = Vec::new();
-    for (path, statement) in all_statements_for(Some(source)) {
-        for token in Tokenizer::tokenize(&statement) {
+    for (path, statement) in &statements {
+        for token in Tokenizer::tokenize(statement) {
             if let TokenKind::Error(reason) = &token.kind {
                 failures.push(format!(
                     "{}: {reason}\n    {statement}",
@@ -139,6 +185,11 @@ fn assert_tokenizes_without_error(source: &str) {
             }
         }
     }
+    println!(
+        "{source} tokenizer totality: {}/{} statements tokenized clean",
+        statements.len().saturating_sub(failures.len()),
+        statements.len()
+    );
     assert!(
         failures.is_empty(),
         "tokenizer errored on {} {source} statement(s) real SQLite accepts:\n{}",
@@ -213,14 +264,21 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 ///
 /// - `temp.sqlite_master` — schema-qualified name with a keyword schema
 /// - `SELECT (VALUES(1),(2))` — VALUES in expression position
-/// - `SELECT release FROM savepoint` — non-reserved keywords used as
-///   identifiers (SQLite's `%fallback ID`)
+///
+/// The third historical case, `SELECT release FROM savepoint`
+/// (non-reserved keywords used as identifiers, SQLite's `%fallback ID`),
+/// dropped out of the sampled corpus when the vendored TCL/sqllogictest
+/// subset widened past V4 (joins/subqueries/aggregates) up through V7
+/// (transactions/pragmas/CTEs) — coincidental corpus churn under the
+/// per-shape/per-category caps, not a parser fix. The underlying bug is
+/// still real; re-raise this baseline back to 3 if a future re-widening
+/// resurfaces it rather than treating this drop as the fix.
 ///
 /// Tracked by #110 (follow-up to #70); lower this number as the parser grows —
 /// never raise it without a documented cause like the #240/#257/#403 bumps
 /// above. A raise means a regression that reclassified valid SQL as
 /// malformed.
-const SELECT_INVALID_BASELINE: usize = 3;
+const SELECT_INVALID_BASELINE: usize = 2;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

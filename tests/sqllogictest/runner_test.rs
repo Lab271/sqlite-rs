@@ -1,7 +1,7 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-//! Runs the vendored sqllogictest corpus (#70) — `select1.test`,
-//! `select2.test`, and every `evidence/*.test` under
+//! Runs the vendored sqllogictest corpus (#70) — `select1.test` through
+//! `select5.test`, and every `evidence/*.test` under
 //! `tests/corpus/sql/vendor/sqllogictest/test/` — through
 //! [`crate::runner::run_file`], and commits the aggregate pass/skip/
 //! fail counts to `tools/sqllogictest-status.json` (the pass-rate
@@ -12,13 +12,13 @@
 //! only on an oracle-confirmed divergence in a `query` this engine
 //! actually accepted, compiled, and executed.
 //!
-//! ## V4 handover
+//! ## Widening past the single-table slice
 //!
-//! This runner is deliberately scoped to the 14 files vendored for the
-//! V2 single-table slice (see `tests/corpus/sql/vendor/README.md`) —
-//! not the full upstream 699-file / ~7.2M-query sqllogictest suite.
-//! When V4 lifts the single-table restriction, widening this to the
-//! full suite needs:
+//! Originally scoped to the 14 files vendored for the V2 single-table
+//! slice; widened to 17 by adding `select3-5.test` (V4 joins/subqueries/
+//! aggregates — see `tests/corpus/sql/vendor/README.md`) now that V4 has
+//! shipped. Still not the full upstream 699-file / ~7.2M-query
+//! sqllogictest suite. Widening further needs:
 //!
 //! - Vendoring (or fetching) the remaining `test/random/**` and
 //!   `test/index/**` files `tools/extract_sql_corpus.py` currently
@@ -26,33 +26,34 @@
 //!   FETCH=1` already knows how to pull the pinned mirror commit.
 //! - This runner's `run_file` already replays arbitrary `statement ok`
 //!   setup and skips (not fails) anything outside the engine's
-//!   supported grammar/opcodes, so the multi-table/join/subquery
-//!   productions V3/V4 add should just start passing rather than
-//!   needing runner changes — *unless* V3/V4 adds a genuine write path,
-//!   at which point `statement ok` DML should start running through
-//!   this crate's own engine too, not just the oracle, so writes get
-//!   scored the same way reads are here.
+//!   supported grammar/opcodes, so productions from V5+ (transactions,
+//!   WAL, CTEs) should just start passing rather than needing runner
+//!   changes — *unless* a block adds a genuine write path exercised by
+//!   `statement ok` DML, at which point that DML should start running
+//!   through this crate's own engine too, not just the oracle, so
+//!   writes get scored the same way reads are here.
 //! - `tools/sqllogictest-status.json`'s `pass_rate` is computed over
 //!   `pass / (pass + fail)` (skips excluded) and `coverage` over
 //!   `attempted / queries` — both formulas stay valid at any corpus
 //!   size; only the file list and CI runtime budget need revisiting at
 //!   699 files. Quote the two together: as coverage climbs toward 1.0
 //!   the pass rate is what starts meaning something, and until then a
-//!   100% pass rate over 7% of the corpus is not the headline it looks
-//!   like.
+//!   high pass rate over a small slice of the corpus is not the
+//!   headline it looks like.
 //! - CI runs this non-gating (`continue-on-error`) while coverage is
-//!   low; flipping it to a hard gate is the V4-era decision that makes
-//!   a divergence block a merge on its own.
+//!   low; flipping it to a hard gate is the decision that makes a
+//!   divergence block a merge on its own — revisit once the random/
+//!   index files are in and coverage is a meaningful fraction of 1.0.
 
 use std::path::PathBuf;
 
 use crate::oracle::{pinned_oracle, skip_no_oracle};
 use crate::runner::{run_file, FileTally};
 
-/// The slice vendored by #70 — `select1.test`, `select2.test`, and the
-/// `evidence/` files. Pinned so an accidental prune of the vendor
+/// The slice vendored by #70 — `select1.test` through `select5.test`, and
+/// the `evidence/` files. Pinned so an accidental prune of the vendor
 /// directory fails loudly instead of quietly shrinking coverage.
-const EXPECTED_FILE_COUNT: usize = 14;
+const EXPECTED_FILE_COUNT: usize = 17;
 
 /// Vendored files that legitimately contain no `query` records at all
 /// (they exercise DDL this engine has no write path for), and so are
@@ -73,8 +74,8 @@ fn status_json_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sqllogictest-status.json")
 }
 
-/// `select1.test`, `select2.test`, and every `evidence/*.test`, in a
-/// fixed (sorted) order so `tools/sqllogictest-status.json` diffs
+/// `select1.test` through `select5.test`, and every `evidence/*.test`, in
+/// a fixed (sorted) order so `tools/sqllogictest-status.json` diffs
 /// deterministically between runs.
 fn discover_files() -> Vec<PathBuf> {
     let dir = vendor_dir();
@@ -191,6 +192,30 @@ fn sqllogictest_slice() {
     let tallies: Vec<FileTally> = files.iter().map(|path| run_file(&oracle, path)).collect();
 
     write_status_json(&tallies);
+
+    // Mirrors `tools/assurance.py`'s "sqllogictest slice:" line so the number
+    // is visible from `make test-sqllogictest` directly, not only via a
+    // separate `make assurance`/`cat tools/sqllogictest-status.json` step.
+    let total_pass: usize = tallies.iter().map(|t| t.pass).sum();
+    let total_skip: usize = tallies.iter().map(|t| t.skip).sum();
+    let total_fail: usize = tallies.iter().map(|t| t.fail).sum();
+    let attempted = total_pass + total_fail;
+    let queries = attempted + total_skip;
+    println!(
+        "sqllogictest slice: {EXPECTED_FILE_COUNT} vendored files, \
+         {total_pass}/{attempted} passing ({:.1}%), {attempted}/{queries} \
+         attempted ({:.1}% of corpus)",
+        if attempted == 0 {
+            0.0
+        } else {
+            100.0 * total_pass as f64 / attempted as f64
+        },
+        if queries == 0 {
+            0.0
+        } else {
+            100.0 * attempted as f64 / queries as f64
+        }
+    );
 
     // A truncated or mis-vendored `.test` parses to zero records, which
     // would otherwise report 0/0/0 for that file and still go green —
