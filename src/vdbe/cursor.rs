@@ -2664,6 +2664,18 @@ mod tests {
     }
 
     #[test]
+    fn open_write_with_p5_set_opens_an_index_write_cursor() {
+        let mut vm = writable_vm(0x0d); // LEAF_TABLE
+        let mut instr = Instruction::new(Opcode::OpenWrite, 0, 7, 0);
+        instr.p5 = 1;
+        open_write(&mut vm, &instr).unwrap();
+        assert!(matches!(
+            vm.cursor(0).unwrap(),
+            CursorSlot::IndexWrite { root_page: 7 }
+        ));
+    }
+
+    #[test]
     fn new_rowid_starts_at_one_on_an_empty_table() {
         let mut vm = writable_vm(0x0d); // LEAF_TABLE
         open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
@@ -2929,6 +2941,30 @@ mod tests {
     }
 
     #[test]
+    fn table_cursor_state_debug_reports_key_fields() {
+        let mut vm = writable_vm(0x0d); // LEAF_TABLE
+        open_write(&mut vm, &Instruction::new(Opcode::OpenWrite, 0, 1, 0)).unwrap();
+        let CursorSlot::Table(state) = vm.cursor(0).unwrap() else {
+            panic!("expected a table cursor");
+        };
+        let debug = format!("{state:?}");
+        assert!(debug.contains("TableCursorState"));
+        assert!(debug.contains("current_rowid"));
+    }
+
+    #[test]
+    fn index_read_state_debug_reports_key_fields() {
+        let mut vm = writable_vm_with_index_entries(1);
+        open_index_read(&mut vm, 0);
+        let CursorSlot::IndexRead(state) = vm.cursor(0).unwrap() else {
+            panic!("expected an index-read cursor");
+        };
+        let debug = format!("{state:?}");
+        assert!(debug.contains("IndexReadState"));
+        assert!(debug.contains("root_page"));
+    }
+
+    #[test]
     fn last_positions_at_the_highest_rowid_and_jumps_when_empty() {
         let mut vm = open_vm("table_multipage.db");
         open_read(&mut vm, &Instruction::new(Opcode::OpenRead, 0, 2, 0)).unwrap();
@@ -3078,6 +3114,24 @@ mod tests {
         open_ephemeral(&mut vm, &Instruction::new(Opcode::OpenEphemeral, 0, 0, 0)).unwrap();
         let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
         assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn column_on_an_ephemeral_table_cursor_with_no_current_row_errors() {
+        let mut vm = Vm::new();
+        let mut open_instr = Instruction::new(Opcode::OpenEphemeral, 0, 0, 0);
+        open_instr.p5 = 1; // ephemeral table, not ephemeral index
+        open_ephemeral(&mut vm, &open_instr).unwrap();
+        let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
+        assert!(matches!(err, ExecError::MalformedInstruction { .. }));
+    }
+
+    #[test]
+    fn column_on_an_auto_index_cursor_is_a_type_mismatch() {
+        let mut vm = Vm::new();
+        open_auto_index(&mut vm, 0);
+        let err = column(&mut vm, &Instruction::new(Opcode::Column, 0, 0, 10)).unwrap_err();
+        assert!(matches!(err, ExecError::CursorTypeMismatch { .. }));
     }
 
     #[test]
