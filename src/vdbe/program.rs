@@ -911,6 +911,12 @@ mod tests {
     }
 
     #[test]
+    fn is_empty_reflects_whether_any_instructions_were_added() {
+        assert!(Program::new(vec![]).is_empty());
+        assert!(!Program::new(vec![Instruction::new(Opcode::Halt, 0, 0, 0)]).is_empty());
+    }
+
+    #[test]
     fn program_indexes_instructions_from_zero() {
         let program = Program::new(vec![
             Instruction::new(Opcode::Init, 0, 1, 0),
