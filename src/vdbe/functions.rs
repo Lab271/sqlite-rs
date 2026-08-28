@@ -189,7 +189,7 @@ fn substr(args: &[Value]) -> Result<Value, FunctionError> {
 /// `[package.metadata.oracle] version`) — `tools/version_pin.py`
 /// checks this literal for drift against that pin. Can't read the pin
 /// via `env!` at compile time here: `env!` is outside `src/`'s
-/// qualified-subset allowlist (`make mvl-limit`).
+/// qualified-subset allowlist (`make check-mvl-limit`).
 fn sqlite_version(_args: &[Value]) -> Result<Value, FunctionError> {
     Ok(Value::Text("3.53.4".to_string().into()))
 }

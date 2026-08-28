@@ -1,6 +1,6 @@
 # Supply-chain gate (issue #26, spec 005-assurance Requirement 3). Installed
 # at zero runtime dependencies — the cheapest possible moment. Run via
-# `make deny` / `cargo deny check`.
+# `make check-deny` / `cargo deny check`.
 
 # Unix-only project (the `nix` crate dependency alone rules out Windows).
 # Without this, cargo-deny resolves the full dependency graph across every
@@ -21,7 +21,12 @@ targets = [
 ignore = []
 
 [licenses]
-allow = ["MIT", "Apache-2.0"]
+# MIT dropped: no dependency in this project's resolved graph (normal, build,
+# or dev; the four pinned Unix targets) needs it to satisfy its license
+# expression — every crate resolves under Apache-2.0 alone. Re-add MIT here
+# if a future dependency actually requires it (`cargo deny check licenses`
+# will report the missing allowance instead of a silent pass).
+allow = ["Apache-2.0"]
 confidence-threshold = 0.8
 
 [bans]

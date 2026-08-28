@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor sbom sbom-dev supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
+.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install check-deny check-audit check-license-headers update vendor sbom sbom-dev supply-chain check-grammar-drift check-mvl-limit version version-pin check-mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance check-assurance traceability coverage check-coverage mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -178,19 +178,22 @@ hooks-install: ## Install git hooks (tools/hooks/) into the shared hooks dir —
 	  echo "installed: $$HOOKS_DIR/$$name -> $$h"; \
 	done
 
-deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
+check-deny: ## Supply-chain gate: advisories, licenses, bans, sources (deny.toml)
 	@command -v cargo-deny >/dev/null 2>&1 || { \
 	  echo "error: cargo-deny not found."; \
 	  echo "install: cargo install cargo-deny"; \
 	  exit 1; }
 	cargo deny check
 
-audit: ## Supply-chain gate: fail on known RUSTSEC vulnerabilities (cargo-audit)
+check-audit: ## Supply-chain gate: fail on known RUSTSEC vulnerabilities (cargo-audit)
 	@command -v cargo-audit >/dev/null 2>&1 || { \
 	  echo "error: cargo-audit not found."; \
 	  echo "install: cargo install cargo-audit"; \
 	  exit 1; }
 	cargo audit
+
+check-license-headers: ## Supply-chain gate: every tracked .rs file (except vendored third_party) carries the Copyright/SPDX header
+	python3 tools/license_headers.py
 
 update: ## Supply-chain: cargo update, then re-run deny+audit against the new lockfile before you commit it
 	@cp Cargo.lock Cargo.lock.before-update
@@ -204,8 +207,8 @@ update: ## Supply-chain: cargo update, then re-run deny+audit against the new lo
 	fi
 	@rm -f Cargo.lock.before-update
 	@echo ""; echo "Re-checking updated lockfile:"
-	@$(MAKE) deny
-	@$(MAKE) audit
+	@$(MAKE) check-deny
+	@$(MAKE) check-audit
 	@echo ""; echo "Lockfile updated and re-vetted — review the diff above, then commit Cargo.lock if it looks right."
 
 vendor: ## Supply-chain: cargo vendor vendor/ for local inspection of exact upstream source (gitignored, not built from by default)
@@ -251,15 +254,15 @@ sbom: ## Regenerate the CycloneDX SBOM (sqlite-rs.cdx.json) from the production 
 sbom-dev: ## Regenerate the dev-inclusive CycloneDX SBOM (sqlite-rs-dev.cdx.json) covering the full Cargo.lock closure
 	python3 tools/gen_dev_sbom.py
 
-supply-chain: deny audit ## Both supply-chain gates (deny + audit), cached to target/supply-chain.json for `make assurance` staleness reporting
+supply-chain: check-deny check-audit check-license-headers ## All supply-chain gates (check-deny + check-audit + check-license-headers), cached to target/supply-chain.json for `make assurance` staleness reporting
 	@mkdir -p target
 	@echo "{\"commit\": \"$$(git rev-parse HEAD)\", \"timestamp\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > target/supply-chain.json
-	@echo "make supply-chain: deny + audit passed, recorded at $$(git rev-parse --short HEAD)"
+	@echo "make supply-chain: deny + audit + license-headers passed, recorded at $$(git rev-parse --short HEAD)"
 
-grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
+check-grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict
 
-mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; the 4 files with genuine dyn Vfs/VfsFile/SharedLockGuard trait objects, the 2 VDBE files with the Rc<dyn PageSource> boundary (#90, #114), src/bin (stdout/stderr CLI I/O boundary), and src/sys/ (vendored fcntl/termios FFI, #563 — the crate's sole unsafe carve-out, see .openspec/adr/0031-vendor-nix-subset.md), exempt — #66 removed the unsafe rationale from src/vfs/lock.rs, shm.rs, test_lock_probe.rs, so those are back in the qualified subset)
+check-mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust rust-limit; the 4 files with genuine dyn Vfs/VfsFile/SharedLockGuard trait objects, the 2 VDBE files with the Rc<dyn PageSource> boundary (#90, #114), src/bin (stdout/stderr CLI I/O boundary), and src/sys/ (vendored fcntl/termios FFI, #563 — the crate's sole unsafe carve-out, see .openspec/adr/0031-vendor-nix-subset.md), exempt — #66 removed the unsafe rationale from src/vfs/lock.rs, shm.rs, test_lock_probe.rs, so those are back in the qualified subset)
 	@command -v $(MVL_LIMIT) >/dev/null 2>&1 || { \
 	  echo "error: $(MVL_LIMIT) not found."; \
 	  echo "install: cargo install cargo-mvl  (or build from mvl-lang/mvl-rust:"; \
@@ -269,7 +272,7 @@ mvl-limit: ## Qualified-subset gate: no unsafe/dyn/lifetimes in src/ (mvl-rust r
 	for f in $$(find src -name '*.rs' $(foreach e,$(MVL_LIMIT_EXCLUDE),-not -path '$(e)') | sort); do \
 	  if ! $(MVL_LIMIT) "$$f"; then echo "LIMIT VIOLATION: $$f"; fail=1; fi; \
 	done; \
-	if [ $$fail -eq 0 ]; then echo "mvl-limit: all files in the qualified subset"; fi; \
+	if [ $$fail -eq 0 ]; then echo "check-mvl-limit: all files in the qualified subset"; fi; \
 	exit $$fail
 
 silent-swallow: ## Robustness audit: count error-discarding patterns in src/ (#342); VERBOSE=1 for file:line listing
@@ -288,14 +291,14 @@ version: ## Print the crate's current version (Cargo.toml [package].version)
 version-pin: ## Version gate: every sqlite3 pin site agrees with Cargo.toml's [package.metadata.oracle]
 	python3 tools/version_pin.py --strict
 
-mod-files: ## Module-layout gate: no legacy foo/mod.rs files under src/ (#73; use foo.rs instead)
+check-mod-files: ## Module-layout gate: no legacy foo/mod.rs files under src/ (#73; use foo.rs instead)
 	@hits=$$(find src -name 'mod.rs'); \
 	if [ -n "$$hits" ]; then \
 	  echo "MOD-FILE VIOLATION: legacy mod.rs found (use foo.rs instead):"; \
 	  echo "$$hits"; \
 	  exit 1; \
 	fi; \
-	echo "mod-files: no legacy mod.rs under src/"
+	echo "check-mod-files: no legacy mod.rs under src/"
 
 # === Fixtures ===
 
@@ -339,7 +342,7 @@ bench-point-lookup: ## Quick wall-clock demos: rowid seek vs scan (#137), and in
 assurance: ## Assurance dashboard: spec -> code -> test traceability + evidence, with per-requirement/model detail
 	@python3 tools/assurance.py --verbose
 
-assurance-gate: ## CI gate: fail if completeness or scenario-weighted coverage is below 80%
+check-assurance: ## CI gate: fail if completeness or scenario-weighted coverage is below 80%
 	@python3 tools/assurance.py --min 0.80
 
 traceability: ## Fast path: traceability only, no corpus/coverage I/O
@@ -358,13 +361,13 @@ coverage: ## Run the test suite under coverage instrumentation and print a line 
 	cargo llvm-cov report
 	cargo llvm-cov report --json --output-path target/llvm-cov.json
 
-coverage-gate: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MIN)%
+check-coverage: coverage ## CI gate: fail if line coverage is below $(COVERAGE_MIN)%
 	@python3 -c "import json, sys; \
 	  p = json.load(open('target/llvm-cov.json'))['data'][0]['totals']['lines']['percent']; \
 	  print(f'Line coverage: {p:.2f}% (threshold: $(COVERAGE_MIN)%)'); \
 	  sys.exit(0 if p >= $(COVERAGE_MIN) else 1)"
 
-verify: coverage-gate deny mvl-limit mod-files ## Full verification gate (coverage-gate + deny + mvl-limit + mod-files), cached to target/verify.json
+verify: check-coverage check-deny check-mvl-limit check-mod-files ## Full verification gate (check-coverage + check-deny + check-mvl-limit + check-mod-files), cached to target/verify.json
 	@mkdir -p target
 	@echo "{\"commit\": \"$$(git rev-parse HEAD)\", \"timestamp\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > target/verify.json
 	@echo "make verify: all gates passed, recorded at $$(git rev-parse --short HEAD)"

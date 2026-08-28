@@ -128,8 +128,8 @@ jobs:
       # Cheap, dependency-free gates first so a policy violation fails the
       # job before the expensive steps run.
       - run: make version-pin
-      - run: make mod-files
-      - run: make grammar-drift
+      - run: make check-mod-files
+      - run: make check-grammar-drift
       # The qualified-subset gate. cargo-mvl-limit is not on crates.io, so it
       # is built from source and cached on the pinned rev — without this step
       # the gate silently never ran in CI, which is how four violations
@@ -146,7 +146,7 @@ jobs:
           set -euo pipefail
           cargo install --git https://github.com/mvl-lang/mvl-rust \
             --rev "$MVL_RUST_REV" rust-limit --bin cargo-mvl-limit --locked --force
-      - run: make mvl-limit
+      - run: make check-mvl-limit
       - run: make test
 
   # Lint plus the supply-chain / spec-coverage gates. None of these need
@@ -172,15 +172,16 @@ jobs:
           # deliberately alongside a regenerated imports.lock.
           tool: cargo-deny,cargo-semver-checks,cargo-vet@0.10.2,cargo-audit
       - run: make lint
-      - run: make deny
+      - run: make check-deny
       - name: Check semver compatibility
         if: github.event_name == 'pull_request'
         run: cargo semver-checks check-release
       - name: Supply chain audit (cargo vet)
         run: cargo vet
       - name: Vulnerability audit (cargo audit)
-        run: make audit
-      - run: make assurance-gate
+        run: make check-audit
+      - run: make check-license-headers
+      - run: make check-assurance
 
   # The oracle-diff corpus, the only job that needs the pinned real
   # sqlite3 build.

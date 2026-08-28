@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Runs a parameterized `SELECT` against a database, binding a `?1`
 //! placeholder before executing.
 //!

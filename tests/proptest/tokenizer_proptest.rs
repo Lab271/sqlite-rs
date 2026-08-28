@@ -4,7 +4,7 @@
 //!
 //! Lives outside `src/` for the same reason as `record_proptest.rs`:
 //! `proptest!`'s macro expansion isn't in the qualified subset's
-//! curated macro allowlist (issue #23 / `make mvl-limit`).
+//! curated macro allowlist (issue #23 / `make check-mvl-limit`).
 
 #![allow(
     clippy::unwrap_used,

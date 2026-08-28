@@ -9,7 +9,7 @@ date: 2026-08-13
 
 The sqlite-rs parser transforms SQL text into an Abstract Syntax Tree (AST). This spec defines the tokenizer, grammar, and parser generator strategy.
 
-**Grammar source of truth:** [`.openspec/grammar/sqlite.ebnf`](../../grammar/sqlite.ebnf) — a structural EBNF re-derivation of SQLite's [`parse.y`](https://github.com/sqlite/sqlite/blob/version-3.53.4/src/parse.y) (pinned 3.53.4; SQLite publishes no EBNF — see [lang.html](https://www.sqlite.org/lang.html) and [syntaxdiagrams.html](https://www.sqlite.org/syntaxdiagrams.html)), V-block-annotated per rule and drift-checked against parse.y by `make grammar-drift` (`tools/grammar_drift.py`).
+**Grammar source of truth:** [`.openspec/grammar/sqlite.ebnf`](../../grammar/sqlite.ebnf) — a structural EBNF re-derivation of SQLite's [`parse.y`](https://github.com/sqlite/sqlite/blob/version-3.53.4/src/parse.y) (pinned 3.53.4; SQLite publishes no EBNF — see [lang.html](https://www.sqlite.org/lang.html) and [syntaxdiagrams.html](https://www.sqlite.org/syntaxdiagrams.html)), V-block-annotated per rule and drift-checked against parse.y by `make check-grammar-drift` (`tools/grammar_drift.py`).
 
 ## Tier Position
 

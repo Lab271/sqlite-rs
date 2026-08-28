@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! A full create-read-update-delete cycle, including an explicit
 //! `BEGIN`/`COMMIT` transaction.
 //!

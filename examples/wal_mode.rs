@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Switches a database to WAL journal mode, writes and reads through it,
 //! then checkpoints the WAL back into the main file.
 //!

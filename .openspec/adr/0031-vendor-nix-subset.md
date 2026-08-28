@@ -7,7 +7,7 @@
 ADR-0009 eliminated this crate's `unsafe` entirely (#66) by moving the
 remaining raw `fcntl`/`mmap`/`fork` calls onto `nix`'s safe wrappers and
 `std`, and declared `#![forbid(unsafe_code)]` crate-wide — "zero unsafe in
-this codebase" as a machine-checked (`mvl-limit`, `cargo geiger`) claim.
+this codebase" as a machine-checked (`check-mvl-limit`, `cargo geiger`) claim.
 
 That claim was always narrower than "zero external trust": `nix` still
 carries the actual `unsafe extern "C"` FFI, plus its own transitive deps
@@ -31,7 +31,7 @@ has zero external dependencies.
 
 This reintroduces exactly one `unsafe` boundary: `src/lib.rs`'s
 `#![forbid(unsafe_code)]` becomes `#![deny(unsafe_code)]`, with a scoped
-`#![allow(unsafe_code)]` in `src/sys/` only (`make mvl-limit`'s qualified
+`#![allow(unsafe_code)]` in `src/sys/` only (`make check-mvl-limit`'s qualified
 subset gains that one exemption). Every other module — `src/vfs/lock.rs`,
 `src/vfs/shm.rs`, `src/vfs/test_lock_probe.rs` included, ADR-0009's actual
 subject — stays exactly as unsafe-free as it was: they call

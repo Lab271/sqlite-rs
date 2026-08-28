@@ -4,7 +4,7 @@
 //!
 //! Lives outside `src/` rather than alongside the hand-picked example
 //! tests in `src/record/varint.rs` / `src/record/decode.rs`: those files
-//! are in the qualified subset (issue #23, enforced by `make mvl-limit`),
+//! are in the qualified subset (issue #23, enforced by `make check-mvl-limit`),
 //! whose curated macro allowlist doesn't include proptest's `proptest!`
 //! macro expansion.
 

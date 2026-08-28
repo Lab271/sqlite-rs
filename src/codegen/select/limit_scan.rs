@@ -72,7 +72,7 @@ pub(super) fn emit_limit_guard(em: &mut Emitter, limit: &LimitState, end_label: 
 ///
 /// Single input reference, so lifetime elision ties both tuple elements
 /// to it without an explicit `<'a>` annotation — the qualified subset
-/// (`make mvl-limit`) forbids explicit lifetimes, and a helper taking
+/// (`make check-mvl-limit`) forbids explicit lifetimes, and a helper taking
 /// both `schema` and `expr` by reference while returning a borrow of
 /// `expr` alone would need one. The caller also needs `schema` (to pick
 /// the non-rowid side via [`is_rowid_reference`]), so that step happens
