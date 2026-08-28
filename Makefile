@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit update vendor sbom sbom-dev supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
+.PHONY: bench-compile-path help test test-lib test-doc test-proptest test-isolation loc lint hooks-install deny audit license-headers update vendor sbom sbom-dev supply-chain grammar-drift mvl-limit version version-pin mod-files verification verify fixtures fixtures-bench bench bench-cli bench-status bench-point-lookup extract-sql-corpus test-corpus test-parity test-sqllogictest test-tcl test-tiers test-spikes test-mcdc mcdc-obligations assurance assurance-gate traceability coverage coverage-gate mutants fuzz-btree fuzz-wal fuzz-decode-record fuzz-parse-select spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 opcodes silent-swallow docs docs-serve
 
 # Qualified-subset gate (issue #23). Boundary policy:
 #   - Tier 0 core (src/record/, src/btree/, src/header.rs, schema reader):
@@ -192,6 +192,9 @@ audit: ## Supply-chain gate: fail on known RUSTSEC vulnerabilities (cargo-audit)
 	  exit 1; }
 	cargo audit
 
+license-headers: ## Supply-chain gate: every tracked .rs file (except vendored third_party) carries the Copyright/SPDX header
+	python3 tools/license_headers.py
+
 update: ## Supply-chain: cargo update, then re-run deny+audit against the new lockfile before you commit it
 	@cp Cargo.lock Cargo.lock.before-update
 	cargo update
@@ -251,10 +254,10 @@ sbom: ## Regenerate the CycloneDX SBOM (sqlite-rs.cdx.json) from the production 
 sbom-dev: ## Regenerate the dev-inclusive CycloneDX SBOM (sqlite-rs-dev.cdx.json) covering the full Cargo.lock closure
 	python3 tools/gen_dev_sbom.py
 
-supply-chain: deny audit ## Both supply-chain gates (deny + audit), cached to target/supply-chain.json for `make assurance` staleness reporting
+supply-chain: deny audit license-headers ## All supply-chain gates (deny + audit + license-headers), cached to target/supply-chain.json for `make assurance` staleness reporting
 	@mkdir -p target
 	@echo "{\"commit\": \"$$(git rev-parse HEAD)\", \"timestamp\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > target/supply-chain.json
-	@echo "make supply-chain: deny + audit passed, recorded at $$(git rev-parse --short HEAD)"
+	@echo "make supply-chain: deny + audit + license-headers passed, recorded at $$(git rev-parse --short HEAD)"
 
 grammar-drift: ## Grammar gate: .openspec/grammar/sqlite.ebnf annotations must resolve against pinned parse.y
 	@python3 tools/grammar_drift.py --strict

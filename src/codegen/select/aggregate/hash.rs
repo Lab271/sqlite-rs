@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Hash-based `GROUP BY` codegen (#570) — the O(n) alternative to
 //! [`super::compile_grouped_scan`]'s sort-then-group strategy, sharing
 //! that function's pass 1 verbatim in shape and its per-group flush

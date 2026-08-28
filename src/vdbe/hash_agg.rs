@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! Hash-based `GROUP BY` aggregation (spec 009, Requirement 13, #570):
 //! the O(n) alternative to `crate::vdbe::sorter`'s sort-then-group
 //! strategy, which pays O(n log n) to make a group's rows adjacent

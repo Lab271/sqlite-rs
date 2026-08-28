@@ -1,3 +1,5 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
 //! #570 acceptance: an explicit `GROUP BY` with no covering index
 //! compiles to a single-pass hash aggregation (`HashAggOpen`/
 //! `HashAggFind`/`HashAggStep`/`HashAggRewind`/`HashAggData`/
