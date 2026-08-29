@@ -36,7 +36,7 @@ pub(crate) use join::compile_joined_grouped_scan;
 /// `LIMIT` all fall back to [`compile_grouped_scan`], as does any
 /// non-equality or multi-column `WHERE`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn try_compile_index_only_count<F>(
+pub(crate) fn try_compile_index_only_count<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
@@ -183,7 +183,7 @@ where
 /// `DISTINCT`/`ORDER BY`/`LIMIT`, a non-bare-column argument, or a
 /// table with no matching index all fall back to
 /// [`compile_grouped_scan`].
-pub(super) fn try_compile_index_only_sum<F>(
+pub(crate) fn try_compile_index_only_sum<F>(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     select: &Select,
