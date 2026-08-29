@@ -8,6 +8,17 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Fixed
 
+- Implicit-whole-table-group aggregates (`count(*)`/`sum`/etc. with a
+  `WHERE` clause, no `GROUP BY`) routed through `compile_grouped_scan`,
+  which unconditionally opened a `Sorter` even though there is no
+  `GROUP BY` key to sort by — every `WHERE`-matching row paid a
+  `MakeRecord`/`SorterInsert`/`SorterSort`/`SorterData` round trip for
+  nothing. Adds `try_compile_direct_agg_scan`, a new fast-path tier
+  that folds `AggStep` inline in a single `Rewind`/`Next` scan instead,
+  reusing `flush_group`/`AggSlot`/`compile_limit_setup` so `HAVING`,
+  `LIMIT`/`OFFSET`, and #287's zero-row-still-flushes-one-row behavior
+  are unchanged. Declines only when an aggregate call uses `DISTINCT`
+  (#633).
 - `compile_scalar_subquery` routed every aggregate scalar subquery
   (`(SELECT avg(x)/sum(x)/count(*) FROM t ...)`) straight into
   `compile_grouped_scan`, bypassing the `try_compile_index_only_count`/
