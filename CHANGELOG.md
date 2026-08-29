@@ -4,6 +4,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.8] - 2026-08-29
+
+### Fixed
+
+- `Tokenizer::new` copied the whole source string on every parse call
+  (`src: src.to_string()`) even though the tokenizer only ever reads
+  through byte-range slices. Neither the obvious fix
+  (`Tokenizer<'a> { src: &'a str }`) nor the fallback
+  (`Cow<'a, str>`) is viable — both trip `make check-mvl-limit`, since
+  `src/parser/tokenizer.rs` is in the qualified subset that bans
+  lifetimes beyond function-scoped elision. Instead `Tokenizer` no
+  longer stores the source at all: every scan method takes `src: &str`
+  as a parameter, keeping every lifetime function-scoped while
+  eliminating the per-parse copy (#644).
+
 ## [0.18.7] - 2026-08-29
 
 ### Fixed
