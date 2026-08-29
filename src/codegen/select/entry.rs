@@ -265,6 +265,11 @@ where
         if super::aggregate::try_compile_index_only_sum(em, reg, select, schema, cursors, sink)? {
             return Ok(());
         }
+        if super::aggregate::try_compile_direct_agg_scan(
+            em, reg, select, schema, cursors, end_label, catalog, sink,
+        )? {
+            return Ok(());
+        }
         return compile_grouped_scan(
             em, reg, select, schema, cursors, end_label, catalog, true, None, sink,
         );
