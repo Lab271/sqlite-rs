@@ -8,6 +8,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Fixed
 
+- `WalWriter::append_frame` issued its own `write_at` syscall per dirty
+  page instead of batching a transaction's frames into a single write —
+  an O(n) syscall pattern in the commit hot path. Frames now accumulate
+  in a pending buffer and `sync()` issues one `write_at` covering the
+  whole run, still fsyncing exactly once per commit (ADR-0026's
+  per-commit rescan behavior unchanged — only the writes feeding that
+  fsync are batched). Filed as follow-ups rather than chased further
+  here: #639 (VDBE table-scan interpretation overhead) and #640
+  (ADR-0026's flagged per-commit WAL rescan cost) (#635).
+
 - Implicit-whole-table-group aggregates (`count(*)`/`sum`/etc. with a
   `WHERE` clause, no `GROUP BY`) routed through `compile_grouped_scan`,
   which unconditionally opened a `Sorter` even though there is no

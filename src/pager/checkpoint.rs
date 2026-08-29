@@ -345,7 +345,7 @@ mod tests {
         let (vfs, db_path) = setup(512);
         let wal_path = companion_path(&db_path, "-wal");
         let header = WalHeader::new(true, 512, 0x7777, 0x8888, 1);
-        let writer = WalWriter::create(&vfs, &wal_path, header).unwrap();
+        let mut writer = WalWriter::create(&vfs, &wal_path, header).unwrap();
         writer.sync().unwrap();
 
         let result = checkpoint_passive(&vfs, &db_path, 512).unwrap();
