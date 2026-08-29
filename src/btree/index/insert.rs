@@ -22,12 +22,12 @@
 
 use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
-    compare_keys, descend_index_tree, write_index_interior_page, write_index_leaf_page,
-    IndexDescent, INTERIOR_INDEX, LEAF_INDEX,
+    descend_index_tree, search_index_leaf, value_cell_len, write_index_interior_page,
+    write_index_leaf_page, IndexDescent, LeafSearch, INTERIOR_INDEX, LEAF_INDEX,
 };
 use crate::btree::{
-    cell_bytes, local_payload_size, page1_header_start, put, read_page_type, splice_insert_cell,
-    BtreeError,
+    cell_bytes, cell_ptr_offset, local_payload_size, page1_header_start, put, read_cell_pointer,
+    read_num_cells, read_page_type, splice_insert_cell, BtreeError,
 };
 use crate::header::DatabaseHeader;
 use crate::pager::Pager;
@@ -151,40 +151,73 @@ fn insert_into_index_leaf(
 ) -> Result<(), BtreeError> {
     let header_start = page1_header_start(leaf_page);
     let buf = pager.get_page_mut(leaf_page)?.clone();
-    let mut cells =
-        collect_index_leaf_cells(pager, &buf, header_start, leaf_page, usable_size, encoding)?;
 
-    let mut insert_pos = cells.len();
-    for (i, (existing_key, _)) in cells.iter().enumerate() {
-        match compare_keys(key, existing_key) {
-            std::cmp::Ordering::Equal => return Err(BtreeError::DuplicateKey),
-            std::cmp::Ordering::Less => {
-                insert_pos = i;
-                break;
-            }
-            std::cmp::Ordering::Greater => {}
-        }
-    }
+    // Binary search for the insert position, decoding only the O(log n)
+    // cells actually compared — a full `collect_index_leaf_cells` decode
+    // of every cell on the page is deferred to the split/fallback paths
+    // below, which are the only ones that actually need every cell's
+    // contents (#648).
+    let insert_pos = match search_index_leaf(
+        pager,
+        &buf,
+        header_start,
+        leaf_page,
+        usable_size,
+        encoding,
+        key,
+    )? {
+        LeafSearch::Found(..) => return Err(BtreeError::DuplicateKey),
+        LeafSearch::NotFound(pos) => pos,
+    };
     // No duplicate found — safe to allocate overflow pages (if any) now.
     let cell = encode_index_cell(pager, usable_size, payload)?;
-    cells.insert(insert_pos, (key.to_vec(), cell.clone()));
 
-    let total_bytes: usize = cells.iter().map(|(_, c)| c.len()).sum();
+    let num_cells = read_num_cells(&buf, header_start, leaf_page)?;
+    let ptr_base = header_start.saturating_add(8);
+    let mut total_bytes = cell.len();
+    for i in 0..num_cells {
+        let ptr_off = cell_ptr_offset(ptr_base, i);
+        let cell_start = read_cell_pointer(&buf, ptr_off, leaf_page, i)?;
+        total_bytes =
+            total_bytes.saturating_add(value_cell_len(&buf, cell_start, leaf_page, usable_size)?);
+    }
     let header_len = 8;
     let needed = header_start
         .saturating_add(header_len)
-        .saturating_add(cells.len().saturating_mul(2))
+        .saturating_add(num_cells.saturating_add(1).saturating_mul(2))
         .saturating_add(total_bytes);
     if needed <= page_len {
-        let buf = pager.get_page_mut(leaf_page)?;
         // Fast path: splice directly into the page (O(1) relative to the
         // other cells) when there's enough contiguous free space; falls
-        // back to a full rebuild otherwise (see #337).
-        if !splice_insert_cell(buf, header_start, leaf_page, insert_pos, &cell)? {
-            write_index_leaf_page(buf, header_start, leaf_page, &cell_bytes(cells))?;
+        // back to a full rebuild otherwise (see #337). `buf` (the
+        // pre-mutation snapshot above) still matches on-disk content here,
+        // since nothing has written to the page yet.
+        let spliced = {
+            let page_buf = pager.get_page_mut(leaf_page)?;
+            splice_insert_cell(page_buf, header_start, leaf_page, insert_pos, &cell)?
+        };
+        if !spliced {
+            let mut cells = collect_index_leaf_cells(
+                pager,
+                &buf,
+                header_start,
+                leaf_page,
+                usable_size,
+                encoding,
+            )?;
+            cells.insert(insert_pos, (key.to_vec(), cell.clone()));
+            let page_buf = pager.get_page_mut(leaf_page)?;
+            write_index_leaf_page(page_buf, header_start, leaf_page, &cell_bytes(cells))?;
         }
         return Ok(());
     }
+
+    // Split: needs every cell's contents to redistribute across the two
+    // resulting pages, so the full decode is unavoidable (and correct)
+    // here.
+    let mut cells =
+        collect_index_leaf_cells(pager, &buf, header_start, leaf_page, usable_size, encoding)?;
+    cells.insert(insert_pos, (key.to_vec(), cell.clone()));
 
     // Split: the median entry is promoted into the parent (removed from
     // both halves); left keeps entries less than it, right (a freshly
