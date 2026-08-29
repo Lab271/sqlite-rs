@@ -32,6 +32,11 @@
 //! own #336 fast path (a single top-level equality, nothing compound),
 //! reusing the exact same per-row body (`col_regs` construction,
 //! constraint checks, index maintenance) either way.
+//!
+//! Constraint recovery reuses `insert.rs`'s [`cached_create_table`]
+//! (#643) instead of calling `parse_create_table` directly, so the DDL
+//! text is only tokenized/parsed once across however many
+//! INSERT/UPDATE compiles reuse the same schema.
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
 use crate::codegen::index_maintenance::{
@@ -39,14 +44,13 @@ use crate::codegen::index_maintenance::{
 };
 use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::stmt::insert::{
-    column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_NOTNULL,
+    cached_create_table, column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK,
+    SQLITE_CONSTRAINT_NOTNULL,
 };
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
     ConflictAction, Expr, ExprKind, Literal, ParamKind, TableConstraint, Update,
 };
-use crate::parser::error::ParseOutcome;
-use crate::parser::parse_create_table;
 use crate::schema::TableSchema;
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
 
@@ -77,14 +81,7 @@ pub fn compile_update_with_catalog(
         });
     }
 
-    let create = match parse_create_table(&schema.sql) {
-        ParseOutcome::Accepted(create) => *create,
-        ParseOutcome::Unsupported { message, .. } | ParseOutcome::Invalid { message, .. } => {
-            return Err(CodegenError::Unsupported {
-                reason: format!("could not recover constraints from schema DDL: {message}"),
-            })
-        }
-    };
+    let create = cached_create_table(schema)?;
 
     let rowid_alias = schema.rowid_alias;
     let plans = column_plans(schema, &create, rowid_alias);

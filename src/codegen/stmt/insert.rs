@@ -2,11 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `Insert` AST -> `Program` compilation (#195): builds on #194's write
 //! opcodes (`NewRowid`/`MakeRecord`/`Insert`/`Delete`) plus constraint
-//! checks (NOT NULL, PRIMARY KEY/rowid, CHECK, DEFAULT). Table
-//! constraints aren't cached anywhere (`TableSchema` is deliberately
-//! naive — see `src/schema/ddl_reader.rs`), so this module re-parses
-//! `schema.sql` with the real parser to recover them, the same trick
-//! `rowid_alias_from_sql` already uses for the PK-rowid-alias fact.
+//! checks (NOT NULL, PRIMARY KEY/rowid, CHECK, DEFAULT). `TableSchema`
+//! is deliberately naive (see `src/schema/ddl_reader.rs`, spec
+//! 002 Requirement 5 — the minimal DDL reader must not depend on the
+//! full parser) and doesn't store constraint info structurally, so
+//! this module recovers it by parsing `schema.sql` with the real
+//! parser — but only once per distinct DDL text: [`cached_create_table`]
+//! memoizes the parsed `CreateTable` in a process-wide, content-addressed
+//! cache (#643), so a schema reused across many INSERT/UPDATE compiles
+//! (e.g. `exec.rs`'s multi-statement script mode) only pays the
+//! tokenize+parse cost once. Measured in isolation this reparse costs
+//! ~5µs — negligible next to the ~14ms/iter of I/O-dominated execution
+//! `tests/performance/crud.rs`'s `insert_single`/`update_pk` benchmarks
+//! spend most of their time on (and that bench compiles the program once
+//! outside its timed loop besides), so this cache doesn't move those
+//! numbers; it's still correct and worth having for repeated-compile
+//! workloads.
 //!
 //! Secondary indexes are maintained on every row (#196): each index on
 //! the table gets its own write cursor, and once a row is inserted the
@@ -65,6 +76,9 @@
 //!   merely evaluates to `NULL` at runtime is not distinguished from
 //!   an ordinary `NOT NULL` violation.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
 use crate::codegen::index_maintenance::{
     emit_index_key_ops, open_index_cursors, valid_table_root_page,
@@ -75,13 +89,49 @@ use crate::codegen::select::{
 };
 use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Target};
 use crate::parser::ast::{
-    ColumnConstraint, ConflictAction, DefaultValue, Expr, ExprKind, Insert, InsertSource, Literal,
-    TableConstraint, TableRef,
+    ColumnConstraint, ConflictAction, CreateTable, DefaultValue, Expr, ExprKind, Insert,
+    InsertSource, Literal, TableConstraint, TableRef,
 };
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
 use crate::schema::TableSchema;
 use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
+
+/// Process-wide cache of parsed `CREATE TABLE` DDL, keyed by the exact
+/// `schema.sql` text — content-addressed, since the parse result depends
+/// only on that text. Populated by [`cached_create_table`], the shared
+/// entry point `compile_insert`/`compile_update_with_catalog` use instead
+/// of calling `parse_create_table` directly (#643). Unbounded: a process
+/// with many distinct, short-lived `CREATE TABLE` texts (e.g. repeated
+/// create/drop of differently-named tables) will grow this map without
+/// eviction, the same tradeoff `src/vfs/shm.rs`'s `SHM_FILES` cache makes.
+static CREATE_TABLE_CACHE: OnceLock<Mutex<HashMap<String, Arc<CreateTable>>>> = OnceLock::new();
+
+/// Parses `schema.sql` into a [`CreateTable`], reusing a cached parse for
+/// the same DDL text instead of re-tokenizing/re-parsing it on every call
+/// (#643 — this ran once per INSERT/UPDATE compile, i.e. once per
+/// single-row statement).
+pub(crate) fn cached_create_table(schema: &TableSchema) -> Result<Arc<CreateTable>, CodegenError> {
+    let cache = CREATE_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(create) = cache.get(&schema.sql) {
+        return Ok(create.clone());
+    }
+
+    let create = match parse_create_table(&schema.sql) {
+        ParseOutcome::Accepted(create) => Arc::new(*create),
+        ParseOutcome::Unsupported { message, .. } | ParseOutcome::Invalid { message, .. } => {
+            return Err(CodegenError::Unsupported {
+                reason: format!("could not recover constraints from schema DDL: {message}"),
+            })
+        }
+    };
+
+    cache.insert(schema.sql.clone(), create.clone());
+    Ok(create)
+}
 
 const TABLE_CURSOR: i32 = 0;
 const CHECK_CURSOR: i32 = 1;
@@ -197,14 +247,7 @@ pub fn compile_insert(
         });
     }
 
-    let create = match parse_create_table(&schema.sql) {
-        ParseOutcome::Accepted(create) => *create,
-        ParseOutcome::Unsupported { message, .. } | ParseOutcome::Invalid { message, .. } => {
-            return Err(CodegenError::Unsupported {
-                reason: format!("could not recover constraints from schema DDL: {message}"),
-            })
-        }
-    };
+    let create = cached_create_table(schema)?;
 
     let rowid_alias = schema.rowid_alias;
     let plans = column_plans(schema, &create, rowid_alias);
