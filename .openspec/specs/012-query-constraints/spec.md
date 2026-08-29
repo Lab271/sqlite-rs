@@ -16,16 +16,17 @@ straight through to the ordinary full scan, even when the compound
 condition provably fixes a value for the seekable column.
 
 This spec covers extracting additional index-eligibility information from
-compound WHERE-clause expression trees. It does not cover genuine range
-constraints (`<`, `>`, `BETWEEN`, `LIKE` prefix) — those require new VDBE
-range-seek opcodes and are tracked separately in #606. OR-to-IN conversion
-turned out *not* to need a new opcode: an OR-chain of pure equalities
-converts to repeated probes of the existing single-key seek opcodes
-(`SeekRowid`/`SeekIndexEq`), one per value — see Requirement 2 and
-ADR-0033's revision note.
+compound WHERE-clause expression trees, plus genuine range constraints
+(`BETWEEN`, `LIKE`/`GLOB` prefix, `IN` lists) against an indexed column,
+which needed two new VDBE opcodes (`SeekIndexGE`, `IdxCompareGT` —
+ADR-0034) since those aren't reducible to a finite list of point probes
+the way OR-to-IN is. OR-to-IN conversion itself did *not* need a new
+opcode: an OR-chain of pure equalities converts to repeated probes of the
+existing single-key seek opcodes (`SeekRowid`/`SeekIndexEq`), one per
+value — see Requirement 2 and ADR-0033's revision note.
 
-Refs: #605 (Requirements 1-2, this spec's implemented scope); #606 tracks
-Requirement 3 separately and is being picked up on a different branch.
+Refs: #605 (Requirements 1-2); #606/ADR-0034 (Requirement 3, range/prefix
+seeks).
 
 ## Tier Position
 
@@ -121,8 +122,91 @@ opcodes — no new opcode needed, since each value is still a point lookup.
 
 **Tests:** `tests/corpus/or_to_in_test.rs::mixed_column_or_falls_back_to_ordinary_scan_and_matches_oracle`
 
-### Requirement 3: Range and Prefix Constraints [Future]
+### Requirement 3: Range and Prefix Constraints [MUST]
 
-`LIKE`/`GLOB` prefix ranges, a single-seek `BETWEEN`, and multi-seek `IN`
-lists (#606) need a new range-seek opcode, since those aren't reducible to
-a finite list of point probes the way OR-to-IN is. Tracked in #606.
+`col BETWEEN lo AND hi`, `col LIKE 'prefix%'`/`col GLOB 'prefix*'`, and
+`col IN (v1, ..., vN)` against an indexed column MUST compile to a genuine
+index range/point-seek walk (`SeekIndexGE` + an `IdxCompareGT`-guarded
+`IdxNext` loop for `BETWEEN`/`LIKE`/`GLOB`; a sequence of deduplicated
+`SeekIndexEq` probes for `IN`) instead of a full scan + filter, whenever
+every literal operand's storage class already matches the indexed
+column's declared affinity (ADR-0034). A seek compares byte-for-byte
+against what's actually stored, unlike the ordinary filter path's dynamic
+comparison-affinity coercion — an affinity mismatch MUST fall back to the
+unchanged filter lowering rather than risk a silently wrong seek.
+
+- `BETWEEN`/`LIKE`/`GLOB` MUST include both boundaries correctly (the
+  `LIKE`/`GLOB` prefix's upper bound is `prefix` with its last byte
+  incremented, not a byte-identical duplicate — off by one here would
+  either drop the last matching row or roll over into the next string in
+  sort order).
+- `IN` MUST deduplicate its value list before probing — a repeated value
+  MUST NOT emit the same row twice.
+- An affinity-mismatched literal operand (e.g. a string literal against
+  an `INTEGER`-affinity column) MUST disqualify the fast path for that
+  query, falling back to the ordinary scan, which still returns the
+  correct rows via its own dynamic coercion.
+- `EXPLAIN QUERY PLAN` MUST report `SEARCH ... USING INDEX` for all three
+  shapes once the fast path is taken.
+
+**Implementation:** `src/codegen/select/range_scan.rs::try_compile_between_seek`,
+`src/codegen/select/range_scan.rs::try_compile_like_prefix_seek`,
+`src/codegen/select/range_scan.rs::try_compile_in_list_seek`
+
+#### Scenario: BETWEEN compiles to a bounded index range seek
+
+- GIVEN a table `t(id, val)` with an index on `val`
+- WHEN `SELECT id FROM t WHERE val BETWEEN 10 AND 20` is compiled
+- THEN the program uses `SeekIndexGE`, and the returned rows are exactly
+  those with `val` inside `[10, 20]` inclusive
+
+**Tests:** `tests/unit/range_scan_test.rs::between_includes_both_boundaries`
+
+#### Scenario: An affinity-mismatched BETWEEN operand falls back to the ordinary scan
+
+- GIVEN the same table, `val` declared `INTEGER`
+- WHEN the WHERE clause is `val BETWEEN '10' AND '20'` (string literals)
+- THEN the program does not use `SeekIndexGE`, and the rows still match
+  what the ordinary scan's dynamic affinity coercion would return
+
+**Tests:** `tests/unit/range_scan_test.rs::between_falls_back_for_affinity_mismatched_string_operand`
+
+#### Scenario: LIKE prefix compiles to a range seek with a correct upper bound
+
+- GIVEN a table `t(id, name)` with an index on `name`, including a row
+  whose value (`'fop'`) is the lexicographic successor of every `'foo...'`
+  string
+- WHEN `SELECT id FROM t WHERE name LIKE 'foo%'` is compiled
+- THEN the program uses `SeekIndexGE`, matches `'foo'`/`'foobar'`, and
+  never includes the `'fop'` row
+
+**Tests:** `tests/unit/range_scan_test.rs::like_prefix_matches_bare_prefix_and_extended_strings`,
+`tests/unit/range_scan_test.rs::like_prefix_excludes_the_lexicographic_rollover_row`
+
+#### Scenario: GLOB prefix takes the same fast path as LIKE
+
+- GIVEN the same table
+- WHEN `SELECT id FROM t WHERE name GLOB 'foo*'` is compiled
+- THEN the program uses `SeekIndexGE` and returns the same rows the
+  equivalent `LIKE 'foo%'` query would
+
+**Tests:** `tests/unit/range_scan_test.rs::glob_prefix_matches_like_the_asterisk_form`
+
+#### Scenario: IN list dedupes values and probes once per distinct value
+
+- GIVEN a table `t(id, val)` with an index on `val`
+- WHEN `SELECT id FROM t WHERE val IN (5, 5, 5)` is compiled
+- THEN exactly one row is returned, not three copies of it
+
+**Tests:** `tests/unit/range_scan_test.rs::in_list_matches_exactly_the_listed_values`,
+`tests/unit/range_scan_test.rs::in_list_with_duplicate_values_does_not_duplicate_the_row`
+
+#### Scenario: EXPLAIN QUERY PLAN reports index usage for all three shapes
+
+- GIVEN indexed tables for `BETWEEN`, `LIKE` prefix, and `IN`
+- WHEN each query is passed to `explain_query_plan`
+- THEN every plan row's detail contains `SEARCH` and `USING INDEX`
+
+**Tests:** `tests/unit/range_scan_test.rs::explain_query_plan_reports_between_as_a_search_using_index`,
+`tests/unit/range_scan_test.rs::explain_query_plan_reports_like_prefix_as_a_search_using_index`,
+`tests/unit/range_scan_test.rs::explain_query_plan_reports_in_list_as_a_search_using_index`
