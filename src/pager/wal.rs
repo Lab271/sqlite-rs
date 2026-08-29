@@ -472,6 +472,20 @@ pub struct WalWriter {
     scratch: Vec<u8>,
 }
 
+/// A `Pager`-cached snapshot of a [`WalWriter`]'s resume state (ADR-0027):
+/// the header, append offset, and running checksum a previous flush left
+/// off at, plus the file size that state is only valid against. Handed
+/// back into [`WalWriter::open_existing`] so a commit that finds the
+/// `-wal` file unchanged since the hint was captured can skip reading and
+/// rescanning the whole file.
+#[derive(Debug, Clone, Copy)]
+pub struct WalResumeHint {
+    header: WalHeader,
+    offset: u64,
+    running: (u32, u32),
+    expected_size: u64,
+}
+
 impl WalWriter {
     /// Creates (or reopens) the `-wal` file at `path` and writes `header`.
     pub fn create(vfs: &AnyVfs, path: &Path, header: WalHeader) -> Result<Self, WalError> {
@@ -553,9 +567,55 @@ impl WalWriter {
     /// `Err` otherwise), the same consistency check
     /// `crate::pager::read_wal_pages`/`checkpoint_passive` already apply
     /// when merging/checkpointing this same file.
-    pub fn open_existing(vfs: &AnyVfs, path: &Path, page_size: u32) -> Result<Self, WalError> {
+    ///
+    /// `resume_hint` (ADR-0027) short-circuits the read-and-rescan below:
+    /// when the file's actual size matches `hint.expected_size`, nothing
+    /// has appended to or truncated the file since the hint was captured
+    /// (this crate's own writer always leaves `offset == file len` after
+    /// `sync`, per [`WalWriter::frame_count`]'s doc comment), so the
+    /// hint's header/offset/running can be trusted as-is instead of
+    /// re-deriving them from a full read + [`last_valid_frame_state`]
+    /// walk. Any mismatch — a concurrent external writer, a mode switch,
+    /// a torn file from a crash — falls back to the full rescan exactly
+    /// as before the hint existed.
+    pub fn open_existing(
+        vfs: &AnyVfs,
+        path: &Path,
+        page_size: u32,
+        resume_hint: Option<&WalResumeHint>,
+    ) -> Result<Self, WalError> {
         let file = vfs.open_write(path)?;
         let size = file.size()?;
+
+        if let Some(hint) = resume_hint {
+            // Two checks, not just the size: a same-size coincidence is
+            // possible across a generation change this cache wasn't told
+            // about (e.g. an external checkpoint truncates `-wal` back to
+            // just its header, then a fresh writer's frames happen to
+            // grow it back to the same total length the old generation
+            // had) — trusting size alone could resume against the wrong
+            // salts/checksum chain. Re-reading just the 32-byte header is
+            // O(1), not O(WAL size), so it's cheap insurance that the
+            // hint's `header` still matches the file currently on disk.
+            let mut header_bytes = [0u8; HEADER_LEN];
+            let read_header = file
+                .read_at(&mut header_bytes, 0)
+                .ok()
+                .filter(|&n| n == HEADER_LEN)
+                .and_then(|_| WalHeader::parse(&header_bytes).ok());
+            if hint.expected_size == size && read_header == Some(hint.header) {
+                return Ok(WalWriter {
+                    file,
+                    header: hint.header,
+                    running: hint.running,
+                    offset: hint.offset,
+                    pending_offset: None,
+                    pending: Vec::new(),
+                    scratch: Vec::new(),
+                });
+            }
+        }
+
         let mut bytes = vec![0u8; size as usize];
         let n = file.read_at(&mut bytes, 0)?;
         bytes.truncate(n);
@@ -578,6 +638,23 @@ impl WalWriter {
             pending: Vec::new(),
             scratch: Vec::new(),
         })
+    }
+
+    /// Snapshots this writer's resume state after a [`WalWriter::sync`]
+    /// (ADR-0027), for a caller (`Pager`) to cache across flushes and
+    /// hand back to the next [`WalWriter::open_existing`] call via
+    /// `resume_hint`. `expected_size` is `self.offset`: this writer's own
+    /// appends are the only thing that can have grown the file since it
+    /// was opened, and `sync` always writes `pending` up to exactly
+    /// `self.offset`, so the file's length and `self.offset` agree by
+    /// construction the moment `sync` returns.
+    pub fn resume_hint(&self) -> WalResumeHint {
+        WalResumeHint {
+            header: self.header,
+            offset: self.offset,
+            running: self.running,
+            expected_size: self.offset,
+        }
     }
 
     /// Total frames now in the WAL, including any written before this
@@ -783,7 +860,7 @@ mod tests {
         }
 
         {
-            let mut writer = WalWriter::open_existing(&vfs, path, 512).unwrap();
+            let mut writer = WalWriter::open_existing(&vfs, path, 512, None).unwrap();
             assert_eq!(
                 writer.frame_count(),
                 1,
@@ -819,7 +896,7 @@ mod tests {
         let header = WalHeader::new(true, 512, 1, 2, 1);
         WalWriter::create(&vfs, path, header).unwrap();
 
-        let result = WalWriter::open_existing(&vfs, path, 4096);
+        let result = WalWriter::open_existing(&vfs, path, 4096, None);
         assert!(matches!(
             result,
             Err(WalError::InvalidPageSize { page_size: 512 })
