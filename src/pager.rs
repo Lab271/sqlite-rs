@@ -270,6 +270,22 @@ pub struct Pager {
     /// the underlying `-shm` file is deleted (`switch_wal_to_journal`) or
     /// freshly recreated (`switch_journal_to_wal`) there.
     wal_shm: Option<AnyWalShm>,
+    /// A cached [`wal::WalResumeHint`] (ADR-0027) letting
+    /// [`Pager::flush_wal_locked`] skip `WalWriter::open_existing`'s
+    /// read-and-rescan of the whole `-wal` file when it's still valid —
+    /// populated after every successful `WalWriter::sync` in this
+    /// connection's lifetime, `None` for a connection that hasn't
+    /// committed in WAL mode yet. Reset to `None` at the same three
+    /// sites `wal_shm` above is: `switch_wal_to_journal`,
+    /// `switch_journal_to_wal`, `recreate_wal_locked` — each deletes or
+    /// recreates the underlying `-wal` file, so a hint captured against
+    /// the old file must never be handed to a writer opened against the
+    /// new one. `open_existing` itself also falls back to a full rescan
+    /// whenever the file's actual size doesn't match the hint (a
+    /// concurrent external writer, or a torn file from a crash), so this
+    /// cache never needs to be "perfectly" invalidated — only cheaply
+    /// invalidated at the points where staleness is certain.
+    wal_resume: Option<wal::WalResumeHint>,
     source: WritablePageSource,
     /// Committed WAL overlay pages, shared as `Rc<[u8]>` so a read hit
     /// hands out a refcount bump instead of copying `page_size` bytes
@@ -425,6 +441,7 @@ impl Pager {
             tx_lock_level: crate::vfs::LockLevel::Shared,
             wal_lock,
             wal_shm: None,
+            wal_resume: None,
             source,
             wal_pages,
             dirty: HashMap::new(),
@@ -666,20 +683,22 @@ impl Pager {
             // checkpoint backfills them.
             let post_page_count = read_be_u32(&self.read_page(1)?, PAGE_COUNT_OFFSET)?;
 
-            let mut writer =
-                match wal::WalWriter::open_existing(&self.vfs, &wal_path, self.page_size) {
-                    Ok(writer) => writer,
-                    // The `-wal` this `Pager` believed was live has vanished —
-                    // e.g. a concurrent `sqlite3` connection auto-checkpointed
-                    // and deleted `-wal`/`-shm` on close (#422). `journal_mode`
-                    // still says `Wal` (this closure only ever runs from that
-                    // branch), so recover exactly as `switch_journal_to_wal`
-                    // creates one from scratch, rather than failing the commit.
-                    Err(wal::WalError::Vfs(VfsError::NotFound { .. })) => {
-                        self.recreate_wal_locked()?
-                    }
-                    Err(source) => return Err(to_pager_error(source)),
-                };
+            let mut writer = match wal::WalWriter::open_existing(
+                &self.vfs,
+                &wal_path,
+                self.page_size,
+                self.wal_resume.as_ref(),
+            ) {
+                Ok(writer) => writer,
+                // The `-wal` this `Pager` believed was live has vanished —
+                // e.g. a concurrent `sqlite3` connection auto-checkpointed
+                // and deleted `-wal`/`-shm` on close (#422). `journal_mode`
+                // still says `Wal` (this closure only ever runs from that
+                // branch), so recover exactly as `switch_journal_to_wal`
+                // creates one from scratch, rather than failing the commit.
+                Err(wal::WalError::Vfs(VfsError::NotFound { .. })) => self.recreate_wal_locked()?,
+                Err(source) => return Err(to_pager_error(source)),
+            };
 
             let last_index = page_nums.len().saturating_sub(1);
             for (index, &page_num) in page_nums.iter().enumerate() {
@@ -695,6 +714,7 @@ impl Pager {
                 }
             }
             writer.sync().map_err(to_pager_error)?;
+            self.wal_resume = Some(writer.resume_hint());
 
             let new_mx_frame = writer.frame_count();
             match &self.wal_shm {
@@ -811,6 +831,13 @@ impl Pager {
         shm_file.sync()?;
 
         self.wal_shm = self.vfs.open_wal_shm(&self.db_path)?;
+        // The resume hint (ADR-0027), if any, described the now-deleted
+        // generation of `-wal`; `flush_wal_locked` overwrites this with
+        // the fresh writer's own hint once its commit succeeds, but
+        // clear it here too so a failure before that point never leaves
+        // a stale hint pointing at a generation this `Pager` just
+        // discarded.
+        self.wal_resume = None;
         Ok(writer)
     }
 
@@ -846,8 +873,12 @@ impl Pager {
 
         // Drop any handle cached (#437) against a now-stale `-shm`
         // generation — `flush_wal_locked` reopens fresh against the file
-        // just created above on its next call.
+        // just created above on its next call. Likewise drop any cached
+        // resume hint (ADR-0027): it was captured against whatever
+        // generation of `-wal` existed before this call, which no longer
+        // exists.
         self.wal_shm = None;
+        self.wal_resume = None;
         Ok(())
     }
 
@@ -899,8 +930,11 @@ impl Pager {
         // The cached handle (#437), if any, points at the `-shm` file
         // just deleted above — drop it so a future switch back to WAL
         // reopens fresh rather than reusing a stale fd to a since-
-        // deleted (or reused-inode) file.
+        // deleted (or reused-inode) file. The cached resume hint
+        // (ADR-0027) is stale for the same reason: the `-wal` file it
+        // describes no longer exists.
         self.wal_shm = None;
+        self.wal_resume = None;
         Ok(())
     }
 
@@ -1806,6 +1840,123 @@ mod tests {
         let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
         assert_eq!(db_size, 2);
         assert_eq!(pages.get(&2), Some(&vec![9u8; 512]));
+    }
+
+    /// ADR-0027: two consecutive commits from the same `Pager` must both
+    /// be correct once the second one resumes from the cached
+    /// `wal_resume` hint instead of rescanning the whole `-wal` file —
+    /// the checksum chain `wal::committed_pages` verifies on read would
+    /// break immediately if the cached offset/running-checksum state
+    /// were wrong.
+    #[test]
+    fn flush_wal_mode_second_commit_resumes_correctly_from_cached_hint() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        pager.flush().unwrap();
+        assert!(pager.wal_resume.is_some());
+
+        pager.get_page_mut(2).unwrap().fill(11u8);
+        pager.flush().unwrap();
+
+        let wal_file = vfs.open_read(Path::new("/test.db-wal")).unwrap();
+        let size = wal_file.size().unwrap();
+        let mut wal_bytes = vec![0u8; size as usize];
+        wal_file.read_at(&mut wal_bytes, 0).unwrap();
+        let header = wal::WalHeader::parse(&wal_bytes).unwrap();
+        let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
+        assert_eq!(db_size, 2);
+        assert_eq!(pages.get(&2), Some(&vec![11u8; 512]));
+        assert_eq!(pager.read_page(2).unwrap(), Rc::from(vec![11u8; 512]));
+    }
+
+    /// ADR-0027: a mode round trip (WAL -> Legacy -> WAL) must invalidate
+    /// the cached `wal_resume` hint, since `switch_wal_to_journal`
+    /// deletes the old `-wal` file and `switch_journal_to_wal` creates an
+    /// unrelated one with fresh salts — resuming against the stale hint
+    /// would append onto (or validate against) a generation that no
+    /// longer exists.
+    #[test]
+    fn flush_wal_mode_after_mode_round_trip_does_not_reuse_stale_hint() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        pager.flush().unwrap();
+        assert!(pager.wal_resume.is_some());
+
+        pager.set_journal_mode(JournalMode::Legacy).unwrap();
+        assert!(pager.wal_resume.is_none());
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+        assert!(pager.wal_resume.is_none());
+
+        pager.get_page_mut(2).unwrap().fill(11u8);
+        pager.flush().unwrap();
+
+        let wal_file = vfs.open_read(Path::new("/test.db-wal")).unwrap();
+        let size = wal_file.size().unwrap();
+        let mut wal_bytes = vec![0u8; size as usize];
+        wal_file.read_at(&mut wal_bytes, 0).unwrap();
+        let header = wal::WalHeader::parse(&wal_bytes).unwrap();
+        let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
+        assert_eq!(db_size, 2);
+        assert_eq!(pages.get(&2), Some(&vec![11u8; 512]));
+    }
+
+    /// ADR-0027: a concurrent writer appending frames to `-wal` between
+    /// two commits from this `Pager` must be detected by the resume
+    /// hint's size check and force a full rescan, rather than resuming
+    /// the checksum chain from a stale cached offset and corrupting the
+    /// file — the same hazard ADR-0026 accepted the full-rescan cost to
+    /// avoid in the first place.
+    #[test]
+    fn flush_wal_mode_falls_back_to_rescan_when_wal_grew_from_elsewhere() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 3).unwrap();
+        contents.extend(vec![2u8; 512]);
+        contents.extend(vec![3u8; 512]);
+        vfs.insert("/test.db", contents);
+
+        let mut writer_a = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        writer_a.set_journal_mode(JournalMode::Wal).unwrap();
+        writer_a.get_page_mut(2).unwrap().fill(9u8);
+        writer_a.flush().unwrap();
+        assert!(writer_a.wal_resume.is_some());
+
+        // A second connection, sharing the same underlying `-wal` file,
+        // commits a frame `writer_a` never learns about through its own
+        // cache.
+        let mut writer_b = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        writer_b.get_page_mut(3).unwrap().fill(7u8);
+        writer_b.flush().unwrap();
+
+        // `writer_a`'s cached hint still reflects the file as it was
+        // after its own commit, not `writer_b`'s — the size check inside
+        // `WalWriter::open_existing` must catch the mismatch and rescan.
+        writer_a.get_page_mut(2).unwrap().fill(11u8);
+        writer_a.flush().unwrap();
+
+        let wal_file = vfs.open_read(Path::new("/test.db-wal")).unwrap();
+        let size = wal_file.size().unwrap();
+        let mut wal_bytes = vec![0u8; size as usize];
+        wal_file.read_at(&mut wal_bytes, 0).unwrap();
+        let header = wal::WalHeader::parse(&wal_bytes).unwrap();
+        let (pages, db_size) = wal::committed_pages(&header, &wal_bytes);
+        assert_eq!(db_size, 3);
+        assert_eq!(pages.get(&2), Some(&vec![11u8; 512]));
+        assert_eq!(pages.get(&3), Some(&vec![7u8; 512]));
     }
 
     /// #389's "readers don't block writers, writers don't block readers,
