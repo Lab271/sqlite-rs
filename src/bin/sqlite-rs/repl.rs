@@ -376,7 +376,24 @@ fn run_one_statement(
         }
     };
     match execute_transaction_step(&program, Rc::clone(pager), header, state.autocommit) {
-        Ok((_, ac)) => state.autocommit = ac,
+        Ok((rows, ac)) => {
+            state.autocommit = ac;
+            // #645: a non-`SELECT` statement can still emit result rows
+            // (e.g. `PRAGMA synchronous`'s bare query form, or
+            // `PRAGMA integrity_check`) — print them the same way the
+            // `SELECT` branch above does, rather than silently dropping
+            // them as this branch did before. No column names to derive
+            // here (this path has no `Select` AST to read them from),
+            // so `.headers on` renders a blank header line for these.
+            if !rows.is_empty() {
+                let mut stdout = io::BufWriter::new(io::stdout().lock());
+                if let Err(e) = print_rows(&mut stdout, state.mode, state.headers, &[], &rows) {
+                    eprintln!("Error: {e}");
+                    return;
+                }
+                stdout.flush().ok();
+            }
+        }
         Err(e) => eprintln!("Error: {e}"),
     }
 }

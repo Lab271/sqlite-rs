@@ -111,6 +111,30 @@ pub enum JournalMode {
     Wal,
 }
 
+/// `PRAGMA synchronous` (#645): how aggressively `Pager::flush` fsyncs
+/// on commit. Unlike [`JournalMode`], this is never read from or
+/// written to the header bytes — stock SQLite keeps it purely as
+/// per-connection state, defaulting to `Full` on every fresh
+/// connection, and so does `Pager`. Lives here (rather than
+/// `src/pager.rs`, its otherwise-natural home) only so `vdbe/pragma.rs`
+/// can name it without importing `crate::pager` directly, which spec
+/// 001-architecture Requirement 1 ("VDBE does not know file format")
+/// forbids — see ADR-0036.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SynchronousMode {
+    /// No fsyncs at all on commit — fastest, least crash-safe.
+    Off = 0,
+    /// Skips the fsync(s) stock `FULL` performs that aren't needed for
+    /// basic crash *consistency* (as opposed to guaranteeing durability
+    /// of the most recent commits after a power loss).
+    Normal = 1,
+    /// fsyncs at every point needed to guarantee a commit survives a
+    /// crash or power loss — this pager's behavior before #645, and
+    /// still the default.
+    #[default]
+    Full = 2,
+}
+
 /// The parsed 100-byte SQLite database header.
 ///
 /// See the page-1 trap note in the module doc: this struct describes only

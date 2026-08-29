@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{FileLock, Result, SharedLockGuard, Vfs, VfsError, VfsFile};
@@ -22,6 +23,13 @@ type FileTable = Arc<Mutex<HashMap<PathBuf, Arc<Mutex<Vec<u8>>>>>>;
 #[derive(Debug, Default, Clone)]
 pub struct MemoryVfs {
     files: FileTable,
+    /// Total `VfsFile::sync` calls across every file handle this `Vfs`
+    /// (or a clone of it) has opened — `Arc`-shared like `files`, so it
+    /// stays visible from the original handle after `Pager::open`
+    /// clones it. Exists purely so `PRAGMA synchronous` (#645) tests
+    /// can assert *whether* a commit fsynced, since an in-memory
+    /// backend has no real fsync effect to observe otherwise.
+    sync_calls: Arc<AtomicUsize>,
 }
 
 impl MemoryVfs {
@@ -39,6 +47,14 @@ impl MemoryVfs {
         files.insert(path.into(), Arc::new(Mutex::new(contents)));
     }
 
+    /// Total `VfsFile::sync` calls across every file this `Vfs` (or a
+    /// clone of it) has opened so far — never reset, so callers
+    /// snapshot the count before and after the operation under test and
+    /// compare the delta (#645).
+    pub fn sync_calls(&self) -> usize {
+        self.sync_calls.load(Ordering::SeqCst)
+    }
+
     fn handle(&self, path: &Path) -> Result<Arc<Mutex<Vec<u8>>>> {
         let files = self.files.lock().map_err(|_| poisoned(path))?;
         files.get(path).cloned().ok_or_else(|| VfsError::NotFound {
@@ -49,11 +65,17 @@ impl MemoryVfs {
 
 impl Vfs for MemoryVfs {
     fn open_read(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
-        Ok(Box::new(MemoryVfsFile(self.handle(path)?)))
+        Ok(Box::new(MemoryVfsFile(
+            self.handle(path)?,
+            self.sync_calls.clone(),
+        )))
     }
 
     fn open_write(&self, path: &Path) -> Result<Box<dyn VfsFile>> {
-        Ok(Box::new(MemoryVfsFile(self.handle(path)?)))
+        Ok(Box::new(MemoryVfsFile(
+            self.handle(path)?,
+            self.sync_calls.clone(),
+        )))
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
@@ -69,7 +91,7 @@ impl Vfs for MemoryVfs {
                 .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
                 .clone()
         };
-        Ok(Box::new(MemoryVfsFile(handle)))
+        Ok(Box::new(MemoryVfsFile(handle, self.sync_calls.clone())))
     }
 
     fn delete(&self, path: &Path) -> Result<()> {
@@ -79,7 +101,7 @@ impl Vfs for MemoryVfs {
     }
 }
 
-struct MemoryVfsFile(Arc<Mutex<Vec<u8>>>);
+struct MemoryVfsFile(Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>);
 
 /// The in-memory backend's `Mutex`es are only ever contended within a
 /// single test process and never cross a panic boundary while held, so a
@@ -141,6 +163,7 @@ impl VfsFile for MemoryVfsFile {
     }
 
     fn sync(&self) -> Result<()> {
+        self.1.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }

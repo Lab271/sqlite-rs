@@ -714,7 +714,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         OpenDup, OpenEphemeral, OpenPseudo, OpenRead, OpenWrite, Real, RealAffinity, Remainder,
         ResultRow, Return, Rewind, Rowid, SeekIndexEq, SeekIndexGE, SeekRowid, Sequence,
         SetJournalMode, ShiftLeft, ShiftRight, Sort, SorterData, SorterInsert, SorterNext,
-        SorterOpen, SorterSort, String8, Subtract, Transaction, Variable,
+        SorterOpen, SorterSort, String8, Subtract, Synchronous, Transaction, Variable,
     };
     match instr.opcode {
         Init => control::init(instr),
@@ -727,6 +727,7 @@ fn dispatch(vm: &mut Vm, pc: usize, instr: &Instruction) -> Result<Step, ExecErr
         AutoCommit => control::auto_commit(vm, instr),
         SetJournalMode => pragma::set_journal_mode(vm, instr),
         IntegrityCheck => pragma::integrity_check(vm, instr),
+        Synchronous => pragma::synchronous(vm, instr),
         IfNot => control::if_not(vm, instr),
         IfNotZero => control::if_not_zero(vm, instr),
         IfPos => control::if_pos(vm, instr),

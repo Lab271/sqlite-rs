@@ -941,6 +941,22 @@ impl Parser {
                 span: join_span(start, name_span),
             });
         }
+        if name.eq_ignore_ascii_case("synchronous") {
+            // Unlike `journal_mode`, the bare query form (no `=`) *is*
+            // implemented (#645) -- it reports the connection's current
+            // level rather than changing it.
+            if !self.eat_punct(&TokenKind::Eq) {
+                return Ok(Pragma::Synchronous {
+                    level: None,
+                    span: join_span(start, name_span),
+                });
+            }
+            let (level, end) = self.pragma_synchronous_value()?;
+            return Ok(Pragma::Synchronous {
+                level: Some(level),
+                span: join_span(start, end),
+            });
+        }
         if !name.eq_ignore_ascii_case("journal_mode") {
             return self.unsupported(format!("pragma {name:?} not yet supported"));
         }
@@ -975,6 +991,33 @@ impl Parser {
                 Ok((PragmaJournalMode::Delete, span))
             }
             _ => self.unsupported("unsupported journal_mode value (only WAL/DELETE are supported)"),
+        }
+    }
+
+    /// `OFF`/`NORMAL`/`FULL` (case-insensitive identifiers) or the
+    /// equivalent `0`/`1`/`2` integer literal (#645). Stock SQLite also
+    /// accepts `EXTRA`, `ON`/boolean aliases, and out-of-range integers
+    /// (with its own legacy masking quirks) -- all deferred, same as
+    /// `journal_mode`'s own narrower-than-stock carve-out.
+    fn pragma_synchronous_value(&mut self) -> PResult<(PragmaSynchronous, Span)> {
+        match self.peek().kind.clone() {
+            TokenKind::Identifier(text) if text.eq_ignore_ascii_case("off") => {
+                Ok((PragmaSynchronous::Off, self.advance_span()))
+            }
+            TokenKind::Identifier(text) if text.eq_ignore_ascii_case("normal") => {
+                Ok((PragmaSynchronous::Normal, self.advance_span()))
+            }
+            // `FULL` is a reserved keyword (used in `FULL [OUTER] JOIN`),
+            // never tokenized as a plain identifier -- same reason
+            // `journal_mode`'s `DELETE` value needs its own keyword
+            // match arm rather than falling out of `identifier()`.
+            TokenKind::Keyword(Keyword::FULL) => Ok((PragmaSynchronous::Full, self.advance_span())),
+            TokenKind::Integer(0) => Ok((PragmaSynchronous::Off, self.advance_span())),
+            TokenKind::Integer(1) => Ok((PragmaSynchronous::Normal, self.advance_span())),
+            TokenKind::Integer(2) => Ok((PragmaSynchronous::Full, self.advance_span())),
+            _ => self.unsupported(
+                "unsupported synchronous value (only OFF/NORMAL/FULL/0/1/2 are supported)",
+            ),
         }
     }
 

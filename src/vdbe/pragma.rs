@@ -8,7 +8,7 @@
 //! mode switch mid-transaction errors with a clear message rather than
 //! being silently applied.
 
-use crate::header::JournalMode;
+use crate::header::{JournalMode, SynchronousMode};
 use crate::integrity::run_integrity_check;
 use crate::record::Value;
 use crate::vdbe::exec::{ExecError, Step, Vm};
@@ -20,6 +20,19 @@ use crate::vdbe::program::Instruction;
 pub const JOURNAL_MODE_DELETE: i32 = 0;
 /// See [`JOURNAL_MODE_DELETE`].
 pub const JOURNAL_MODE_WAL: i32 = 1;
+
+/// `Instruction::p1` values `compile_pragma`/`synchronous` (#645) use to
+/// carry the target [`SynchronousMode`] (or the bare-query-form
+/// sentinel) through the `Synchronous` opcode.
+pub const SYNCHRONOUS_OFF: i32 = 0;
+/// See [`SYNCHRONOUS_OFF`].
+pub const SYNCHRONOUS_NORMAL: i32 = 1;
+/// See [`SYNCHRONOUS_OFF`].
+pub const SYNCHRONOUS_FULL: i32 = 2;
+/// `PRAGMA synchronous` (bare, no `=`): query the current level rather
+/// than set it. Distinct from every real level (`0`/`1`/`2`), never
+/// mistakable for one.
+pub const SYNCHRONOUS_QUERY: i32 = -1;
 
 /// `SetJournalMode`: switches the pager's on-disk journal mode via
 /// [`crate::pager::Pager::set_journal_mode`]. Errors with
@@ -46,6 +59,39 @@ pub fn set_journal_mode(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecEr
     };
     if let Some(writer) = vm.db().ok().and_then(|db| db.writer.clone()) {
         writer.borrow_mut().set_journal_mode(mode)?;
+    }
+    Ok(Step::Next)
+}
+
+/// `Synchronous` (#645): the bare query form (`P1` equal to
+/// [`SYNCHRONOUS_QUERY`]) emits the attached pager's current
+/// [`SynchronousMode`] as a single `INTEGER` result row (`0`/`1`/`2`,
+/// matching stock SQLite's own numeric report) via [`Vm::emit_row`] --
+/// mirrors [`integrity_check`]'s row-emitting shape rather than
+/// `set_journal_mode`'s side-effect-only one. A read-only `Vm` (no
+/// `writer`) reports [`SynchronousMode::default`] (`Full`), since
+/// there's no pager instance to have diverged from it. Otherwise sets
+/// the level via [`crate::pager::Pager::set_synchronous`] -- unlike
+/// [`set_journal_mode`], this never checks `vm.autocommit`: stock
+/// SQLite allows changing `synchronous` at any time, including
+/// mid-transaction, since it only affects fsync behavior at the next
+/// commit.
+pub fn synchronous(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
+    let writer = vm.db().ok().and_then(|db| db.writer.clone());
+    if instr.p1 == SYNCHRONOUS_QUERY {
+        let mode = writer.map_or(SynchronousMode::default(), |writer| {
+            writer.borrow().synchronous()
+        });
+        vm.emit_row(vec![Value::Integer(mode as i64)]);
+        return Ok(Step::Next);
+    }
+    let mode = match instr.p1 {
+        SYNCHRONOUS_OFF => SynchronousMode::Off,
+        SYNCHRONOUS_NORMAL => SynchronousMode::Normal,
+        _ => SynchronousMode::Full,
+    };
+    if let Some(writer) = writer {
+        writer.borrow_mut().set_synchronous(mode);
     }
     Ok(Step::Next)
 }
@@ -121,5 +167,50 @@ mod tests {
         let mut vm = VmType::new();
         let instr = Instruction::new(Opcode::SetJournalMode, JOURNAL_MODE_WAL, 0, 0);
         assert_eq!(set_journal_mode(&mut vm, &instr).unwrap(), Step::Next);
+    }
+
+    #[test]
+    fn synchronous_defaults_to_full_on_query() {
+        let mut vm = writable_vm();
+        let instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_QUERY, 0, 0);
+        assert_eq!(synchronous(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(vm.rows().to_vec(), vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn synchronous_set_then_query_round_trips() {
+        let mut vm = writable_vm();
+        let set_instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_OFF, 0, 0);
+        assert_eq!(synchronous(&mut vm, &set_instr).unwrap(), Step::Next);
+        let writer = vm.db().unwrap().writer.clone().unwrap();
+        assert_eq!(writer.borrow().synchronous(), SynchronousMode::Off);
+
+        let query_instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_QUERY, 0, 0);
+        assert_eq!(synchronous(&mut vm, &query_instr).unwrap(), Step::Next);
+        assert_eq!(vm.rows().to_vec(), vec![vec![Value::Integer(0)]]);
+    }
+
+    #[test]
+    fn synchronous_normal_sets_level_one() {
+        let mut vm = writable_vm();
+        let instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_NORMAL, 0, 0);
+        assert_eq!(synchronous(&mut vm, &instr).unwrap(), Step::Next);
+        let writer = vm.db().unwrap().writer.clone().unwrap();
+        assert_eq!(writer.borrow().synchronous(), SynchronousMode::Normal);
+    }
+
+    #[test]
+    fn synchronous_query_with_no_writable_db_reports_default_full() {
+        let mut vm = VmType::new();
+        let instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_QUERY, 0, 0);
+        assert_eq!(synchronous(&mut vm, &instr).unwrap(), Step::Next);
+        assert_eq!(vm.rows().to_vec(), vec![vec![Value::Integer(2)]]);
+    }
+
+    #[test]
+    fn synchronous_set_with_no_writable_db_is_a_no_op() {
+        let mut vm = VmType::new();
+        let instr = Instruction::new(Opcode::Synchronous, SYNCHRONOUS_OFF, 0, 0);
+        assert_eq!(synchronous(&mut vm, &instr).unwrap(), Step::Next);
     }
 }

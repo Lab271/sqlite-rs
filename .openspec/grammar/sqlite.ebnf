@@ -345,26 +345,36 @@ drop-view-stmt  ::= "DROP" "VIEW" [ "IF" "EXISTS" ] view-name ;
 view-name       ::= identifier ;                                         (* V6 *)
 
 (* ===================== PRAGMA journal_mode / integrity_check / quick_check
- *                       (V6/V7 carve-outs) =====================
+ *                       / synchronous (V6/V7 carve-outs) =====================
  * [parse.y:1715 cmd ::= PRAGMA nm dbnm EQ nmnum, :1717 cmd ::= PRAGMA nm
- * dbnm] -- `nmnum` (parse.y:1723) is where `DELETE` is folded in as a
- * bare keyword value alongside a plain `nm` (identifier) value like
- * `WAL`, which is why the `journal_mode` value alternation below needs
- * its own two literal cases rather than one `identifier` production.
+ * dbnm] -- `nmnum` (parse.y:1723) is where `DELETE`/`FULL` are folded in
+ * as bare keyword values alongside a plain `nm` (identifier) value like
+ * `WAL`/`OFF`/`NORMAL`, which is why the `journal_mode`/`synchronous`
+ * value alternations below need their own literal cases for those two
+ * rather than one `identifier` production.
  * `integrity_check`/`quick_check` (#540, #541) are the bare
  * `PRAGMA nm dbnm` form (no `EQ`) with no result-set arguments --
  * stock SQLite's `PRAGMA integrity_check(N)` (bounding the number of
  * errors reported) and any `dbnm` (schema-qualified) prefix are out of
- * this carve-out's scope. General PRAGMA support -- every other pragma
- * name, and journal_mode's other stock-SQLite values (MEMORY/OFF/
- * TRUNCATE/PERSIST) -- stays deferred to V7 (see Future blocks below);
- * #388/#540/#541 carve out only these cases.
+ * this carve-out's scope. `synchronous` (#645) is the first pragma here
+ * that's genuinely bidirectional: `PRAGMA synchronous` (no `EQ`, same
+ * :1717 production as `integrity_check`) queries the connection's
+ * current level instead of changing it -- `journal_mode`'s own bare
+ * query form stays unimplemented (`Unsupported`). General PRAGMA
+ * support -- every other pragma name, journal_mode's other
+ * stock-SQLite values (MEMORY/OFF/TRUNCATE/PERSIST), and synchronous's
+ * `EXTRA`/`ON`/boolean aliases and out-of-0-2-range integers (with
+ * their own legacy masking quirks) -- stays deferred to V7 (see Future
+ * blocks below); #388/#540/#541/#645 carve out only these cases.
  *)
 
 pragma-stmt     ::= "PRAGMA" "journal_mode" "=" ( "WAL" | "DELETE" )
-                   | "PRAGMA" ( "integrity_check" | "quick_check" ) ;
+                   | "PRAGMA" ( "integrity_check" | "quick_check" )
+                   | "PRAGMA" "synchronous" [ "=" ( "OFF" | "NORMAL" | "FULL"
+                                                   | "0" | "1" | "2" ) ] ;
                      (* V6 [parse.y:1715 cmd] -- #388 *)
                      (* V7 [parse.y:1717 cmd] -- #540, #541 *)
+                     (* V7 [parse.y:1715,1717 cmd] -- #645 *)
 
 (* ===================== ANALYZE (V7 carve-out) =====================
  * [parse.y:1875 cmd ::= ANALYZE, :1876 cmd ::= ANALYZE nm dbnm] --

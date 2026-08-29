@@ -40,7 +40,10 @@ pub use exec::{
 };
 pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, like_match, FunctionError};
-pub use pragma::{JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL};
+pub use pragma::{
+    JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL, SYNCHRONOUS_FULL, SYNCHRONOUS_NORMAL, SYNCHRONOUS_OFF,
+    SYNCHRONOUS_QUERY,
+};
 pub use program::{
     AnalyzeIndexTarget, AnalyzeTarget, GroupKeyColumn, Instruction, Opcode, Program, SortKeyColumn,
     P4,
