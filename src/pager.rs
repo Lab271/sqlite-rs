@@ -43,7 +43,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::header::JournalMode;
+use crate::header::{JournalMode, SynchronousMode};
 use crate::vfs::{
     companion_path, AnyVfs, AnyVfsFile, AnyWalShm, FileLock, PageError, PageSource, Vfs, VfsError,
     WritablePageSource,
@@ -334,6 +334,10 @@ pub struct Pager {
     /// and WAL write paths, so it's tracked here rather than re-read off
     /// page 1 on every flush.
     journal_mode: JournalMode,
+    /// `PRAGMA synchronous` (#645) — defaults to `Full` on every fresh
+    /// [`Pager::open`], same as stock SQLite; never read from or
+    /// written to the database file. See [`SynchronousMode`].
+    synchronous: SynchronousMode,
 }
 
 /// Byte offsets of the three header fields ([`crate::header::DatabaseHeader`])
@@ -451,6 +455,7 @@ impl Pager {
             db_path: path.to_path_buf(),
             journal_path,
             journal_mode,
+            synchronous: SynchronousMode::default(),
         })
     }
 
@@ -603,7 +608,13 @@ impl Pager {
                     .write_record(index as u32, page_num, &original)
                     .map_err(journal_to_pager_error)?;
             }
-            writer.sync().map_err(journal_to_pager_error)?;
+            // `PRAGMA synchronous` (#645): the journal fsync is skipped
+            // only at `Off` — `Normal` keeps it, since it's what lets a
+            // crash mid-write-to-the-main-file recover via
+            // `recover_hot_journal` at all (ADR-0036).
+            if self.synchronous != SynchronousMode::Off {
+                writer.sync().map_err(journal_to_pager_error)?;
+            }
         }
 
         for page_num in page_nums {
@@ -611,7 +622,12 @@ impl Pager {
                 self.source.write_page(page_num, bytes)?;
             }
         }
-        self.source.sync()?;
+        // `PRAGMA synchronous` (#645): the main-file fsync (the second
+        // of the two-fsync rollback-journal commit protocol) is the one
+        // `Normal` relaxes relative to `Full` (ADR-0036).
+        if self.synchronous == SynchronousMode::Full {
+            self.source.sync()?;
+        }
 
         if !to_journal.is_empty() {
             self.vfs.delete(&self.journal_path)?;
@@ -713,7 +729,13 @@ impl Pager {
                         .map_err(to_pager_error)?;
                 }
             }
-            writer.sync().map_err(to_pager_error)?;
+            // `PRAGMA synchronous` (#645): `Full` fsyncs the WAL on every
+            // commit; `Normal`/`Off` don't — matching stock SQLite's
+            // documented WAL+NORMAL behavior of only syncing at
+            // checkpoint boundaries (ADR-0036).
+            if self.synchronous == SynchronousMode::Full {
+                writer.sync().map_err(to_pager_error)?;
+            }
             self.wal_resume = Some(writer.resume_hint());
 
             let new_mx_frame = writer.frame_count();
@@ -802,6 +824,22 @@ impl Pager {
         self.source.sync()?;
         self.page_cache.borrow_mut().invalidate(1);
         Ok(())
+    }
+
+    /// The active `PRAGMA synchronous` level (#645), consulted by
+    /// [`Pager::flush_locked`]/[`Pager::flush_wal_locked`] to decide
+    /// which commit-time fsyncs to skip.
+    pub fn synchronous(&self) -> SynchronousMode {
+        self.synchronous
+    }
+
+    /// Sets the active `PRAGMA synchronous` level (#645). Unlike
+    /// [`Pager::set_journal_mode`], this has no on-disk representation
+    /// to flip and no pending-transaction restriction — stock SQLite
+    /// allows changing it at any time, including mid-transaction, since
+    /// it only affects fsync behavior at the *next* commit.
+    pub fn set_synchronous(&mut self, mode: SynchronousMode) {
+        self.synchronous = mode;
     }
 
     /// Recovers [`Pager::flush_wal_locked`] from a `-wal` that vanished out
@@ -1646,6 +1684,120 @@ mod tests {
         let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
         pager.flush().unwrap();
         assert_eq!(pager.read_page(1).unwrap(), Rc::from(vec![7u8; 512]));
+    }
+
+    #[test]
+    fn synchronous_defaults_to_full() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![1u8; 512]);
+        let pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(pager.synchronous(), SynchronousMode::Full);
+    }
+
+    #[test]
+    fn set_synchronous_roundtrips_and_is_never_a_pending_transaction_error() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        // Unlike `set_journal_mode`, allowed even with a dirty page —
+        // stock SQLite lets `synchronous` change mid-transaction (#645).
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        pager.set_synchronous(SynchronousMode::Off);
+        assert_eq!(pager.synchronous(), SynchronousMode::Off);
+    }
+
+    /// #645/ADR-0036: `Full` (the default) fsyncs both the journal and
+    /// the main file on a rollback-journal commit — the two-fsync
+    /// protocol this pager used unconditionally before `synchronous`
+    /// existed.
+    #[test]
+    fn synchronous_full_syncs_journal_and_main_file_on_rollback_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        let before = vfs.sync_calls();
+        pager.flush().unwrap();
+        assert_eq!(
+            vfs.sync_calls() - before,
+            2,
+            "journal fsync + main-file fsync"
+        );
+    }
+
+    /// #645/ADR-0036: `Normal` keeps the journal fsync (still needed for
+    /// `recover_hot_journal` to be safe) but skips the main-file fsync.
+    #[test]
+    fn synchronous_normal_skips_main_file_sync_on_rollback_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_synchronous(SynchronousMode::Normal);
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        let before = vfs.sync_calls();
+        pager.flush().unwrap();
+        assert_eq!(vfs.sync_calls() - before, 1, "journal fsync only");
+    }
+
+    /// #645/ADR-0036: `Off` skips every commit-time fsync.
+    #[test]
+    fn synchronous_off_skips_all_syncs_on_rollback_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_synchronous(SynchronousMode::Off);
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        let before = vfs.sync_calls();
+        pager.flush().unwrap();
+        assert_eq!(vfs.sync_calls() - before, 0);
+    }
+
+    /// #645/ADR-0036: `Full` fsyncs the WAL on every commit.
+    #[test]
+    fn synchronous_full_syncs_wal_frame_on_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        let before = vfs.sync_calls();
+        pager.flush().unwrap();
+        assert_eq!(vfs.sync_calls() - before, 1, "WAL frame fsync");
+    }
+
+    /// #645/ADR-0036: `Normal`/`Off` in WAL mode skip the per-commit
+    /// frame fsync — matching stock SQLite's documented behavior of only
+    /// syncing WAL+NORMAL at checkpoint boundaries.
+    #[test]
+    fn synchronous_normal_skips_wal_frame_sync_on_commit() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![1u8; 512];
+        write_be_u32(&mut contents, PAGE_COUNT_OFFSET, 2).unwrap();
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.set_journal_mode(JournalMode::Wal).unwrap();
+        pager.set_synchronous(SynchronousMode::Normal);
+
+        pager.get_page_mut(2).unwrap().fill(9u8);
+        let before = vfs.sync_calls();
+        pager.flush().unwrap();
+        assert_eq!(vfs.sync_calls() - before, 0);
     }
 
     /// #388: `PRAGMA journal_mode=WAL` creates a fresh `-wal`/`-shm` and

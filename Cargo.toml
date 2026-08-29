@@ -77,6 +77,10 @@ name = "unit_pragma_parser"
 path = "tests/unit/pragma_parser.rs"
 
 [[test]]
+name = "unit_pragma_synchronous_repl"
+path = "tests/unit/pragma_synchronous_repl.rs"
+
+[[test]]
 name = "unit_introspection_pragmas"
 path = "tests/unit/introspection_pragmas.rs"
 

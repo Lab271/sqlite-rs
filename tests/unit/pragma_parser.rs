@@ -1,9 +1,9 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the PRAGMA parser carve-outs: `journal_mode` (#388),
-//! `integrity_check`/`quick_check` (#540, #541). Any other pragma name
-//! or value is `Unsupported`, not a hard parse error -- mirrors `WITH
-//! RECURSIVE`'s precedent.
+//! `integrity_check`/`quick_check` (#540, #541), `synchronous` (#645).
+//! Any other pragma name or value is `Unsupported`, not a hard parse
+//! error -- mirrors `WITH RECURSIVE`'s precedent.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -28,6 +28,13 @@ fn journal_mode(p: &Pragma) -> PragmaJournalMode {
     match p {
         Pragma::JournalMode { journal_mode, .. } => *journal_mode,
         other => panic!("expected JournalMode, got {other:?}"),
+    }
+}
+
+fn synchronous_level(p: &Pragma) -> Option<PragmaSynchronous> {
+    match p {
+        Pragma::Synchronous { level, .. } => *level,
+        other => panic!("expected Synchronous, got {other:?}"),
     }
 }
 
@@ -98,6 +105,48 @@ fn test_accept_integrity_check_is_case_insensitive() {
     );
 }
 
+// ---- accepted: synchronous --------------------------------------------------
+
+#[test]
+fn test_accept_synchronous_query_form() {
+    let p = accept("PRAGMA synchronous");
+    assert_eq!(synchronous_level(&p), None);
+}
+
+#[test]
+fn test_accept_synchronous_off() {
+    let p = accept("PRAGMA synchronous = OFF");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Off));
+}
+
+#[test]
+fn test_accept_synchronous_normal() {
+    let p = accept("PRAGMA synchronous = NORMAL");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Normal));
+}
+
+#[test]
+fn test_accept_synchronous_full() {
+    let p = accept("PRAGMA synchronous = FULL");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Full));
+}
+
+#[test]
+fn test_accept_synchronous_integer_values() {
+    let p = accept("PRAGMA synchronous = 0");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Off));
+    let p = accept("PRAGMA synchronous = 1");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Normal));
+    let p = accept("PRAGMA synchronous = 2");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Full));
+}
+
+#[test]
+fn test_accept_synchronous_is_case_insensitive() {
+    let p = accept("pragma SYNCHRONOUS = full");
+    assert_eq!(synchronous_level(&p), Some(PragmaSynchronous::Full));
+}
+
 // ---- unsupported ------------------------------------------------------------
 
 #[test]
@@ -128,4 +177,12 @@ fn test_unsupported_bare_journal_mode_query_form() {
 #[test]
 fn test_unsupported_integrity_check_with_arg() {
     unsupported("PRAGMA integrity_check(10)");
+}
+
+#[test]
+fn test_unsupported_synchronous_value() {
+    unsupported("PRAGMA synchronous = ON");
+    unsupported("PRAGMA synchronous = EXTRA");
+    unsupported("PRAGMA synchronous = 3");
+    unsupported("PRAGMA synchronous = 4");
 }

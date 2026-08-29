@@ -1,20 +1,25 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-//! `Pragma` AST -> `Program` compilation: `journal_mode` (#388) and
-//! `integrity_check`/`quick_check` (#540, #541). Mirrors
-//! `src/codegen/transaction.rs`'s shape: one control opcode per pragma,
-//! operands carrying whatever the executor needs.
+//! `Pragma` AST -> `Program` compilation: `journal_mode` (#388),
+//! `integrity_check`/`quick_check` (#540, #541), and `synchronous`
+//! (#645). Mirrors `src/codegen/transaction.rs`'s shape: one control
+//! opcode per pragma, operands carrying whatever the executor needs.
 
 use crate::codegen::Emitter;
-use crate::parser::ast::{Pragma, PragmaJournalMode};
-use crate::vdbe::{Instruction, Opcode, Program, JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL};
+use crate::parser::ast::{Pragma, PragmaJournalMode, PragmaSynchronous};
+use crate::vdbe::{
+    Instruction, Opcode, Program, JOURNAL_MODE_DELETE, JOURNAL_MODE_WAL, SYNCHRONOUS_FULL,
+    SYNCHRONOUS_NORMAL, SYNCHRONOUS_OFF, SYNCHRONOUS_QUERY,
+};
 
 /// Compiles a `PRAGMA` statement into an `Init -> <op> -> Halt` program.
 /// `journal_mode` emits `SetJournalMode` (`P1` carries the target mode,
 /// no result rows); `integrity_check`/`quick_check` emit
 /// `IntegrityCheck` (`P1` = 1 for the `quick_check` reduced pass, 0 for
 /// the full `integrity_check`), which produces a result set of `TEXT`
-/// rows.
+/// rows; `synchronous` emits `Synchronous` (`P1` carries the target
+/// level, or `SYNCHRONOUS_QUERY` for the bare query form, which
+/// produces a single `INTEGER` result row instead of a side effect).
 pub fn compile_pragma(pragma: &Pragma) -> Program {
     let mut em = Emitter::new();
     let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
@@ -37,6 +42,15 @@ pub fn compile_pragma(pragma: &Pragma) -> Program {
                 0,
                 0,
             ));
+        }
+        Pragma::Synchronous { level, .. } => {
+            let p1 = match level {
+                None => SYNCHRONOUS_QUERY,
+                Some(PragmaSynchronous::Off) => SYNCHRONOUS_OFF,
+                Some(PragmaSynchronous::Normal) => SYNCHRONOUS_NORMAL,
+                Some(PragmaSynchronous::Full) => SYNCHRONOUS_FULL,
+            };
+            em.emit(Instruction::new(Opcode::Synchronous, p1, 0, 0));
         }
     }
     em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
@@ -107,5 +121,49 @@ mod tests {
             vec![Opcode::Init, Opcode::IntegrityCheck, Opcode::Halt]
         );
         assert_eq!(program.instructions[1].p1, 1);
+    }
+
+    #[test]
+    fn synchronous_query_compiles_p1_sentinel() {
+        let pragma = match parse_pragma("PRAGMA synchronous") {
+            ParseOutcome::Accepted(p) => p,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_pragma(&pragma);
+        assert_eq!(
+            opcodes(&program),
+            vec![Opcode::Init, Opcode::Synchronous, Opcode::Halt]
+        );
+        assert_eq!(program.instructions[1].p1, SYNCHRONOUS_QUERY);
+    }
+
+    #[test]
+    fn synchronous_off_compiles_p1_zero() {
+        let pragma = match parse_pragma("PRAGMA synchronous = OFF") {
+            ParseOutcome::Accepted(p) => p,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_pragma(&pragma);
+        assert_eq!(program.instructions[1].p1, SYNCHRONOUS_OFF);
+    }
+
+    #[test]
+    fn synchronous_normal_compiles_p1_one() {
+        let pragma = match parse_pragma("PRAGMA synchronous = NORMAL") {
+            ParseOutcome::Accepted(p) => p,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_pragma(&pragma);
+        assert_eq!(program.instructions[1].p1, SYNCHRONOUS_NORMAL);
+    }
+
+    #[test]
+    fn synchronous_full_via_integer_compiles_p1_two() {
+        let pragma = match parse_pragma("PRAGMA synchronous = 2") {
+            ParseOutcome::Accepted(p) => p,
+            other => panic!("expected Accepted, got {other:?}"),
+        };
+        let program = compile_pragma(&pragma);
+        assert_eq!(program.instructions[1].p1, SYNCHRONOUS_FULL);
     }
 }

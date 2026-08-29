@@ -39,3 +39,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0033](0033-constant-propagation-and-or-to-in-extend-fast-paths-in-place.md) | Constant propagation and OR-to-IN extend existing equality fast paths in place; only genuine range seeks wait for a new opcode | 2026-08-28 |
 | [0034](0034-index-range-seeks.md) | Real-index range seeks for `BETWEEN`/`IN`/`LIKE`-prefix (`SeekIndexGE`/`IdxCompareGT`) | 2026-08-28 |
 | [0035](0035-wal-resume-hint-cache-supersedes-0026.md) | `Pager`-cached WAL resume hint supersedes ADR-0026's per-flush rescan | 2026-08-29 |
+| [0036](0036-pragma-synchronous-fsync-policy.md) | `PRAGMA synchronous` fsync-skip policy, and why `SynchronousMode` lives in `header.rs` | 2026-08-29 |

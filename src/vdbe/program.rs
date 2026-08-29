@@ -59,6 +59,16 @@ pub enum Opcode {
     /// 0 for the full `integrity_check`. Emits one `TEXT` result row per
     /// problem found, or a single `"ok"` row if none.
     IntegrityCheck,
+    // #645: `PRAGMA synchronous [= OFF|NORMAL|FULL]` -- postdates the V2
+    // oracle harvest, so excluded from `ALL` but fully dispatched and
+    // exhaustiveness-checked, like `SetJournalMode`/`IntegrityCheck`
+    // above.
+    /// `PRAGMA synchronous [= OFF|NORMAL|FULL]`: `P1` carries the target
+    /// level (`crate::vdbe::pragma::{SYNCHRONOUS_OFF, SYNCHRONOUS_NORMAL,
+    /// SYNCHRONOUS_FULL}`), or `crate::vdbe::pragma::SYNCHRONOUS_QUERY`
+    /// for the bare query form, which emits the connection's current
+    /// level as a single `INTEGER` result row instead of changing it.
+    Synchronous,
     /// Jumps to `P2` if register `P1` is falsy (zero/false, per SQLite's
     /// truthiness rules).
     IfNot,
@@ -517,6 +527,7 @@ fn _exhaustive(o: Opcode) {
         | Opcode::AutoCommit
         | Opcode::SetJournalMode
         | Opcode::IntegrityCheck
+        | Opcode::Synchronous
         | Opcode::IfNot
         | Opcode::IfNotZero
         | Opcode::IfPos

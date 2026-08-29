@@ -787,10 +787,25 @@ pub enum PragmaJournalMode {
     Delete,
 }
 
+/// The three `synchronous` levels `pragma-stmt` (grammar V7 carve-out,
+/// #645) accepts — stock SQLite's `synchronous` pragma also takes
+/// `EXTRA` and the `ON`/boolean aliases, plus arbitrary integers beyond
+/// 0-2 (with its own legacy masking quirks), all deferred to general
+/// PRAGMA support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PragmaSynchronous {
+    /// `PRAGMA synchronous = OFF` (or `= 0`).
+    Off,
+    /// `PRAGMA synchronous = NORMAL` (or `= 1`).
+    Normal,
+    /// `PRAGMA synchronous = FULL` (or `= 2`).
+    Full,
+}
+
 /// A parsed `PRAGMA` statement: the narrow V6 `journal_mode` carve-out
-/// (#388) plus the V7 `integrity_check`/`quick_check` carve-out (#540,
-/// #541). Every other pragma name stays `Unsupported` at the parser
-/// (see `parse_pragma_stmt`).
+/// (#388), the V7 `integrity_check`/`quick_check` carve-out (#540,
+/// #541), and the V7 `synchronous` carve-out (#645). Every other pragma
+/// name stays `Unsupported` at the parser (see `parse_pragma_stmt`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pragma {
     /// `PRAGMA journal_mode = WAL|DELETE` (#388); see [`PragmaJournalMode`].
@@ -809,13 +824,26 @@ pub enum Pragma {
         /// The source span covering the whole statement.
         span: Span,
     },
+    /// `PRAGMA synchronous [= OFF|NORMAL|FULL|0|1|2]` (#645). `level =
+    /// None` is the bare query form (`PRAGMA synchronous`, no `=`),
+    /// which reports the connection's current level as a result row
+    /// instead of changing it — unlike `journal_mode`, whose bare query
+    /// form the parser still rejects as `Unsupported`.
+    Synchronous {
+        /// The requested level, or `None` to query the current one.
+        level: Option<PragmaSynchronous>,
+        /// The source span covering the whole statement.
+        span: Span,
+    },
 }
 
 impl Pragma {
     /// The source span covering the whole statement, whichever variant.
     pub fn span(&self) -> Span {
         match self {
-            Pragma::JournalMode { span, .. } | Pragma::IntegrityCheck { span, .. } => *span,
+            Pragma::JournalMode { span, .. }
+            | Pragma::IntegrityCheck { span, .. }
+            | Pragma::Synchronous { span, .. } => *span,
         }
     }
 }
