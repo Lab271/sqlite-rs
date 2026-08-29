@@ -282,6 +282,163 @@ where
     Ok(true)
 }
 
+/// Emits a `Sorter`-free implicit-whole-table-group aggregate (#633):
+/// when there's no `GROUP BY` key at all (#287's implicit whole-table
+/// group) and no aggregate call uses `DISTINCT`, every WHERE-matching
+/// row belongs to the same single group, so there is nothing to sort
+/// by — a single linear `Rewind`/`Next` scan calling `AggStep` inline
+/// produces the identical result [`compile_grouped_scan`]'s
+/// buffer-then-flush machinery does, without ever opening a `Sorter`
+/// (no `MakeRecord`/`SorterInsert`/`SorterSort`/`SorterData` round
+/// trip per row).
+///
+/// Reuses [`flush_group`]/[`AggSlot`]/`compile_limit_setup` so
+/// `HAVING`, `LIMIT`/`OFFSET`, and #287's "a zero-row table still
+/// flushes one row" behavior (`count(*) = 0`, other aggregates `NULL`)
+/// all come from the same code the `Sorter`-backed path uses.
+///
+/// Returns `Ok(true)` when this fast path was taken (result row
+/// already emitted via `sink`); `Ok(false)` leaves `em`/`reg`
+/// untouched — a `DISTINCT` aggregate falls back to
+/// [`compile_grouped_scan`]. Only called from the implicit-group
+/// (`select.group_by.is_empty()`) branch; an explicit `GROUP BY`
+/// always has `compile_grouped_scan`'s sort-then-group semantics.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_direct_agg_scan<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let aggs = collect_aggregates(select)?;
+    if aggs.iter().any(|(_, _, _, distinct)| *distinct) {
+        return Ok(false);
+    }
+
+    let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    // #322: hoist any uncorrelated WHERE-clause subquery once, up
+    // front — see `compile_grouped_scan`'s identical comment.
+    let hoisted = match &select.where_clause {
+        Some(where_expr) => crate::codegen::subquery::hoist_uncorrelated_where_subqueries(
+            em,
+            reg,
+            &table_scope,
+            where_expr,
+        )?,
+        None => std::collections::HashMap::new(),
+    };
+    let table_scope = table_scope.with_hoisted(std::rc::Rc::new(hoisted));
+
+    let limit = compile_limit_setup(em, reg, &table_scope, select)?;
+
+    let zero_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, zero_reg, 0));
+    let have_group_reg = reg.alloc();
+    em.emit(Instruction::new(Opcode::Integer, 0, have_group_reg, 0));
+
+    let snapshot_regs: Vec<i32> = schema.columns.iter().map(|_| reg.alloc()).collect();
+    // NULL-initialized up front so a zero-row (or zero-match) table's
+    // tail flush reads NULL for any plain column — see
+    // `compile_grouped_scan`'s identical comment.
+    for &r in &snapshot_regs {
+        em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+    }
+
+    let agg_slots: Vec<AggSlot> = aggs
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (call, name, arg, _distinct))| AggSlot {
+            call,
+            name,
+            arg,
+            slot: i32::try_from(slot).unwrap_or(0),
+            eph_cursor: None,
+        })
+        .collect();
+
+    let scan_rewind = em.emit(Instruction::new(Opcode::Rewind, cursors.table, 0, 0));
+    let tail_label = em.new_label();
+    em.patch_p2(scan_rewind, tail_label);
+    let scan_loop = em.new_label();
+    em.place(scan_loop);
+
+    let scan_skip = em.new_label();
+    if let Some(where_expr) = &select.where_clause {
+        compile_cond(
+            em,
+            reg,
+            &table_scope,
+            where_expr,
+            CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
+        )?;
+    }
+
+    let boundary_label = em.new_label();
+    let not_boundary_label = em.new_label();
+    let first_row_check = em.emit(Instruction::new(Opcode::Eq, have_group_reg, 0, zero_reg));
+    em.patch_p2(first_row_check, boundary_label);
+    let goto_not_boundary = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_not_boundary, not_boundary_label);
+
+    em.place(boundary_label);
+    em.emit(Instruction::new(Opcode::Integer, 1, have_group_reg, 0));
+    // This table's first matching row: fold with `reset: true` so a
+    // freshly-numbered slot starts a fresh accumulator — see
+    // `compile_grouped_scan`'s identical comment.
+    for agg in &agg_slots {
+        emit_agg_step(em, reg, &table_scope, agg, true)?;
+    }
+    // The single implicit group's "arbitrary row" for any plain
+    // (non-aggregate) result/`HAVING` column is its first matching
+    // row, matching `compile_grouped_scan`'s choice — snapshotted
+    // straight off the real table cursor (not `read_row_columns_into`,
+    // which is only safe against the pass-2 pseudo cursor's
+    // already-materialized record; a rowid-alias column here still
+    // needs `Opcode::Rowid` against the live table cursor).
+    for (idx, &r) in snapshot_regs.iter().enumerate() {
+        emit_column_read(em, schema, cursors.table, idx, r)?;
+    }
+    let after_accumulate = em.new_label();
+    let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+    em.patch_p2(goto_after_accumulate, after_accumulate);
+
+    em.place(not_boundary_label);
+    for agg in &agg_slots {
+        emit_agg_step(em, reg, &table_scope, agg, false)?;
+    }
+
+    em.place(after_accumulate);
+    em.place(scan_skip);
+    let scan_next = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
+    em.patch_p2(scan_next, scan_loop);
+
+    // Tail flush: always exactly one row (#287), whether or not any
+    // row ever matched — `have_group_reg`/`snapshot_regs`' NULL
+    // initialization and `AggFinal`'s never-stepped-slot handling
+    // produce `count(*) = 0`/other aggregates `NULL` when it didn't.
+    em.place(tail_label);
+    flush_group(
+        em,
+        reg,
+        select,
+        schema,
+        catalog,
+        &snapshot_regs,
+        &agg_slots,
+        limit.as_ref(),
+        end_label,
+        sink,
+    )?;
+    Ok(true)
+}
+
 /// #506: which of `schema`'s columns [`compile_grouped_scan`]'s pass 1
 /// actually needs to serialize into the sort record — the `GROUP BY`
 /// key, every aggregate argument, and every plain column `select.columns`/
