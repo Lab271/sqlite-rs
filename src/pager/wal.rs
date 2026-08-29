@@ -454,6 +454,18 @@ pub struct WalWriter {
     header: WalHeader,
     running: (u32, u32),
     offset: u64,
+    /// Byte offset `pending` should be written at — the value `offset` had
+    /// before the first frame accumulated into `pending` since the last
+    /// [`WalWriter::sync`]. `None` while `pending` is empty.
+    pending_offset: Option<u64>,
+    /// Frames appended since the last [`WalWriter::sync`], accumulated
+    /// here instead of written immediately (#635): a multi-page commit
+    /// then costs one `write_at` covering every frame instead of one
+    /// `write_at` per dirty page, which dominated commit latency for
+    /// updates scattered across many leaf pages. Flushed to `file` by
+    /// `sync`, which still fsyncs exactly once per commit (ADR-0026
+    /// unchanged — this only batches the writes feeding that one fsync).
+    pending: Vec<u8>,
     /// Reusable frame buffer for [`WalWriter::append_frame`] (#588): one
     /// allocation per writer instead of one per frame, while keeping the
     /// frame header + page as a single `write_at` (ADR-0026 unchanged).
@@ -470,6 +482,8 @@ impl WalWriter {
             running: header.header_checksum,
             offset: HEADER_LEN as u64,
             header,
+            pending_offset: None,
+            pending: Vec::new(),
             scratch: Vec::new(),
         })
     }
@@ -506,15 +520,26 @@ impl WalWriter {
             .reserve(FRAME_HEADER_LEN.saturating_add(page_data.len()));
         self.scratch.extend_from_slice(&frame_header);
         self.scratch.extend_from_slice(page_data);
-        self.file.write_at(&self.scratch, self.offset)?;
+
+        if self.pending_offset.is_none() {
+            self.pending_offset = Some(self.offset);
+        }
+        self.pending.extend_from_slice(&self.scratch);
 
         self.running = after_page;
         self.offset = self.offset.saturating_add(self.scratch.len() as u64);
         Ok(())
     }
 
-    /// Flushes every frame written so far to durable storage.
-    pub fn sync(&self) -> Result<(), WalError> {
+    /// Writes every frame accumulated since the last call, in one
+    /// `write_at` covering the whole run, then flushes to durable storage.
+    /// A no-op `write_at`-wise (fsync still runs) when nothing is pending,
+    /// e.g. a second `sync()` call or a writer that appended no frames.
+    pub fn sync(&mut self) -> Result<(), WalError> {
+        if let Some(pending_offset) = self.pending_offset.take() {
+            self.file.write_at(&self.pending, pending_offset)?;
+            self.pending.clear();
+        }
         self.file.sync()?;
         Ok(())
     }
@@ -549,6 +574,8 @@ impl WalWriter {
             header,
             running,
             offset,
+            pending_offset: None,
+            pending: Vec::new(),
             scratch: Vec::new(),
         })
     }
