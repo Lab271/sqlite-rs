@@ -37,12 +37,10 @@
 //! everything in it was already deleted earlier), the matched entry is
 //! removed outright instead of swapped.
 
-use std::cmp::Ordering;
-
 use crate::btree::index::{
     build_index_interior_cell, collect_index_interior_entries, collect_index_leaf_cells,
-    compare_keys, decode_payload_len, descend_index_tree, write_index_interior_page, IndexDescent,
-    INTERIOR_INDEX, LEAF_INDEX,
+    decode_payload_len, descend_index_tree, search_index_leaf, write_index_interior_page,
+    IndexDescent, LeafSearch, INTERIOR_INDEX, LEAF_INDEX,
 };
 use crate::btree::{
     local_payload_size, page1_header_start, read_page_type, read_u32, splice_delete_cell,
@@ -134,20 +132,22 @@ fn delete_from_leaf(
 ) -> Result<(), BtreeError> {
     let header_start = page1_header_start(leaf_page);
     let buf = pager.get_page_mut(leaf_page)?.clone();
-    let cells =
-        collect_index_leaf_cells(pager, &buf, header_start, leaf_page, usable_size, encoding)?;
 
-    let pos = cells
-        .iter()
-        .position(|(existing_key, _)| compare_keys(existing_key, key) == Ordering::Equal)
-        .ok_or(BtreeError::KeyNotFound)?;
-    let overflow_page = overflow_page_of(
-        &cells
-            .get(pos)
-            .ok_or(BtreeError::Internal("delete_from_leaf: pos out of bounds"))?
-            .1,
+    // Binary search for the exact match, decoding only the O(log n)
+    // cells actually compared instead of every cell on the page (#648).
+    let (pos, matched_cell) = match search_index_leaf(
+        pager,
+        &buf,
+        header_start,
+        leaf_page,
         usable_size,
-    )?;
+        encoding,
+        key,
+    )? {
+        LeafSearch::Found(pos, cell) => (pos, cell),
+        LeafSearch::NotFound(_) => return Err(BtreeError::KeyNotFound),
+    };
+    let overflow_page = overflow_page_of(&matched_cell.1, usable_size)?;
 
     let buf = pager.get_page_mut(leaf_page)?;
     splice_delete_cell(buf, header_start, leaf_page, usable_size, pos, false)?;

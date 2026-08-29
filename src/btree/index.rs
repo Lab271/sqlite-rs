@@ -473,12 +473,20 @@ pub(super) fn collect_index_leaf_cells(
 ) -> Result<Vec<IndexLeafCell>, BtreeError> {
     let num_cells = read_num_cells(buf, header_start, page_num)?;
     let ptr_base = header_start.saturating_add(8);
+    let page: Rc<[u8]> = Rc::from(buf);
     let mut out = Vec::with_capacity(num_cells);
     for i in 0..num_cells {
         let ptr_off = cell_ptr_offset(ptr_base, i);
         let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
-        let (key, cell_bytes) =
-            decode_value_cell(source, buf, cell_start, page_num, usable_size, encoding)?;
+        let (key, cell_bytes) = decode_value_cell(
+            source,
+            buf,
+            &page,
+            cell_start,
+            page_num,
+            usable_size,
+            encoding,
+        )?;
         out.push((key, cell_bytes));
     }
     Ok(out)
@@ -499,14 +507,22 @@ pub(super) fn collect_index_interior_entries(
 ) -> Result<(Vec<IndexInteriorEntry>, u32), BtreeError> {
     let num_cells = read_num_cells(buf, header_start, page_num)?;
     let ptr_base = header_start.saturating_add(12);
+    let page: Rc<[u8]> = Rc::from(buf);
     let mut out = Vec::with_capacity(num_cells);
     for i in 0..num_cells {
         let ptr_off = cell_ptr_offset(ptr_base, i);
         let cell_start = read_cell_pointer(buf, ptr_off, page_num, i)?;
         let child = read_u32(buf, cell_start, page_num)?;
         let value_start = cell_start.saturating_add(4);
-        let (key, cell_bytes) =
-            decode_value_cell(source, buf, value_start, page_num, usable_size, encoding)?;
+        let (key, cell_bytes) = decode_value_cell(
+            source,
+            buf,
+            &page,
+            value_start,
+            page_num,
+            usable_size,
+            encoding,
+        )?;
         out.push((child, key, cell_bytes));
     }
     let rightmost = read_u32(buf, header_start.saturating_add(8), page_num)?;
@@ -518,9 +534,14 @@ pub(super) fn collect_index_interior_entries(
 /// interior cells: returns the decoded key (for ordering) and the raw,
 /// verbatim cell bytes (varint + local bytes + optional overflow
 /// pointer), starting at `value_start`.
+/// `page` must be the same bytes as `buf`, shared as an `Rc` so
+/// `reassemble_payload` can follow an overflow chain past `buf`'s
+/// borrow — callers decoding multiple cells off one page build `page`
+/// once and pass it in, rather than paying a full-page copy per cell.
 fn decode_value_cell(
     source: &Pager,
     buf: &[u8],
+    page: &Rc<[u8]>,
     value_start: usize,
     page_num: u32,
     usable_size: u32,
@@ -536,18 +557,87 @@ fn decode_value_cell(
         .get(value_start..cell_end)
         .ok_or(BtreeError::PayloadTooShort { page_num })?
         .to_vec();
-    let page: Rc<[u8]> = Rc::from(buf);
     let payload = reassemble_payload(
         source,
         usable_size,
         page_num,
-        &page,
+        page,
         tail_start,
         payload_len,
         true,
     )?;
     let key = decode_record(&payload, encoding)?;
     Ok((key, cell_bytes))
+}
+
+/// Byte length of the value-cell (payload-length varint, local payload,
+/// plus optional 4-byte overflow pointer) starting at `cell_start`,
+/// without decoding its key or copying its bytes. Used for page-space
+/// bookkeeping where only the cell's on-disk size matters, not its sort
+/// key — letting [`super::insert::insert_into_index_leaf`]'s space check
+/// avoid a full [`decode_value_cell`] per existing cell.
+pub(super) fn value_cell_len(
+    buf: &[u8],
+    cell_start: usize,
+    page_num: u32,
+    usable_size: u32,
+) -> Result<usize, BtreeError> {
+    let (payload_len, tail_start) = decode_payload_len(buf, cell_start, page_num)?;
+    let local_size = local_payload_size(usable_size, payload_len, true) as usize;
+    let has_overflow = (local_size as u64) < payload_len;
+    let cell_end = tail_start
+        .saturating_add(local_size)
+        .saturating_add(if has_overflow { 4 } else { 0 });
+    Ok(cell_end.saturating_sub(cell_start))
+}
+
+/// Outcome of [`search_index_leaf`]: either an exact key match (with its
+/// decoded cell, so callers don't need to decode it again) or the
+/// cell-pointer-array position a new entry with this key would sort into.
+pub(super) enum LeafSearch {
+    Found(usize, IndexLeafCell),
+    NotFound(usize),
+}
+
+/// Binary search for `key` among an index leaf page's sorted entries,
+/// decoding only the O(log n) cells actually compared — unlike
+/// [`collect_index_leaf_cells`], which decodes every cell on the page.
+/// Used by the index insert/delete write paths to locate a position
+/// without paying for a full-page decode on every write (#648).
+pub(super) fn search_index_leaf(
+    source: &Pager,
+    buf: &[u8],
+    header_start: usize,
+    page_num: u32,
+    usable_size: u32,
+    encoding: TextEncoding,
+    key: &[Value],
+) -> Result<LeafSearch, BtreeError> {
+    let num_cells = read_num_cells(buf, header_start, page_num)?;
+    let ptr_base = header_start.saturating_add(8);
+    let page: Rc<[u8]> = Rc::from(buf);
+    let mut lo = 0usize;
+    let mut hi = num_cells;
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+        let ptr_off = cell_ptr_offset(ptr_base, mid);
+        let cell_start = read_cell_pointer(buf, ptr_off, page_num, mid)?;
+        let decoded = decode_value_cell(
+            source,
+            buf,
+            &page,
+            cell_start,
+            page_num,
+            usable_size,
+            encoding,
+        )?;
+        match compare_keys(key, &decoded.0) {
+            Ordering::Equal => return Ok(LeafSearch::Found(mid, decoded)),
+            Ordering::Less => hi = mid,
+            Ordering::Greater => lo = mid.saturating_add(1),
+        }
+    }
+    Ok(LeafSearch::NotFound(lo))
 }
 
 /// Builds an index interior cell: 4-byte left-child page number followed
