@@ -1258,15 +1258,18 @@ instance on `Value`.
 **Implementation:** `src/vdbe/hash_agg.rs`,
 `src/codegen/select/aggregate/hash.rs::try_compile_hash_grouped_scan`
 
-#### Scenario: A plain GROUP BY compiles the hash strategy, not the sorter
+#### Scenario: A plain GROUP BY compiles the sorter strategy, not the hash strategy
 
 - GIVEN `SELECT bucket, count(*), sum(x) FROM t GROUP BY bucket` over a
   table with no index on `bucket`
-- THEN the compiled program contains the full `HashAggOpen`/`HashAggFind`/
-  `HashAggStep`/`HashAggRewind`/`HashAggData`/`HashAggNext` family, one
-  `HashAggStep` per aggregate call, and no `SorterOpen`
+- THEN the compiled program contains the full `SorterOpen`/`SorterInsert`/
+  `SorterSort`/`SorterData`/`SorterNext` family and no `HashAggOpen` —
+  #631 kept this hash-aggregation opcode family reachable but no longer
+  wires it into the plain-`GROUP BY` dispatch (`entry.rs`), preferring
+  the sorter strategy's sequential post-sort iteration in practice
+  despite the hash strategy's better big-O
 
-**Tests:** `tests/unit/codegen_select_test.rs::plain_group_by_compiles_the_hash_aggregation_strategy`
+**Tests:** `tests/unit/codegen_select_test.rs::plain_group_by_compiles_the_sorter_strategy`
 
 #### Scenario: Several aggregates fold side by side into one hash table
 

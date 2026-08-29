@@ -9,7 +9,8 @@ use crate::codegen::expr::{compile_cond, compile_value};
 use crate::codegen::index_maintenance::{valid_index_root_page, valid_table_root_page};
 use crate::codegen::select::join_access::{choose_join_access, JoinAccess};
 use crate::codegen::select::{
-    compile_grouped_scan, select_has_aggregate, CodegenError, ScanCursors,
+    compile_grouped_scan, select_has_aggregate, try_compile_index_only_count,
+    try_compile_index_only_sum, CodegenError, ScanCursors,
 };
 use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Scope, Target};
 use crate::parser::ast::{Expr, ResultColumn, Select};
@@ -136,11 +137,23 @@ pub(crate) fn compile_scalar_subquery(
             pseudo: reg.alloc_cursor(),
             distinct: reg.alloc_cursor(),
         };
-        let end_label = em.new_label();
         let mut sink = |em: &mut Emitter, _reg: &mut RegAlloc, first: i32, _count: i32| {
             em.emit(Instruction::new(Opcode::Copy, first, dest, 0));
             Ok(())
         };
+        // #634: try the same index-only fast paths top-level aggregate
+        // queries get (`entry.rs`'s dispatch order) before falling back
+        // to `compile_grouped_scan`'s buffer-then-flush machinery — a
+        // subquery's projected aggregate is otherwise never given the
+        // chance at an index-only scan.
+        if try_compile_index_only_count(em, reg, subselect, &schema, cursors, &catalog, &mut sink)?
+        {
+            return Ok(dest);
+        }
+        if try_compile_index_only_sum(em, reg, subselect, &schema, cursors, &mut sink)? {
+            return Ok(dest);
+        }
+        let end_label = em.new_label();
         compile_grouped_scan(
             em,
             reg,
@@ -781,6 +794,47 @@ mod tests {
         let ops = opcodes(&program);
         assert!(ops.contains(&Opcode::AggStep));
         assert!(ops.contains(&Opcode::AggFinal));
+    }
+
+    fn s_indexed_v() -> TableSchema {
+        let mut s = s_rowid();
+        s.indexes.push(IndexSchema {
+            name: "idx_v".to_string(),
+            unique: false,
+            columns: vec![IndexedColumn {
+                name: "v".to_string(),
+                desc: false,
+                collation: Collation::Binary,
+            }],
+            root_page: 6,
+        });
+        s
+    }
+
+    #[test]
+    fn scalar_subquery_with_aggregate_index_only_sum() {
+        let catalog = [t(), s_indexed_v()];
+        let program = compile("SELECT (SELECT sum(v) FROM s) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::IdxRewind));
+        assert!(ops.contains(&Opcode::IdxNext));
+    }
+
+    #[test]
+    fn scalar_subquery_with_aggregate_index_only_avg() {
+        let catalog = [t(), s_indexed_v()];
+        let program = compile("SELECT (SELECT avg(v) FROM s) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::IdxRewind));
+        assert!(ops.contains(&Opcode::IdxNext));
+    }
+
+    #[test]
+    fn scalar_subquery_with_aggregate_index_only_count_star() {
+        let catalog = [t(), s_rowid()];
+        let program = compile("SELECT (SELECT count(*) FROM s) FROM t", &catalog).unwrap();
+        let ops = opcodes(&program);
+        assert!(ops.contains(&Opcode::Count));
     }
 
     #[test]

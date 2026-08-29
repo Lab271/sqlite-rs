@@ -200,7 +200,10 @@ pub use eqp::{explain_query_plan, EqpRow};
 pub use joins::compile_select_joined;
 pub use order_by::output_column_names;
 
-pub(crate) use aggregate::{compile_grouped_scan, select_has_aggregate};
+pub(crate) use aggregate::{
+    compile_grouped_scan, select_has_aggregate, try_compile_index_only_count,
+    try_compile_index_only_sum,
+};
 pub(crate) use entry::{
     compile_select_scan, select_result_column_count, select_result_column_count_joined,
 };

@@ -4,6 +4,23 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.8] - 2026-08-29
+
+### Fixed
+
+- `compile_scalar_subquery` routed every aggregate scalar subquery
+  (`(SELECT avg(x)/sum(x)/count(*) FROM t ...)`) straight into
+  `compile_grouped_scan`, bypassing the `try_compile_index_only_count`/
+  `try_compile_index_only_sum` fast-path dispatch top-level aggregate
+  queries already get in `entry.rs`. Such a subquery now compiles to
+  the same index-only `IdxRewind`/`IdxNext`/`Count` bytecode as the
+  identical standalone query, when a qualifying index exists and the
+  subquery has no `WHERE` clause, instead of a full table scan (#634).
+- Fixed a stale spec scenario/dead test link in 009/Req-17 (still
+  described #570's pre-#631 hash-aggregation dispatch, pointed at a
+  renamed test function), caught by `make assurance` while working on
+  #634.
+
 ## [0.18.7] - 2026-08-29
 
 ### Fixed
