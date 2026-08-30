@@ -4,20 +4,6 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
-## [0.18.10] - 2026-08-30
-
-### Fixed
-
-- INSERT and UPDATE codegen re-`SeekRowid`'d back onto the row they had
-  just written, then re-read every index column via `Opcode::Column`/
-  `Opcode::Rowid` to build `IdxInsert` keys — even though those same
-  values were still sitting in `col_regs`/`rowid_reg` from just before
-  the write. `emit_index_key_ops_from_regs` builds the key via
-  `Opcode::Copy` from those registers instead, dropping the seek and
-  re-read on every indexed INSERT/UPDATE. `IdxDelete` paths (removing a
-  *different*, already-on-disk row's stale entries) are unaffected —
-  they have no such register run to reuse (#663).
-
 ## [0.18.9] - 2026-08-30
 
 ### Fixed
@@ -39,6 +25,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   opts into; every other `SorterInsert` emitter keeps the original
   decode-from-blob behavior. Measured ~3.5-4% faster on `group_by_agg`
   (#660).
+
+- INSERT and UPDATE codegen re-`SeekRowid`'d back onto the row they had
+  just written, then re-read every index column via `Opcode::Column`/
+  `Opcode::Rowid` to build `IdxInsert` keys — even though those same
+  values were still sitting in `col_regs`/`rowid_reg` from just before
+  the write. `emit_index_key_ops_from_regs` builds the key via
+  `Opcode::Copy` from those registers instead, dropping the seek and
+  re-read on every indexed INSERT/UPDATE. `IdxDelete` paths (removing a
+  *different*, already-on-disk row's stale entries) are unaffected —
+  they have no such register run to reuse (#663).
 
 ## [0.18.8] - 2026-08-29
 
