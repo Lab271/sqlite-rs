@@ -1,10 +1,13 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
 //! Vendored `fcntl(F_SETLK`/`F_GETLK)` byte-range locking FFI (#563) —
-//! replaces `nix::fcntl`. SQLite's journal-mode lock ladder needs POSIX
-//! record locks; there is no pure-Rust or `std` equivalent, so the
-//! `unsafe extern "C"` boundary here is unavoidable, not merely
-//! convenient. `flock`'s field layout and lock/cmd constants differ
+//! replaces `nix::fcntl` — plus (macOS-only, #652) a plain `fsync(2)`
+//! wrapper that bypasses `std::fs`'s Apple-only upgrade to
+//! `fcntl(F_FULLFSYNC)`; see [`fsync`]'s doc comment. SQLite's
+//! journal-mode lock ladder needs POSIX record locks; there is no
+//! pure-Rust or `std` equivalent, so the `unsafe extern "C"` boundary
+//! here is unavoidable, not merely convenient. `flock`'s field layout
+//! and lock/cmd constants differ
 //! between macOS and Linux (verified against each platform's own headers:
 //! `<sys/fcntl.h>` on macOS, glibc's `bits/fcntl.h` on Linux) — the two
 //! are kept in separate `cfg`-gated modules below rather than one
@@ -106,6 +109,49 @@ extern "C" {
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
 }
 
+// macOS-only: `std::fs::File::sync_data`/`sync_all` upgrade to
+// `fcntl(F_FULLFSYNC)` on Apple targets (a full flush past the drive's
+// write cache) — see `fsync`'s doc comment below for why that's the wrong
+// default for this crate to inherit. `#[link_name]` renames the raw
+// extern symbol so the safe wrapper below can keep the same name POSIX
+// and every other caller expects.
+#[cfg(target_os = "macos")]
+extern "C" {
+    #[link_name = "fsync"]
+    fn raw_fsync(fd: c_int) -> c_int;
+}
+
+/// Plain POSIX `fsync(2)` — used in place of `std::fs::File::sync_data`/
+/// `sync_all` on macOS. `std::fs`'s two sync methods both call
+/// `fcntl(F_FULLFSYNC)` on Apple platforms rather than a bare `fsync()`,
+/// trading a large latency cost (measured ~80x slower than plain `fsync`
+/// on this crate's own dev hardware, #652) for a stronger guarantee (a
+/// full flush past the drive's write cache) that real SQLite does not
+/// enable by default either: `PRAGMA fullfsync` governs exactly this on
+/// SQLite's own macOS VFS, and it defaults to `0`/off (verified against
+/// the pinned oracle, #652) — `synchronous=FULL` alone calls plain
+/// `fsync()`. Using `std`'s upgraded sync unconditionally made this
+/// crate's default durability behavior *stronger* than the oracle's own
+/// default, and most of the wall-clock gap between the two on
+/// write-heavy benchmarks traced to exactly this call. Linux is
+/// unaffected — `std`'s `sync_data` already calls plain `fdatasync`
+/// there, matching SQLite's own Linux default — so this wrapper and its
+/// callers are `cfg(target_os = "macos")`-only; non-macOS call sites keep
+/// calling `File::sync_data` directly.
+#[cfg(target_os = "macos")]
+pub fn fsync(file: &File) -> io::Result<()> {
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is a valid, open descriptor for the duration of this
+    // call, borrowed from `file` — the same precondition `fcntl_call`
+    // above documents.
+    let ret = unsafe { raw_fsync(fd) };
+    if ret == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// One `fcntl(F_SETLK)`/`fcntl(F_GETLK)` call: `F_SETLK(&fl)` acquires or
 /// releases the byte range described by `fl` (never blocks — SQLite's
 /// locking protocol is entirely non-blocking); `F_GETLK(&mut fl)` queries
@@ -156,13 +202,13 @@ mod tests {
     use std::fs::OpenOptions;
 
     fn temp_file() -> (File, std::path::PathBuf) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "sqlite-rs-sys-fcntl-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            n
         ));
         let file = OpenOptions::new()
             .read(true)
@@ -172,6 +218,23 @@ mod tests {
             .open(&path)
             .unwrap();
         (file, path)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fsync_succeeds_and_does_not_lose_the_write() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let (mut file, path) = temp_file();
+        file.write_all(b"hello, fsync").unwrap();
+        fsync(&file).unwrap();
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "hello, fsync");
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     fn lock_at(file: &File, kind: i16, start: off_t, len: off_t) -> io::Result<()> {
