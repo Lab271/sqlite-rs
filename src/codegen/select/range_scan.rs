@@ -36,6 +36,7 @@
 use super::limit_scan::{compile_limit_setup, emit_limit_guard, emit_offset_guard};
 use super::projection::emit_row_via_sink;
 use super::*;
+use crate::parser::ast::BinaryOp;
 use crate::parser::tokenizer::Span;
 use crate::vdbe::{affinity_of, Affinity};
 
@@ -611,6 +612,144 @@ where
     Ok(true)
 }
 
+/// Normalizes a single top-level comparison `WHERE` clause to
+/// `(col_name, literal_operand, inclusive)` when it has the shape
+/// `col > lit`/`col >= lit`/`lit < col`/`lit <= col` — the four spellings
+/// of "the index should seek to the first entry strictly/inclusively
+/// past `lit` and then walk forward with no upper bound". `col <
+/// lit`/`col <= lit`/`lit > col`/`lit >= col` (the descending-bound
+/// shapes) return `None`: walking those forward from a low-bound seek
+/// would require a *backward* walk from the top of the index, which
+/// needs an `IdxLast`/`IdxPrev` stop-check opcode this codegen doesn't
+/// have yet (#654) — those shapes keep falling back to the ordinary
+/// scan, unchanged from before this function existed.
+fn as_forward_comparison(expr: &Expr) -> Option<(&str, &Expr, bool)> {
+    let ExprKind::Binary { op, lhs, rhs } = &expr.kind else {
+        return None;
+    };
+    match op {
+        BinaryOp::Gt => Some((where_col(lhs)?, rhs.as_ref(), false)),
+        BinaryOp::Ge => Some((where_col(lhs)?, rhs.as_ref(), true)),
+        BinaryOp::Lt => Some((where_col(rhs)?, lhs.as_ref(), false)),
+        BinaryOp::Le => Some((where_col(rhs)?, lhs.as_ref(), true)),
+        _ => None,
+    }
+}
+
+/// Compiles `WHERE col > lit`/`col >= lit`/`lit < col`/`lit <= col` (`col`
+/// a plain column with a matching index) as a `SeekIndexGE(lit)` walk
+/// with no upper bound — `col >= lit`/`lit <= col` (`inclusive`) process
+/// every entry the seek lands on and after; the exclusive `>`/`<` shapes
+/// additionally skip a leading run of entries equal to `lit` (duplicate
+/// keys) before processing, since `SeekIndexGE`'s floor is inclusive.
+/// Real sqlite3's own `EXPLAIN QUERY PLAN` collapses inclusive and
+/// exclusive into the same `(col>?)` wording (confirmed empirically,
+/// sqlite3 3.53.4) — [`find_range_seek_detail`] mirrors that, not a
+/// `>=`-specific spelling. Returns `Ok(false)` — `em`/`reg` untouched —
+/// for any shape [`as_forward_comparison`] doesn't recognize, an
+/// unsupported/mismatched-affinity operand, an unindexed column, or
+/// `DISTINCT`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_forward_comparison_seek<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    if matches!(select.distinct, Some(Distinctness::Distinct)) {
+        return Ok(false);
+    }
+    let Some(where_expr) = &select.where_clause else {
+        return Ok(false);
+    };
+    let Some((col_name, operand, inclusive)) = as_forward_comparison(where_expr) else {
+        return Ok(false);
+    };
+    if !is_supported_operand(operand) {
+        return Ok(false);
+    }
+    let Some(index_position) = find_leading_index(schema, col_name) else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_position) else {
+        return Ok(false);
+    };
+    let affinity = column_affinity(schema, col_name);
+    if !operand_matches_column_affinity(operand, affinity) {
+        return Ok(false);
+    }
+    let leading_collation = index
+        .columns
+        .first()
+        .map_or(Collation::Binary, |c| c.collation);
+
+    let index_cursor = cursors.sort;
+    open_index_cursor(em, index, index_cursor)?;
+
+    let scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
+    let limit = compile_limit_setup(em, reg, &scope, select)?;
+    let bound_reg = compile_value(em, reg, &scope, operand)?;
+
+    let seek_addr = em.emit(Instruction::with_p4(
+        Opcode::SeekIndexGE,
+        index_cursor,
+        0,
+        bound_reg,
+        P4::SeekKey(vec![leading_collation]),
+    ));
+    em.patch_p2(seek_addr, end_label);
+
+    if !inclusive {
+        // The seek floor is inclusive, so a run of entries equal to
+        // `bound_reg` (duplicate keys) needs skipping before the walk
+        // below can treat "landed here" as "strictly past the bound".
+        let skip_start = em.new_label();
+        em.place(skip_start);
+        let past_bound = em.new_label();
+        let gt_addr = em.emit(Instruction::with_p4(
+            Opcode::IdxCompareGT,
+            index_cursor,
+            0,
+            bound_reg,
+            P4::SeekKey(vec![leading_collation]),
+        ));
+        em.patch_p2(gt_addr, past_bound);
+        let skip_next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+        em.patch_p2(skip_next_addr, skip_start);
+        let exhausted_addr = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(exhausted_addr, end_label);
+        em.place(past_bound);
+    }
+
+    let loop_start = em.new_label();
+    em.place(loop_start);
+    let row_skip = em.new_label();
+    emit_matched_row(
+        em,
+        reg,
+        select,
+        schema,
+        cursors,
+        index_cursor,
+        &limit,
+        row_skip,
+        end_label,
+        catalog,
+        sink,
+    )?;
+    em.place(row_skip);
+    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    Ok(true)
+}
+
 /// `EXPLAIN QUERY PLAN` reporting for this file's fast paths (#606's
 /// acceptance criteria: `EXPLAIN QUERY PLAN` must show index usage for
 /// these query shapes) — reuses the exact same shape-recognition
@@ -695,6 +834,24 @@ pub(super) fn find_range_seek_detail(
                 index.name
             ))
         }
-        _ => None,
+        _ => as_forward_comparison(where_expr).and_then(|(col_name, operand, _inclusive)| {
+            if !is_supported_operand(operand) {
+                return None;
+            }
+            let index_position = find_leading_index(schema, col_name)?;
+            let index = schema.indexes.get(index_position)?;
+            let affinity = column_affinity(schema, col_name);
+            if !operand_matches_column_affinity(operand, affinity) {
+                return None;
+            }
+            // Real sqlite3 collapses inclusive and exclusive into the
+            // same `(col>?)` wording (see `try_compile_forward_comparison_seek`'s
+            // doc) -- `_inclusive` only matters to the compiled seek's
+            // dup-skip, not to this report.
+            Some(format!(
+                "SEARCH {table_display} USING INDEX {} ({col_name}>?)",
+                index.name
+            ))
+        }),
     }
 }
