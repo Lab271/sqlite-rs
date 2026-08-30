@@ -17,7 +17,18 @@
 //! `src/vdbe/cursor.rs`'s module doc for the same caveat: these are not
 //! claimed to match codegen's, #91, eventual harvested operand layout):
 //! - `SorterOpen(p1=cursor, p2=bound register [only if p5!=0], p4=SortKey(columns), p5=1 if bounded)`
-//! - `SorterInsert(p1=cursor, p2=register holding the record blob)`
+//! - `SorterInsert(p1=cursor, p2=register holding the record blob,
+//!   p3=first register of the run that record was built from, p5=1 if
+//!   p3 names source registers, 0 to decode the key from the blob as
+//!   before)` — the `p3`/`p5` pairing mirrors `HashAggFind`'s own
+//!   `P3`: when the key columns' source registers are still live
+//!   (codegen allocates `MakeRecord`'s destination register *after*
+//!   that run, so they always are, for every emitter that opts in),
+//!   reading them straight from registers avoids decoding the very
+//!   blob this same instruction was just handed purely to recover
+//!   values already in hand — see [`sorter_key_values`]. `p5=0`
+//!   (every emitter that hasn't opted in yet) keeps the original
+//!   decode-from-blob behavior, so this is purely additive.
 //! - `SorterSort`/`Sort(p1=cursor, p2=jump target if the sorter is
 //!   empty)` — mirrors `Rewind`'s "jump on empty" shape.
 //! - `SorterNext(p1=cursor, p2=jump target if another row was found)` —
@@ -118,6 +129,33 @@ impl Vm {
     }
 }
 
+/// This row's key values read straight from `p3 + <column index>` — the
+/// register run `p2`'s record was just `MakeRecord`'d from — instead of
+/// decoding them back out of that same record. Both `state` (for the
+/// key descriptor) and `vm.register` need only a shared borrow, so this
+/// runs entirely before `SorterInsert`'s own exclusive borrow, exactly
+/// as `crate::vdbe::hash_agg::hash_agg_find`'s equivalent phase does.
+fn sorter_key_values_from_registers(
+    vm: &Vm,
+    p1: i32,
+    p3: i32,
+    opcode: &'static str,
+) -> Result<Vec<Value>, ExecError> {
+    let state = vm.sorter_ref(p1, opcode)?;
+    let mut values = Vec::with_capacity(state.keys.len());
+    for key in &state.keys {
+        let offset = i32::try_from(key.index).map_err(|_| ExecError::RegisterRangeTooLarge {
+            opcode,
+            count: i32::MAX,
+        })?;
+        let reg = p3
+            .checked_add(offset)
+            .ok_or(ExecError::RegisterOutOfRange { opcode, index: p3 })?;
+        values.push(vm.register(reg)?.clone());
+    }
+    Ok(values)
+}
+
 /// `SorterOpen`: opens an empty sorter, keyed by `P4`'s sort-key
 /// descriptor, into cursor slot `P1`. A nonzero `P5` reads `P2` as this
 /// sorter's top-K bound (#129): a negative value (`OffsetLimit`'s
@@ -187,17 +225,37 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             })
         }
     };
+    // When `p5` says `p3` names this record's own source-register run,
+    // read the key columns straight out of those registers (shared
+    // borrow, so this runs before `sorter_mut`'s exclusive one below) —
+    // encoding into `blob` and then decoding straight back out of it
+    // purely to recover values still sitting in registers is exactly
+    // the overhead `HashAggFind`'s own `P3` exists to avoid; see this
+    // module's doc.
+    let precomputed_values = if instr.p5 == 0 {
+        None
+    } else {
+        Some(sorter_key_values_from_registers(
+            vm,
+            instr.p1,
+            instr.p3,
+            "SorterInsert",
+        )?)
+    };
     let state = vm.sorter_mut(instr.p1, "SorterInsert")?;
     state.sorted = false;
     match state.bound {
         Some(0) => {}
         Some(n) if state.buffer.len() >= n => {
-            let new_values = decode_bytes_upto(
-                "SorterInsert",
-                &blob,
-                &state.key_indices,
-                &mut state.header_entries,
-            )?;
+            let new_values = match precomputed_values {
+                Some(values) => values,
+                None => decode_bytes_upto(
+                    "SorterInsert",
+                    &blob,
+                    &state.key_indices,
+                    &mut state.header_entries,
+                )?,
+            };
             let is_better = state.buffer.first().is_some_and(|(_, worst)| {
                 compare_rows(&new_values, worst, &state.keys) == Ordering::Less
             });
@@ -209,12 +267,15 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             }
         }
         _ => {
-            let values = decode_bytes_upto(
-                "SorterInsert",
-                &blob,
-                &state.key_indices,
-                &mut state.header_entries,
-            )?;
+            let values = match precomputed_values {
+                Some(values) => values,
+                None => decode_bytes_upto(
+                    "SorterInsert",
+                    &blob,
+                    &state.key_indices,
+                    &mut state.header_entries,
+                )?,
+            };
             state.buffer.push((blob, values));
             if state.bound.is_some() {
                 let last = state.buffer.len().saturating_sub(1);

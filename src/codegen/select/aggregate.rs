@@ -765,12 +765,14 @@ where
         i32::try_from(count).unwrap_or(0),
         record_reg,
     ));
-    em.emit(Instruction::new(
-        Opcode::SorterInsert,
-        cursors.sort,
-        record_reg,
-        0,
-    ));
+    // `first..first+count` (this row's `MakeRecord` source run) is still
+    // live here — `record_reg` was allocated after it — so `SorterInsert`
+    // can read its own sort key's values straight out of those registers
+    // instead of decoding them back out of the blob it's also handed;
+    // see `crate::vdbe::sorter`'s module doc for the `p3`/`p5` contract.
+    let mut sorter_insert = Instruction::new(Opcode::SorterInsert, cursors.sort, record_reg, first);
+    sorter_insert.p5 = 1;
+    em.emit(sorter_insert);
 
     em.place(scan_skip);
     let scan_next = em.emit(Instruction::new(Opcode::Next, cursors.table, 0, 0));
