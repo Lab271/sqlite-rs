@@ -406,6 +406,157 @@ where
     Ok(true)
 }
 
+/// #666: `UPDATE`/`DELETE`'s row-scan equivalent of
+/// [`try_compile_forward_comparison_seek`]/[`try_compile_between_seek`],
+/// stripped of `SELECT`-only concerns (`DISTINCT`, LIMIT/OFFSET,
+/// projection) — recognizes the same two WHERE shapes (`col >/>=/</<=
+/// lit` and `col BETWEEN lo AND hi` against a leading-indexed column)
+/// and emits the same `SeekIndexGE`/`IdxCompareGT`/`IdxNext` walk, but
+/// calls `sink` once per matching *index* entry instead of fetching the
+/// full table row itself — `sink` is responsible for turning that into
+/// a table-row action (typically `IdxRowid` + `SeekRowid` onto
+/// `row_skip` on a miss, then the caller's own per-row body). Returns
+/// `Ok(false)` — `em`/`reg` untouched — for any unrecognized shape,
+/// exactly like its `SELECT` counterparts.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_compile_range_row_seek<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    where_expr: &Expr,
+    schema: &TableSchema,
+    scope: &Scope,
+    index_cursor: i32,
+    end_label: Label,
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, Label) -> Result<(), CodegenError>,
+{
+    if let ExprKind::Between {
+        expr,
+        lo,
+        hi,
+        negated: false,
+    } = &where_expr.kind
+    {
+        let Some(col_name) = where_col(expr) else {
+            return Ok(false);
+        };
+        if !is_supported_operand(lo) || !is_supported_operand(hi) {
+            return Ok(false);
+        }
+        let Some(index_position) = find_leading_index(schema, col_name) else {
+            return Ok(false);
+        };
+        let Some(index) = schema.indexes.get(index_position) else {
+            return Ok(false);
+        };
+        let affinity = column_affinity(schema, col_name);
+        if !operand_matches_column_affinity(lo, affinity)
+            || !operand_matches_column_affinity(hi, affinity)
+        {
+            return Ok(false);
+        }
+        let leading_collation = index
+            .columns
+            .first()
+            .map_or(Collation::Binary, |c| c.collation);
+
+        open_index_cursor(em, index, index_cursor)?;
+        let lo_reg = compile_value(em, reg, scope, lo)?;
+        let hi_reg = compile_value(em, reg, scope, hi)?;
+
+        let seek_addr = em.emit(Instruction::with_p4(
+            Opcode::SeekIndexGE,
+            index_cursor,
+            0,
+            lo_reg,
+            P4::SeekKey(vec![leading_collation]),
+        ));
+        em.patch_p2(seek_addr, end_label);
+
+        let loop_start = em.new_label();
+        em.place(loop_start);
+
+        let stop_addr = em.emit(Instruction::with_p4(
+            Opcode::IdxCompareGT,
+            index_cursor,
+            0,
+            hi_reg,
+            P4::SeekKey(vec![leading_collation]),
+        ));
+        em.patch_p2(stop_addr, end_label);
+
+        let row_skip = em.new_label();
+        sink(em, reg, index_cursor, row_skip)?;
+        em.place(row_skip);
+        let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+        em.patch_p2(next_addr, loop_start);
+        return Ok(true);
+    }
+
+    let Some((col_name, operand, inclusive)) = as_forward_comparison(where_expr) else {
+        return Ok(false);
+    };
+    if !is_supported_operand(operand) {
+        return Ok(false);
+    }
+    let Some(index_position) = find_leading_index(schema, col_name) else {
+        return Ok(false);
+    };
+    let Some(index) = schema.indexes.get(index_position) else {
+        return Ok(false);
+    };
+    let affinity = column_affinity(schema, col_name);
+    if !operand_matches_column_affinity(operand, affinity) {
+        return Ok(false);
+    }
+    let leading_collation = index
+        .columns
+        .first()
+        .map_or(Collation::Binary, |c| c.collation);
+
+    open_index_cursor(em, index, index_cursor)?;
+    let bound_reg = compile_value(em, reg, scope, operand)?;
+
+    let seek_addr = em.emit(Instruction::with_p4(
+        Opcode::SeekIndexGE,
+        index_cursor,
+        0,
+        bound_reg,
+        P4::SeekKey(vec![leading_collation]),
+    ));
+    em.patch_p2(seek_addr, end_label);
+
+    if !inclusive {
+        let skip_start = em.new_label();
+        em.place(skip_start);
+        let past_bound = em.new_label();
+        let gt_addr = em.emit(Instruction::with_p4(
+            Opcode::IdxCompareGT,
+            index_cursor,
+            0,
+            bound_reg,
+            P4::SeekKey(vec![leading_collation]),
+        ));
+        em.patch_p2(gt_addr, past_bound);
+        let skip_next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+        em.patch_p2(skip_next_addr, skip_start);
+        let exhausted_addr = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
+        em.patch_p2(exhausted_addr, end_label);
+        em.place(past_bound);
+    }
+
+    let loop_start = em.new_label();
+    em.place(loop_start);
+    let row_skip = em.new_label();
+    sink(em, reg, index_cursor, row_skip)?;
+    em.place(row_skip);
+    let next_addr = em.emit(Instruction::new(Opcode::IdxNext, index_cursor, 0, 0));
+    em.patch_p2(next_addr, loop_start);
+    Ok(true)
+}
+
 /// The maximum Unicode scalar value, `char::MAX` (U+10FFFF) — see this
 /// module's doc comment for why appending it to a literal prefix gives a
 /// safe strict upper bound for `LIKE 'prefix%'`/`GLOB 'prefix*'`.

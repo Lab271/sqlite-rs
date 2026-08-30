@@ -42,12 +42,14 @@ use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_colum
 use crate::codegen::index_maintenance::{
     emit_index_key_ops, emit_index_key_ops_from_regs, open_index_cursors, valid_table_root_page,
 };
-use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
-use crate::codegen::stmt::insert::{
-    cached_create_table, column_plans, emit_constraint_violation, SQLITE_CONSTRAINT_CHECK,
-    SQLITE_CONSTRAINT_NOTNULL,
+use crate::codegen::select::{
+    is_rowid_reference, top_level_equality_operands, try_compile_range_row_seek, CodegenError,
 };
-use crate::codegen::{CondTargets, Emitter, NullTarget, RegAlloc, Target};
+use crate::codegen::stmt::insert::{
+    cached_create_table, column_plans, emit_constraint_violation, ColumnPlan,
+    SQLITE_CONSTRAINT_CHECK, SQLITE_CONSTRAINT_NOTNULL,
+};
+use crate::codegen::{CondTargets, Emitter, Label, NullTarget, RegAlloc, Scope, Target};
 use crate::parser::ast::{
     ConflictAction, Expr, ExprKind, Literal, ParamKind, TableConstraint, Update,
 };
@@ -162,9 +164,9 @@ pub fn compile_update_with_catalog(
     // #336: on a seek, `row_skip` and `end_label` are the same target —
     // there's exactly one candidate row, so "skip this row" (a
     // constraint violation under `OR IGNORE`) and "no more rows" both
-    // mean "we're done". On the ordinary scan, they differ as usual:
-    // `row_skip` continues the loop, `end_label` exits it.
-    let (loop_start, row_skip) = if let Some(operand) = rowid_seek_operand {
+    // mean "we're done". On the ordinary/range-seek scans, they differ
+    // as usual: `row_skip` continues the loop, `end_label` exits it.
+    if let Some(operand) = rowid_seek_operand {
         let value_reg = compile_value(&mut em, &mut reg, &scope, operand)?;
         let seek_addr = em.emit(Instruction::new(
             Opcode::SeekRowid,
@@ -173,7 +175,132 @@ pub fn compile_update_with_catalog(
             value_reg,
         ));
         em.patch_p2(seek_addr, end_label);
-        (None, end_label)
+        emit_update_row_body(
+            &mut em,
+            &mut reg,
+            schema,
+            &scope,
+            &plans,
+            &table_checks,
+            &check_schema,
+            action,
+            rowid_alias,
+            &assigned,
+            end_label,
+        )?;
+        em.place(end_label);
+        em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+        return Ok(em.finish());
+    }
+
+    // #666: an index-seek range scan (`WHERE col >/>=/</<= lit` or
+    // `BETWEEN`, against a leading-indexed column) in place of the
+    // ordinary `Rewind`/`Next` scan + per-row `compile_cond` filter,
+    // mirroring `select.rs`'s own range-seek fast paths (#606). Runs in
+    // two passes, like `delete.rs`'s own #666 fast path: pass 1 (the
+    // `IdxNext` walk, read-only) records each matched rowid into an
+    // in-memory ephemeral table, since the walk mutates the very index
+    // b-tree it's scanning (every index, including the WHERE-clause
+    // one, gets rebuilt per updated row) — unlike [`TableCursor`]'s
+    // snapshotted traversal frames, the index cursor doing the
+    // `IdxNext` walk has no such mid-scan-mutation safety. Pass 2
+    // replays those rowids against `TABLE_CURSOR` to do the actual
+    // update, once the index scan is safely finished.
+    //
+    // [`TableCursor`]: crate::btree::TableCursor
+    let range_index_cursor =
+        FIRST_INDEX_CURSOR.saturating_add(i32::try_from(schema.indexes.len()).unwrap_or(0));
+    let eph_cursor = range_index_cursor.saturating_add(1);
+    let used_range_seek = if let Some(where_expr) = &update.where_clause {
+        em.emit(Instruction {
+            opcode: Opcode::OpenEphemeral,
+            p1: eph_cursor,
+            p2: 0,
+            p3: 0,
+            p4: P4::None,
+            p5: 1,
+        });
+        let pass1_done = em.new_label();
+        let matched = try_compile_range_row_seek(
+            &mut em,
+            &mut reg,
+            where_expr,
+            schema,
+            &scope,
+            range_index_cursor,
+            pass1_done,
+            &mut |em, reg, index_cursor, _row_skip| {
+                let rowid_reg = reg.alloc();
+                em.emit(Instruction::new(
+                    Opcode::IdxRowid,
+                    index_cursor,
+                    rowid_reg,
+                    0,
+                ));
+                let seq_reg = reg.alloc();
+                em.emit(Instruction::new(Opcode::Sequence, eph_cursor, seq_reg, 0));
+                let record_reg = reg.alloc();
+                em.emit(Instruction::new(
+                    Opcode::MakeRecord,
+                    rowid_reg,
+                    1,
+                    record_reg,
+                ));
+                em.emit(Instruction::new(
+                    Opcode::Insert,
+                    eph_cursor,
+                    seq_reg,
+                    record_reg,
+                ));
+                Ok(())
+            },
+        )?;
+        // Pass 1's own "no more rows"/"past the upper bound" exit (both
+        // routed to `pass1_done`, not `end_label`) must still fall into
+        // pass 2's replay loop below — an empty `eph_cursor` there is a
+        // correct, cheap no-op, but skipping straight to `end_label`
+        // would skip pass 2 entirely even when rows *were* collected
+        // before the bound was hit.
+        em.place(pass1_done);
+        matched
+    } else {
+        false
+    };
+
+    if used_range_seek {
+        let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, eph_cursor, 0, 0));
+        em.patch_p2(rewind_addr, end_label);
+        let loop_start = em.new_label();
+        em.place(loop_start);
+
+        let rowid_reg = reg.alloc();
+        em.emit(Instruction::new(Opcode::Column, eph_cursor, 0, rowid_reg));
+        let row_skip = em.new_label();
+        let seek_addr = em.emit(Instruction::new(
+            Opcode::SeekRowid,
+            TABLE_CURSOR,
+            0,
+            rowid_reg,
+        ));
+        em.patch_p2(seek_addr, row_skip);
+
+        emit_update_row_body(
+            &mut em,
+            &mut reg,
+            schema,
+            &scope,
+            &plans,
+            &table_checks,
+            &check_schema,
+            action,
+            rowid_alias,
+            &assigned,
+            row_skip,
+        )?;
+
+        em.place(row_skip);
+        let next_addr = em.emit(Instruction::new(Opcode::Next, eph_cursor, 0, 0));
+        em.patch_p2(next_addr, loop_start);
     } else {
         let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
         em.patch_p2(rewind_addr, end_label);
@@ -190,14 +317,60 @@ pub fn compile_update_with_catalog(
                 CondTargets::null_is_false(Target::Fallthrough, Target::Jump(row_skip)),
             )?;
         }
-        (Some(loop_start), row_skip)
-    };
 
+        emit_update_row_body(
+            &mut em,
+            &mut reg,
+            schema,
+            &scope,
+            &plans,
+            &table_checks,
+            &check_schema,
+            action,
+            rowid_alias,
+            &assigned,
+            row_skip,
+        )?;
+
+        em.place(row_skip);
+        let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
+        em.patch_p2(next_addr, loop_start);
+    }
+
+    em.place(end_label);
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+    Ok(em.finish())
+}
+
+/// Shared per-matched-row body for [`compile_update_with_catalog`]'s
+/// three positioning strategies (`SeekRowid` #336 fast path, #666's
+/// range-seek fast path, and the ordinary `Rewind`/`Next` scan): reads
+/// the new row's values (a mix of `SET`-assigned expressions and the
+/// row's own unassigned columns) from `TABLE_CURSOR`'s current row,
+/// re-validates NOT NULL/CHECK, then rebuilds the row (`Delete` +
+/// `Insert`) and its index entries. `row_skip` is where a constraint
+/// violation under `OR IGNORE` jumps — the caller places it and wires
+/// whatever "next row" mechanism (or none, for the single-row seek
+/// cases) follows.
+#[allow(clippy::too_many_arguments)]
+fn emit_update_row_body(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    scope: &Scope,
+    plans: &[ColumnPlan],
+    table_checks: &[Expr],
+    check_schema: &TableSchema,
+    action: ConflictAction,
+    rowid_alias: Option<usize>,
+    assigned: &[Option<&Expr>],
+    row_skip: Label,
+) -> Result<(), CodegenError> {
     // Every value the new row needs — including a possibly-reassigned
     // rowid — is read from the cursor's *current* row before `Delete`
     // below clears it (`cursor::delete` sets `state.current = None`).
     let rowid_reg = match rowid_alias.and_then(|idx| assigned.get(idx).copied().flatten()) {
-        Some(expr) => compile_value(&mut em, &mut reg, &scope, expr)?,
+        Some(expr) => compile_value(em, reg, scope, expr)?,
         None => {
             let r = reg.alloc();
             em.emit(Instruction::new(Opcode::Rowid, TABLE_CURSOR, r, 0));
@@ -214,10 +387,10 @@ pub fn compile_update_with_catalog(
             continue;
         }
         let r = match expr {
-            Some(expr) => compile_value(&mut em, &mut reg, &scope, expr)?,
+            Some(expr) => compile_value(em, reg, scope, expr)?,
             None => {
                 let r = reg.alloc();
-                emit_column_read(&mut em, schema, TABLE_CURSOR, idx, r)?;
+                emit_column_read(em, schema, TABLE_CURSOR, idx, r)?;
                 r
             }
         };
@@ -242,7 +415,7 @@ pub fn compile_update_with_catalog(
         em.goto(ok);
         em.place(violation);
         emit_constraint_violation(
-            &mut em,
+            em,
             action,
             SQLITE_CONSTRAINT_NOTNULL,
             format!(
@@ -286,9 +459,9 @@ pub fn compile_update_with_catalog(
             let violation = em.new_label();
             let ok = em.new_label();
             compile_cond(
-                &mut em,
-                &mut reg,
-                &crate::codegen::Scope::single(&check_schema, CHECK_CURSOR),
+                em,
+                reg,
+                &crate::codegen::Scope::single(check_schema, CHECK_CURSOR),
                 expr,
                 CondTargets {
                     on_true: Target::Fallthrough,
@@ -299,7 +472,7 @@ pub fn compile_update_with_catalog(
             em.goto(ok);
             em.place(violation);
             emit_constraint_violation(
-                &mut em,
+                em,
                 action,
                 SQLITE_CONSTRAINT_CHECK,
                 format!("CHECK constraint failed: {}", schema.name),
@@ -328,8 +501,8 @@ pub fn compile_update_with_catalog(
     // Old index entries are read from the cursor's still-current
     // (pre-`Delete`) row — must happen before `Delete` clears it.
     emit_index_key_ops(
-        &mut em,
-        &mut reg,
+        em,
+        reg,
         schema,
         TABLE_CURSOR,
         FIRST_INDEX_CURSOR,
@@ -347,23 +520,8 @@ pub fn compile_update_with_catalog(
         // The new row's values are already sitting in `col_regs`/
         // `rowid_reg` — build index keys from those directly instead of
         // seeking `TABLE_CURSOR` back onto the just-written row.
-        emit_index_key_ops_from_regs(
-            &mut em,
-            &mut reg,
-            schema,
-            &col_regs,
-            rowid_reg,
-            FIRST_INDEX_CURSOR,
-        )?;
+        emit_index_key_ops_from_regs(em, reg, schema, &col_regs, rowid_reg, FIRST_INDEX_CURSOR)?;
     }
 
-    if let Some(loop_start) = loop_start {
-        em.place(row_skip);
-        let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));
-        em.patch_p2(next_addr, loop_start);
-    }
-
-    em.place(end_label);
-    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
-    Ok(em.finish())
+    Ok(())
 }
