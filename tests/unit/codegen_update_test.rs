@@ -15,6 +15,7 @@
 //! `decode_record`, mirroring `tests/unit/codegen_insert_test.rs`'s harness.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlite_rs::btree::TableCursor;
@@ -23,9 +24,9 @@ use sqlite_rs::header::DatabaseHeader;
 use sqlite_rs::pager::Pager;
 use sqlite_rs::parser::{parse_insert, parse_update, ParseOutcome};
 use sqlite_rs::record::{decode_record, TextEncoding, Value};
-use sqlite_rs::schema::TableSchema;
+use sqlite_rs::schema::{read_schema, TableSchema};
 use sqlite_rs::vdbe::{execute_with_writable_db, ExecError};
-use sqlite_rs::vfs::{UnixVfs, Vfs};
+use sqlite_rs::vfs::{UnixVfs, Vfs, VfsPageSource};
 
 fn scratch_db(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -457,4 +458,119 @@ fn check_violation_halts_and_leaves_the_row_unchanged() {
         rows(&path, &header, page_size, 1),
         vec![(1, vec![Value::Integer(5)])]
     );
+}
+
+// ---------------------------------------------------------------
+// #666: index-seek range scan (`WHERE col >/>=/</<= lit`, `BETWEEN`)
+// ---------------------------------------------------------------
+
+fn seed_via_sqlite3(db: &Path, sql: &str) {
+    let status = Command::new("sqlite3").arg(db).arg(sql).status().unwrap();
+    assert!(status.success());
+}
+
+fn indexed_table_schema(db: &Path, table: &str) -> TableSchema {
+    let vfs = UnixVfs;
+    let file = vfs.open_read(db).unwrap();
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0).unwrap();
+    let header = DatabaseHeader::parse(&header_buf).unwrap();
+    let source = VfsPageSource::open(&vfs, db, header.page_size).unwrap();
+    let mut cursor = TableCursor::new(source, &header, 1);
+    let schemas = read_schema(&mut cursor, header.text_encoding).unwrap();
+    schemas
+        .into_iter()
+        .find(|s| s.name == table)
+        .unwrap_or_else(|| panic!("no schema for table {table}"))
+}
+
+fn range_seek_fixture(label: &str) -> (PathBuf, DatabaseHeader, u32, TableSchema) {
+    let db = std::env::temp_dir().join(format!(
+        "sqlite-rs-codegen-update-range-seek-{label}-{}.db",
+        std::process::id()
+    ));
+    std::fs::remove_file(&db).ok();
+    seed_via_sqlite3(
+        &db,
+        "CREATE TABLE t(id INTEGER, val INTEGER); \
+         CREATE INDEX idx_val ON t(val); \
+         INSERT INTO t VALUES (1, 5), (2, 10), (3, 15), (4, 20), (5, 25);",
+    );
+    let schema = indexed_table_schema(&db, "t");
+    let vfs = UnixVfs;
+    let file = vfs.open_read(&db).unwrap();
+    let mut header_buf = [0u8; 100];
+    file.read_at(&mut header_buf, 0).unwrap();
+    let header = DatabaseHeader::parse(&header_buf).unwrap();
+    let page_size = header.page_size;
+    (db, header, page_size, schema)
+}
+
+/// #666: `WHERE val > lit` against a leading-indexed column compiles to
+/// an index seek (`SeekIndexGE`), not a full `Rewind`/`Next` scan.
+#[test]
+fn range_predicate_update_compiles_to_index_seek() {
+    let (_db, _header, _page_size, schema) = range_seek_fixture("compile-check");
+    let update = match parse_update("UPDATE t SET id = id + 1 WHERE val > 15") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekIndexGE"),
+        "expected SeekIndexGE in the compiled program: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "Rewind" && r.p1 == 0),
+        "range-predicate update must not also emit a full scan of the table cursor: {rows:?}"
+    );
+}
+
+#[test]
+fn range_predicate_update_touches_only_matching_rows() {
+    let (db, header, page_size, schema) = range_seek_fixture("exec-gt");
+    run_update(
+        &db,
+        &header,
+        page_size,
+        "UPDATE t SET id = id + 100 WHERE val > 15",
+        &schema,
+    )
+    .unwrap();
+
+    let got = rows(&db, &header, page_size, schema.root_page);
+    let mut ids: Vec<i64> = got
+        .into_iter()
+        .map(|(_, values)| match &values[0] {
+            Value::Integer(n) => *n,
+            other => panic!("expected INTEGER, got {other:?}"),
+        })
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3, 104, 105]);
+}
+
+#[test]
+fn between_predicate_update_touches_only_matching_rows() {
+    let (db, header, page_size, schema) = range_seek_fixture("exec-between");
+    run_update(
+        &db,
+        &header,
+        page_size,
+        "UPDATE t SET id = id + 100 WHERE val BETWEEN 10 AND 20",
+        &schema,
+    )
+    .unwrap();
+
+    let got = rows(&db, &header, page_size, schema.root_page);
+    let mut ids: Vec<i64> = got
+        .into_iter()
+        .map(|(_, values)| match &values[0] {
+            Value::Integer(n) => *n,
+            other => panic!("expected INTEGER, got {other:?}"),
+        })
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 5, 102, 103, 104]);
 }
