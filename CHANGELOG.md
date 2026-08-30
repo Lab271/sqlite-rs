@@ -4,6 +4,19 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.9] - 2026-08-30
+
+### Fixed
+
+- `IndexCursor::seek()` scanned linearly from the first entry, fully
+  decoding every candidate cell until finding one `>= target`: O(n) per
+  seek. It now does a real O(log n) tree descent, binary-searching each
+  level's cell array and falling back to the nearest ancestor's
+  qualifying cell when a descended-into subtree has nothing to offer —
+  mirroring `TableCursor::seek`'s binary search, which never got applied
+  to the index-cursor side. Measured ~13.8% faster on an indexed range
+  scan and ~7% faster on an indexed join (#661).
+
 ## [0.18.8] - 2026-08-29
 
 ### Fixed

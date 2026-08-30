@@ -17,9 +17,9 @@
 //! Key comparison (NULL < numeric < text < blob, BINARY collation only —
 //! Tier 0 scope) is minimal by design, per the originating issue: enough
 //! ordering to walk in the correct sequence, not a fully general seek.
-//! [`IndexCursor::seek`] is a linear scan from the first entry rather
-//! than a tree descent, trading O(log n) for a much simpler, harder-to-
-//! get-wrong implementation — acceptable at Tier 0 scope.
+//! [`IndexCursor::seek`] does a real O(log n) tree descent (#661),
+//! binary-searching each level's cell array rather than scanning linearly
+//! from the first entry.
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -135,22 +135,90 @@ impl<P: PageSource> IndexCursor<P> {
 
     /// Returns the first entry (in ascending key order) whose decoded key
     /// is not less than `target`, or `None` if every entry is less than
-    /// `target`. A linear scan from the first entry — see the module doc
-    /// for why that's an intentional Tier 0 simplification.
+    /// `target`.
+    ///
+    /// A real tree descent (#661): at each interior level, binary-searches
+    /// that page's cell array for the leftmost cell whose key is not less
+    /// than `target`, then descends into that cell's left child (which
+    /// may itself hold a qualifying entry smaller than the cell's own
+    /// key) — recording that cell as a fallback by leaving this frame's
+    /// `step` positioned just past the descend, exactly as normal
+    /// [`Self::advance`] traversal would after visiting it. If no cell on
+    /// a level qualifies, descends into `rightmost` instead. At the leaf,
+    /// binary-searches for the matching entry directly. Either way, the
+    /// stack left behind is indistinguishable from one built by ordinary
+    /// [`Self::first`]/[`Self::next`] traversal up to this point, so a
+    /// final [`Self::advance`] call yields the right entry — the leaf
+    /// match if there is one, or (if the leaf has nothing to offer) pops
+    /// back up to the nearest ancestor's fallback cell, or `None` if
+    /// nothing on the path ever qualified. This decodes only the O(log n)
+    /// candidate cells actually inspected per level, not every cell in
+    /// the tree.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "top = stack.len() - 1, computed just above from a non-empty stack (just pushed); always in bounds"
+    )]
     pub fn seek(
         &mut self,
         target: &[Value],
         encoding: TextEncoding,
     ) -> Result<Option<IndexRow>, BtreeError> {
-        let mut row = self.first()?;
-        while let Some(r) = row {
-            let key = decode_record(&r.payload, encoding)?;
-            if compare_keys(&key, target) != Ordering::Less {
-                return Ok(Some(r));
+        self.stack.clear();
+        self.pages_visited = 0;
+        self.push_page(self.root_page)?;
+        loop {
+            let top = self.stack.len().saturating_sub(1);
+            let (is_interior, num_cells) = {
+                let f = &self.stack[top];
+                (f.is_interior, f.num_cells)
+            };
+            if !is_interior {
+                let i = self.binary_search_page(top, num_cells, target, encoding, false)?;
+                self.stack[top].step = i;
+                break;
             }
-            row = self.next()?;
+            let i = self.binary_search_page(top, num_cells, target, encoding, true)?;
+            let child = if i < num_cells {
+                self.stack[top].step = i.saturating_mul(2).saturating_add(1);
+                self.read_interior_child(top, i)?
+            } else {
+                self.stack[top].step = num_cells.saturating_mul(2).saturating_add(1);
+                self.stack[top].rightmost
+            };
+            self.push_page(child)?;
         }
-        Ok(None)
+        self.advance()
+    }
+
+    /// Binary-searches `top`'s cell array (interior or leaf, per
+    /// `is_interior`) for the leftmost cell index whose decoded key is
+    /// not less than `target`, or `num_cells` if none qualify. Only the
+    /// O(log n) cells actually probed get their payload decoded.
+    fn binary_search_page(
+        &self,
+        top: usize,
+        num_cells: usize,
+        target: &[Value],
+        encoding: TextEncoding,
+        is_interior: bool,
+    ) -> Result<usize, BtreeError> {
+        let mut lo = 0usize;
+        let mut hi = num_cells;
+        while lo < hi {
+            let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+            let row = if is_interior {
+                self.decode_interior_entry(top, mid)?
+            } else {
+                self.decode_leaf_entry(top, mid)?
+            };
+            let key = decode_record(&row.payload, encoding)?;
+            if compare_keys(&key, target) != Ordering::Less {
+                hi = mid;
+            } else {
+                lo = mid.saturating_add(1);
+            }
+        }
+        Ok(lo)
     }
 
     fn read_page(&mut self, page_num: u32) -> Result<Rc<[u8]>, BtreeError> {
@@ -890,6 +958,67 @@ mod tests {
         let key = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
         assert_eq!(text(&key[0]), "row number 100");
         assert_eq!(int(&key[1]), 100);
+    }
+
+    /// #661: `seek`'s binary-search tree descent must land on exactly the
+    /// entry a linear full scan would, for a value between two existing
+    /// keys (not an exact hit on any stored key — exercises the
+    /// interior-cell fallback path when a descended-into child's subtree
+    /// turns out to hold nothing `>= target`) — and the cursor must then
+    /// be positioned correctly for `next()` to continue in order.
+    #[test]
+    fn secondary_index_seek_between_keys_matches_full_scan_and_next_continues() {
+        let mut scan = open_cursor("index.db", 3);
+        let mut rows = Vec::new();
+        let mut row = scan.first().unwrap();
+        while let Some(r) = row {
+            rows.push(decode_record(&r.payload, TextEncoding::Utf8).unwrap());
+            row = scan.next().unwrap();
+        }
+
+        // BINARY collation: "row number 15" sorts between "row number 1"
+        // and "row number 150"/"row number 1500" etc., but isn't itself a
+        // stored key.
+        let target = [Value::Text("row number 15".to_string().into())];
+        let expect_idx = rows
+            .iter()
+            .position(|k| compare_keys(k, &target) != Ordering::Less)
+            .expect("some row must be >= target");
+
+        let mut cursor = open_cursor("index.db", 3);
+        let landed = cursor.seek(&target, TextEncoding::Utf8).unwrap().unwrap();
+        let landed_key = decode_record(&landed.payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(landed_key, rows[expect_idx]);
+
+        // `next()` from here must continue exactly where a full scan
+        // would, proving the stack seek() leaves behind is positioned
+        // like ordinary first()/next() traversal.
+        for expected in &rows[expect_idx.saturating_add(1)..] {
+            let next_row = cursor.next().unwrap().expect("more rows expected");
+            let next_key = decode_record(&next_row.payload, TextEncoding::Utf8).unwrap();
+            assert_eq!(&next_key, expected);
+        }
+        assert!(cursor.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn secondary_index_seek_past_every_key_returns_none() {
+        let mut cursor = open_cursor("index.db", 3);
+        let target = [Value::Text("zzz-past-everything".to_string().into())];
+        assert!(cursor.seek(&target, TextEncoding::Utf8).unwrap().is_none());
+    }
+
+    #[test]
+    fn secondary_index_seek_before_every_key_returns_first_row() {
+        let mut cursor = open_cursor("index.db", 3);
+        let target = [Value::Text(String::new().into())];
+        let row = cursor.seek(&target, TextEncoding::Utf8).unwrap().unwrap();
+        let key = decode_record(&row.payload, TextEncoding::Utf8).unwrap();
+
+        let mut expect = open_cursor("index.db", 3);
+        let first = expect.first().unwrap().unwrap();
+        let first_key = decode_record(&first.payload, TextEncoding::Utf8).unwrap();
+        assert_eq!(key, first_key);
     }
 
     /// #52 tagged MC/DC vector (obligation `index_868`, the ordering-check
