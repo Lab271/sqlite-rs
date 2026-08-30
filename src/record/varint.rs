@@ -10,6 +10,7 @@ use super::error::RecordError;
     clippy::arithmetic_side_effects,
     reason = "i ranges over the compile-time-constant 0..8, so i + 1 never overflows"
 )]
+#[inline]
 pub fn decode_varint(buf: &[u8]) -> Result<(u64, usize), RecordError> {
     let mut result: u64 = 0;
     for i in 0..8 {
