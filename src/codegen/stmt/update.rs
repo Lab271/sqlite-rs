@@ -40,7 +40,7 @@
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value, emit_column_read};
 use crate::codegen::index_maintenance::{
-    emit_index_key_ops, open_index_cursors, valid_table_root_page,
+    emit_index_key_ops, emit_index_key_ops_from_regs, open_index_cursors, valid_table_root_page,
 };
 use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, CodegenError};
 use crate::codegen::stmt::insert::{
@@ -344,26 +344,17 @@ pub fn compile_update_with_catalog(
     ));
 
     if !schema.indexes.is_empty() {
-        // Same "`Insert` doesn't reposition the cursor" caveat as
-        // `insert.rs` — seek back onto the row just written before
-        // reading its new index-key values.
-        let seek_ok = em.new_label();
-        let seek_addr = em.emit(Instruction::new(
-            Opcode::SeekRowid,
-            TABLE_CURSOR,
-            0,
-            rowid_reg,
-        ));
-        em.patch_p2(seek_addr, seek_ok);
-        emit_index_key_ops(
+        // The new row's values are already sitting in `col_regs`/
+        // `rowid_reg` — build index keys from those directly instead of
+        // seeking `TABLE_CURSOR` back onto the just-written row.
+        emit_index_key_ops_from_regs(
             &mut em,
             &mut reg,
             schema,
-            TABLE_CURSOR,
+            &col_regs,
+            rowid_reg,
             FIRST_INDEX_CURSOR,
-            Opcode::IdxInsert,
         )?;
-        em.place(seek_ok);
     }
 
     if let Some(loop_start) = loop_start {
