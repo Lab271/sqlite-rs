@@ -413,6 +413,8 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 - WHEN sqlite-rs dumps text values
 - THEN text MUST be decoded correctly
 
+**Tests:** `src/header.rs::tests::encoding_utf16le`, `src/header.rs::tests::encoding_utf16be`, `src/record/decode.rs::tests::text_utf16le_and_utf16be`
+
 #### Scenario: Unknown schema entry degrades gracefully
 
 - GIVEN a database containing a virtual table (e.g. FTS5) whose module is unimplemented

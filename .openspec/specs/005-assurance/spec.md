@@ -114,6 +114,8 @@ fuzz target all discharge this claim today: `Cargo.toml`'s
 - WHEN `decode_record` runs
 - THEN it returns a `RecordError` variant naming the failure, never panics
 
+**Tests:** `src/record/decode.rs::truncated_record_at_every_offset_errors_not_panics`
+
 #### Scenario: Compile-time panic-surface gate
 
 - GIVEN `src/`'s workspace lint configuration
