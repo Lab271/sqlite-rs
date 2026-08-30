@@ -196,6 +196,24 @@ impl VfsFile for UnixVfsFile {
             .map_err(|source| to_vfs_error(&self.path, source))
     }
 
+    // On macOS, `std::fs::File::sync_data` upgrades to
+    // `fcntl(F_FULLFSYNC)` — a full flush past the drive's write cache —
+    // rather than a plain `fsync()`. That's a much stronger (and ~80x
+    // slower on this crate's own dev hardware, #652) guarantee than real
+    // SQLite's own default on the same platform: `PRAGMA fullfsync`
+    // governs exactly this and defaults to off, so `synchronous=FULL`
+    // alone calls plain `fsync()` there. `crate::sys::fcntl::fsync`
+    // matches that default; see its doc comment. Linux is unaffected —
+    // `sync_data` already calls plain `fdatasync` there, matching
+    // SQLite's own Linux default — so only the macOS path is routed
+    // through the vendored wrapper.
+    #[cfg(target_os = "macos")]
+    fn sync(&self) -> Result<()> {
+        crate::sys::fcntl::fsync(self.lock.borrow().file())
+            .map_err(|source| to_vfs_error(&self.path, source))
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn sync(&self) -> Result<()> {
         self.lock
             .borrow()
