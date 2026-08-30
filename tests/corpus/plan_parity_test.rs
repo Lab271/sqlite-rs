@@ -197,14 +197,7 @@ fn read_pk_matches_oracle_plan() {
     );
 }
 
-/// #606's range-seek fast path only covers `BETWEEN`/`IN`/LIKE-prefix, not
-/// a bare `>` comparison (`src/codegen/select/range_scan.rs::find_range_seek_detail`),
-/// so `compile_direct_scan` falls back to a plain scan here where the
-/// oracle picks `SEARCH ... USING INDEX bench_data_x (x>?)` -- a real,
-/// tracked planner gap, not a test bug. Un-ignore once a bare-comparison
-/// range seek lands.
 #[test]
-#[ignore = "no bare-`>` range-seek fast path yet (range_scan.rs only covers BETWEEN/IN/LIKE)"]
 fn read_indexed_range_matches_oracle_plan() {
     run_scenario(
         "read_indexed_range",
@@ -226,14 +219,7 @@ fn read_join_matches_oracle_plan() {
     );
 }
 
-/// The oracle reports an extra `USE TEMP B-TREE FOR GROUP BY` row that
-/// `explain_query_plan` (`src/codegen/select/eqp.rs`) never emits --
-/// `GROUP BY`'s own EQP reporting doesn't yet surface whether the
-/// compiled program actually sorts via a temp b-tree, a real gap distinct
-/// from `read_indexed_range`'s missing fast path. Un-ignore once that
-/// reporting is added.
 #[test]
-#[ignore = "GROUP BY EQP doesn't report a temp-b-tree sort step yet (eqp.rs)"]
 fn read_group_by_agg_matches_oracle_plan() {
     run_scenario(
         "read_group_by_agg",

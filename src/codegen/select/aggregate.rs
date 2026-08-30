@@ -1008,29 +1008,26 @@ where
 /// index scan against a filtered table scan), an ordinary rowid table,
 /// and every `GROUP BY` term a bare column (a computed `GROUP BY`
 /// expression has no corresponding index column to match against).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn try_compile_index_ordered_group_by<F>(
-    em: &mut Emitter,
-    reg: &mut RegAlloc,
+/// Whether `select`'s `GROUP BY` can walk an existing index in key order
+/// instead of sorting (`(index_position, forward)` if so) — the shared
+/// eligibility check `try_compile_index_ordered_group_by` gates on before
+/// compiling, factored out so [`super::eqp::explain_query_plan`] can ask
+/// the identical question (whether the compiled program needs a
+/// `Sorter`, i.e. a temp b-tree, for this `GROUP BY`) without
+/// duplicating — and risking drifting from — this eligibility logic.
+pub(super) fn group_by_index_ordering(
     select: &Select,
     schema: &TableSchema,
-    cursors: ScanCursors,
-    end_label: Label,
-    catalog: &[TableSchema],
     implicit_group: bool,
-    sink: &mut F,
-) -> Result<bool, CodegenError>
-where
-    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
-{
+) -> Result<Option<(usize, bool)>, CodegenError> {
     if implicit_group || select.group_by.is_empty() {
         // No GROUP BY key at all: nothing for an index to order by,
         // and #287's implicit whole-table group has exactly one group
         // regardless — sorting a single group is already free.
-        return Ok(false);
+        return Ok(None);
     }
     if select.where_clause.is_some() || schema.without_rowid {
-        return Ok(false);
+        return Ok(None);
     }
     let group_targets: Vec<OrderByTarget> = select
         .group_by
@@ -1044,7 +1041,7 @@ where
     // below) so that loop has no "already-rejected, can't happen"
     // branch to justify with an `unreachable!` the qualified-subset
     // gate (`make check-mvl-limit`) doesn't allow.
-    let Some(group_col_indices): Option<Vec<usize>> = group_targets
+    let Some(_group_col_indices): Option<Vec<usize>> = group_targets
         .iter()
         .map(|t| match t {
             OrderByTarget::Column(idx) => Some(*idx),
@@ -1052,7 +1049,7 @@ where
         })
         .collect()
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let plans: Vec<OrderByPlan> = select
         .group_by
@@ -1072,7 +1069,44 @@ where
             nulls_first: true,
         })
         .collect();
-    let Some((index_idx, forward)) = super::index_scan::find_ordering_index(schema, &plans) else {
+    Ok(super::index_scan::find_ordering_index(schema, &plans))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_compile_index_ordered_group_by<F>(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    select: &Select,
+    schema: &TableSchema,
+    cursors: ScanCursors,
+    end_label: Label,
+    catalog: &[TableSchema],
+    implicit_group: bool,
+    sink: &mut F,
+) -> Result<bool, CodegenError>
+where
+    F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
+{
+    let Some((index_idx, forward)) = group_by_index_ordering(select, schema, implicit_group)?
+    else {
+        return Ok(false);
+    };
+    let group_targets: Vec<OrderByTarget> = select
+        .group_by
+        .iter()
+        .map(|expr| order_by_target_for_expr(expr, schema))
+        .collect::<Result<_, _>>()?;
+    // `group_by_index_ordering` already confirmed every target is a
+    // bare column (that's what makes it index-orderable) — re-derived
+    // here since it doesn't return the indices themselves.
+    let Some(group_col_indices): Option<Vec<usize>> = group_targets
+        .iter()
+        .map(|t| match t {
+            OrderByTarget::Column(idx) => Some(*idx),
+            OrderByTarget::Expr(_) => None,
+        })
+        .collect()
+    else {
         return Ok(false);
     };
     let Some(index) = schema.indexes.get(index_idx) else {

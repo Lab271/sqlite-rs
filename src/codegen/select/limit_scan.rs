@@ -864,6 +864,11 @@ where
     )? {
         return Ok(());
     }
+    if super::range_scan::try_compile_forward_comparison_seek(
+        em, reg, select, schema, cursors, end_label, catalog, sink,
+    )? {
+        return Ok(());
+    }
     if try_compile_skip_scan_index(
         em, reg, select, schema, cursors, end_label, catalog, stats, sink,
     )? {

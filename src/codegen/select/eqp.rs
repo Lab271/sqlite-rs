@@ -409,6 +409,32 @@ pub fn explain_query_plan(
             }
         }
     }
+    // #654: a single-table `GROUP BY` that can't walk an existing index
+    // in key order needs a `Sorter` (`compile_grouped_scan`'s own doc
+    // comment) to group rows -- reusing
+    // `aggregate::group_by_index_ordering`, the exact eligibility check
+    // `compile_select_scan`'s dispatch itself gates
+    // `try_compile_index_ordered_group_by` on, so this report can never
+    // drift from which strategy actually got compiled. Real sqlite3's
+    // own wording for the Sorter-backed case (confirmed empirically,
+    // sqlite3 3.53.4): `USE TEMP B-TREE FOR GROUP BY`. Joined `GROUP BY`
+    // (`compile_joined_grouped_scan`) isn't covered here -- out of scope
+    // for #654, which only found this gap via a single-table scenario.
+    if from.joins.is_empty() && !select.group_by.is_empty() {
+        if let Some(binding) = bindings.first() {
+            let index_ordered =
+                super::aggregate::group_by_index_ordering(select, &binding.schema, false)?
+                    .is_some();
+            if !index_ordered {
+                rows.push(EqpRow {
+                    id: next_id,
+                    parent: 0,
+                    notused: 0,
+                    detail: "USE TEMP B-TREE FOR GROUP BY".to_string(),
+                });
+            }
+        }
+    }
     Ok(rows)
 }
 
