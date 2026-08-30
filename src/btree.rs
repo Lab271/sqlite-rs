@@ -1654,6 +1654,7 @@ fn read_u32(page: &[u8], offset: usize, page_num: u32) -> Result<u32, BtreeError
     Ok(u32::from_be_bytes(bytes))
 }
 
+#[inline]
 fn read_cell_pointer(
     page: &[u8],
     ptr_off: usize,
@@ -1686,6 +1687,7 @@ fn cell_ptr_offset(base: usize, i: usize) -> usize {
 /// Decodes a leaf table-b-tree cell's head (payload-length varint + rowid
 /// varint) and returns `(rowid, payload_len, tail_start)`, where
 /// `tail_start` is the page offset where the payload bytes begin.
+#[inline]
 fn decode_cell_head(
     page: &[u8],
     cell_start: usize,
