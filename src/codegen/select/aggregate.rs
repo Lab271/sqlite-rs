@@ -503,38 +503,97 @@ fn columns_needed_for_projection(
     indices
 }
 
-/// #506: pass 1's `MakeRecord` source registers, one per `schema`
-/// column in declared order — but only a real `Column`/`Rowid` read for
-/// an index in `needed`; every other column becomes a cheap `Null`
-/// placeholder instead of a real per-row read off `cursor`. Keeping one
-/// register per schema column (rather than compacting to just the
-/// needed ones) means every downstream reader of the pass-2 pseudo
-/// cursor — `read_pseudo_column`'s rowid-alias check, `flush_group`'s
-/// synthetic schema, arbitrary `compile_value` column resolution — still
-/// sees the exact same column-index-to-position mapping it did before
-/// this ticket, so none of that code needs to change at all. A `Null`
-/// placeholder is never actually read back (by construction: `needed`
-/// already covers every column any compiled expression touches), so
-/// its only costs are one `MakeRecord` NULL serial-type byte per row and
-/// nothing on decode — versus the real column's full read/encode/decode
-/// path skipped entirely. Returns the first allocated register (mirrors
-/// `compile_row_values`'s return).
-fn compile_row_values_pruned(
+/// #506's `needed` set, ordered ascending by original `schema` column
+/// index — this order becomes the sort record's own column layout, so
+/// every pass-2 index-based pseudo-cursor read needs translating
+/// through the position each original index lands at here.
+fn ordered_needed_columns(
+    needed: &std::collections::HashSet<usize>,
+    schema: &TableSchema,
+) -> Vec<usize> {
+    (0..schema.columns.len())
+        .filter(|i| needed.contains(i))
+        .collect()
+}
+
+/// The reverse of [`ordered_needed_columns`]: `result[orig_idx]` is the
+/// compacted record's position for that original `schema` column index,
+/// or `None` if it was pruned away entirely. Sized to `schema.columns.len()`
+/// so every lookup is a plain (safe, bounds-checked) `.get()`.
+fn compact_index_map(needed_order: &[usize], schema_len: usize) -> Vec<Option<usize>> {
+    let mut map = vec![None; schema_len];
+    for (pos, &orig) in needed_order.iter().enumerate() {
+        if let Some(slot) = map.get_mut(orig) {
+            *slot = Some(pos);
+        }
+    }
+    map
+}
+
+/// #665: a synthetic `TableSchema` covering only `needed_order`'s
+/// columns, in that order — so [`Scope::single`]'s ordinary name-based
+/// column resolution (`crate::codegen::expr::column_index`) automatically
+/// maps a column name to its *compacted* position, with no per-call-site
+/// index translation needed for any expression compiled through it
+/// (`compile_value`/`compile_cond` against the pass-2 pseudo cursor).
+/// Only the handful of call sites that address a column by raw original
+/// `schema` index (not by name) still need [`compact_index_map`]
+/// directly — see [`compile_grouped_scan`]'s pass 2.
+fn compact_schema(schema: &TableSchema, needed_order: &[usize]) -> TableSchema {
+    TableSchema {
+        name: schema.name.clone(),
+        root_page: 0,
+        columns: needed_order
+            .iter()
+            .map(|&i| schema.columns.get(i).cloned().unwrap_or_default())
+            .collect(),
+        without_rowid: schema.without_rowid,
+        strict: false,
+        column_types: needed_order
+            .iter()
+            .map(|&i| schema.column_types.get(i).cloned().unwrap_or_default())
+            .collect(),
+        column_collations: needed_order
+            .iter()
+            .map(|&i| {
+                schema
+                    .column_collations
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Collation::Binary)
+            })
+            .collect(),
+        is_virtual: false,
+        sql: String::new(),
+        indexes: Vec::new(),
+        rowid_alias: schema
+            .rowid_alias
+            .and_then(|orig| needed_order.iter().position(|&i| i == orig)),
+    }
+}
+
+/// #665: pass 1's `MakeRecord` source registers — a real `Column`/
+/// `Rowid` read for exactly `needed_order`'s columns, in that order, and
+/// nothing at all for any other column (no register, no placeholder).
+/// This is the actual sort-record width reduction #506 stopped short of
+/// (see that ticket's doc on [`compact_schema`]/[`compact_index_map`]
+/// for why it's safe now): pass 2 resolves every column reference
+/// against a [`compact_schema`]-backed scope/index map instead of
+/// assuming the record still mirrors `schema`'s full column layout.
+/// Returns the first allocated register (mirrors `compile_row_values`'s
+/// return), or a fresh unused register if `needed_order` is empty.
+fn compile_row_values_compact(
     em: &mut Emitter,
     reg: &mut RegAlloc,
     schema: &TableSchema,
-    needed: &std::collections::HashSet<usize>,
+    needed_order: &[usize],
     cursor: i32,
 ) -> Result<i32, CodegenError> {
     let mut first = None;
-    for idx in 0..schema.columns.len() {
+    for &idx in needed_order {
         let r = reg.alloc();
         first.get_or_insert(r);
-        if needed.contains(&idx) {
-            emit_column_read(em, schema, cursor, idx, r)?;
-        } else {
-            em.emit(Instruction::new(Opcode::Null, 0, r, 0));
-        }
+        emit_column_read(em, schema, cursor, idx, r)?;
     }
     Ok(first.unwrap_or_else(|| reg.alloc()))
 }
@@ -676,10 +735,8 @@ where
     F: FnMut(&mut Emitter, &mut RegAlloc, i32, i32) -> Result<(), CodegenError>,
 {
     let mut table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
-    let mut pseudo_scope = Scope::single(schema, cursors.pseudo).with_catalog(catalog.to_vec());
     if let Some(outer) = outer_scope {
         table_scope = table_scope.with_outer(outer.clone());
-        pseudo_scope = pseudo_scope.with_outer(outer.clone());
     }
     // #322: hoist any uncorrelated WHERE-clause IN/scalar (including
     // aggregate, #304) subquery out of pass 1's scan loop below,
@@ -706,9 +763,24 @@ where
         .map(|expr| order_by_target_for_expr(expr, schema))
         .collect::<Result<_, _>>()?;
     let needed_columns = columns_needed_for_projection(select, schema);
+    // #665: `needed_order`/`compact_of` are the sort record's actual
+    // (narrowed) column layout and the original-index -> that-layout
+    // translation table; `pseudo_scope` resolves by name against
+    // `compact_schema` (so `compile_value`/`emit_agg_step`'s GROUP BY
+    // and aggregate-argument expressions need no translation at all —
+    // only the couple of by-index reads below do.
+    let needed_order = ordered_needed_columns(&needed_columns, schema);
+    let compact_of = compact_index_map(&needed_order, schema.columns.len());
+    let pseudo_schema = compact_schema(schema, &needed_order);
+    let mut pseudo_scope =
+        Scope::single(&pseudo_schema, cursors.pseudo).with_catalog(catalog.to_vec());
+    if let Some(outer) = outer_scope {
+        pseudo_scope = pseudo_scope.with_outer(outer.clone());
+    }
 
-    // Pass 1: buffer every WHERE-matching row's full column tuple, plus
-    // a trailing register per computed (non-bare-column) GROUP BY
+    // Pass 1: buffer every WHERE-matching row's needed column values
+    // (#665: only the columns `needed_order` names, not the full row),
+    // plus a trailing register per computed (non-bare-column) GROUP BY
     // expression, sorted by the GROUP BY key — identical in shape to
     // `compile_sorted_scan`'s ORDER BY pass 1.
     let sorter_open_addr = em.emit(Instruction::with_p4(
@@ -735,12 +807,15 @@ where
             CondTargets::null_is_false(Target::Fallthrough, Target::Jump(scan_skip)),
         )?;
     }
-    let first = compile_row_values_pruned(em, reg, schema, &needed_columns, cursors.table)?;
+    let first = compile_row_values_compact(em, reg, schema, &needed_order, cursors.table)?;
 
     let mut sort_keys = Vec::with_capacity(group_targets.len());
     for (expr, target) in select.group_by.iter().zip(&group_targets) {
         let index = match target {
-            OrderByTarget::Column(idx) => *idx,
+            // Always resolves: `needed_columns` includes every column
+            // `select.group_by` references (`columns_needed_for_projection`),
+            // so `idx` always has a compacted position.
+            OrderByTarget::Column(idx) => compact_of.get(*idx).copied().flatten().unwrap_or(0),
             OrderByTarget::Expr(e) => {
                 let r = compile_value(em, reg, &table_scope, e)?;
                 usize::try_from(r.saturating_sub(first)).unwrap_or(0)
@@ -863,7 +938,10 @@ where
         .map(|(target, expr)| match target {
             OrderByTarget::Column(idx) => {
                 let r = reg.alloc();
-                read_pseudo_column(em, schema, cursors.pseudo, *idx, r)?;
+                // Always resolves — see the identical comment on
+                // pass 1's `sort_keys` loop above.
+                let compact_idx = compact_of.get(*idx).copied().flatten().unwrap_or(0);
+                read_pseudo_column(em, &pseudo_schema, cursors.pseudo, compact_idx, r)?;
                 Ok(r)
             }
             OrderByTarget::Expr(_) => compile_value(em, reg, &pseudo_scope, expr),
@@ -942,7 +1020,19 @@ where
     // exactly once, here, on the group's first (boundary) row; a
     // group's second-and-later rows (`not_boundary_label` below) only
     // fold their aggregates and never touch `snapshot_regs` again.
-    read_row_columns_into(em, schema, cursors.pseudo, &snapshot_regs)?;
+    //
+    // #665: `snapshot_regs` is still one register per *original*
+    // `schema` column (unchanged — `flush_group`'s own synthetic schema
+    // still zips against it 1:1), but the sort record itself now only
+    // has `needed_order`'s columns, so only those get a real read; the
+    // rest keep the NULL they were initialized to above (exactly the
+    // value they'd have decoded to anyway, since `needed_columns`
+    // already covers every column any compiled expression touches).
+    for (orig_idx, &dest) in snapshot_regs.iter().enumerate() {
+        if let Some(compact_idx) = compact_of.get(orig_idx).copied().flatten() {
+            read_pseudo_column(em, &pseudo_schema, cursors.pseudo, compact_idx, dest)?;
+        }
+    }
     let after_accumulate = em.new_label();
     let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
     em.patch_p2(goto_after_accumulate, after_accumulate);
