@@ -36,6 +36,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   *different*, already-on-disk row's stale entries) are unaffected —
   they have no such register run to reuse (#663).
 
+- `UPDATE ... WHERE col >/>=/</<= lit`/`BETWEEN` against a leading-indexed
+  column fell back to a full `Rewind`/`Next` scan with a per-row
+  `compile_cond` filter — unlike `SELECT`'s equivalent fast path, it
+  never used the index at all. `try_compile_range_row_seek` (a
+  `SELECT`-agnostic variant of the existing range-seek builders) is now
+  wired into `UPDATE` codegen: a read-only `IdxNext` walk records
+  matched rowids into an in-memory ephemeral table, then a second pass
+  replays them against the table cursor to do the actual update (the
+  index cursor doing the range walk has no save/restore protection
+  against the same scan's own index-maintenance writes, unlike
+  `TableCursor`'s snapshotted frames, so the update can't happen inline
+  during the walk). Measured ~28% faster on `update_filtered_range`
+  (#666). `DELETE`'s equivalent fast path was prototyped but not
+  shipped — for a highly selective predicate on a small table, the same
+  two-pass materialization regressed rather than helped, since it
+  needs an unavoidable random-order re-seek per matched row; blocked on
+  cursor save/restore, a separate follow-up.
+
 ## [0.18.8] - 2026-08-29
 
 ### Fixed
