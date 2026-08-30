@@ -5,16 +5,17 @@
 //! cursor, and emit the `IdxInsert`/`IdxDelete` pair for a row's index
 //! entries.
 //!
-//! Index keys are read back from the table cursor's *current* row via
-//! ordinary `Opcode::Column`/`Opcode::Rowid` (rowid last, matching the
-//! on-disk index key convention `btree::index::insert`/`index::delete`
-//! use) rather than reusing already-computed value registers — there is
-//! no register-copy opcode in the frozen V2 set
-//! (`tools/opcodes-v2.json`), so a fresh contiguous register run is
-//! rebuilt by reading from a cursor every time one is needed. For a
-//! freshly-inserted/updated row, the caller must position the table
-//! cursor on it first (`SeekRowid`) since `Opcode::Insert` does not
-//! reposition the cursor itself.
+//! For a row whose values are only available from disk (the *old* row
+//! of an `UPDATE`'s rebuild, or a row displaced by an `INSERT OR
+//! REPLACE` conflict), index keys are read back from the table cursor's
+//! *current* row via ordinary `Opcode::Column`/`Opcode::Rowid` (rowid
+//! last, matching the on-disk index key convention
+//! `btree::index::insert`/`index::delete` use) — see
+//! [`emit_index_key_ops`]. For a row whose values are already sitting in
+//! registers (a freshly-inserted/updated row, before it's written),
+//! [`emit_index_key_ops_from_regs`] builds the same key layout via
+//! `Opcode::Copy` from those registers instead, with no cursor re-seek
+//! or re-read.
 //!
 //! `DESC` index columns are rejected (`CodegenError::Unsupported`)
 //! rather than silently mis-keyed: no index b-tree comparator in this
@@ -140,6 +141,84 @@ pub(crate) fn emit_index_key_ops(
             opcode,
             index_cursor,
             start.unwrap_or(rowid_reg),
+            0,
+            P4::Int(i64::from(count)),
+        ));
+    }
+    Ok(())
+}
+
+/// Like [`emit_index_key_ops`], but for a row whose column values are
+/// already sitting in `col_regs` (one register per `schema.columns`
+/// entry, in order — the same layout `INSERT`/`UPDATE` codegen builds
+/// for `MakeRecord`) and whose rowid is already in `rowid_reg`. Builds
+/// each index's key via `Opcode::Copy` from those registers into a
+/// fresh contiguous run instead of `Opcode::Column`/`Opcode::Rowid`
+/// against a cursor — so callers don't need to `SeekRowid` back onto
+/// the row first. Always emits `IdxInsert`: the only caller that needs
+/// `IdxDelete` (removing a *different*, already-on-disk row's stale
+/// entries) has no such register run to reuse and stays on
+/// [`emit_index_key_ops`].
+pub(crate) fn emit_index_key_ops_from_regs(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    col_regs: &[i32],
+    rowid_reg: i32,
+    first_index_cursor: i32,
+) -> Result<(), CodegenError> {
+    for (i, index) in schema.indexes.iter().enumerate() {
+        let index_cursor = first_index_cursor.saturating_add(i32::try_from(i).unwrap_or(0));
+        let mut start = None;
+        for col in &index.columns {
+            if col.desc {
+                return Err(CodegenError::Unsupported {
+                    reason: format!(
+                        "index {} has a DESC column ({}); descending index keys aren't supported yet",
+                        index.name, col.name
+                    ),
+                });
+            }
+            let col_idx =
+                column_index(schema, &col.name).ok_or_else(|| CodegenError::Unsupported {
+                    reason: format!(
+                        "index {} references a column or expression this codegen can't resolve: {}",
+                        index.name, col.name
+                    ),
+                })?;
+            // The rowid-alias column's own register holds NULL (readers
+            // substitute the cursor's actual rowid instead — see
+            // `emit_column_read`), so its live value is `rowid_reg`, not
+            // `col_regs[col_idx]`.
+            let src = if Some(col_idx) == schema.rowid_alias {
+                rowid_reg
+            } else {
+                *col_regs
+                    .get(col_idx)
+                    .ok_or_else(|| CodegenError::Unsupported {
+                        reason: format!(
+                            "index {} references column {} outside the row's register run",
+                            index.name, col.name
+                        ),
+                    })?
+            };
+            let r = reg.alloc();
+            if start.is_none() {
+                start = Some(r);
+            }
+            em.emit(Instruction::new(Opcode::Copy, src, r, 0));
+        }
+        let key_rowid_reg = reg.alloc();
+        if start.is_none() {
+            start = Some(key_rowid_reg);
+        }
+        em.emit(Instruction::new(Opcode::Copy, rowid_reg, key_rowid_reg, 0));
+
+        let count = i32::try_from(index.columns.len().saturating_add(1)).unwrap_or(0);
+        em.emit(Instruction::with_p4(
+            Opcode::IdxInsert,
+            index_cursor,
+            start.unwrap_or(key_rowid_reg),
             0,
             P4::Int(i64::from(count)),
         ));

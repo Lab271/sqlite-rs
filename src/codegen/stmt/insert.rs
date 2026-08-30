@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::codegen::expr::{column_index, compile_cond, compile_value};
 use crate::codegen::index_maintenance::{
-    emit_index_key_ops, open_index_cursors, valid_table_root_page,
+    emit_index_key_ops, emit_index_key_ops_from_regs, open_index_cursors, valid_table_root_page,
 };
 use crate::codegen::select::{
     compile_select_joined_scan, compile_select_scan, select_result_column_count,
@@ -794,29 +794,10 @@ fn compile_row(
     ));
 
     if !schema.indexes.is_empty() {
-        // `Insert` doesn't reposition `TABLE_CURSOR` onto the row it
-        // just wrote, but the index-key registers are read back via
-        // `Opcode::Column`/`Opcode::Rowid` against the cursor's current
-        // row (see `index_maintenance`), so seek onto it first. A
-        // not-found jump target is required by `SeekRowid`'s shape but
-        // should be unreachable — the row was just inserted.
-        let seek_ok = em.new_label();
-        let seek_addr = em.emit(Instruction::new(
-            Opcode::SeekRowid,
-            TABLE_CURSOR,
-            0,
-            rowid_reg,
-        ));
-        em.patch_p2(seek_addr, seek_ok);
-        emit_index_key_ops(
-            em,
-            reg,
-            schema,
-            TABLE_CURSOR,
-            FIRST_INDEX_CURSOR,
-            Opcode::IdxInsert,
-        )?;
-        em.place(seek_ok);
+        // The new row's values are already sitting in `col_regs`/
+        // `rowid_reg` — build index keys from those directly instead of
+        // seeking `TABLE_CURSOR` back onto the just-written row.
+        emit_index_key_ops_from_regs(em, reg, schema, &col_regs, rowid_reg, FIRST_INDEX_CURSOR)?;
     }
 
     em.place(row_skip);
