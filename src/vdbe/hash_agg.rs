@@ -119,6 +119,22 @@ pub(crate) struct HashAggState {
     /// Iteration position within `order`.
     pos: usize,
     frozen: bool,
+    /// Scratch buffer for `HashAggFind`'s per-row key-source values,
+    /// reused across rows via take/give-back instead of allocating a
+    /// fresh `Vec` each call.
+    values_scratch: Vec<Value>,
+    /// Scratch buffer for `group_key_into`'s canonical key bytes, reused
+    /// the same way. Cloned into `index` only when a row starts a new
+    /// group.
+    key_bytes_scratch: Vec<u8>,
+    /// Scratch buffer for `group_key_into`'s decoded key values, reused
+    /// the same way. Cloned into a new `GroupSlot` only when a row
+    /// starts a new group.
+    key_values_scratch: Vec<Value>,
+    /// Scratch buffer for `HashAggStep`'s per-row aggregate arguments,
+    /// reused across rows via take/give-back. Never cloned: arguments
+    /// are only read by reference into `aggregate::step`.
+    args_scratch: Vec<Value>,
 }
 
 // Methods rather than free functions so the borrow of `self` elides —
@@ -214,17 +230,34 @@ fn exact_integer_real(r: f64) -> Option<i64> {
 }
 
 /// This row's group key: the `keys`-named columns of `values`, each
-/// with its comparison affinity applied, as both canonical bytes (the
-/// hash-map key) and values (kept for `HashAggRewind`'s ordering).
-fn group_key(values: &[Value], keys: &[GroupKeyColumn]) -> (Vec<u8>, Vec<Value>) {
-    let mut bytes = Vec::with_capacity(keys.len().saturating_mul(9));
-    let mut key_values = Vec::with_capacity(keys.len());
+/// with its comparison affinity applied, written into `bytes` (the
+/// hash-map key) and `key_values` (kept for `HashAggRewind`'s
+/// ordering) — both cleared and reused in place rather than allocated
+/// fresh, so a caller can reuse the same pair of buffers across rows.
+fn group_key_into(
+    values: &[Value],
+    keys: &[GroupKeyColumn],
+    bytes: &mut Vec<u8>,
+    key_values: &mut Vec<Value>,
+) {
+    bytes.clear();
+    key_values.clear();
     for key in keys {
         let mut value = values.get(key.index).cloned().unwrap_or(Value::Null);
         apply_affinity(&mut value, Affinity::from_p4_byte(key.affinity));
-        push_key_bytes(&mut bytes, &value, key.collation);
+        push_key_bytes(bytes, &value, key.collation);
         key_values.push(value);
     }
+}
+
+/// Test/non-hot-path convenience wrapper over [`group_key_into`] that
+/// allocates fresh buffers — the hot path (`hash_agg_find`) reuses
+/// scratch buffers directly instead.
+#[cfg(test)]
+fn group_key(values: &[Value], keys: &[GroupKeyColumn]) -> (Vec<u8>, Vec<Value>) {
+    let mut bytes = Vec::new();
+    let mut key_values = Vec::new();
+    group_key_into(values, keys, &mut bytes, &mut key_values);
     (bytes, key_values)
 }
 
@@ -250,6 +283,10 @@ pub fn hash_agg_open(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             order: Vec::new(),
             pos: 0,
             frozen: false,
+            values_scratch: Vec::new(),
+            key_bytes_scratch: Vec::new(),
+            key_values_scratch: Vec::new(),
+            args_scratch: Vec::new(),
         }),
     )?;
     Ok(Step::Next)
@@ -293,7 +330,11 @@ pub fn hash_agg_find(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
         }
         state.keys.clone()
     };
-    let mut values = Vec::with_capacity(positional.len());
+    let mut values = {
+        let state = vm.hash_agg_mut(instr.p1, "HashAggFind")?;
+        std::mem::take(&mut state.values_scratch)
+    };
+    values.clear();
     for key in &positional {
         let offset = i32::try_from(key.index).map_err(|_| ExecError::RegisterRangeTooLarge {
             opcode: "HashAggFind",
@@ -314,21 +355,26 @@ pub fn hash_agg_find(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
         .map(|(i, k)| GroupKeyColumn { index: i, ..*k })
         .collect();
     let state = vm.hash_agg_mut(instr.p1, "HashAggFind")?;
-    let (bytes, key_values) = group_key(&values, &positional);
+    let mut bytes = std::mem::take(&mut state.key_bytes_scratch);
+    let mut key_values = std::mem::take(&mut state.key_values_scratch);
+    group_key_into(&values, &positional, &mut bytes, &mut key_values);
     let position = match state.index.get(&bytes) {
         Some(pos) => *pos,
         None => {
             let pos = state.groups.len();
             state.groups.push(GroupSlot {
                 row: blob,
-                key_values,
+                key_values: key_values.clone(),
                 accumulators: Vec::new(),
             });
-            state.index.insert(bytes, pos);
+            state.index.insert(bytes.clone(), pos);
             pos
         }
     };
     state.current = Some(position);
+    state.values_scratch = values;
+    state.key_bytes_scratch = bytes;
+    state.key_values_scratch = key_values;
     Ok(Step::Next)
 }
 
@@ -351,7 +397,11 @@ pub fn hash_agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
             })
         }
     };
-    let mut args = Vec::with_capacity(arity);
+    let mut args = {
+        let state = vm.hash_agg_mut(instr.p3, "HashAggStep")?;
+        std::mem::take(&mut state.args_scratch)
+    };
+    args.clear();
     for i in 0..arity {
         let offset = i32::try_from(i).map_err(|_| ExecError::RegisterRangeTooLarge {
             opcode: "HashAggStep",
@@ -397,6 +447,7 @@ pub fn hash_agg_step(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     if let Some(cell) = group.accumulators.get_mut(slot) {
         *cell = Some(updated);
     }
+    state.args_scratch = args;
     Ok(Step::Next)
 }
 
