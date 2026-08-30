@@ -161,11 +161,79 @@ fn open_index_cursor(
     Ok(())
 }
 
+/// Every select-list column, when it's a bare unqualified column
+/// reference (`ResultColumn::Expr` wrapping `ExprKind::Column{table:
+/// None, catalog: None, ..}`) — the shape every fast path in this file
+/// is profiled against (`SELECT id, n, x, ... FROM t WHERE ...`), and
+/// the only shape [`emit_matched_row`]'s indexed-column substitution
+/// (#664) knows how to recognize. `None` for `*`/`tbl.*`, a qualified
+/// reference, or any computed expression — [`emit_matched_row`] falls
+/// back to the ordinary full-row read via [`emit_row_via_sink`] for
+/// those, exactly as before this optimization existed.
+fn bare_column_names(select: &Select) -> Option<Vec<&str>> {
+    select
+        .columns
+        .iter()
+        .map(|col| match col {
+            ResultColumn::Expr {
+                expr:
+                    Expr {
+                        kind:
+                            ExprKind::Column {
+                                table: None,
+                                catalog: None,
+                                name,
+                            },
+                        ..
+                    },
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reads `idx`'s value from `index_cursor`'s own leading key column
+/// (position 0) into `dest`, instead of [`emit_column_read`]'s ordinary
+/// read off the table cursor (#664) — every fast path in this file
+/// positions its index cursor on an entry whose key already carries the
+/// one column the seek matched against, so re-reading that same column
+/// a moment later off the table row `IdxRowid`+`SeekRowid` just fetched
+/// is a wholly redundant round trip (the table lookup itself still
+/// stands: every *other* selected column still only lives in the table
+/// row). Mirrors `emit_column_read`'s REAL-affinity fixup (#143) since
+/// this is still logically that same schema column, just sourced from a
+/// different cursor; the rowid-alias case never arises here — a
+/// rowid-alias column is never itself indexed as an ordinary index
+/// column, so [`emit_matched_row`] never requests it.
+fn emit_indexed_column_read(
+    em: &mut Emitter,
+    schema: &TableSchema,
+    index_cursor: i32,
+    idx: usize,
+    dest: i32,
+) {
+    em.emit(Instruction::new(Opcode::Column, index_cursor, 0, dest));
+    if schema
+        .column_types
+        .get(idx)
+        .is_some_and(|t| affinity_of(t) == Affinity::Real)
+    {
+        em.emit(Instruction::new(Opcode::RealAffinity, dest, 0, 0));
+    }
+}
+
 /// Emits the shared "fetch the full row and hand it to `sink`" tail
 /// every fast path in this file uses once the index cursor is
 /// positioned on a matching entry: `IdxRowid` + `SeekRowid` (jumping to
-/// `row_skip` if the table row is somehow missing) + LIMIT/OFFSET guards
-/// + [`emit_row_via_sink`].
+/// `row_skip` if the table row is somehow missing), then LIMIT/OFFSET
+/// guards, then the row projection. `indexed_col_name` is the column
+/// this fast path's seek matched against (already sitting in
+/// `index_cursor`'s key) — when every select-list column is a bare
+/// reference ([`bare_column_names`]), that one column is read straight
+/// from the index cursor instead of the table row (#664); any other
+/// select-list shape falls back to [`emit_row_via_sink`]'s ordinary
+/// full-row read, unchanged from before this optimization existed.
 #[allow(clippy::too_many_arguments)]
 fn emit_matched_row<F>(
     em: &mut Emitter,
@@ -174,6 +242,7 @@ fn emit_matched_row<F>(
     schema: &TableSchema,
     cursors: ScanCursors,
     index_cursor: i32,
+    indexed_col_name: &str,
     limit: &Option<super::limit_scan::LimitState>,
     row_skip: Label,
     end_label: Label,
@@ -203,6 +272,24 @@ where
     }
     if let Some(limit) = limit {
         emit_limit_guard(em, limit, end_label);
+    }
+
+    if let Some(names) = bare_column_names(select) {
+        let mut first = None;
+        for name in &names {
+            let idx = column_index(schema, name).ok_or_else(|| CodegenError::UnknownColumn {
+                name: (*name).to_string(),
+            })?;
+            let r = reg.alloc();
+            if name.eq_ignore_ascii_case(indexed_col_name) && schema.rowid_alias != Some(idx) {
+                emit_indexed_column_read(em, schema, index_cursor, idx, r);
+            } else {
+                emit_column_read(em, schema, cursors.table, idx, r)?;
+            }
+            first.get_or_insert(r);
+        }
+        let first = first.unwrap_or_else(|| reg.alloc());
+        return sink(em, reg, first, i32::try_from(names.len()).unwrap_or(0));
     }
     emit_row_via_sink(em, reg, select, schema, cursors.table, false, catalog, sink)
 }
@@ -305,6 +392,7 @@ where
         schema,
         cursors,
         index_cursor,
+        col_name,
         &limit,
         row_skip,
         end_label,
@@ -473,6 +561,7 @@ where
         schema,
         cursors,
         index_cursor,
+        col_name,
         &limit,
         row_skip,
         end_label,
@@ -597,6 +686,7 @@ where
             schema,
             cursors,
             index_cursor,
+            col_name,
             &limit,
             row_skip,
             end_label,
@@ -738,6 +828,7 @@ where
         schema,
         cursors,
         index_cursor,
+        col_name,
         &limit,
         row_skip,
         end_label,
