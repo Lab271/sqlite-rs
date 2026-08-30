@@ -9,9 +9,38 @@ use super::super::limit_scan::compile_limit_setup;
 use super::super::order_by::{order_by_target_for_expr, OrderByTarget};
 use super::super::*;
 use super::{
-    collect_aggregates, columns_needed_for_projection, compile_row_values_pruned, flush_group,
-    read_row_columns_into, AggSlot,
+    collect_aggregates, columns_needed_for_projection, flush_group, read_row_columns_into, AggSlot,
 };
+
+/// This spike's own pre-#665 copy of what was `compile_grouped_scan`'s
+/// `compile_row_values_pruned`: one register per `schema` column in
+/// declared order (a real read for a column in `needed`, a cheap `Null`
+/// placeholder otherwise), so `group_keys`/`group_key`'s below — which
+/// still index by raw original `schema` column index, matching this
+/// file's "identical record layout" doc comment — stay correct. Kept
+/// deliberately un-migrated to #665's true-narrowing scheme: this
+/// function is unwired from GROUP BY dispatch (#631) and only kept for
+/// possible reuse, so it isn't worth threading the same
+/// `compact_schema`/`compact_index_map` translation through a dead path.
+fn compile_row_values_pruned(
+    em: &mut Emitter,
+    reg: &mut RegAlloc,
+    schema: &TableSchema,
+    needed: &std::collections::HashSet<usize>,
+    cursor: i32,
+) -> Result<i32, CodegenError> {
+    let mut first = None;
+    for idx in 0..schema.columns.len() {
+        let r = reg.alloc();
+        first.get_or_insert(r);
+        if needed.contains(&idx) {
+            emit_column_read(em, schema, cursor, idx, r)?;
+        } else {
+            em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+        }
+    }
+    Ok(first.unwrap_or_else(|| reg.alloc()))
+}
 
 /// Compiles an explicit `GROUP BY` as a single-pass hash aggregation
 /// (#570): each WHERE-matching row is folded straight into its group's

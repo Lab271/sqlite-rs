@@ -1184,6 +1184,105 @@ fn group_by_multiple_columns() {
     std::fs::remove_file(&path).ok();
 }
 
+/// #665: the sort record `compile_grouped_scan`'s pass 1 buffers must
+/// carry only the columns the query actually needs — the `GROUP BY`
+/// key plus any plain (arbitrary-row) `SELECT`/`HAVING` column and any
+/// aggregate argument — not a `Null`-padded copy of the whole row. `u`
+/// here is referenced nowhere, so a correct fix excludes it entirely;
+/// `sub` is a plain non-grouped, non-aggregate column, exercising the
+/// "arbitrary row" snapshot path (picks the group's first row) through
+/// the now-compacted pseudo cursor.
+#[test]
+fn group_by_excludes_unreferenced_columns_from_the_sort_record() {
+    let path = std::env::temp_dir().join(format!(
+        "sqlite_rs_codegen_select_group_by_test_{}_unreferenced_column.db",
+        std::process::id()
+    ));
+    std::fs::remove_file(&path).ok();
+    let status = Command::new("sqlite3")
+        .arg(&path)
+        .arg(
+            "CREATE TABLE t(cat TEXT, sub TEXT, u INTEGER, val INTEGER); \
+             INSERT INTO t VALUES \
+             ('x', 'p', 999, 1), ('x', 'q', 999, 2), \
+             ('y', 'r', 999, 10);",
+        )
+        .status()
+        .expect("creating GROUP BY fixture db");
+    assert!(status.success());
+    let schema = TableSchema {
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec![
+            "cat".to_string(),
+            "sub".to_string(),
+            "u".to_string(),
+            "val".to_string(),
+        ],
+        column_types: vec![
+            "TEXT".to_string(),
+            "TEXT".to_string(),
+            "INTEGER".to_string(),
+            "INTEGER".to_string(),
+        ],
+        column_collations: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
+
+    let sql = "SELECT cat, sub, count(*), sum(val) FROM t GROUP BY cat;";
+    let select = match parse_select(sql) {
+        ParseOutcome::Accepted(s) => *s,
+        other => panic!("expected the parser to accept this query, got {other:?}"),
+    };
+    let program = compile_select(&select, &schema).expect("compiles");
+    let rows = sqlite_rs::vdbe::explain(&program);
+    let sorter_insert = rows
+        .iter()
+        .find(|r| r.opcode == "MakeRecord")
+        .expect("expected a MakeRecord instruction feeding SorterInsert");
+    assert_eq!(
+        sorter_insert.p2, 3,
+        "sort record should carry exactly `cat`, `sub`, and `val` — the \
+         GROUP BY key, the plain arbitrary-row column, and the aggregate \
+         argument — but not `u`, which is never referenced at all: {rows:?}"
+    );
+
+    let mut our = our_rows(&path, &schema, sql).expect("query should compile and execute");
+    our.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        our,
+        vec![
+            vec![
+                Value::Text("x".to_string().into()),
+                Value::Text("p".to_string().into()),
+                Value::Integer(2),
+                Value::Integer(3),
+            ],
+            vec![
+                Value::Text("y".to_string().into()),
+                Value::Text("r".to_string().into()),
+                Value::Integer(1),
+                Value::Integer(10),
+            ],
+        ]
+    );
+    if let Some(oracle) = pinned_oracle() {
+        let oracle_out = oracle_rows(&oracle, &path, sql);
+        let ours_as_text: Vec<Vec<String>> = our
+            .iter()
+            .map(|row| row.iter().map(value_to_oracle_text).collect())
+            .collect();
+        assert_eq!(ours_as_text, oracle_out);
+    }
+    std::fs::remove_file(&path).ok();
+}
+
 #[test]
 fn group_by_having_filters_groups() {
     let (path, schema) = group_by_fixture("having");
