@@ -43,7 +43,8 @@ use crate::codegen::index_maintenance::{
     emit_index_key_ops, emit_index_key_ops_from_regs, open_index_cursors, valid_table_root_page,
 };
 use crate::codegen::select::{
-    is_rowid_reference, top_level_equality_operands, try_compile_range_row_seek, CodegenError,
+    is_rowid_reference, range_seek_index_position, top_level_equality_operands,
+    try_compile_range_row_seek, CodegenError,
 };
 use crate::codegen::stmt::insert::{
     cached_create_table, column_plans, emit_constraint_violation, ColumnPlan,
@@ -193,81 +194,154 @@ pub fn compile_update_with_catalog(
         return Ok(em.finish());
     }
 
-    // #666: an index-seek range scan (`WHERE col >/>=/</<= lit` or
+    // #666/#675: an index-seek range scan (`WHERE col >/>=/</<= lit` or
     // `BETWEEN`, against a leading-indexed column) in place of the
     // ordinary `Rewind`/`Next` scan + per-row `compile_cond` filter,
-    // mirroring `select.rs`'s own range-seek fast paths (#606). Runs in
-    // two passes, like `delete.rs`'s own #666 fast path: pass 1 (the
-    // `IdxNext` walk, read-only) records each matched rowid into an
-    // in-memory ephemeral table, since the walk mutates the very index
-    // b-tree it's scanning (every index, including the WHERE-clause
-    // one, gets rebuilt per updated row) — unlike [`TableCursor`]'s
-    // snapshotted traversal frames, the index cursor doing the
-    // `IdxNext` walk has no such mid-scan-mutation safety. Pass 2
-    // replays those rowids against `TABLE_CURSOR` to do the actual
-    // update, once the index scan is safely finished.
+    // mirroring `select.rs`'s own range-seek fast paths (#606). The
+    // `IdxNext` walk mutates a b-tree it's scanning only when a `SET`
+    // column is actually part of *that* index's key — unlike
+    // [`TableCursor`]'s snapshotted traversal frames, the index cursor
+    // doing the `IdxNext` walk has no protection against a mid-scan
+    // mutation of its own b-tree. When no assigned column intersects the
+    // scanned index (the common case), the update is safe to apply
+    // directly inside the walk (`range_seek_touches_scanned_index ==
+    // false`, single pass below). Otherwise (#666's original shape) pass
+    // 1 (the `IdxNext` walk, read-only) records each matched rowid into
+    // an in-memory ephemeral table, and pass 2 replays those rowids
+    // against `TABLE_CURSOR` to do the actual update once the index scan
+    // is safely finished — like `delete.rs`'s own #666 fast path.
     //
     // [`TableCursor`]: crate::btree::TableCursor
     let range_index_cursor =
         FIRST_INDEX_CURSOR.saturating_add(i32::try_from(schema.indexes.len()).unwrap_or(0));
     let eph_cursor = range_index_cursor.saturating_add(1);
-    let used_range_seek = if let Some(where_expr) = &update.where_clause {
-        em.emit(Instruction {
-            opcode: Opcode::OpenEphemeral,
-            p1: eph_cursor,
-            p2: 0,
-            p3: 0,
-            p4: P4::None,
-            p5: 1,
+
+    // Only the index the range-seek itself walks matters here — other
+    // indexes get rebuilt per matched row regardless of pass count (a
+    // separate, documented simplification, see this module's top-level
+    // doc comment), and rebuilding *them* doesn't perturb the cursor
+    // doing the `IdxNext` walk on `range_index_cursor`. An `IndexedColumn`
+    // whose name isn't a plain column (an expression index) can't be
+    // proven not to reference an assigned column, so it's conservatively
+    // treated as touched.
+    let range_seek_touches_scanned_index = update
+        .where_clause
+        .as_ref()
+        .and_then(|where_expr| range_seek_index_position(where_expr, schema))
+        .and_then(|position| schema.indexes.get(position))
+        .is_some_and(|index| {
+            index.columns.iter().any(|c| {
+                column_index(schema, &c.name)
+                    .is_none_or(|idx| assigned.get(idx).is_some_and(Option::is_some))
+            })
         });
-        let pass1_done = em.new_label();
-        let matched = try_compile_range_row_seek(
-            &mut em,
-            &mut reg,
-            where_expr,
-            schema,
-            &scope,
-            range_index_cursor,
-            pass1_done,
-            &mut |em, reg, index_cursor, _row_skip| {
-                let rowid_reg = reg.alloc();
-                em.emit(Instruction::new(
-                    Opcode::IdxRowid,
-                    index_cursor,
-                    rowid_reg,
-                    0,
-                ));
-                let seq_reg = reg.alloc();
-                em.emit(Instruction::new(Opcode::Sequence, eph_cursor, seq_reg, 0));
-                let record_reg = reg.alloc();
-                em.emit(Instruction::new(
-                    Opcode::MakeRecord,
-                    rowid_reg,
-                    1,
-                    record_reg,
-                ));
-                em.emit(Instruction::new(
-                    Opcode::Insert,
-                    eph_cursor,
-                    seq_reg,
-                    record_reg,
-                ));
-                Ok(())
-            },
-        )?;
-        // Pass 1's own "no more rows"/"past the upper bound" exit (both
-        // routed to `pass1_done`, not `end_label`) must still fall into
-        // pass 2's replay loop below — an empty `eph_cursor` there is a
-        // correct, cheap no-op, but skipping straight to `end_label`
-        // would skip pass 2 entirely even when rows *were* collected
-        // before the bound was hit.
-        em.place(pass1_done);
-        matched
+
+    let used_range_seek = if let Some(where_expr) = &update.where_clause {
+        if range_seek_touches_scanned_index {
+            em.emit(Instruction {
+                opcode: Opcode::OpenEphemeral,
+                p1: eph_cursor,
+                p2: 0,
+                p3: 0,
+                p4: P4::None,
+                p5: 1,
+            });
+            let pass1_done = em.new_label();
+            let matched = try_compile_range_row_seek(
+                &mut em,
+                &mut reg,
+                where_expr,
+                schema,
+                &scope,
+                range_index_cursor,
+                pass1_done,
+                &mut |em, reg, index_cursor, _row_skip| {
+                    let rowid_reg = reg.alloc();
+                    em.emit(Instruction::new(
+                        Opcode::IdxRowid,
+                        index_cursor,
+                        rowid_reg,
+                        0,
+                    ));
+                    let seq_reg = reg.alloc();
+                    em.emit(Instruction::new(Opcode::Sequence, eph_cursor, seq_reg, 0));
+                    let record_reg = reg.alloc();
+                    em.emit(Instruction::new(
+                        Opcode::MakeRecord,
+                        rowid_reg,
+                        1,
+                        record_reg,
+                    ));
+                    em.emit(Instruction::new(
+                        Opcode::Insert,
+                        eph_cursor,
+                        seq_reg,
+                        record_reg,
+                    ));
+                    Ok(())
+                },
+            )?;
+            // Pass 1's own "no more rows"/"past the upper bound" exit
+            // (both routed to `pass1_done`, not `end_label`) must still
+            // fall into pass 2's replay loop below — an empty
+            // `eph_cursor` there is a correct, cheap no-op, but skipping
+            // straight to `end_label` would skip pass 2 entirely even
+            // when rows *were* collected before the bound was hit.
+            em.place(pass1_done);
+            matched
+        } else {
+            // #675: no assigned column intersects the scanned index, so
+            // it's safe to apply the update directly inside the same
+            // `IdxNext` walk instead of deferring it to a second pass —
+            // `row_skip` here is the exact label `try_compile_range_row_seek`
+            // already places right before its own `IdxNext`, so reusing
+            // it for both a failed `SeekRowid` and a constraint-violation
+            // skip continues the walk exactly like the two-pass replay
+            // loop below does for its own `Next`.
+            try_compile_range_row_seek(
+                &mut em,
+                &mut reg,
+                where_expr,
+                schema,
+                &scope,
+                range_index_cursor,
+                end_label,
+                &mut |em, reg, index_cursor, row_skip| {
+                    let rowid_reg = reg.alloc();
+                    em.emit(Instruction::new(
+                        Opcode::IdxRowid,
+                        index_cursor,
+                        rowid_reg,
+                        0,
+                    ));
+                    let seek_addr = em.emit(Instruction::new(
+                        Opcode::SeekRowid,
+                        TABLE_CURSOR,
+                        0,
+                        rowid_reg,
+                    ));
+                    em.patch_p2(seek_addr, row_skip);
+                    emit_update_row_body(
+                        em,
+                        reg,
+                        schema,
+                        &scope,
+                        &plans,
+                        &table_checks,
+                        &check_schema,
+                        action,
+                        rowid_alias,
+                        &assigned,
+                        row_skip,
+                    )
+                },
+            )?
+        }
     } else {
         false
     };
 
-    if used_range_seek {
+    if used_range_seek && range_seek_touches_scanned_index {
         let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, eph_cursor, 0, 0));
         em.patch_p2(rewind_addr, end_label);
         let loop_start = em.new_label();
@@ -301,7 +375,7 @@ pub fn compile_update_with_catalog(
         em.place(row_skip);
         let next_addr = em.emit(Instruction::new(Opcode::Next, eph_cursor, 0, 0));
         em.patch_p2(next_addr, loop_start);
-    } else {
+    } else if !used_range_seek {
         let rewind_addr = em.emit(Instruction::new(Opcode::Rewind, TABLE_CURSOR, 0, 0));
         em.patch_p2(rewind_addr, end_label);
         let loop_start = em.new_label();
@@ -395,6 +469,24 @@ fn emit_update_row_body(
             }
         };
         col_regs.push(r);
+    }
+
+    // `compile_value` returns whatever register its expression's *last*
+    // sub-computation happened to land in — for anything beyond a bare
+    // literal/column reference (e.g. `SET val = val + 1`), that's a
+    // scratch register consumed while evaluating the expression's own
+    // operands, so `col_regs` collected above can land anywhere,
+    // interleaved with other columns' scratch registers, not the
+    // contiguous run `MakeRecord` below requires. A second pass
+    // `Copy`'s each value into a freshly bump-allocated register, back
+    // to back with nothing else allocated in between (mirroring
+    // `insert.rs`'s own `compile_column_source`, #141/#261's fix for the
+    // same requirement), so the *copies* — not the original scattered
+    // registers — form the contiguous run.
+    for r in &mut col_regs {
+        let dest = reg.alloc();
+        em.emit(Instruction::new(Opcode::Copy, *r, dest, 0));
+        *r = dest;
     }
 
     // Re-validate NOT NULL against the new row's values — an unassigned

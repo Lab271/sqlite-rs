@@ -992,6 +992,87 @@ where
     Ok(true)
 }
 
+/// The `schema.indexes` position of the index a range-seek fast path in
+/// this file would pick for `where_expr`, or `None` if `where_expr`
+/// doesn't match any of the recognized shapes (`BETWEEN`, `LIKE`/`GLOB`
+/// prefix, `IN`, or a forward comparison) — the same
+/// shape-recognition/affinity checks `try_compile_range_row_seek` itself
+/// applies, factored out so a caller can inspect *which* index would be
+/// scanned without actually emitting anything (`update.rs`'s #675 fix
+/// uses this to decide whether the `SET` clause touches that index and a
+/// two-pass ephemeral-rowid plan is still required).
+pub(crate) fn range_seek_index_position(where_expr: &Expr, schema: &TableSchema) -> Option<usize> {
+    match &where_expr.kind {
+        ExprKind::Between {
+            expr,
+            lo,
+            hi,
+            negated: false,
+        } => {
+            let col_name = where_col(expr)?;
+            if !is_supported_operand(lo) || !is_supported_operand(hi) {
+                return None;
+            }
+            let index_position = find_leading_index(schema, col_name)?;
+            let affinity = column_affinity(schema, col_name);
+            if !operand_matches_column_affinity(lo, affinity)
+                || !operand_matches_column_affinity(hi, affinity)
+            {
+                return None;
+            }
+            Some(index_position)
+        }
+        ExprKind::Like {
+            expr,
+            pattern,
+            glob,
+            negated: false,
+            escape: None,
+        } => {
+            let col_name = where_col(expr)?;
+            let ExprKind::Literal(Literal::Str(pattern_str)) = &pattern.kind else {
+                return None;
+            };
+            like_literal_prefix(pattern_str, *glob)?;
+            let index_position = find_leading_index(schema, col_name)?;
+            if column_affinity(schema, col_name) != Affinity::Text {
+                return None;
+            }
+            Some(index_position)
+        }
+        ExprKind::In {
+            expr,
+            list,
+            negated: false,
+        } => {
+            if list.is_empty() || !list.iter().all(is_supported_operand) {
+                return None;
+            }
+            let col_name = where_col(expr)?;
+            let index_position = find_leading_index(schema, col_name)?;
+            let affinity = column_affinity(schema, col_name);
+            if !list
+                .iter()
+                .all(|v| operand_matches_column_affinity(v, affinity))
+            {
+                return None;
+            }
+            Some(index_position)
+        }
+        _ => as_forward_comparison(where_expr).and_then(|(col_name, operand, _inclusive)| {
+            if !is_supported_operand(operand) {
+                return None;
+            }
+            let index_position = find_leading_index(schema, col_name)?;
+            let affinity = column_affinity(schema, col_name);
+            if !operand_matches_column_affinity(operand, affinity) {
+                return None;
+            }
+            Some(index_position)
+        }),
+    }
+}
+
 /// `EXPLAIN QUERY PLAN` reporting for this file's fast paths (#606's
 /// acceptance criteria: `EXPLAIN QUERY PLAN` must show index usage for
 /// these query shapes) — reuses the exact same shape-recognition

@@ -574,3 +574,78 @@ fn between_predicate_update_touches_only_matching_rows() {
     ids.sort_unstable();
     assert_eq!(ids, vec![1, 5, 102, 103, 104]);
 }
+
+// ---------------------------------------------------------------
+// #675: single-pass range-seek update when the `SET` clause doesn't
+// touch the scanned index, still falling back to #666's two-pass plan
+// when it does.
+// ---------------------------------------------------------------
+
+/// `SET id = ...` never touches `idx_val` (the index `WHERE val > lit`
+/// scans), so the compiled plan must skip the ephemeral-rowid
+/// materialization entirely and apply the update directly in the index
+/// walk.
+#[test]
+fn range_predicate_update_without_indexed_set_uses_single_pass() {
+    let (_db, _header, _page_size, schema) = range_seek_fixture("single-pass-compile");
+    let update = match parse_update("UPDATE t SET id = id + 1 WHERE val > 15") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let rows = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows.iter().any(|r| r.opcode == "SeekIndexGE"),
+        "expected SeekIndexGE in the compiled program: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.opcode == "OpenEphemeral"),
+        "SET column doesn't intersect the scanned index — the two-pass \
+         ephemeral-rowid plan should be skipped: {rows:?}"
+    );
+}
+
+/// `SET val = ...` *does* touch `idx_val`, the very index `WHERE val >
+/// lit` scans — the compiled plan must keep #666's two-pass ephemeral
+/// plan (correctness over speed here), and the update must still land
+/// correctly on every originally-matching row despite the self-mutating
+/// index walk.
+#[test]
+fn range_predicate_update_on_indexed_column_keeps_two_pass_plan() {
+    let (db, header, page_size, schema) = range_seek_fixture("two-pass-compile");
+    let update = match parse_update("UPDATE t SET val = val + 1 WHERE val > 15") {
+        ParseOutcome::Accepted(u) => *u,
+        other => panic!("failed to parse: {other:?}"),
+    };
+    let program = compile_update(&update, &schema).unwrap();
+    let rows_eqp = sqlite_rs::vdbe::explain(&program);
+    assert!(
+        rows_eqp.iter().any(|r| r.opcode == "OpenEphemeral"),
+        "SET column intersects the scanned index — the two-pass \
+         ephemeral-rowid plan must still be used: {rows_eqp:?}"
+    );
+
+    run_update(
+        &db,
+        &header,
+        page_size,
+        "UPDATE t SET val = val + 1 WHERE val > 15",
+        &schema,
+    )
+    .unwrap();
+
+    let got = rows(&db, &header, page_size, schema.root_page);
+    let mut vals: Vec<i64> = got
+        .into_iter()
+        .map(|(_, values)| match &values[1] {
+            Value::Integer(n) => *n,
+            other => panic!("expected INTEGER, got {other:?}"),
+        })
+        .collect();
+    vals.sort_unstable();
+    // Originally 5, 10, 15, 20, 25 -- only val > 15 (20, 25) should be
+    // touched, becoming 21, 26. A self-mutating single-pass walk would
+    // either skip, re-visit, or double-increment these once the index
+    // b-tree is rewritten mid-scan.
+    assert_eq!(vals, vec![5, 10, 15, 21, 26]);
+}
