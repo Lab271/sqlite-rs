@@ -168,7 +168,7 @@ pub fn delete_master_row(
         header.text_encoding,
     )?
     .ok_or_else(|| BtreeError::MasterEntryNotFound {
-        name: name.to_string(),
+        name: Box::leak(name.to_string().into_boxed_str()),
     })?;
     super::delete_row(pager, header, SQLITE_MASTER_ROOT_PAGE, rowid)
 }
@@ -225,12 +225,12 @@ fn find_master_rootpage(
         if let (Some(Value::Text(n)), Some(Value::Integer(rp))) = (values.get(1), values.get(3)) {
             if n.as_ref() == name {
                 let rootpage = u32::try_from(*rp).map_err(|_| BtreeError::InvalidRootPage {
-                    name: name.to_string(),
+                    name: Box::leak(name.to_string().into_boxed_str()),
                     rootpage: *rp,
                 })?;
                 if rootpage == 0 {
                     return Err(BtreeError::InvalidRootPage {
-                        name: name.to_string(),
+                        name: Box::leak(name.to_string().into_boxed_str()),
                         rootpage: *rp,
                     });
                 }

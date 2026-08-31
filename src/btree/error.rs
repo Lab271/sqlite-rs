@@ -131,17 +131,25 @@ pub enum BtreeError {
     KeyNotFound,
 
     /// A `sqlite_master` entry names a rootpage number outside the valid page range.
+    ///
+    /// `name` is leaked (via [`Box::leak`]) rather than owned as a `String`:
+    /// this is a cold, rare corruption-detection path, and leaking here keeps
+    /// `BtreeError` itself free of drop glue (`needs_drop::<BtreeError>() ==
+    /// false`), which matters because it is constructed on the hot
+    /// `TableCursor::seek` path (see #679).
     InvalidRootPage {
         /// Name of the offending `sqlite_master` entry.
-        name: String,
+        name: &'static str,
         /// Out-of-range rootpage value.
         rootpage: i64,
     },
 
     /// A delete targeted a `sqlite_master` entry that does not exist.
+    ///
+    /// `name` is leaked for the same reason as [`BtreeError::InvalidRootPage`].
     MasterEntryNotFound {
         /// Name of the entry that could not be found.
-        name: String,
+        name: &'static str,
     },
 
     /// An internal invariant was violated; the message describes what was expected.
@@ -369,17 +377,14 @@ mod tests {
         );
         assert_eq!(
             BtreeError::InvalidRootPage {
-                name: "t".to_string(),
+                name: "t",
                 rootpage: -1
             }
             .to_string(),
             "sqlite_master entry \"t\" has out-of-range rootpage -1"
         );
         assert_eq!(
-            BtreeError::MasterEntryNotFound {
-                name: "t".to_string()
-            }
-            .to_string(),
+            BtreeError::MasterEntryNotFound { name: "t" }.to_string(),
             "cannot delete sqlite_master entry \"t\": no such entry"
         );
         assert_eq!(
