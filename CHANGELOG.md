@@ -4,6 +4,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.10] - 2026-08-31
+
+### Fixed
+
+- `hash_agg_find` allocated a fresh `Vec<u8>` key buffer and `Vec<Value>`
+  key-values buffer per row. It now reuses `HashAggState`-held scratch
+  buffers via take/give-back, cloning into `GroupSlot`/the index
+  `HashMap` only when a row starts a new group. `hash_agg_step` similarly
+  reuses a scratch `Vec<Value>` for per-row aggregate arguments instead
+  of allocating fresh each row. `read_group_by_agg` improves from ~2.5x
+  oracle to ~2.26x oracle on `bench_1mb.db` (#674).
+
 ## [0.18.9] - 2026-08-30
 
 ### Fixed
