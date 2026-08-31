@@ -209,7 +209,7 @@ pub(crate) use entry::{
 };
 pub(crate) use joins::compile_select_joined_scan;
 pub(crate) use limit_scan::{is_rowid_reference, top_level_equality_operands};
-pub(crate) use range_scan::try_compile_range_row_seek;
+pub(crate) use range_scan::{range_seek_index_position, try_compile_range_row_seek};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
