@@ -472,4 +472,10 @@ spike-008: ## Run spike 008 — tree-walking evaluator kernel-consumer prototype
 spike-009: ## Run spike 009 — VFS dyn-elimination option A/B prototypes (tests/spike/009_vfs_dyn_elimination, #80)
 	cd tests/spike/009_vfs_dyn_elimination && cargo run --bin option_a && cargo run --bin option_b
 
+spike-014: ## Run spike 014 — embedding-API kernel: Send+Sync handle over a streaming VDBE (tests/spike/014_embedding_api, #682)
+	$(MAKE) -C tests/spike/014_embedding_api test
+
+spike-014-bench: ## Bench spike 014 — full-drain vs time-to-first-row across batch/worker/stream/chunked (#682)
+	$(MAKE) -C tests/spike/014_embedding_api bench
+
 test-spikes: spike-001 spike-002 spike-003 spike-004 spike-005 spike-006 spike-007 spike-008 spike-009 ## Run every spike

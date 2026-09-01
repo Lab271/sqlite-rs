@@ -1,0 +1,17 @@
+[package]
+name = "embedding_api_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sqlite-rs = { path = "../../.." }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "streaming"
+harness = false
+
+[workspace]
