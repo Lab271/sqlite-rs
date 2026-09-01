@@ -1079,62 +1079,142 @@ pub fn execute_transaction_step(
     run(vm, program)
 }
 
-fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
-    // #509: `steps`/`pc` are both backstops against pathological programs
-    // (a step-limit runaway, a jump target past the end), not values any
-    // real program comes close to overflowing (`MAX_STEPS` is 50_000_000,
-    // program lengths are a handful of instructions per SQL statement) —
-    // `saturating_add` keeps the overflow-safety `arithmetic_side_effects`
-    // lint demands without `checked_add`'s per-step `Option` construction
-    // and `.ok_or` unwrap on this hot loop. (A batched, check-every-N-steps
-    // variant of the `MAX_STEPS` comparison was also tried and measured no
-    // further win beyond this — see the closing comment on #509 — so it
-    // was dropped rather than kept as unjustified complexity.)
-    let mut pc = 0usize;
-    let mut steps = 0u32;
-    loop {
-        steps = steps.saturating_add(1);
-        if steps > MAX_STEPS {
-            return Err(ExecError::StepLimitExceeded);
-        }
-        let Some(instr) = program.get(pc) else {
-            return Err(ExecError::ProgramCounterOutOfRange { pc });
-        };
-        match dispatch(&mut vm, pc, instr)? {
-            Step::Next => {
-                pc = pc.saturating_add(1);
-            }
-            Step::Jump(target) => pc = target,
-            Step::Halt { code: 0, .. } => {
-                // A program with no explicit `Transaction` (#194's
-                // original behavior, unchanged) treats a successful
-                // `Halt` as an implicit commit, flushing any pending
-                // write-opcode changes before returning. A `Vm::with_db`
-                // (read-only) or a writable `Vm` that never actually
-                // wrote anything both take the cheap
-                // `writer.is_none()`/`dirty.is_empty()` no-op path.
-                //
-                // #360: a program that opened an explicit transaction
-                // (`Transaction` opcode, `vm.autocommit == false`) and
-                // hasn't reached a matching `AutoCommit` yet does
-                // neither — one SQL statement is one `Program`/`Vm`
-                // (see `execute_transaction_step`), so `BEGIN`'s own
-                // `Halt` running with `autocommit == false` is the
-                // normal, expected case: the transaction stays open,
-                // `vm.autocommit` carries that forward to whichever
-                // `Vm` runs the next statement on this same `Pager`.
-                if let Some(db) = &vm.db {
-                    if vm.autocommit {
-                        if let Some(writer) = &db.writer {
-                            writer.borrow_mut().flush()?;
-                        }
-                    }
-                }
-                return Ok((vm.rows, vm.autocommit));
-            }
-            Step::Halt { code, message } => return Err(ExecError::Halted { code, message }),
+/// One statement's execution, driven one result row at a time.
+///
+/// `execute_with_db` and friends materialize every row into a `Vec`
+/// before the caller sees the first one, so reading row 0 of a large
+/// result costs building row N (#683, ADR-0038). Spike 014 (#682)
+/// measured that at 137.7 MB peak heap and 5.36 ms to first row for a
+/// 1,000,000-row result, against 8.68 MB and 44.7 µs here.
+///
+/// Nothing here changes what a program computes: [`run`] is a wrapper
+/// that collects `next_row` into the same `Vec` it always returned, so
+/// the batch path and the streaming path are literally the same loop. A
+/// behaviour difference between them would therefore be a bug in one,
+/// not a divergence callers have to reason about.
+///
+/// The `pending` queue is not redundant. `Vm::emit_row` has three
+/// callers, and `PRAGMA integrity_check`
+/// (`src/vdbe/pragma.rs::integrity_check`) emits *N* rows from a single
+/// dispatch — one per problem found. A drain that assumed one row per
+/// step would silently reverse that output, so rows move through a FIFO
+/// rather than being popped off the back.
+pub struct Execution<'p> {
+    vm: Vm,
+    program: &'p Program,
+    pc: usize,
+    steps: u32,
+    done: bool,
+    pending: std::collections::VecDeque<Vec<Value>>,
+}
+
+impl<'p> Execution<'p> {
+    /// Binds `vm` to `program` without executing anything yet.
+    pub fn new(vm: Vm, program: &'p Program) -> Self {
+        Self {
+            vm,
+            program,
+            pc: 0,
+            steps: 0,
+            done: false,
+            pending: std::collections::VecDeque::new(),
         }
     }
+
+    /// Runs until the program produces its next result row, returning
+    /// `None` once it has halted. Errors are terminal: `done` is set
+    /// before returning one, so a caller that keeps polling gets `None`
+    /// rather than re-entering a halted program.
+    pub fn next_row(&mut self) -> Result<Option<Vec<Value>>, ExecError> {
+        if let Some(row) = self.pending.pop_front() {
+            return Ok(Some(row));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        // #509: `steps`/`pc` are both backstops against pathological
+        // programs (a step-limit runaway, a jump target past the end),
+        // not values any real program comes close to overflowing
+        // (`MAX_STEPS` is 50_000_000, program lengths are a handful of
+        // instructions per SQL statement) — `saturating_add` keeps the
+        // overflow-safety `arithmetic_side_effects` lint demands without
+        // `checked_add`'s per-step `Option` construction and `.ok_or`
+        // unwrap on this hot loop. (A batched, check-every-N-steps
+        // variant of the `MAX_STEPS` comparison was also tried and
+        // measured no further win beyond this — see the closing comment
+        // on #509 — so it was dropped rather than kept as unjustified
+        // complexity.)
+        loop {
+            self.steps = self.steps.saturating_add(1);
+            if self.steps > MAX_STEPS {
+                self.done = true;
+                return Err(ExecError::StepLimitExceeded);
+            }
+            let Some(instr) = self.program.get(self.pc) else {
+                self.done = true;
+                return Err(ExecError::ProgramCounterOutOfRange { pc: self.pc });
+            };
+            match dispatch(&mut self.vm, self.pc, instr)? {
+                Step::Next => {
+                    self.pc = self.pc.saturating_add(1);
+                }
+                Step::Jump(target) => self.pc = target,
+                Step::Halt { code: 0, .. } => {
+                    // A program with no explicit `Transaction` (#194's
+                    // original behavior, unchanged) treats a successful
+                    // `Halt` as an implicit commit, flushing any pending
+                    // write-opcode changes before returning. A
+                    // `Vm::with_db` (read-only) or a writable `Vm` that
+                    // never actually wrote anything both take the cheap
+                    // `writer.is_none()`/`dirty.is_empty()` no-op path.
+                    //
+                    // #360: a program that opened an explicit transaction
+                    // (`Transaction` opcode, `vm.autocommit == false`) and
+                    // hasn't reached a matching `AutoCommit` yet does
+                    // neither — one SQL statement is one `Program`/`Vm`
+                    // (see `execute_transaction_step`), so `BEGIN`'s own
+                    // `Halt` running with `autocommit == false` is the
+                    // normal, expected case: the transaction stays open,
+                    // `vm.autocommit` carries that forward to whichever
+                    // `Vm` runs the next statement on this same `Pager`.
+                    if let Some(db) = &self.vm.db {
+                        if self.vm.autocommit {
+                            if let Some(writer) = &db.writer {
+                                writer.borrow_mut().flush()?;
+                            }
+                        }
+                    }
+                    self.done = true;
+                    return Ok(None);
+                }
+                Step::Halt { code, message } => {
+                    self.done = true;
+                    return Err(ExecError::Halted { code, message });
+                }
+            }
+            if !self.vm.rows.is_empty() {
+                self.pending.extend(self.vm.rows.drain(..));
+                if let Some(row) = self.pending.pop_front() {
+                    return Ok(Some(row));
+                }
+            }
+        }
+    }
+
+    /// The autocommit flag as it stands, for threading into the next
+    /// statement on the same `Pager` (see [`execute_transaction_step`]).
+    pub fn autocommit(&self) -> bool {
+        self.vm.autocommit
+    }
+}
+
+fn run(vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
+    let mut execution = Execution::new(vm, program);
+    let mut rows = Vec::new();
+    while let Some(row) = execution.next_row()? {
+        rows.push(row);
+    }
+    Ok((rows, execution.autocommit()))
 }
 
 #[cfg(test)]
