@@ -179,6 +179,7 @@ jobs:
     outputs:
       version: ${{ steps.pack.outputs.version }}
       digest: ${{ steps.upload.outputs.digest }}
+      already-published: ${{ steps.guard.outputs.already-published }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -200,12 +201,49 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           cargo package --locked
 
+      # Never re-publish a version that already exists. This is not
+      # defensive tidiness — it is load-bearing, and it was found the hard
+      # way:
+      #
+      #   * `cargo package` is not byte-reproducible across machines. The
+      #     same commit produced sha256:eb1deeae… on a laptop and
+      #     sha256:84074b9f… on a runner.
+      #   * `lab-cargo-*-local` are mutable. Re-uploading the same version
+      #     overwrote the bytes silently, with no error, including a version
+      #     already promoted with status `Released`.
+      #   * Cargo pins checksums in Cargo.lock. So an overwrite is not a
+      #     harmless re-upload; every existing consumer breaks outright with
+      #     "checksum for `sqlite-rs v0.18.10` changed between lock files".
+      #
+      # Repository immutability on `lab-cargo-prod-local`
+      # (Lab271/labs-jfrog-poc#4) is the real fix and needs platform admin we
+      # do not have. Until then this guard is the only thing standing between
+      # a re-run and a broken downstream lockfile.
+      - id: guard
+        name: Refuse to overwrite an existing version
+        run: |
+          v="${{ steps.pack.outputs.version }}"
+          found=false
+          for repo in lab-cargo-dev-local lab-cargo-prod-local; do
+            code=$(jf rt curl -s -o /dev/null -w '%{http_code}' \
+              "/api/storage/${repo}/crates/sqlite-rs/sqlite-rs-${v}.crate")
+            if [ "$code" = "200" ]; then
+              echo "::warning::sqlite-rs ${v} already exists in ${repo}."
+              found=true
+            fi
+          done
+          echo "already-published=$found" >> "$GITHUB_OUTPUT"
+          if [ "$found" = "true" ]; then
+            echo "::notice::Nothing to publish — bump the version to release new bytes. Skipping publish and promote."
+          fi
+
       # `--project` is mandatory on every build-info command. Without it the
       # CLI targets the platform-level `artifactory-build-info` repository and
       # gets a flat 403 whose message names that repository rather than the
       # missing flag.
       - id: upload
         name: Upload with build-info
+        if: steps.guard.outputs.already-published == 'false'
         run: |
           v="${{ steps.pack.outputs.version }}"
           n="${{ github.run_number }}"
@@ -235,7 +273,9 @@ jobs:
   promote:
     name: Promote to lab-cargo-prod-local
     needs: [preflight, publish]
-    if: needs.preflight.outputs.have-token == 'true'
+    if: >-
+      needs.preflight.outputs.have-token == 'true' &&
+      needs.publish.outputs.already-published == 'false'
     runs-on: ubuntu-latest
     environment: jfrog-prod
     steps:
