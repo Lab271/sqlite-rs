@@ -20,6 +20,11 @@ on:
       - "Cargo.lock"
   push:
     tags: ["v*"]
+    # TEMPORARY, reverted before merge. `workflow_dispatch` only fires for a
+    # workflow that already exists on the default branch, so the publish and
+    # promote jobs cannot be exercised from a feature branch any other way —
+    # and an unexecuted workflow is not evidence that it works.
+    branches: ["feat/jfrog-cargo"]
   workflow_dispatch:
 
 permissions:
@@ -113,9 +118,22 @@ jobs:
       - name: A second crate consumes the published version
         env:
           CARGO_REGISTRIES_LAB_CARGO_PROD_TOKEN: Bearer ${{ secrets.JF_ACCESS_TOKEN }}
+          JF_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
         run: |
           version=$(cargo metadata --no-deps --format-version=1 \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+
+          # On a PR that bumps the version, that version has not been
+          # promoted yet and there is nothing to consume. Skip rather than
+          # fail: a red build here would be a JFrog-caused CI failure, and
+          # the evaluation's threshold for those is zero.
+          if ! curl -sf -H "Authorization: Bearer ${JF_TOKEN}" \
+               "${JF_URL}/artifactory/api/cargo/lab-cargo-prod/index/sq/li/sqlite-rs" \
+               | grep -q "\"vers\":\"${version}\""; then
+            echo "::notice::sqlite-rs ${version} is not in lab-cargo-prod yet — nothing to consume, skipping."
+            exit 0
+          fi
+
           probe="$RUNNER_TEMP/consumer-probe"
           mkdir -p "$probe/src"
           cat > "$probe/Cargo.toml" <<EOF
@@ -148,7 +166,7 @@ jobs:
     needs: [preflight, resolve]
     if: >-
       needs.preflight.outputs.have-token == 'true' &&
-      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'push')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pack.outputs.version }}
