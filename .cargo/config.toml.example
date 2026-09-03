@@ -1,0 +1,50 @@
+# Cargo configuration for the Lab271 JFrog Artifactory registry.
+#
+# THIS FILE IS A TEMPLATE AND IS NOT ACTIVE. Copy it to `.cargo/config.toml`
+# (gitignored) to opt in:
+#
+#     cp .cargo/config.toml.example .cargo/config.toml
+#
+# It is deliberately not committed as `.cargo/config.toml`. This repository is
+# public, and the Artifactory Cargo index requires authentication — an
+# anonymous request to it returns 401, not a fallthrough to crates.io. A
+# committed source replacement would therefore break `cargo build` for every
+# outside contributor and every fork. See ADR-0038.
+#
+# Requires a JFrog identity token. Cargo reads it from
+# `CARGO_REGISTRIES_LAB_CARGO_DEV_TOKEN` (preferred, nothing on disk) or from
+# `~/.cargo/credentials.toml`. Never put a token in this file or in
+# `.cargo/config.toml`.
+
+# --- Resolving public crates through the Artifactory cache ------------------
+#
+# Source replacement, so no Cargo.toml or Cargo.lock change is needed. Cargo
+# requires a replacement source to serve byte-identical crates, and verifies
+# every `.crate` against the checksum already pinned in Cargo.lock — so this
+# cannot silently substitute a different dependency, and Cargo.lock stays
+# portable (its `source` entries keep pointing at crates.io).
+[source.crates-io]
+replace-with = "lab-cargo-dev"
+
+[source.lab-cargo-dev]
+registry = "sparse+https://schubergphilis.jfrog.io/artifactory/api/cargo/lab-cargo-dev/index/"
+
+# --- Publishing this crate, and consuming it elsewhere ---------------------
+#
+# The named-registry form. Needed by `cargo publish --registry lab-cargo-dev`,
+# and by any other crate that depends on this one as
+# `sqlite-rs = { version = "0.18", registry = "lab-cargo-dev" }`.
+#
+# Prefer that named form over relying on the source replacement above when
+# depending on sqlite-rs: under source replacement, the consumer's Cargo.lock
+# records our private crate as `source = "registry+https://github.com/
+# rust-lang/crates.io-index"`, which is untrue and makes `deny.toml`'s
+# `sources` check (`allow-registry = [crates.io]`) pass it silently.
+[registries.lab-cargo-dev]
+index = "sparse+https://schubergphilis.jfrog.io/artifactory/api/cargo/lab-cargo-dev/index/"
+
+# Promoted releases only — backed by `lab-cargo-prod-local` with no remote, so
+# it can never reach crates.io. That also makes it the only one of the two
+# immune to the name collision described in docs/src/jfrog-registry.md.
+[registries.lab-cargo-prod]
+index = "sparse+https://schubergphilis.jfrog.io/artifactory/api/cargo/lab-cargo-prod/index/"
