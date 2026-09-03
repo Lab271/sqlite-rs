@@ -20,11 +20,6 @@ on:
       - "Cargo.lock"
   push:
     tags: ["v*"]
-    # TEMPORARY, reverted before merge. `workflow_dispatch` only fires for a
-    # workflow that already exists on the default branch, so the publish and
-    # promote jobs cannot be exercised from a feature branch any other way —
-    # and an unexecuted workflow is not evidence that it works.
-    branches: ["feat/jfrog-cargo"]
   workflow_dispatch:
 
 permissions:
@@ -174,7 +169,7 @@ jobs:
     needs: [preflight, resolve]
     if: >-
       needs.preflight.outputs.have-token == 'true' &&
-      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pack.outputs.version }}
