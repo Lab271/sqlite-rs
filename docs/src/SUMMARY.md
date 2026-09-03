@@ -15,6 +15,7 @@
 # Reference
 
 - [Plan](plan.md)
+- [Private crate registry](jfrog-registry.md)
 - [ADR Index](adr/index.md)
   - [0001 — `-shm` access via pread/pwrite, not mmap](adr/0001-shm-access-pread-not-mmap.md)
   - [0002 — Value blocks over layer-ordered development](adr/0002-value-blocks-over-layers.md)

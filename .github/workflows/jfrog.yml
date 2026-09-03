@@ -1,0 +1,243 @@
+name: JFrog
+
+# Private crate registry: resolve through the Artifactory cache, publish the
+# packaged crate with build-info, promote a release to prod. See
+# docs/src/jfrog-registry.md and ADR-0038.
+#
+# Every job is gated on the JF_ACCESS_TOKEN secret being present and skips
+# cleanly when it is not. Forked pull requests never receive secrets, so this
+# workflow must never be the reason a contributor's PR shows red — a
+# JFrog-caused failure is a finding against the evaluation's reliability
+# criterion, and the threshold there is zero.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/jfrog.yml"
+      - ".cargo/config.toml.example"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JF_PROJECT: ${{ vars.JF_PROJECT }}
+  JF_URL: ${{ vars.JF_URL }}
+
+jobs:
+  # Is the credential available at all? Forked PRs get no secrets, and
+  # `secrets` cannot be referenced in a job-level `if:`, so the answer has to
+  # be computed in a job and passed on as an output.
+  preflight:
+    name: Credential available
+    runs-on: ubuntu-latest
+    outputs:
+      have-token: ${{ steps.check.outputs.have-token }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "${{ vars.JF_URL }}" ]; then
+            echo "have-token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have-token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No JFrog credential on this ref (expected on forked PRs) — JFrog jobs will skip."
+          fi
+
+  # Resolve the whole dependency closure through `lab-cargo-dev`, then prove a
+  # separate crate can consume the promoted `sqlite-rs` from `lab-cargo-prod`.
+  # The second half is the point of the exercise: eighteen releases in, no
+  # colleague has ever been able to write `sqlite-rs = "0.18"` and have it
+  # resolve.
+  resolve:
+    name: Resolve through lab-cargo-dev
+    needs: preflight
+    if: needs.preflight.outputs.have-token == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      # Written to the runner's CARGO_HOME, never to the working tree — the
+      # repository is public and a committed source replacement would 401
+      # every anonymous clone (ADR-0038). Credentials go via the environment,
+      # so no token is ever written to disk.
+      - name: Configure Cargo for Artifactory
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<EOF
+          [source.crates-io]
+          replace-with = "lab-cargo-dev"
+
+          [source.lab-cargo-dev]
+          registry = "sparse+${JF_URL}/artifactory/api/cargo/lab-cargo-dev/index/"
+
+          [registries.lab-cargo-dev]
+          index = "sparse+${JF_URL}/artifactory/api/cargo/lab-cargo-dev/index/"
+
+          [registries.lab-cargo-prod]
+          index = "sparse+${JF_URL}/artifactory/api/cargo/lab-cargo-prod/index/"
+          EOF
+
+      - name: cargo fetch --locked through the cache
+        env:
+          CARGO_REGISTRIES_LAB_CARGO_DEV_TOKEN: Bearer ${{ secrets.JF_ACCESS_TOKEN }}
+        run: |
+          start=$(date +%s)
+          cargo fetch --locked
+          echo "::notice::cargo fetch --locked through lab-cargo-dev took $(( $(date +%s) - start ))s"
+
+      # Cargo requires a replacement source to serve byte-identical crates and
+      # verifies each `.crate` against the checksum already in Cargo.lock, so
+      # resolving through Artifactory must leave the lockfile untouched. If it
+      # ever does not, the lockfile has stopped being portable and public
+      # clones are affected — fail loudly rather than commit the drift.
+      - name: Cargo.lock must be unchanged and still portable
+        run: |
+          git diff --exit-code -- Cargo.lock
+          if grep -qE 'jfrog|artifactory' Cargo.lock; then
+            echo "::error::Cargo.lock now references Artifactory — it is no longer portable."
+            exit 1
+          fi
+
+      # A throwaway crate outside the workspace, depending on the published
+      # version by name from the registry. Uses the named-registry form rather
+      # than the source replacement so the consumer's lockfile records honest
+      # provenance — see ADR-0038.
+      - name: A second crate consumes the published version
+        env:
+          CARGO_REGISTRIES_LAB_CARGO_PROD_TOKEN: Bearer ${{ secrets.JF_ACCESS_TOKEN }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version=1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          probe="$RUNNER_TEMP/consumer-probe"
+          mkdir -p "$probe/src"
+          cat > "$probe/Cargo.toml" <<EOF
+          [package]
+          name = "sqlite-rs-consumer-probe"
+          version = "0.0.0"
+          edition = "2021"
+          publish = false
+
+          [dependencies]
+          sqlite-rs = { version = "=${version}", registry = "lab-cargo-prod" }
+          EOF
+          cat > "$probe/src/main.rs" <<'EOF'
+          fn main() {
+              // Touch real public items so the dependency is genuinely
+              // compiled and linked, not merely resolved and discarded.
+              assert_eq!(sqlite_rs::header::HEADER_LEN, 100);
+              println!("consumed sqlite-rs from lab-cargo-prod");
+          }
+          EOF
+          cd "$probe" && cargo run --quiet
+          grep -A3 'name = "sqlite-rs"' Cargo.lock
+
+  # Package and upload with build-info. Deliberately does not use
+  # `cargo publish`: `package.publish` stays `false` (ADR-0038), and only the
+  # upload path records build-info. Tags and manual runs only — a PR does not
+  # publish.
+  publish:
+    name: Publish to lab-cargo-dev-local
+    needs: [preflight, resolve]
+    if: >-
+      needs.preflight.outputs.have-token == 'true' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # build-add-git needs real history to read the revision from.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: jfrog/setup-jfrog-cli@279b1f629f43dd5bc658d8361ac4802a7ef8d2d5 # v4.9.1
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+
+      # `cargo package` works fine under `publish = false`; it is only
+      # `cargo publish` that the flag blocks.
+      - id: pack
+        name: cargo package
+        run: |
+          version=$(cargo metadata --no-deps --format-version=1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cargo package --locked
+
+      # `--project` is mandatory on every build-info command. Without it the
+      # CLI targets the platform-level `artifactory-build-info` repository and
+      # gets a flat 403 whose message names that repository rather than the
+      # missing flag.
+      - id: upload
+        name: Upload with build-info
+        run: |
+          v="${{ steps.pack.outputs.version }}"
+          n="${{ github.run_number }}"
+          jf rt upload "target/package/sqlite-rs-${v}.crate" \
+            "lab-cargo-dev-local/crates/sqlite-rs/sqlite-rs-${v}.crate" \
+            --build-name=sqlite-rs --build-number="$n" --project="$JF_PROJECT"
+          jf rt build-add-git sqlite-rs "$n" --project="$JF_PROJECT"
+          jf rt build-publish sqlite-rs "$n" --project="$JF_PROJECT"
+          # Recorded BEFORE any promotion: `jf rt build-promote` moves by
+          # default, and after a move there is nothing left in dev to compare
+          # the promoted bytes against.
+          digest=$(jf rt curl -s \
+            "/api/storage/lab-cargo-dev-local/crates/sqlite-rs/sqlite-rs-${v}.crate" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["checksums"]["sha256"])')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "::notice::dev digest sha256:${digest}"
+
+  # Promote the same bytes to prod. The `jfrog-prod` environment is what makes
+  # the approver visible in the audit trail.
+  #
+  # NOTE FOR A HUMAN: the environment does not exist yet. GitHub creates it on
+  # this workflow's first run with NO protection rules, which means this job is
+  # currently ungated. Add required reviewers under
+  # Settings -> Environments -> jfrog-prod before treating it as an approval
+  # gate. Until then the environment records who triggered the run, not who
+  # approved it.
+  promote:
+    name: Promote to lab-cargo-prod-local
+    needs: [preflight, publish]
+    if: needs.preflight.outputs.have-token == 'true'
+    runs-on: ubuntu-latest
+    environment: jfrog-prod
+    steps:
+      - uses: jfrog/setup-jfrog-cli@279b1f629f43dd5bc658d8361ac4802a7ef8d2d5 # v4.9.1
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+
+      # `--copy=true` is not optional. build-promote MOVES by default, which
+      # would delete the crate from dev and break anything still resolving
+      # that version from `lab-cargo-dev`.
+      - name: Promote, then assert the digest is unchanged
+        run: |
+          v="${{ needs.publish.outputs.version }}"
+          jf rt build-promote sqlite-rs "${{ github.run_number }}" \
+            lab-cargo-prod-local --project="$JF_PROJECT" \
+            --status=Released --copy=true
+          for _ in $(seq 1 12); do
+            prod=$(jf rt curl -s \
+              "/api/storage/lab-cargo-prod-local/crates/sqlite-rs/sqlite-rs-${v}.crate" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("checksums",{}).get("sha256",""))')
+            [ -n "$prod" ] && break
+            sleep 5
+          done
+          echo "dev  sha256:${{ needs.publish.outputs.digest }}"
+          echo "prod sha256:${prod}"
+          if [ "$prod" != "${{ needs.publish.outputs.digest }}" ]; then
+            echo "::error::Promoted digest differs from the dev digest — the bytes were not preserved."
+            exit 1
+          fi
+          echo "::notice::Promoted bytes identical to dev — no rebuild in the path."
