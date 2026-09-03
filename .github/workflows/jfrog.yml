@@ -77,6 +77,14 @@ jobs:
         run: |
           mkdir -p "$HOME/.cargo"
           cat >> "$HOME/.cargo/config.toml" <<EOF
+          # The Artifactory index advertises "auth-required": true, and Cargo
+          # then refuses to query it unless a credential provider is named
+          # explicitly — "authenticated registries require a
+          # credential-provider to be configured". Naming the built-in token
+          # provider is what makes CARGO_REGISTRIES_*_TOKEN take effect.
+          [registry]
+          global-credential-providers = ["cargo:token"]
+
           [source.crates-io]
           replace-with = "lab-cargo-dev"
 
