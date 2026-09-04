@@ -12,6 +12,7 @@ pub mod dispatch;
 pub mod expr;
 pub(crate) mod index_maintenance;
 pub mod pragma;
+pub mod prepare;
 pub mod select;
 pub mod stmt;
 pub(crate) mod subquery;
@@ -24,6 +25,7 @@ pub use ddl::{
 };
 pub use dispatch::{compile_statement, leading_keywords, DispatchError};
 pub use pragma::compile_pragma;
+pub use prepare::{compile_select_program, result_column_names, PrepareError, SelectOutcome};
 pub use select::{
     compile_select, compile_select_compound, compile_select_joined, compile_select_with_catalog,
     compile_select_with_catalog_and_stats, explain_query_plan, output_column_names, CodegenError,

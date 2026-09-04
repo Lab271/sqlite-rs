@@ -47,7 +47,8 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_statement, leading_keywords, output_column_names, resolve_from_table_schema,
+    compile_select_program, compile_statement, leading_keywords, output_column_names,
+    resolve_from_table_schema, SelectOutcome,
 };
 use sqlite_rs::dump;
 use sqlite_rs::parser::{ends_with_semicolon, parse_select, split_statements, ParseOutcome};
@@ -60,7 +61,7 @@ use crate::dot_commands::{
 };
 use crate::mode::{print_rows, OutputMode};
 use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
-use crate::query::{compile_select_program, write_list_row, SelectOutcome};
+use crate::query::write_list_row;
 use crate::readline::{history_path, ReadlineError};
 use crate::tables::{list_table_and_view_names, print_table_names};
 
