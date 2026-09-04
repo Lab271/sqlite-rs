@@ -58,7 +58,7 @@ use crate::record::{
     record_column_count, TextEncoding, Value,
 };
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
-use crate::vdbe::program::{Instruction, P4};
+use crate::vdbe::program::{Instruction, OPFLAG_NCHANGE, P4};
 use crate::vdbe::{compare, Collation};
 
 /// One open cursor slot: a real table cursor, an in-memory ephemeral
@@ -1964,6 +1964,13 @@ pub fn delete(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             if let CursorSlot::Table(state) = vm.cursor_mut(instr.p1)? {
                 state.set_current(None);
             }
+            // Only when codegen marked this delete as the statement's row
+            // change (#692). A DELETE's own `Delete` carries the flag; the
+            // one an UPDATE emits before re-inserting the row does not,
+            // because that pair is one changed row, not two.
+            if instr.p5 & OPFLAG_NCHANGE != 0 {
+                vm.record_change();
+            }
             Ok(Step::Next)
         }
         CursorSlot::Ephemeral(_) => {
@@ -2048,6 +2055,14 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
                     reason: e.to_string(),
                 }
             })?;
+            drop(pager);
+            // See `Delete` above: the flag is codegen's call. Note the
+            // `EphemeralTable` arm never reaches here, so the two-pass
+            // UPDATE plan's rowid-stashing `Insert` cannot count even if
+            // a future caller flagged it by mistake.
+            if instr.p5 & OPFLAG_NCHANGE != 0 {
+                vm.record_change();
+            }
             Ok(Step::Next)
         }
     }

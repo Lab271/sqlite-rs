@@ -129,6 +129,10 @@ name = "vdbe_integrity_check"
 path = "tests/unit/vdbe_integrity_check_test.rs"
 
 [[test]]
+name = "vdbe_changes"
+path = "tests/unit/vdbe_changes_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 

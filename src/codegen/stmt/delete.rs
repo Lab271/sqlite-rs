@@ -28,7 +28,7 @@ use crate::codegen::select::{is_rowid_reference, top_level_equality_operands, Co
 use crate::codegen::{CondTargets, Emitter, RegAlloc, Scope, Target};
 use crate::parser::ast::{Delete, ExprKind, Literal, ParamKind};
 use crate::schema::TableSchema;
-use crate::vdbe::{Instruction, Opcode, Program};
+use crate::vdbe::{Instruction, Opcode, Program, OPFLAG_NCHANGE};
 
 const TABLE_CURSOR: i32 = 0;
 const FIRST_INDEX_CURSOR: i32 = 1;
@@ -118,7 +118,13 @@ pub fn compile_delete_with_catalog(
             FIRST_INDEX_CURSOR,
             Opcode::IdxDelete,
         )?;
-        em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
+        em.emit(Instruction::with_p5(
+            Opcode::Delete,
+            TABLE_CURSOR,
+            0,
+            0,
+            OPFLAG_NCHANGE,
+        ));
 
         em.place(end_label);
         em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
@@ -149,7 +155,13 @@ pub fn compile_delete_with_catalog(
         FIRST_INDEX_CURSOR,
         Opcode::IdxDelete,
     )?;
-    em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
+    em.emit(Instruction::with_p5(
+        Opcode::Delete,
+        TABLE_CURSOR,
+        0,
+        0,
+        OPFLAG_NCHANGE,
+    ));
 
     em.place(row_skip);
     let next_addr = em.emit(Instruction::new(Opcode::Next, TABLE_CURSOR, 0, 0));

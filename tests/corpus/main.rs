@@ -13,6 +13,7 @@
     clippy::arithmetic_side_effects
 )]
 
+mod changes_oracle_test;
 mod harness;
 mod oracle;
 
