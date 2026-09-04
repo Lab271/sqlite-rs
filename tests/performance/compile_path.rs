@@ -77,6 +77,7 @@ const WITH_CTE: &str =
 /// this bench stays fixture-free.
 fn bench_schema() -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec![

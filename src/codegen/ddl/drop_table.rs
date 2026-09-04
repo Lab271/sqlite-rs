@@ -53,6 +53,7 @@ mod tests {
 
     fn schema_with_index() -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: "t".to_string(),
             root_page: 2,
             columns: vec!["a".to_string()],

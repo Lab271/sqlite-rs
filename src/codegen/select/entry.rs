@@ -163,6 +163,7 @@ pub(super) fn compile_select_no_from(
     em.patch_p2(init_addr, body_start);
 
     let no_table = TableSchema {
+        unresolved_autoindex: false,
         name: String::new(),
         root_page: 0,
         columns: vec![],
@@ -460,6 +461,7 @@ pub fn compile_select_compound(
     // trailing ORDER BY/LIMIT and its terms bind to the compound's
     // result columns, never to any arm's table columns.
     let output_schema = TableSchema {
+        unresolved_autoindex: false,
         name: String::new(),
         root_page: 0,
         columns: output_column_names(first, first_schema),

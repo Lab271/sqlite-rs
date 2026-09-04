@@ -46,6 +46,7 @@ fn one_row_fixture() -> (std::path::PathBuf, TableSchema) {
         .expect("creating scratch fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
@@ -220,6 +221,7 @@ fn affinity_fixture() -> (std::path::PathBuf, TableSchema) {
         .expect("creating scratch fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["i".to_string(), "r".to_string()],

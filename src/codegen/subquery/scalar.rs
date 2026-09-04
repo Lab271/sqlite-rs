@@ -696,6 +696,7 @@ mod tests {
 
     fn table(name: &str, root_page: u32, columns: &[&str], sql: &str) -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: name.to_string(),
             root_page,
             columns: columns.iter().map(|c| c.to_string()).collect(),
