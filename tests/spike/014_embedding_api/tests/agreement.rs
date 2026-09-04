@@ -38,6 +38,25 @@ fn all_three_prototypes_agree_on_every_row() {
     assert_eq!(control, worker_batch, "worker_batch diverged from control");
     assert_eq!(control, worker_stream, "worker_stream diverged from control");
     assert_eq!(control, worker_chunked, "worker_chunked diverged from control");
+
+    // The zero-conversion path yields engine rows, so compare after
+    // converting the control the same way.
+    let worker_direct: Vec<_> = conn
+        .query_direct(SQL, vec![], 97)
+        .expect("worker_direct")
+        .map(|r| embedding_api_spike::send_row(&r.expect("row")))
+        .collect();
+    assert_eq!(control, worker_direct, "worker_direct diverged from control");
+
+    let worker_adaptive: Vec<_> = conn
+        .query_adaptive(SQL, vec![], 1024)
+        .expect("worker_adaptive")
+        .map(|r| embedding_api_spike::send_row(&r.expect("row")))
+        .collect();
+    assert_eq!(
+        control, worker_adaptive,
+        "worker_adaptive diverged from control"
+    );
 }
 
 /// A chunk larger than the whole result must still terminate and return

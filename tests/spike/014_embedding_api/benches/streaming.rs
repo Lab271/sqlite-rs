@@ -56,6 +56,27 @@ fn full_drain(c: &mut Criterion) {
         });
     }
 
+    // Decision 1 option (b): `Value` payloads as `Arc`, so rows cross the
+    // boundary with no conversion at all. Requires the branch-local patch
+    // to `src/record/value.rs`.
+    for chunk in [256_usize, 1024] {
+        group.bench_function(format!("worker_direct/{chunk}"), |b| {
+            b.iter(|| {
+                conn.query_direct(SQL, vec![], chunk)
+                    .expect("worker_direct")
+                    .count()
+            })
+        });
+    }
+
+    group.bench_function("worker_adaptive/cap1024", |b| {
+        b.iter(|| {
+            conn.query_adaptive(SQL, vec![], 1024)
+                .expect("worker_adaptive")
+                .count()
+        })
+    });
+
     group.finish();
 }
 
@@ -97,6 +118,14 @@ fn time_to_first_row(c: &mut Criterion) {
             })
         });
     }
+
+    group.bench_function("worker_adaptive/cap1024", |b| {
+        b.iter(|| {
+            conn.query_adaptive(SQL, vec![], 1024)
+                .expect("worker_adaptive")
+                .next()
+        })
+    });
 
     group.finish();
 }

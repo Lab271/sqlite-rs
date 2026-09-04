@@ -286,7 +286,7 @@ pub fn sorter_insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError
     Ok(Step::Next)
 }
 
-type SorterRow = (std::rc::Rc<[u8]>, Vec<Value>);
+type SorterRow = (std::sync::Arc<[u8]>, Vec<Value>);
 
 /// Restores the max-heap property (root = worst row, per `compare_rows`)
 /// after appending a new element at `buf`'s end — bubbles it up while

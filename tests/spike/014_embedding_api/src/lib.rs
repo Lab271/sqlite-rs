@@ -224,6 +224,18 @@ pub mod batch {
 // ---------------------------------------------------------------------
 
 enum Cmd {
+    /// Send engine rows across the boundary with **no conversion at all**.
+    ///
+    /// Only compiles when `Value`'s payloads are `Arc` rather than `Rc`
+    /// (the branch-local patch to `src/record/value.rs`). This is
+    /// Decision 1 option (b): pay atomic refcounting everywhere in the
+    /// engine, and nothing at the boundary.
+    Direct {
+        sql: String,
+        params: Row,
+        chunk: usize,
+        reply: SyncSender<SpikeResult<Option<Vec<EngineRow>>>>,
+    },
     /// Collect every row, then send the whole set once.
     Batch {
         sql: String,
@@ -235,6 +247,17 @@ enum Cmd {
         sql: String,
         params: Row,
         reply: SyncSender<SpikeResult<Option<Row>>>,
+    },
+    /// Send rows in *growing* groups: 1, 2, 4, ... up to `cap`.
+    ///
+    /// Decision 3 option (c): the first chunk is one row, so first-row
+    /// latency matches the unchunked path, and later chunks reach the
+    /// size that makes throughput match batch. No knob for the caller.
+    Adaptive {
+        sql: String,
+        params: Row,
+        cap: usize,
+        reply: SyncSender<SpikeResult<Option<Vec<EngineRow>>>>,
     },
     /// Send rows in groups of `chunk`; `Ok(None)` terminates the stream.
     Chunked {
@@ -332,6 +355,22 @@ fn worker_loop(path: &Path, rx: &Receiver<Cmd>, ready: &mpsc::Sender<SpikeResult
             }
             Cmd::Stream { sql, params, reply } => {
                 stream_one(path, &sql, params, &reply);
+            }
+            Cmd::Adaptive {
+                sql,
+                params,
+                cap,
+                reply,
+            } => {
+                stream_adaptive(path, &sql, params, cap, &reply);
+            }
+            Cmd::Direct {
+                sql,
+                params,
+                chunk,
+                reply,
+            } => {
+                stream_direct(path, &sql, params, chunk, &reply);
             }
             Cmd::Chunked {
                 sql,
@@ -439,6 +478,100 @@ fn stream_chunked(
     }
 }
 
+/// Growing-chunk variant: chunk size doubles from 1 up to `cap`.
+fn stream_adaptive(
+    path: &Path,
+    sql: &str,
+    params: Row,
+    cap: usize,
+    reply: &SyncSender<SpikeResult<Option<Vec<EngineRow>>>>,
+) {
+    let (source, header, program) = match open_and_compile(path, sql) {
+        Ok(parts) => parts,
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return;
+        }
+    };
+    let mut vm = Vm::with_db(source, header);
+    vm.bind_params(params.iter().map(SendValue::to_value).collect());
+    let mut execution = Execution::new(vm, &program);
+    let cap = cap.max(1);
+    let mut target = 1usize;
+    let mut buffer: Vec<EngineRow> = Vec::with_capacity(target);
+    loop {
+        match execution.next_row() {
+            Ok(Some(row)) => {
+                buffer.push(row);
+                if buffer.len() >= target {
+                    if reply.send(Ok(Some(std::mem::take(&mut buffer)))).is_err() {
+                        return;
+                    }
+                    target = target.saturating_mul(2).min(cap);
+                    buffer = Vec::with_capacity(target);
+                }
+            }
+            Ok(None) => {
+                if !buffer.is_empty() {
+                    let _ = reply.send(Ok(Some(buffer)));
+                }
+                let _ = reply.send(Ok(None));
+                return;
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e.to_string()));
+                return;
+            }
+        }
+    }
+}
+
+/// Like [`stream_chunked`], but hands `Value` over untouched.
+fn stream_direct(
+    path: &Path,
+    sql: &str,
+    params: Row,
+    chunk: usize,
+    reply: &SyncSender<SpikeResult<Option<Vec<EngineRow>>>>,
+) {
+    let (source, header, program) = match open_and_compile(path, sql) {
+        Ok(parts) => parts,
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return;
+        }
+    };
+    let mut vm = Vm::with_db(source, header);
+    vm.bind_params(params.iter().map(SendValue::to_value).collect());
+    let mut execution = Execution::new(vm, &program);
+    let chunk = chunk.max(1);
+    let mut buffer: Vec<EngineRow> = Vec::with_capacity(chunk);
+    loop {
+        match execution.next_row() {
+            Ok(Some(row)) => {
+                buffer.push(row); // no conversion, no copy
+                if buffer.len() >= chunk {
+                    if reply.send(Ok(Some(std::mem::take(&mut buffer)))).is_err() {
+                        return;
+                    }
+                    buffer = Vec::with_capacity(chunk);
+                }
+            }
+            Ok(None) => {
+                if !buffer.is_empty() {
+                    let _ = reply.send(Ok(Some(buffer)));
+                }
+                let _ = reply.send(Ok(None));
+                return;
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e.to_string()));
+                return;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // 2. worker_batch — Req 4 alone
 // ---------------------------------------------------------------------
@@ -493,6 +626,86 @@ impl Connection {
             buffer: std::collections::VecDeque::new(),
             done: false,
         })
+    }
+
+    /// Growing chunks: low first-row latency *and* batch throughput,
+    /// with no chunk-size knob exposed to the caller.
+    pub fn query_adaptive(
+        &self,
+        sql: &str,
+        params: Row,
+        cap: usize,
+    ) -> SpikeResult<DirectRowStream> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::Adaptive {
+            sql: sql.to_string(),
+            params,
+            cap,
+            reply,
+        })?;
+        Ok(DirectRowStream {
+            rx,
+            buffer: std::collections::VecDeque::new(),
+            done: false,
+        })
+    }
+
+    /// Rows handed over with no boundary conversion (Arc-`Value` only).
+    pub fn query_direct(
+        &self,
+        sql: &str,
+        params: Row,
+        chunk: usize,
+    ) -> SpikeResult<DirectRowStream> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::Direct {
+            sql: sql.to_string(),
+            params,
+            chunk,
+            reply,
+        })?;
+        Ok(DirectRowStream {
+            rx,
+            buffer: std::collections::VecDeque::new(),
+            done: false,
+        })
+    }
+}
+
+/// Caller's end of a zero-conversion stream.
+pub struct DirectRowStream {
+    rx: Receiver<SpikeResult<Option<Vec<EngineRow>>>>,
+    buffer: std::collections::VecDeque<EngineRow>,
+    done: bool,
+}
+
+impl Iterator for DirectRowStream {
+    type Item = SpikeResult<EngineRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(row) = self.buffer.pop_front() {
+                return Some(Ok(row));
+            }
+            if self.done {
+                return None;
+            }
+            match self.rx.recv() {
+                Ok(Ok(Some(chunk))) => self.buffer.extend(chunk),
+                Ok(Ok(None)) => {
+                    self.done = true;
+                    return None;
+                }
+                Ok(Err(e)) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+                Err(_) => {
+                    self.done = true;
+                    return Some(Err("engine is gone".to_string()));
+                }
+            }
+        }
     }
 }
 

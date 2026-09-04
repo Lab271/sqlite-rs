@@ -242,3 +242,157 @@ Not reached, and deliberately out of scope: rows-affected (Req 1), the
 contract (Req 5), named-parameter refusal, and any write path. The
 `sqlite_autoindex_*` corruption (spec 010/Req-8) is independent of all of it
 and remains the higher-priority item.
+
+---
+
+# Part 2: can Jacob's three design decisions be settled by measurement?
+
+Part 1 found three problems with spec 013 but left the *fixes* as open
+design decisions, because each had a defensible alternative a spike had no
+business choosing unilaterally. This part builds each alternative and
+prices it, so the decisions are made on numbers instead of taste.
+
+Same machine and method as Part 1. Two prototypes here (`worker_direct`,
+`worker_adaptive`) only compile under the branch-local `Arc`-`Value` patch
+described below.
+
+## Decision 1 — where does the copy happen when a row leaves the worker?
+
+`Value::Text(Rc<str>)`/`Blob(Rc<[u8]>)` make `Value` `!Send`, and a result
+row is a `Vec<Value>`, so something has to give. Three options were
+measured, not argued.
+
+**Option (b), switching `Value`'s payloads to `Arc`, turned out to be
+almost free — and nobody had ever measured it.** ADR-0013 and ADR-0017
+rejected `Arc`, but they were arguing about the *pager*; `Value` was never
+the subject.
+
+The whole change is **+22/-17 across 6 files**, because nearly every
+construction site writes `Value::Text(s.to_string().into())` and `.into()`
+is identical for `Rc<str>` and `Arc<str>`. Only the ~12 sites that *name*
+the type needed editing, plus 4 unused imports. `Rc<dyn PageSource>` and
+`Rc<RefCell<Pager>>` are untouched, so both ADRs stay intact.
+
+- `cargo test --locked`: **1562 passed / 0 failed** — identical to `Rc`.
+- `Value` becomes `Send + Sync`, asserted at compile time.
+
+Cost on the read path (`full_drain/batch` is single-threaded with no
+boundary, so it isolates the tax):
+
+| | `full_drain/batch` |
+|---|---:|
+| `Rc` payloads | 5.42-5.62 ms across runs |
+| `Arc` payloads | 5.24-5.33 ms across runs |
+
+**No measurable tax.** Individual comparisons showed `Arc` up to 5.6%
+*faster*, which is not credible as a real gain — `Rc`-only runs already
+spanned 5.42-5.62 ms, so the honest reading is that the difference sits
+inside run-to-run variance.
+
+And the boundary saving is large, because the copy disappears entirely:
+
+| Full drain, 50,000 rows | Time |
+|---|---:|
+| `batch` (control, no boundary) | 5.31 ms |
+| `worker_chunked/1024` (owned copy, option a) | 7.34 ms |
+| `worker_direct/1024` (no copy, option b) | **5.13 ms** |
+
+`worker_direct` matching — slightly beating — single-threaded `batch` is
+real rather than noise: with `sync_channel(1)` the worker builds the next
+chunk while the caller drains the previous one, so the thread boundary
+buys pipelining once it stops costing copies.
+
+**Finding: option (b).** A `Send` API for a 39-line diff, no measurable
+engine cost, and it removes ~30% of the boundary cost that option (a)
+pays forever. Option (a) remains the fallback if the `Arc` change is
+judged too invasive on principle, but the measured case against it has
+evaporated.
+
+## Decision 2 — weaken the memory promise, or make it true?
+
+Part 1 found streaming's peak floored at ~8 MB, contradicting Req 7's
+scenario. The assumed alternatives were "restate the claim" (free) or
+"build scan-aware page eviction" (a large separate ticket).
+
+**Both were wrong: the floor is a single constant.** Sweeping
+`DEFAULT_PAGE_CACHE_CAPACITY` (`src/pager.rs:63`) against a 1,000,000-row
+result:
+
+| Capacity | Ceiling | `batch` peak | streaming peak | Ratio |
+|---:|---:|---:|---:|---:|
+| 2000 pages | 8.19 MB | 137.7 MB | 8.68 MB | 15.9x |
+| 256 pages | 1.05 MB | 130.2 MB | 1.10 MB | 118.8x |
+| 64 pages | 262 KB | 129.4 MB | **291 KB** | **445x** |
+
+Streaming peak tracks the ceiling almost exactly and stays flat in result
+size (1.00x for 2.5x rows read) at every setting. The existing LRU already
+does the job; the constant is simply tuned for a general workload.
+
+Time cost of dropping to 64 pages (`full_drain`, 50,000 rows):
+
+| | 2000 pages | 64 pages | Change |
+|---|---:|---:|---|
+| `batch` | 5.326 ms | 5.316 ms | none (p = 0.42) |
+| `worker_direct/1024` | 5.042 ms | 5.266 ms | **+4.5%** (p < 0.05) |
+
+**Finding: 4.5% time for 28x less memory**, and no new machinery. A
+sequential scan reads each page once, so a small cache costs almost
+nothing on this access pattern — the penalty would land on random/indexed
+access, which is worth checking before making it a global default.
+
+So Req 7 does not need its promise weakened *or* a new eviction subsystem.
+It needs a streaming connection to be allowed a smaller cache. The right
+spec wording is a bound the caller can choose, not a fixed ~8 MB.
+
+## Decision 3 — is the chunk size public API or a hidden constant?
+
+Part 1 measured fixed chunk sizes and found a real trade: big chunks give
+throughput, small chunks give first-row latency. That trade is what would
+have justified exposing a knob. Option (c), a growing chunk (1, 2, 4, ...
+up to a cap), was untested.
+
+| Strategy | Full drain (50k) | Time to first row |
+|---|---:|---:|
+| `batch` (control) | 5.26 ms | 5.69 ms |
+| 1 row per message | 231.6 ms | 45.5 µs |
+| fixed chunk 1024 | 5.27 ms | 357 µs |
+| **adaptive, cap 1024** | **5.52 ms** | **50.2 µs** |
+
+**Finding: the trade does not exist.** Adaptive lands within 5% of the
+best throughput and within 10% of the best latency, simultaneously. It
+needs no knob, so the chunk size stays an implementation detail and never
+enters the public API.
+
+This also dissolves the question Part 1 raised about which SQE use case to
+optimise for — the catalog pointer store and the arbitrary-attached-database
+case are both served by the same strategy.
+
+## Conclusion to Part 2
+
+All three decisions are answerable from measurement, and in each case the
+answer is the *better* option rather than a compromise:
+
+1. **Switch `Value` to `Arc`.** 39 lines, no measurable cost, removes the
+   boundary copy permanently. The ADRs that seemed to forbid this were
+   about the pager.
+2. **Let a streaming connection choose a smaller page cache.** 4.5% time
+   for 28x memory. Req 7's promise can be nearly kept rather than
+   weakened or deferred.
+3. **Adaptive chunking, no knob.** Both properties at once; the trade
+   that would have justified a configurable API is not real.
+
+Two caveats worth carrying into the tickets. The `Arc` measurements are
+same-machine and same-session, and a -5.6% "speedup" from adding atomics
+is a reminder that the noise floor here is a few percent — the claim is
+"no measurable tax", not "faster". And the small-cache result is measured
+only on sequential scans; the random-access cost is unmeasured and is the
+obvious next thing to check before changing any default.
+
+### ADR consequences
+
+Part 1's ADR verdict stands, and Part 2 adds one: Decision 1 needs an ADR
+of its own, because switching `Value` to `Arc` narrows what ADR-0013 and
+ADR-0017 were taken to mean. Neither actually ruled on `Value`, so this is
+a clarification with new evidence rather than a superseding decision — but
+it should be written down, since the natural reading of those two ADRs is
+that `Arc` anywhere was settled against.

@@ -57,7 +57,7 @@
 //!    insert), so no query can reach it.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::record::{Collation, Value};
 use crate::vdbe::affinity::{apply_affinity, Affinity};
@@ -80,7 +80,7 @@ struct GroupSlot {
     /// observably pick the group's first row, and the sort strategy —
     /// whose sort is stable, so a group's ties stay in scan order —
     /// picks the same one.
-    row: Rc<[u8]>,
+    row: Arc<[u8]>,
     /// This group's key values in key order (not record order),
     /// post-affinity, used only to order the groups at `HashAggRewind`.
     key_values: Vec<Value>,
