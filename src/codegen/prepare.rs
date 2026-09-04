@@ -39,6 +39,7 @@ use crate::vdbe::Program;
 /// What [`compile_select_program`] produced: either `EXPLAIN QUERY PLAN`'s rows
 /// (nothing further to compile — there is no bytecode to run) or an
 /// ordinary compiled [`Program`].
+#[derive(Debug)]
 pub enum SelectOutcome {
     /// `EXPLAIN QUERY PLAN` output rows.
     Eqp(Vec<EqpRow>),
