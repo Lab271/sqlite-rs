@@ -323,6 +323,105 @@ before the row's own `Insert`, dispatching `ON CONFLICT`
 **Tests:**
 `tests/corpus/unique_constraint_test.rs::insert_or_replace_displaces_the_conflicting_row`
 
+### Requirement 8: A Write MUST NOT Ignore an Index It Cannot Read [MUST]
+
+A write to a table MUST maintain every index present for that table in
+`sqlite_master`, or MUST refuse the write. It MUST NOT succeed while leaving an
+index on disk unmaintained.
+
+Requirement 7's `emit_unique_check` iterates `schema.indexes.iter().filter(|i|
+i.unique)` and `IdxInsert` (Requirement 5) maintains what codegen emits for, so
+both are bounded by what the schema reader returned. `src/schema/ddl_reader.rs`
+deliberately returns less than the file contains: its own test,
+`auto_index_with_null_sql_is_omitted`, records that an index whose
+`sqlite_master.sql` is NULL is "gracefully skipped rather than erroring",
+because the naive reader cannot recover a column list from a NULL. Every
+`sqlite_autoindex_*` stock SQLite creates for a `PRIMARY KEY` or `UNIQUE` table
+constraint has exactly that shape.
+
+Graceful degradation is correct for a read. For a write it is data loss, and it
+is silent: the row lands in the table b-tree, the index keeps its old contents,
+and the write returns success.
+
+Measured 2026-08-28, this crate's CLI at 0.18.5 against the pinned
+`sqlite3` 3.53.4 oracle (`tests/corpus/oracle.rs`); re-checked on
+2026-09-04 and unchanged:
+
+```sql
+-- stock sqlite3 creates the table; sqlite_autoindex_t_1 exists
+CREATE TABLE t (a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL, v TEXT,
+                PRIMARY KEY (a, b, c));
+INSERT INTO t VALUES ('c','ns','t1','v1');
+```
+
+```console
+$ sqlite-rs exec t.db "INSERT INTO t VALUES ('c','ns','t2','v2')"   # rc=0
+$ sqlite-rs exec t.db "INSERT INTO t VALUES ('c','ns','t1','dup')"  # rc=0, duplicate accepted
+$ sqlite3 t.db "SELECT count(*) FROM t; PRAGMA integrity_check;"
+1
+wrong # of entries in index sqlite_autoindex_t_1
+row 2 missing from index sqlite_autoindex_t_1
+row 3 missing from index sqlite_autoindex_t_1
+```
+
+`count(*)` answers from the stale index and undercounts. A control table with no
+primary key writes and verifies clean, which places the fault at index
+maintenance rather than the file format, page 1 or the schema table.
+
+The precedent for the shape of the fix is spec 007 Requirement 1: a hot journal
+is detected and refused rather than silently ignored, because serving
+pre-rollback pages is worse than failing to open. Same argument, write side.
+
+Two ways to satisfy this, and either is acceptable:
+
+- **Read the autoindex.** Its column list is recoverable without SQL text, from
+  the table's declared constraint in its own `CREATE TABLE`. Then the existing
+  `NoConflict` and `IdxInsert` paths cover it with no new opcode.
+- **Refuse the write.** A table carrying an index the reader could not parse is
+  read-only until it can. Narrower, and it converts silent corruption into an
+  error a caller can act on.
+
+Creating `sqlite_autoindex_*` for a declared constraint is a separate `CREATE
+TABLE`-side gap (`src/codegen/stmt/insert.rs` records it, V3/V7 owns it), and it
+has its own file-level consequence: a table this crate creates with a declared
+composite `PRIMARY KEY` has no autoindex, and stock `sqlite3` then answers any
+write or `integrity_check` on it with "database disk image is malformed (11)".
+Closing this requirement without closing that one leaves creation broken; closing
+that one without this leaves adoption of a foreign file broken.
+
+**Implementation:** `src/schema/ddl_reader.rs::index_schema` (planned), consumed
+by `src/codegen/stmt/insert.rs::emit_unique_check`
+
+**Tests:** `tests/corpus/autoindex_maintenance_test.rs` (planned)
+
+#### Scenario: A write to a stock-created composite-PK table keeps the index consistent
+
+- GIVEN a table created by the pinned oracle with a composite `PRIMARY KEY`, so
+  `sqlite_autoindex_*` exists, holding one row
+- WHEN this crate inserts a second row
+- THEN the oracle's `PRAGMA integrity_check` reports ok and `count(*)` returns 2,
+  or the insert was refused and the file is byte-identical to before
+
+**Tests:** `tests/corpus/autoindex_maintenance_test.rs::stock_composite_pk_stays_consistent` (planned)
+
+#### Scenario: A duplicate against an autoindex-backed constraint is refused
+
+- GIVEN the same table holding `('c','ns','t1')`
+- WHEN this crate inserts `('c','ns','t1')` again
+- THEN it fails with a uniqueness error, or the write is refused for the reason
+  above, and in neither case is a duplicate row persisted
+
+**Tests:** `tests/corpus/autoindex_maintenance_test.rs::autoindex_duplicate_is_refused` (planned)
+
+#### Scenario: A named index is unaffected
+
+- GIVEN a table with no declared primary key and a named `CREATE UNIQUE INDEX`
+- WHEN this crate inserts a new key and then a duplicate
+- THEN the new key is written, the duplicate is refused, and the oracle's
+  `integrity_check` reports ok
+
+**Tests:** `tests/corpus/autoindex_maintenance_test.rs::named_index_round_trips` (planned)
+
 ## Related regimes
 
 - Tier suite: `tests/tiers/tier2.rs::t2_crud_round_trips_on_rowid_tables`
