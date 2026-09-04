@@ -93,7 +93,7 @@ fn oracle_select(oracle: &PathBuf, db: &PathBuf, sql: &str) -> String {
 }
 
 /// Runs one `INSERT` through our own parse -> codegen -> VDBE path.
-fn our_insert(db: &PathBuf, table: &str, sql: &str) -> Result<(), String> {
+fn our_insert(db: &Path, table: &str, sql: &str) -> Result<(), String> {
     let page_size = page_size_of(db);
     let header = read_header(db, page_size);
     let schema = table_schema(db, &header, table);
@@ -111,7 +111,7 @@ fn our_insert(db: &PathBuf, table: &str, sql: &str) -> Result<(), String> {
 
 /// The name -> key-columns mapping our reader recovered, for asserting
 /// the numbering rule.
-fn autoindex_map(db: &PathBuf, table: &str) -> Vec<(String, Vec<String>)> {
+fn autoindex_map(db: &Path, table: &str) -> Vec<(String, Vec<String>)> {
     let page_size = page_size_of(db);
     let header = read_header(db, page_size);
     let schema = table_schema(db, &header, table);
