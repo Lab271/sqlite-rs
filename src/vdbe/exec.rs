@@ -320,6 +320,14 @@ pub struct Vm {
     /// `Halt` handling for the "BEGIN with no matching COMMIT/ROLLBACK"
     /// safety fallback.
     pub(crate) autocommit: bool,
+    /// Rows this program has changed (013/Req 1, #692) — incremented by
+    /// `Insert`/`Delete` only when their `P5` carries
+    /// [`OPFLAG_NCHANGE`], which is codegen's decision rather than the
+    /// opcode's. Counts table rows: index maintenance (`IdxInsert`,
+    /// `IdxDelete`, `AutoIndexInsert`) and ephemeral-cursor writes never
+    /// set the flag, so a table with three indexes reports the same
+    /// number as the same table with none.
+    changes: u64,
     /// Reused byte buffer for `MakeRecord` (#454): amortizes the record
     /// payload's allocation across every row a statement emits, instead
     /// of a fresh `Vec<u8>` per `MakeRecord` execution.
@@ -347,6 +355,7 @@ impl Default for Vm {
             once_fired: HashSet::new(),
             params: Vec::new(),
             autocommit: true,
+            changes: 0,
             record_scratch: Vec::new(),
             make_record_values_scratch: Vec::new(),
             encode_scratch: Vec::new(),
@@ -368,6 +377,27 @@ impl Vm {
     /// sorter/ephemeral-only tests).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Counts one changed table row (013/Req 1, #692). Called by
+    /// `Insert`/`Delete` only when the instruction's `P5` carries
+    /// [`OPFLAG_NCHANGE`] — see [`Vm::changes`]'s field doc for why the
+    /// handler cannot decide this for itself.
+    pub(crate) fn record_change(&mut self) {
+        self.changes = self.changes.saturating_add(1);
+    }
+
+    /// Rows changed so far by this program (013/Req 1, #692).
+    ///
+    /// This is a per-`Vm` count, and a `Vm` lives for one statement. The
+    /// cross-statement retention `sqlite3_changes()` specifies — a
+    /// statement that changes nothing does not clobber the previous
+    /// count — is the connection's rule, not the engine's, and belongs to
+    /// spec 013/Req 1's `Connection::changes`. What the engine promises
+    /// is that this number is right for the statement just run; see
+    /// [`StepOutcome::changes`] for how the two fit together.
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// Reused scratch buffer for `MakeRecord` (#454) — see
@@ -1009,7 +1039,7 @@ const MAX_STEPS: u32 = 50_000_000;
 /// Runs `program` to completion on a fresh, database-less [`Vm`] and
 /// returns the rows it emitted via `ResultRow`.
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::new(), program).map(|(rows, _)| rows)
+    run(Vm::new(), program).map(|(rows, _, _)| rows)
 }
 
 /// Like [`execute`], but binds `params` for `Opcode::Variable` to read
@@ -1022,7 +1052,7 @@ pub fn execute_with_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::new();
     vm.bind_params(params);
-    run(vm, program).map(|(rows, _)| rows)
+    run(vm, program).map(|(rows, _, _)| rows)
 }
 
 /// Like [`execute`], but the `Vm` can service `OpenRead` (cursor
@@ -1033,7 +1063,7 @@ pub fn execute_with_db(
     source: Rc<dyn PageSource>,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_db(source, header), program).map(|(rows, _)| rows)
+    run(Vm::with_db(source, header), program).map(|(rows, _, _)| rows)
 }
 
 /// Like [`execute_with_db`], but the `Vm` can also service the write
@@ -1044,7 +1074,7 @@ pub fn execute_with_writable_db(
     pager: crate::pager::Pager,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_writable_db(pager, header), program).map(|(rows, _)| rows)
+    run(Vm::with_writable_db(pager, header), program).map(|(rows, _, _)| rows)
 }
 
 /// Combines [`execute_with_db`] and [`execute_with_params`].
@@ -1056,7 +1086,7 @@ pub fn execute_with_db_and_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::with_db(source, header);
     vm.bind_params(params);
-    run(vm, program).map(|(rows, _)| rows)
+    run(vm, program).map(|(rows, _, _)| rows)
 }
 
 /// Runs one statement's `program` against a `pager` shared across
@@ -1074,12 +1104,58 @@ pub fn execute_transaction_step(
     header: DatabaseHeader,
     autocommit_in: bool,
 ) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
-    let mut vm = Vm::with_shared_writable_db(pager, header);
-    vm.autocommit = autocommit_in;
-    run(vm, program)
+    execute_transaction_step_counted(program, pager, header, autocommit_in)
+        .map(|outcome| (outcome.rows, outcome.autocommit))
 }
 
-fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecError> {
+/// What one statement produced: its rows, the autocommit flag to thread
+/// into the next statement, and how many rows it changed (013/Req 1,
+/// #692).
+pub struct StepOutcome {
+    /// The statement's result rows, in order.
+    pub rows: Vec<Vec<Value>>,
+    /// Autocommit state after this statement — pass it as the next
+    /// call's `autocommit_in`, exactly as [`execute_transaction_step`]'s
+    /// second tuple element.
+    pub autocommit: bool,
+    /// Rows changed, or `None` when this statement does not have a
+    /// rows-changed count at all.
+    ///
+    /// `Some(0)` and `None` are different answers and the difference is
+    /// the whole point. `Some(0)` is "this was an `INSERT`/`UPDATE`/
+    /// `DELETE` and it changed nothing" — a lost optimistic-concurrency
+    /// race, which is what a consumer needs to detect. `None` is "this
+    /// was not that kind of statement", so a connection tracking
+    /// `sqlite3_changes()` should leave its stored count untouched rather
+    /// than zeroing it. That retention rule is the connection's to
+    /// implement (spec 013/Req 1's `Connection::changes`); this type just
+    /// makes it a one-liner.
+    pub changes: Option<u64>,
+}
+
+/// [`execute_transaction_step`] plus the rows-changed count (013/Req 1,
+/// #692).
+///
+/// The two share one loop rather than running in parallel:
+/// `execute_transaction_step` is a wrapper that drops the count, so the
+/// counted and uncounted paths cannot drift.
+pub fn execute_transaction_step_counted(
+    program: &Program,
+    pager: Rc<std::cell::RefCell<crate::pager::Pager>>,
+    header: DatabaseHeader,
+    autocommit_in: bool,
+) -> Result<StepOutcome, ExecError> {
+    let mut vm = Vm::with_shared_writable_db(pager, header);
+    vm.autocommit = autocommit_in;
+    let (rows, autocommit, changed) = run(vm, program)?;
+    Ok(StepOutcome {
+        rows,
+        autocommit,
+        changes: program.counts_changes().then_some(changed),
+    })
+}
+
+fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool, u64), ExecError> {
     // #509: `steps`/`pc` are both backstops against pathological programs
     // (a step-limit runaway, a jump target past the end), not values any
     // real program comes close to overflowing (`MAX_STEPS` is 50_000_000,
@@ -1130,7 +1206,7 @@ fn run(mut vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool), ExecErr
                         }
                     }
                 }
-                return Ok((vm.rows, vm.autocommit));
+                return Ok((vm.rows, vm.autocommit, vm.changes));
             }
             Step::Halt { code, message } => return Err(ExecError::Halted { code, message }),
         }

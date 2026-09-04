@@ -95,7 +95,7 @@ use crate::parser::ast::{
 use crate::parser::error::ParseOutcome;
 use crate::parser::parse_create_table;
 use crate::schema::TableSchema;
-use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
+use crate::vdbe::{affinity_of, Instruction, Opcode, Program, OPFLAG_NCHANGE, P4};
 
 /// Process-wide cache of parsed `CREATE TABLE` DDL, keyed by the exact
 /// `schema.sql` text — content-addressed, since the parse result depends
@@ -786,11 +786,15 @@ fn compile_row(
         record_reg,
         P4::Affinity(affinities),
     ));
-    em.emit(Instruction::new(
+    // `OPFLAG_NCHANGE`: this is the one mutation an INSERT reports as a
+    // changed row (013/Req 1, #692). The index maintenance emitted just
+    // below is deliberately unflagged.
+    em.emit(Instruction::with_p5(
         Opcode::Insert,
         TABLE_CURSOR,
         rowid_reg,
         record_reg,
+        OPFLAG_NCHANGE,
     ));
 
     if !schema.indexes.is_empty() {

@@ -35,8 +35,9 @@ pub use control::{
     TRANSACTION_MODE_DEFERRED, TRANSACTION_MODE_EXCLUSIVE, TRANSACTION_MODE_IMMEDIATE,
 };
 pub use exec::{
-    execute, execute_transaction_step, execute_with_db, execute_with_db_and_params,
-    execute_with_params, execute_with_writable_db, ExecError, Step, Vm,
+    execute, execute_transaction_step, execute_transaction_step_counted, execute_with_db,
+    execute_with_db_and_params, execute_with_params, execute_with_writable_db, ExecError, Step,
+    StepOutcome, Vm,
 };
 pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, like_match, FunctionError};
@@ -46,6 +47,6 @@ pub use pragma::{
 };
 pub use program::{
     AnalyzeIndexTarget, AnalyzeTarget, GroupKeyColumn, Instruction, Opcode, Program, SortKeyColumn,
-    P4,
+    OPFLAG_NCHANGE, P4,
 };
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};
