@@ -33,3 +33,10 @@ __pycache__/
 
 # mdBook build output (`make docs`)
 /docs/book/
+
+# Local opt-in for the Artifactory Cargo registry (ADR-0038). Committing this
+# would 401 every anonymous `cargo build` on this public repo, so only the
+# `.example` template is tracked. Ignored rather than merely absent so a local
+# copy cannot be committed by accident.
+/.cargo/config.toml
+/.cargo/credentials.toml
