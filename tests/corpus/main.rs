@@ -17,6 +17,7 @@ mod harness;
 mod oracle;
 
 mod analyze_test;
+mod autoindex_maintenance_test;
 mod begin_immediate_lock_interop_test;
 mod btree_delete_test;
 mod btree_index_insert_delete_test;

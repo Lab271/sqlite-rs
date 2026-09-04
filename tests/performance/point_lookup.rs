@@ -59,6 +59,7 @@ fn fixture(row_count: u32, label: &str) -> (PathBuf, TableSchema) {
     assert!(status.success(), "fixture creation failed");
 
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["id".to_string(), "payload".to_string()],

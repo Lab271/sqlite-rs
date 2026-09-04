@@ -232,6 +232,7 @@ fn run_query(db_path: &Path, record: &QueryRecord) -> Outcome {
         // internally for this case, which never reads `schema` at all
         // — this dummy only satisfies the function's signature.
         let no_from_schema = TableSchema {
+            unresolved_autoindex: false,
             name: String::new(),
             root_page: 0,
             columns: vec![],
