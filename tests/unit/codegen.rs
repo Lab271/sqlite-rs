@@ -43,6 +43,7 @@ fn schema(sql: &str, columns: &[&str]) -> TableSchema {
         })
         .collect();
     TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: columns.iter().map(|c| (*c).to_string()).collect(),
