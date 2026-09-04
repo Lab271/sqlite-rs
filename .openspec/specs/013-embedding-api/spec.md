@@ -89,8 +89,14 @@ Each line is checkable against the tree at 0.18.10.
    that the examples copy `fixtures/empty.db` instead.
 5. **Named parameters.** `:name`, `@name`, `$name` reach the always-NULL stub
    ADR-0015 left in place, which a public facade would make reachable.
-6. **A durability contract.** `Pager` syncs (`src/pager.rs:589,597,697,782`)
-   but nothing states what is guaranteed, and `synchronous` has no handler.
+6. **A durability contract in writing** -- not the mechanism, which
+   exists. `Pager` syncs (`src/pager.rs:589,597,697,782`) and
+   `PRAGMA synchronous` is fully implemented: the query form and all three
+   levels, with a decided per-level fsync-skip policy (#645, ADR-0036,
+   `src/vdbe/pragma.rs:79`). This spec originally said it "has no handler",
+   which was already false when written. What is genuinely absent is a
+   *stated* guarantee -- what a consumer is promised at commit, per level --
+   so a reader has to derive it from `Pager`'s source.
 7. **Incremental row access, at the facade.** `execute_with_db` and
    `execute_with_db_and_params` return `Vec<Vec<Value>>`
    (`src/vdbe/exec.rs:1073, 1093`), so those entry points still materialize a
@@ -301,9 +307,13 @@ returns so a multi-statement transaction is one unit, and MUST roll back a
 transaction handle dropped without commit.
 
 It MUST also state what is durable at commit and honor `PRAGMA synchronous` at
-least to distinguish FULL from OFF. Sync points exist
-(`src/pager.rs:589,597,697,782,811,845`); what is missing is a documented
-guarantee and any way to trade it. A consumer storing pointers to data it cannot
+least to distinguish FULL from OFF. **The `synchronous` half of this is
+already done** -- #645/ADR-0036 implement all three levels with a decided
+fsync-skip policy per level, which is more than "at least FULL from OFF"
+asks for. Sync points exist (`src/pager.rs:589,597,697,782,811,845`) and
+there is now a way to trade them. What remains for this requirement is the
+written guarantee, the transaction surface, and the retryable-error handling
+below. A consumer storing pointers to data it cannot
 otherwise find needs that in writing: *SQE*'s file holds the metadata pointer
 for every table in a warehouse, so a commit returning before it is durable turns
 a power failure into tables that exist on object storage and are unreachable.
