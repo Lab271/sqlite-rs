@@ -20,7 +20,7 @@ query engine that stores catalog pointers in SQLite; cited as *SQE* where its
 measured need pins a decision). Requirement 1 is the one item on this list a
 consumer cannot work around.
 
-Decisions and rejected alternatives: ADR-0034.
+Decisions and rejected alternatives: ADR-0041.
 
 ## Scope and inheritance
 
@@ -69,7 +69,7 @@ the only requirement here driven by a read path rather than a pointer store.
 
 ## What is missing today
 
-Each line is checkable against the tree at 0.18.5.
+Each line is checkable against the tree at 0.18.10.
 
 1. **A rows-affected count.** Nothing in `src/vdbe/` reports how many rows an
    `INSERT`/`UPDATE`/`DELETE` changed. The only capability gap here.
@@ -77,7 +77,13 @@ Each line is checkable against the tree at 0.18.5.
    assembles pager, header, `Program` and a positional `Vec<Value>` by hand.
 3. **A `Send + Sync` handle.** `Rc<dyn PageSource>` and `Rc<RefCell<Pager>>`
    are `!Send`, and ownership does not change that, so an async trait cannot
-   hold the engine at all.
+   hold the engine at all. A second `!Send` was missed on first writing and is
+   now closed: `Value::Text`/`Blob` held `Rc` payloads, so a result row --
+   the one thing that has to *leave* a worker thread -- could not cross a
+   thread boundary either. Both this spec and ADR-0041 originally attributed
+   the problem to the pager alone. `Value` is `Arc`-backed and `Send + Sync`
+   as of ADR-0039, which leaves only the pager half, and the pager half is
+   what Requirement 4's worker thread is for.
 4. **A creation API.** `DatabaseHeader::new_empty_page1` is public
    (`src/header.rs:295`) but no API offers it, so `examples/README.md` records
    that the examples copy `fixtures/empty.db` instead.
@@ -85,10 +91,15 @@ Each line is checkable against the tree at 0.18.5.
    ADR-0015 left in place, which a public facade would make reachable.
 6. **A durability contract.** `Pager` syncs (`src/pager.rs:589,597,697,782`)
    but nothing states what is guaranteed, and `synchronous` has no handler.
-7. **Incremental row access.** `execute_with_db` and
-   `execute_with_db_and_params` return `Vec<Vec<Value>>` (`src/vdbe/exec.rs:1073,
-   1093`), so a result set is fully materialized before the caller sees a row.
-   Nothing in `src/vdbe/` offers a step or iterator API.
+7. **Incremental row access, at the facade.** `execute_with_db` and
+   `execute_with_db_and_params` return `Vec<Vec<Value>>`
+   (`src/vdbe/exec.rs:1073, 1093`), so those entry points still materialize a
+   result set before the caller sees a row. The engine half is no longer
+   missing: `vdbe::Execution` (ADR-0040) is a public streaming primitive, and
+   `run()` is now a wrapper that collects it, so batch and streaming are the
+   same loop. What is still absent is a consumer-facing step API -- which is
+   Requirement 7, restated below against that primitive rather than against
+   `execute_with_db`.
 
 ## Prerequisites owned elsewhere
 
@@ -97,9 +108,18 @@ They are listed so nobody plans around the wrong gap.
 
 - **`CREATE TABLE IF NOT EXISTS` is ignored after parsing.** `if_not_exists`
   appears only in `src/parser/grammar.rs` and `src/parser/printer.rs`.
-- **A composite `PRIMARY KEY`/`UNIQUE` table constraint is not enforced, no
-  `sqlite_autoindex_*` is created, and an existing one is not maintained.** Now
-  measured rather than inferred (0.18.5 against stock `sqlite3` 3.51.0), and it
+- **A composite `PRIMARY KEY`/`UNIQUE` table constraint: the maintenance half
+  is fixed, the creation half is not.** As of #685 an existing
+  `sqlite_autoindex_*` is recovered from the owning table's DDL and maintained,
+  uniqueness is enforced against it, and an autoindex this reader cannot
+  interpret makes the table read-only rather than writable-and-corrupting
+  (spec 010 Requirement 8). What remains is emitting one on `CREATE TABLE`,
+  tracked as #687, so a table created *here* with a declared composite key
+  still lacks its index and the oracle still calls the file "malformed (11)" on
+  any write to it. The description below is the original finding, kept because
+  it is what the requirement was written against. Now
+  measured rather than inferred (0.18.5 against the pinned `sqlite3` 3.53.4
+  oracle), and it
   is worse than a missing feature: writing into a stock-created table with a
   declared composite PK leaves rows out of the autoindex, after which the oracle
   undercounts and `integrity_check` reports rows missing, while the write
@@ -116,8 +136,10 @@ They are listed so nobody plans around the wrong gap.
 
   *SQE*'s response, for reference: its catalog schema drops the declared
   composite primary key in favour of a named unique index, and its adapter
-  refuses writes to any catalog carrying an `sqlite_autoindex_*`. Both are
-  workarounds for this item and come out when it closes.
+  refuses writes to any catalog carrying an `sqlite_autoindex_*`. The second
+  workaround comes out now -- #685 makes writing to such a catalog safe, which
+  is the adoption direction SQE actually needs. The first waits on #687,
+  because a catalog this crate creates still needs the named index.
 
 ## Requirements
 
@@ -232,7 +254,14 @@ Both cannot hold by making the connection type `Send`: `Rc` is not `Send` and
 ownership does not change that, so the compiler rejects the shape. Of the two
 achievable designs -- an `Arc`/lock refactor of `Pager` and `PageSource`, which
 ADR-0013 and ADR-0017 rejected on read-path cost, or a worker thread owned by
-the connection -- this requirement specifies the second. `sqlx`'s own SQLite
+the connection -- this requirement specifies the second.
+
+ADR-0039 narrows the scope of that choice without reopening it. `Value`'s
+payloads are now `Arc`, measured at no read-path cost, so rows themselves are
+`Send` and need no copy at the boundary; ADR-0013 and ADR-0017 were only ever
+about the pager, and their subject matter is untouched. The worker thread is
+still required, and still for exactly the reason above -- but it now hands
+rows across rather than serializing them. `sqlx`'s own SQLite
 driver does the same for a C `sqlite3*`
 (`sqlx-sqlite-0.9.0/src/connection/worker.rs`: a spawned thread behind a `flume`
 channel, one per connection), so implementing it here gives every consumer once
@@ -378,7 +407,11 @@ Memory MUST be bounded by the rows the caller has actually pulled, not by the
 result set, and abandoning a partially-read statement MUST release its resources
 and its cursors without waiting for the rest.
 
-**Implementation:** `src/api.rs::Statement::next_row` (planned), or an `Iterator` impl
+**Implementation:** `src/api.rs::Statement::next_row` (planned), or an `Iterator`
+impl, built on `src/vdbe/exec.rs::Execution::next_row` rather than on
+`execute_with_db` -- #682 found the ordering matters, because a facade
+retrofitted onto the materializing entry point cannot be made incremental
+afterwards
 
 **Tests:** `tests/unit/api_streaming_test.rs` (planned)
 
@@ -386,8 +419,21 @@ and its cursors without waiting for the rest.
 
 - GIVEN a table with a row count well above any sensible buffer
 - WHEN the first ten rows are read and the statement is dropped
-- THEN peak allocation is proportional to the ten rows rather than the table,
-  and the ten values match the pinned oracle's first ten
+- THEN peak allocation is **independent of the table's row count** -- flat as
+  the table grows, rather than proportional to it -- and the ten values match
+  the pinned oracle's first ten
+
+  Stated that way deliberately. "Proportional to the ten rows" is not
+  satisfiable by a correct implementation and was the original wording: peak
+  heap for a streaming read is dominated by the page cache, not the rows
+  pulled, so it is a floor rather than a slope. Measured on 1,000,000 rows
+  (spike 014, #682): 137.7 MB materialized against 8.68 MB streamed, and the
+  8.68 MB does not move with the result size. The whole floor is one constant,
+  `DEFAULT_PAGE_CACHE_CAPACITY` (`src/pager.rs:63`) -- 2000 pages gives
+  8.68 MB, 256 gives 1.10 MB, 64 gives 291 KB -- so a caller who needs the
+  floor lower has a knob, at ~4.5% streaming throughput for the smallest.
+  Independence from result size is the property a consumer actually needs, and
+  unlike proportionality it is testable.
 
 **Tests:** `tests/unit/api_streaming_test.rs::partial_read_is_bounded` (planned)
 
@@ -403,8 +449,8 @@ and its cursors without waiting for the rest.
 ## Not in this spec
 
 - **A `sqlx` driver.** Out of tree (`sqlx-sqlite-rs`), so this crate's empty
-  `[dependencies]` stays empty. Rationale and rejected alternatives: ADR-0034.
-- **A C ABI, a rusqlite-shaped API, an `Arc` pager.** ADR-0034.
+  `[dependencies]` stays empty. Rationale and rejected alternatives: ADR-0041.
+- **A C ABI, a rusqlite-shaped API, an `Arc` pager.** ADR-0041.
 - **Async connections.** Blocking; `sqlx` drivers run blocking work on their own
   executor, and an async pager is a storage decision.
 - **The PRAGMA catalogue.** plan.md V7 owns the list and its tiers; Requirement

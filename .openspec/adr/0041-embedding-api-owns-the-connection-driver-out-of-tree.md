@@ -1,4 +1,4 @@
-# 0034 — The embedding API owns the connection; the `sqlx` driver stays out of tree
+# 0041 — The embedding API owns the connection; the `sqlx` driver stays out of tree
 
 **Status:** Proposed · **Date:** 2026-08-28
 

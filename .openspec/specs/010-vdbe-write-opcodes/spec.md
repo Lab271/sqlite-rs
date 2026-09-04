@@ -343,7 +343,9 @@ Graceful degradation is correct for a read. For a write it is data loss, and it
 is silent: the row lands in the table b-tree, the index keeps its old contents,
 and the write returns success.
 
-Measured 2026-08-28, this crate's CLI at 0.18.5 against stock `sqlite3` 3.51.0:
+Measured 2026-08-28, this crate's CLI at 0.18.5 against the pinned
+`sqlite3` 3.53.4 oracle (`tests/corpus/oracle.rs`); re-checked on
+2026-09-04 and unchanged:
 
 ```sql
 -- stock sqlite3 creates the table; sqlite_autoindex_t_1 exists
