@@ -42,3 +42,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0036](0036-pragma-synchronous-fsync-policy.md) | `PRAGMA synchronous` fsync-skip policy, and why `SynchronousMode` lives in `header.rs` | 2026-08-29 |
 | [0037](0037-macos-plain-fsync-not-fullfsync.md) | On macOS, `Vfs::sync` calls plain `fsync(2)`, not `std`'s `F_FULLFSYNC` | 2026-08-30 |
 | [0038](0038-cargo-registry-opt-in-not-committed.md) | Artifactory Cargo access is opt-in local config, never a committed source replacement | 2026-09-03 |
+| [0040](0040-streaming-execution-with-batch-as-wrapper.md) | One streaming execution primitive, with the batch path as its wrapper | 2026-09-01 |

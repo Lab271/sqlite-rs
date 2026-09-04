@@ -4,16 +4,49 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use sqlite_rs::vdbe::{execute, Collation, Instruction, Opcode, Program, P4};
+use sqlite_rs::vdbe::{Collation, Execution, Instruction, Opcode, Program, Vm, P4};
 
-// Discharges spec 009's no-panic-totality obligation (#89): `execute()`
-// must never panic on an arbitrary instruction stream, including
+// Discharges spec 009's no-panic-totality obligation (#89): dispatching
+// an arbitrary instruction stream must never panic, including
 // out-of-range register indices, malformed P4 operands, jumps to
 // nonexistent addresses, and adversarial loops (bounded by `MAX_STEPS`,
 // surfaced as a structured `Err` rather than a hang).
+//
+// Rows are pulled through `Execution` (#683, ADR-0040) and dropped
+// rather than collected by `execute()`, and the pull is capped. Those
+// two bounds are what keep an adversarial program from exhausting
+// memory or time before `MAX_STEPS` can stop it:
+//
+//   * `execute()` hands the caller every row the program emitted, so it
+//     necessarily holds them all. The decoder can build `ResultRow`
+//     with a register range up to `MAX_REGISTERS` jumped back to
+//     forever, which grows that result set without bound — 4.3 GB in
+//     ~1400 rows, the OOM in CI run 33857317005 that seed
+//     `result_row_emit_loop` reproduces. Capping accumulation inside
+//     the engine instead would be wrong: a `SELECT` that legitimately
+//     returns N rows must be allowed to return N rows, and real
+//     programs come from codegen, never from a caller handing the VM
+//     raw bytecode.
+//   * A wide `ResultRow` costs its whole register range per execution,
+//     so the same loop is unbounded in *time* even once rows are
+//     dropped. `MAX_ROWS` bounds the emitted work per input.
+//
+// Dispatch coverage is unchanged by draining rather than collecting:
+// per ADR-0040 `run()` — and so `execute()` — is this same loop plus a
+// `Vec::push`.
+const MAX_ROWS: usize = 64;
+
 fuzz_target!(|data: &[u8]| {
     let program = decode_program(data);
-    let _ = execute(&program);
+    let mut execution = Execution::new(Vm::new(), &program);
+    for _ in 0..MAX_ROWS {
+        // Each row is dropped as it arrives: peak is one row, not the
+        // whole result set.
+        match execution.next_row() {
+            Ok(Some(_row)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
 });
 
 const OPCODES: &[Opcode] = &[
