@@ -1083,7 +1083,7 @@ pub fn execute_transaction_step(
 ///
 /// `execute_with_db` and friends materialize every row into a `Vec`
 /// before the caller sees the first one, so reading row 0 of a large
-/// result costs building row N (#683, ADR-0038). Spike 014 (#682)
+/// result costs building row N (#683, ADR-0040). Spike 014 (#682)
 /// measured that at 137.7 MB peak heap and 5.36 ms to first row for a
 /// 1,000,000-row result, against 8.68 MB and 44.7 µs here.
 ///

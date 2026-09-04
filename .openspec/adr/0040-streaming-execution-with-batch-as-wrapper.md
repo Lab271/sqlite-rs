@@ -1,4 +1,4 @@
-# 0038: One streaming execution primitive, with the batch path as its wrapper
+# 0040: One streaming execution primitive, with the batch path as its wrapper
 
 Date: 2026-09-01
 
