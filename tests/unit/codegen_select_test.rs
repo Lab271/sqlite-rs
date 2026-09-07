@@ -60,6 +60,7 @@ fn explain_query_plan_rejects_schema_count_mismatch() {
 
 fn bare_table(name: &str) -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: name.to_string(),
         root_page: 0,
         columns: vec!["a".to_string()],
@@ -158,6 +159,7 @@ fn scratch_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         .expect("creating scratch fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
@@ -195,6 +197,7 @@ fn empty_fixture_labeled(label: &str) -> (PathBuf, TableSchema) {
         .expect("creating empty scratch fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
@@ -394,6 +397,7 @@ fn nulls_fixture(label: &str) -> (PathBuf, TableSchema) {
         .expect("creating nulls fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["i".to_string()],
@@ -558,6 +562,7 @@ fn order_by_collate_nocase_is_case_insensitive() {
         .expect("creating collate fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["name".to_string()],
@@ -739,6 +744,7 @@ fn order_by_limit_compiles_a_bounded_sorter_and_matches_full_sort() {
         .expect("creating scratch fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["a".to_string(), "b".to_string(), "name".to_string()],
@@ -975,6 +981,7 @@ fn group_by_fixture(label: &str) -> (PathBuf, TableSchema) {
         .expect("creating GROUP BY fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["cat".to_string(), "sub".to_string(), "val".to_string()],
@@ -1034,6 +1041,7 @@ fn min_max_aggregate_honours_collate_nocase() {
         .expect("creating agg collate fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["name".to_string()],
@@ -1081,6 +1089,7 @@ fn group_by_boundary_honours_collate_nocase() {
         .expect("creating group by collate fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["name".to_string()],
@@ -1211,6 +1220,7 @@ fn group_by_excludes_unreferenced_columns_from_the_sort_record() {
         .expect("creating GROUP BY fixture db");
     assert!(status.success());
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec![
@@ -1430,6 +1440,7 @@ fn group_by_expression() {
 #[test]
 fn plain_group_by_compiles_the_sorter_strategy() {
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["bucket".to_string(), "x".to_string()],
@@ -1484,6 +1495,7 @@ fn plain_group_by_compiles_the_sorter_strategy() {
 #[test]
 fn distinct_aggregate_group_by_still_compiles_the_sorter_strategy() {
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 2,
         columns: vec!["bucket".to_string(), "x".to_string()],

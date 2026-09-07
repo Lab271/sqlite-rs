@@ -268,6 +268,7 @@ mod tests {
         .unwrap();
 
         let schemas = vec![TableSchema {
+            unresolved_autoindex: false,
             name: "sqlite_stat1".to_string(),
             root_page: stat1_root,
             columns: vec!["tbl".to_string(), "idx".to_string(), "stat".to_string()],

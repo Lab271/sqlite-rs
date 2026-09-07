@@ -134,6 +134,7 @@ fn subquery_result_schema(
 ) -> TableSchema {
     let columns = subquery_output_columns(subquery, table_refs, schemas);
     TableSchema {
+        unresolved_autoindex: false,
         name: String::new(),
         root_page: 0,
         columns: columns.clone(),
@@ -386,6 +387,7 @@ mod tests {
 
     fn table(name: &str, root_page: u32) -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: name.to_string(),
             root_page,
             columns: vec!["a".to_string(), "b".to_string()],

@@ -51,6 +51,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::btree::{self, IndexCursor, TableCursor};
 use crate::record::{
@@ -115,7 +116,7 @@ pub(crate) enum CursorSlot {
         /// for table cursors. Valid only while `cached_blob` still
         /// points at the same allocation as `register`'s current value.
         header_cache: RowHeaderCache,
-        cached_blob: Option<Rc<[u8]>>,
+        cached_blob: Option<Arc<[u8]>>,
     },
     Sorter(crate::vdbe::sorter::SorterState),
     /// A hash-aggregation table (#570) — opened by `HashAggOpen`, the
@@ -586,9 +587,9 @@ fn normalize_key_values(values: &[Value], collations: &[Collation]) -> Vec<Value
         .zip(collations.iter())
         .map(|(v, collation)| match (v, collation) {
             (Value::Text(s), Collation::NoCase) => {
-                Value::Text(Rc::from(s.to_ascii_lowercase().as_str()))
+                Value::Text(Arc::from(s.to_ascii_lowercase().as_str()))
             }
-            (Value::Text(s), Collation::RTrim) => Value::Text(Rc::from(s.trim_end_matches(' '))),
+            (Value::Text(s), Collation::RTrim) => Value::Text(Arc::from(s.trim_end_matches(' '))),
             _ => v.clone(),
         })
         .collect()
@@ -960,7 +961,7 @@ fn read_row_column(
                 cached_blob,
                 ..
             } => {
-                if !cached_blob.as_ref().is_some_and(|b| Rc::ptr_eq(b, &bytes)) {
+                if !cached_blob.as_ref().is_some_and(|b| Arc::ptr_eq(b, &bytes)) {
                     header_cache.invalidate();
                     *cached_blob = Some(bytes.clone());
                 }
@@ -4139,7 +4140,7 @@ mod tests {
         // ever produce on its own.
         state.set_current(Some(btree::IndexRow {
             payload: btree::Payload::Owned(encode_record(
-                &[Value::Text(Rc::from("not-a-rowid"))],
+                &[Value::Text(Arc::from("not-a-rowid"))],
                 TextEncoding::Utf8,
             )),
         }));
