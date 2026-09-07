@@ -100,6 +100,7 @@ pub(crate) fn compile_select_program(
             return Err("EXPLAIN QUERY PLAN requires a FROM clause".to_string());
         }
         let no_table = TableSchema {
+            unresolved_autoindex: false,
             name: String::new(),
             root_page: 0,
             columns: vec![],

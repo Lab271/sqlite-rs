@@ -5,7 +5,7 @@
 //! record serialization (`MakeRecord`, reusing spec 003's on-disk record
 //! encoding byte-for-byte), and row emission (`ResultRow`).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::record::{encode_record_into, TextEncoding, Value};
 use crate::vdbe::affinity::{apply_affinity, Affinity};
@@ -166,7 +166,7 @@ pub fn make_record(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
         &mut scratch,
         &mut encode_scratch,
     );
-    let payload: Rc<[u8]> = Rc::from(scratch.as_slice());
+    let payload: Arc<[u8]> = Arc::from(scratch.as_slice());
     *vm.record_scratch() = scratch;
     *vm.encode_scratch() = encode_scratch;
     *vm.make_record_values_scratch() = values;

@@ -108,6 +108,16 @@ pub struct TableSchema {
     /// graceful-degradation rule as unparseable DDL elsewhere in this
     /// reader (#211).
     pub indexes: Vec<IndexSchema>,
+    /// Set when this table carries a `sqlite_autoindex_*` whose key
+    /// columns could not be recovered from its own DDL (#685).
+    ///
+    /// Writes MUST be refused while this is set. The index exists on
+    /// disk but is absent from `indexes`, so codegen would neither
+    /// enforce its uniqueness nor maintain it — the write would succeed
+    /// and leave the file corrupt. Same argument as spec 007/Req 1's
+    /// hot-journal refusal: failing the operation beats silently
+    /// producing a wrong database.
+    pub unresolved_autoindex: bool,
     /// The rowid-alias column index (0-based into `columns`), resolved
     /// once at schema-decode time by [`rowid_alias_from_sql`] — SQLite's
     /// single-`INTEGER PRIMARY KEY` special case (see
@@ -189,6 +199,9 @@ pub fn read_schema_and_views<P: PageSource>(
     // a hash lookup instead of an O(indexes × tables) linear scan (#589).
     let mut table_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut pending_indexes: Vec<(String, IndexSchema)> = Vec::new();
+    // (table name, index name, root page) for `sqlite_autoindex_*` rows,
+    // resolved after the walk because resolution needs the table's DDL.
+    let mut pending_autoindexes: Vec<(String, String, u32)> = Vec::new();
     let mut row = cursor.first_row()?;
     while let Some(r) = row {
         let values = decode_record(&r.payload, encoding)?;
@@ -201,7 +214,26 @@ pub fn read_schema_and_views<P: PageSource>(
                 table_pos.insert(schema.name.clone(), schemas.len());
                 schemas.push(schema);
             }
-            "index" => pending_indexes.extend(index_schema(&values)),
+            "index" => {
+                if let Some(entry) = index_schema(&values) {
+                    pending_indexes.push(entry);
+                } else {
+                    // `sql` is NULL (or unparseable). Every autoindex
+                    // SQLite builds for a `PRIMARY KEY`/`UNIQUE`
+                    // constraint has that shape, and dropping it here is
+                    // what corrupts writes (#685) — so defer it and
+                    // recover its key columns from the owning table's
+                    // own DDL below.
+                    pending_autoindexes.push((
+                        text(values.get(2)).to_string(),
+                        text(values.get(1)).to_string(),
+                        match values.get(3) {
+                            Some(Value::Integer(i)) => u32::try_from(*i).unwrap_or(0),
+                            _ => 0,
+                        },
+                    ));
+                }
+            }
             "view" => views.push(ViewSchema {
                 name: text(values.get(1)).to_string(),
                 sql: text(values.get(4)).to_string(),
@@ -216,6 +248,39 @@ pub fn read_schema_and_views<P: PageSource>(
             .and_then(|&pos| schemas.get_mut(pos))
         {
             schema.indexes.push(index);
+        }
+    }
+    for (table_name, index_name, root_page) in pending_autoindexes {
+        let Some(&pos) = table_pos.get(&table_name) else {
+            continue;
+        };
+        // Read the DDL out before taking the mutable borrow.
+        let Some((sql, without_rowid)) = schemas
+            .get(pos)
+            .map(|schema| (schema.sql.clone(), schema.without_rowid))
+        else {
+            continue;
+        };
+        let resolved = autoindex_ordinal(&index_name, &table_name).and_then(|ordinal| {
+            autoindex_key_lists(&sql, without_rowid)
+                .and_then(|lists| lists.into_iter().nth(ordinal.saturating_sub(1)))
+        });
+        let Some(schema) = schemas.get_mut(pos) else {
+            continue;
+        };
+        match resolved {
+            Some(columns) => schema.indexes.push(IndexSchema {
+                name: index_name,
+                // Every `sqlite_autoindex_*` backs a `PRIMARY KEY` or
+                // `UNIQUE` constraint, so it is always unique.
+                unique: true,
+                columns,
+                root_page,
+            }),
+            // Could not recover the key. The index is real and on disk,
+            // so the table must become read-only rather than writable
+            // and silently corrupting.
+            None => schema.unresolved_autoindex = true,
         }
     }
     Ok((schemas, views))
@@ -297,6 +362,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
 
     if is_virtual_table(sql) {
         return TableSchema {
+            unresolved_autoindex: false,
             name,
             root_page: 0,
             columns: Vec::new(),
@@ -314,6 +380,7 @@ fn table_schema(values: &[Value]) -> TableSchema {
     let parsed = parse_create_table(sql).unwrap_or_default();
     let rowid_alias = rowid_alias_from_sql(sql, parsed.without_rowid);
     TableSchema {
+        unresolved_autoindex: false,
         name,
         root_page,
         columns: parsed.columns,
@@ -326,6 +393,217 @@ fn table_schema(values: &[Value]) -> TableSchema {
         indexes: Vec::new(),
         rowid_alias,
     }
+}
+
+/// The ordinal `N` in `sqlite_autoindex_<table>_<N>` (#685).
+fn autoindex_ordinal(index_name: &str, table_name: &str) -> Option<usize> {
+    let prefix = format!("sqlite_autoindex_{table_name}_");
+    index_name
+        .strip_prefix(prefix.as_str())?
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1)
+}
+
+/// Whether `def` contains `keyword` at paren depth 0, outside quotes.
+///
+/// `UNIQUE` inside `CHECK (x <> 'UNIQUE')` or inside a nested key list
+/// must not count, which is why this scans the masked copy rather than
+/// the raw text.
+fn def_has_top_level_keyword(def: &str, keyword: &str) -> bool {
+    let masked = mask_quotes_and_comments(def);
+    let kw = keyword.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < masked.len() {
+        match masked.get(i) {
+            Some(b'(') => depth = depth.saturating_add(1),
+            Some(b')') => depth = depth.saturating_sub(1),
+            _ => {
+                if depth == 0 {
+                    if let Some(window) = masked.get(i..i.saturating_add(kw.len())) {
+                        if window.eq_ignore_ascii_case(kw) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    false
+}
+
+/// A table constraint's parenthesised key list as [`IndexedColumn`]s.
+fn constraint_key_columns(constraint: &str) -> Option<Vec<IndexedColumn>> {
+    let open = constraint.find('(')?;
+    let close = constraint.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let inner = constraint.get(open.saturating_add(1)..close)?;
+    Some(
+        split_top_level_commas(inner)
+            .into_iter()
+            .map(indexed_column)
+            .collect(),
+    )
+}
+
+/// `PRIMARY KEY` / `UNIQUE` / neither, for a table constraint, seeing
+/// through an optional `CONSTRAINT <name>` prefix. `None` means "this
+/// reader cannot tell", which the caller must treat as unresolvable
+/// rather than as "no constraint".
+fn table_constraint_kind(constraint: &str) -> Option<Option<bool>> {
+    let mut rest = constraint.trim();
+    if starts_with_ignore_case(rest, "CONSTRAINT") {
+        // Skip `CONSTRAINT` and the identifier that follows it.
+        let after = rest.get("CONSTRAINT".len()..)?.trim_start();
+        let ident_end = after
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(after.len());
+        rest = after.get(ident_end..)?.trim_start();
+    }
+    if starts_with_ignore_case(rest, "PRIMARY KEY") {
+        return Some(Some(true));
+    }
+    if starts_with_ignore_case(rest, "UNIQUE") {
+        return Some(Some(false));
+    }
+    if starts_with_ignore_case(rest, "FOREIGN KEY") || starts_with_ignore_case(rest, "CHECK") {
+        return Some(None);
+    }
+    None
+}
+
+/// The rowid-alias column's name, using SQLite's actual rule.
+///
+/// Deliberately local rather than reusing [`rowid_alias_from_sql`]:
+/// that function's table-level branch additionally requires the primary
+/// key to name the table's *only* column, which is not SQLite's rule
+/// (measured — `(a INTEGER, b TEXT, PRIMARY KEY (a))` is an alias). That
+/// is a real read-correctness bug, but fixing it changes rowid handling
+/// crate-wide, so #686 owns it; #685 must not smuggle that change in
+/// alongside a corruption fix. When #686 lands, this collapses into a
+/// call to the shared helper.
+fn rowid_alias_column_name(sql: &str, without_rowid: bool) -> Option<String> {
+    if without_rowid {
+        return None;
+    }
+    let (start, end) = column_list_span(sql)?;
+    let inner = sql.get(start..end)?;
+    let mut columns: Vec<&str> = Vec::new();
+    let mut constraints: Vec<&str> = Vec::new();
+    for def in split_top_level_commas(inner) {
+        if is_table_constraint(def) {
+            constraints.push(def);
+        } else {
+            columns.push(def);
+        }
+    }
+    for def in &columns {
+        if is_integer_primary_key_inline(def) {
+            return Some(column_name(def));
+        }
+    }
+    // Table-level `PRIMARY KEY (col)`: an alias whenever it names one
+    // INTEGER column, however many other columns the table has.
+    for constraint in &constraints {
+        if let Some(pk_col) = primary_key_single_column(constraint) {
+            if columns
+                .iter()
+                .any(|def| is_integer_column(def) && column_name(def).eq_ignore_ascii_case(&pk_col))
+            {
+                return Some(pk_col);
+            }
+        }
+    }
+    None
+}
+
+/// Case-insensitive key-list equality, so a redundant constraint does
+/// not claim a second autoindex number.
+fn same_key_list(a: &[IndexedColumn], b: &[IndexedColumn]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.name.eq_ignore_ascii_case(&y.name) && x.desc == y.desc)
+}
+
+/// Every key list SQLite creates a `sqlite_autoindex_*` for, in the
+/// order it numbers them (#685).
+///
+/// The rule is oracle-derived (`sqlite3` 3.51.0), not inferred:
+///
+/// * declaration order wins — `UNIQUE (c), PRIMARY KEY (a, b)` numbers
+///   the `UNIQUE` first;
+/// * column-level `PRIMARY KEY`/`UNIQUE` count as much as table-level;
+/// * a rowid-alias primary key gets no index *and consumes no number*;
+/// * a `WITHOUT ROWID` table's primary key gets none — it *is* the table;
+/// * two constraints over the same key list collapse to one index.
+///
+/// `None` means some constraint could not be understood. The caller must
+/// treat that as unresolvable and refuse writes, never as "no index".
+fn autoindex_key_lists(sql: &str, without_rowid: bool) -> Option<Vec<Vec<IndexedColumn>>> {
+    let (start, end) = column_list_span(sql)?;
+    let inner = sql.get(start..end)?;
+    let alias = rowid_alias_column_name(sql, without_rowid);
+    let mut out: Vec<Vec<IndexedColumn>> = Vec::new();
+    let push = |cols: Vec<IndexedColumn>, out: &mut Vec<Vec<IndexedColumn>>| {
+        if !out.iter().any(|existing| same_key_list(existing, &cols)) {
+            out.push(cols);
+        }
+    };
+
+    for def in split_top_level_commas(inner) {
+        let trimmed = def.trim();
+        if is_table_constraint(trimmed) {
+            let kind = table_constraint_kind(trimmed)?;
+            let Some(is_pk) = kind else {
+                continue; // FOREIGN KEY / CHECK — no index
+            };
+            if is_pk && without_rowid {
+                continue;
+            }
+            let cols = constraint_key_columns(trimmed)?;
+            if cols.is_empty() {
+                return None;
+            }
+            let is_alias = is_pk
+                && cols.len() == 1
+                && alias
+                    .as_deref()
+                    .is_some_and(|a| cols.first().is_some_and(|c| c.name.eq_ignore_ascii_case(a)));
+            if is_alias {
+                continue;
+            }
+            push(cols, &mut out);
+        } else {
+            let name = column_name(trimmed);
+            if name.is_empty() {
+                continue;
+            }
+            // A column-level constraint's index inherits the column's
+            // declared `COLLATE`, which uniqueness checking depends on:
+            // two byte-distinct values can be collation-equal, and the
+            // autoindex SQLite built used the column's collation.
+            let col = IndexedColumn {
+                name: name.clone(),
+                desc: false,
+                collation: column_collation(trimmed),
+            };
+            let is_alias = alias
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(&name));
+            if def_has_top_level_keyword(trimmed, "PRIMARY KEY") && !is_alias && !without_rowid {
+                push(vec![col.clone()], &mut out);
+            }
+            if def_has_top_level_keyword(trimmed, "UNIQUE") {
+                push(vec![col], &mut out);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Parses a `sqlite_master` row with `type = 'index'` into the owning

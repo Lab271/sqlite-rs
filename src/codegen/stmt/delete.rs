@@ -54,6 +54,20 @@ pub fn compile_delete_with_catalog(
             reason: "WITHOUT ROWID tables are not supported by DELETE codegen yet".to_string(),
         });
     }
+    // #685: an on-disk `sqlite_autoindex_*` whose key columns could not
+    // be recovered from the table's DDL is absent from `schema.indexes`,
+    // so this codegen would neither enforce its uniqueness nor maintain
+    // it — the write would report success and leave the index stale.
+    // Refuse instead, per spec 010/Req 8 and spec 007/Req 1's precedent.
+    if schema.unresolved_autoindex {
+        return Err(CodegenError::Unsupported {
+            reason: format!(
+                "table {} carries an automatic index this reader could not \
+                 interpret, so DELETE would corrupt it; the table is read-only",
+                schema.name
+            ),
+        });
+    }
 
     let mut em = Emitter::new();
     let mut reg = RegAlloc::new();

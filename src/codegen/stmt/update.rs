@@ -83,6 +83,20 @@ pub fn compile_update_with_catalog(
             reason: "WITHOUT ROWID tables are not supported by UPDATE codegen yet".to_string(),
         });
     }
+    // #685: an on-disk `sqlite_autoindex_*` whose key columns could not
+    // be recovered from the table's DDL is absent from `schema.indexes`,
+    // so this codegen would neither enforce its uniqueness nor maintain
+    // it — the write would report success and leave the index stale.
+    // Refuse instead, per spec 010/Req 8 and spec 007/Req 1's precedent.
+    if schema.unresolved_autoindex {
+        return Err(CodegenError::Unsupported {
+            reason: format!(
+                "table {} carries an automatic index this reader could not \
+                 interpret, so UPDATE would corrupt it; the table is read-only",
+                schema.name
+            ),
+        });
+    }
 
     let create = cached_create_table(schema)?;
 
@@ -105,6 +119,7 @@ pub fn compile_update_with_catalog(
     // for the rowid-alias column — cleared here alongside `sql`, and which the pseudo-cursor can't
     // answer).
     let check_schema = TableSchema {
+        unresolved_autoindex: false,
         sql: String::new(),
         rowid_alias: None,
         ..schema.clone()

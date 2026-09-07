@@ -123,6 +123,7 @@ fn rows(
 
 fn schema(sql: &str) -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],

@@ -170,6 +170,7 @@ mod tests {
     fn schema(name: &str, columns: &[&str]) -> TableSchema {
         let columns: Vec<String> = columns.iter().map(|s| s.to_string()).collect();
         TableSchema {
+            unresolved_autoindex: false,
             name: name.to_string(),
             root_page: 2,
             column_types: vec![String::new(); columns.len()],

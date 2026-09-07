@@ -35,7 +35,7 @@ use sqlite_rs::parser::error::ParseOutcome;
 use sqlite_rs::parser::parse_select;
 use sqlite_rs::record::Value;
 use sqlite_rs::schema::{read_schema, read_views, TableSchema, ViewSchema};
-use sqlite_rs::vdbe::{execute_transaction_step_counted, Program, StepOutcome};
+use sqlite_rs::vdbe::{execute_transaction_step_counted, Execution, Program, StepOutcome, Vm};
 use sqlite_rs::vfs::MemoryVfs;
 
 fn empty_db(page_size: u32) -> (MemoryVfs, DatabaseHeader) {
@@ -296,4 +296,36 @@ fn ddl_has_no_count() {
     let mut db = Db::new();
     assert_eq!(db.step("CREATE TABLE t(n INTEGER)").changes, None);
     assert_eq!(db.step("CREATE INDEX t_n ON t(n)").changes, None);
+}
+
+/// The streaming entry point (#683/#691) exposes the same counter.
+///
+/// Deliberately *not* written as "streaming agrees with batch": `run()`
+/// is a wrapper over `Execution::next_row` and reads the count through
+/// this very accessor, so such a test passes even when the accessor is
+/// stubbed to zero — both sides move together. These are absolute
+/// counts for that reason.
+#[test]
+fn streaming_execution_reports_the_rows_it_changed() {
+    let mut db = Db::new();
+    db.exec_ddl("CREATE TABLE t(n INTEGER)");
+
+    for (sql, expected) in [
+        ("INSERT INTO t VALUES (10), (11), (12)", 3),
+        ("UPDATE t SET n = n + 1 WHERE n >= 11", 2),
+        ("UPDATE t SET n = 0 WHERE n = 9999", 0),
+        ("DELETE FROM t WHERE n > 11", 2),
+    ] {
+        let program = db.compile(sql);
+        let vm = Vm::with_shared_writable_db(Rc::clone(&db.pager), db.header);
+        let mut execution = Execution::new(vm, &program);
+        while execution.next_row().unwrap().is_some() {}
+
+        assert_eq!(execution.changes(), expected, "{sql}");
+        assert!(
+            program.counts_changes(),
+            "{sql} should be a counting statement"
+        );
+        db.autocommit = execution.autocommit();
+    }
 }

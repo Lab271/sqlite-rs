@@ -36,8 +36,8 @@ pub use control::{
 };
 pub use exec::{
     execute, execute_transaction_step, execute_transaction_step_counted, execute_with_db,
-    execute_with_db_and_params, execute_with_params, execute_with_writable_db, ExecError, Step,
-    StepOutcome, Vm,
+    execute_with_db_and_params, execute_with_params, execute_with_writable_db, ExecError,
+    Execution, Step, StepOutcome, Vm,
 };
 pub use explain::{explain, ExplainRow};
 pub use functions::{call as call_function, like_match, FunctionError};
