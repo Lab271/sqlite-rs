@@ -133,6 +133,10 @@ name = "vdbe_streaming_execution"
 path = "tests/unit/vdbe_streaming_execution_test.rs"
 
 [[test]]
+name = "vdbe_changes"
+path = "tests/unit/vdbe_changes_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 
