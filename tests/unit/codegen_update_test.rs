@@ -124,6 +124,7 @@ fn rows(
 
 fn schema(sql: &str) -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],
@@ -141,6 +142,7 @@ fn schema(sql: &str) -> TableSchema {
 
 fn schema_with_columns(sql: &str, columns: &[&str], column_types: &[&str]) -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: columns.iter().map(|s| (*s).to_string()).collect(),

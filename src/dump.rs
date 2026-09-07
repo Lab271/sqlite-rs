@@ -324,6 +324,7 @@ mod tests {
 
     fn schema(sql: &str) -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: "t".to_string(),
             root_page: 1,
             columns: vec![],

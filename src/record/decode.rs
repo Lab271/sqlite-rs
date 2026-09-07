@@ -1,6 +1,6 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::error::RecordError;
 use super::value::{TextEncoding, Value};
@@ -389,17 +389,17 @@ pub(crate) fn decode_serial_value(
     }
 }
 
-/// Decodes text bytes straight into `Rc<str>`. The UTF-8 case (by far the
-/// common one) builds the `Rc<str>` directly from the validated byte slice
+/// Decodes text bytes straight into `Arc<str>`. The UTF-8 case (by far the
+/// common one) builds the `Arc<str>` directly from the validated byte slice
 /// instead of routing through an intermediate `String`, avoiding a second
 /// allocation and copy per text column.
-fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<Rc<str>, RecordError> {
+fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<Arc<str>, RecordError> {
     match encoding {
         TextEncoding::Utf8 => std::str::from_utf8(bytes)
-            .map(Rc::from)
+            .map(Arc::from)
             .map_err(|_| RecordError::InvalidUtf8),
-        TextEncoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes).map(Rc::from),
-        TextEncoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes).map(Rc::from),
+        TextEncoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes).map(Arc::from),
+        TextEncoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes).map(Arc::from),
     }
 }
 

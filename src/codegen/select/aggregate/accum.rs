@@ -367,6 +367,7 @@ where
     let mut synthetic_types = schema.column_types.clone();
     synthetic_types.extend(synthetic_names.iter().map(|_| String::new()));
     let synthetic_schema = TableSchema {
+        unresolved_autoindex: false,
         name: schema.name.clone(),
         root_page: 0,
         columns: synthetic_columns,
