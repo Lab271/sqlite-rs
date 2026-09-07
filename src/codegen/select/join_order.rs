@@ -282,6 +282,7 @@ mod tests {
 
     fn schema(name: &str, columns: &[&str], indexes: Vec<IndexSchema>) -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: name.to_string(),
             root_page: 0,
             columns: columns.iter().map(|c| (*c).to_string()).collect(),

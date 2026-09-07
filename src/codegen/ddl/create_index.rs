@@ -97,6 +97,7 @@ mod tests {
 
     fn schema() -> TableSchema {
         TableSchema {
+            unresolved_autoindex: false,
             name: "t".to_string(),
             root_page: 2,
             columns: vec!["a".to_string(), "b".to_string()],

@@ -246,6 +246,20 @@ pub fn compile_insert(
             reason: "WITHOUT ROWID tables are not supported by INSERT codegen yet".to_string(),
         });
     }
+    // #685: an on-disk `sqlite_autoindex_*` whose key columns could not
+    // be recovered from the table's DDL is absent from `schema.indexes`,
+    // so this codegen would neither enforce its uniqueness nor maintain
+    // it — the write would report success and leave the index stale.
+    // Refuse instead, per spec 010/Req 8 and spec 007/Req 1's precedent.
+    if schema.unresolved_autoindex {
+        return Err(CodegenError::Unsupported {
+            reason: format!(
+                "table {} carries an automatic index this reader could not \
+                 interpret, so INSERT would corrupt it; the table is read-only",
+                schema.name
+            ),
+        });
+    }
 
     let create = cached_create_table(schema)?;
 
@@ -367,6 +381,7 @@ pub fn compile_insert(
     // support. Every `CHECK` column reference reads via ordinary
     // `Opcode::Column` instead.
     let check_schema = TableSchema {
+        unresolved_autoindex: false,
         sql: String::new(),
         rowid_alias: None,
         ..schema.clone()
@@ -964,7 +979,21 @@ fn emit_unique_check(
             em.place(seek_ok);
         }
         ConflictAction::Abort | ConflictAction::Fail | ConflictAction::Rollback => {
-            let message = format!("UNIQUE constraint failed: {}.{}", schema.name, index.name);
+            // Stock SQLite names the *columns*, not the index:
+            // `UNIQUE constraint failed: t.a, t.b, t.c`. Naming the
+            // index instead diverged for every unique index (measured
+            // against 3.51.0), and #685 made it newly reachable for
+            // autoindexes, whose generated name would be meaningless in
+            // an application's error log.
+            let message = format!(
+                "UNIQUE constraint failed: {}",
+                index
+                    .columns
+                    .iter()
+                    .map(|col| format!("{}.{}", schema.name, col.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             em.emit(Instruction::with_p4(
                 Opcode::Halt,
                 SQLITE_CONSTRAINT_UNIQUE,

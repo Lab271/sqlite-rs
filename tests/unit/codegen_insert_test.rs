@@ -113,6 +113,7 @@ fn not_null_violation_halts_and_inserts_nothing() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(a INTEGER NOT NULL, b TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],
@@ -150,6 +151,7 @@ fn valid_row_round_trips() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(a INTEGER NOT NULL, b TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],
@@ -191,6 +193,7 @@ fn default_value_applied_when_column_omitted() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(a INTEGER, b TEXT DEFAULT 'fallback')";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string(), "b".to_string()],
@@ -235,6 +238,7 @@ fn check_violation_halts() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(a INTEGER CHECK (a > 0))";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["a".to_string()],
@@ -284,6 +288,7 @@ fn primary_key_conflict_aborts_by_default() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["id".to_string(), "v".to_string()],
@@ -332,6 +337,7 @@ fn primary_key_conflict_or_ignore_skips_the_row() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["id".to_string(), "v".to_string()],
@@ -377,6 +383,7 @@ fn primary_key_conflict_or_replace_overwrites_the_row() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["id".to_string(), "v".to_string()],
@@ -422,6 +429,7 @@ fn omitted_rowid_alias_is_auto_assigned() {
     let header = seed_minimal_db(&vfs, &path, page_size);
     let sql = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)";
     let schema = TableSchema {
+        unresolved_autoindex: false,
         name: "t".to_string(),
         root_page: 1,
         columns: vec!["id".to_string(), "v".to_string()],

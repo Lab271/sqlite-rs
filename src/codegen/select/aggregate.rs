@@ -541,6 +541,7 @@ fn compact_index_map(needed_order: &[usize], schema_len: usize) -> Vec<Option<us
 /// directly — see [`compile_grouped_scan`]'s pass 2.
 fn compact_schema(schema: &TableSchema, needed_order: &[usize]) -> TableSchema {
     TableSchema {
+        unresolved_autoindex: false,
         name: schema.name.clone(),
         root_page: 0,
         columns: needed_order
