@@ -40,6 +40,7 @@ mod index_ordered_group_by_test;
 mod index_ordered_scan_test;
 mod join_test;
 mod journal_interop_test;
+mod last_insert_rowid_oracle_test;
 mod lock_state_interop_test;
 mod no_stats_optimizations_test;
 mod or_to_in_test;

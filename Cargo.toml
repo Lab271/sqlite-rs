@@ -137,8 +137,16 @@ name = "vdbe_changes"
 path = "tests/unit/vdbe_changes_test.rs"
 
 [[test]]
+name = "vdbe_last_insert_rowid"
+path = "tests/unit/vdbe_last_insert_rowid_test.rs"
+
+[[test]]
 name = "prepare"
 path = "tests/unit/prepare_test.rs"
+
+[[test]]
+name = "param_binding"
+path = "tests/unit/param_binding_test.rs"
 
 [[test]]
 name = "codegen_expr"

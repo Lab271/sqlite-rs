@@ -848,6 +848,30 @@ pub struct Instruction {
 /// which mutation is the row change; the handler does not.
 pub const OPFLAG_NCHANGE: u16 = 0x01;
 
+/// `P5` bit marking the `Insert` whose rowid `Connection::last_insert_rowid`
+/// should report (013/Req 1).
+///
+/// Same value (`0x20`) and same job as stock SQLite's `OPFLAG_LASTROWID`
+/// (`sqliteInt.h:4068`, pinned 3.53.4). Two properties of the upstream
+/// handler are worth stating because they are not guessable from the name,
+/// and both are reproduced in `cursor::insert`:
+///
+/// 1. **It nests inside [`OPFLAG_NCHANGE`].** `vdbe.c:5803` updates
+///    `db->lastRowid` *within* the `if( p5 & OPFLAG_NCHANGE )` arm, and
+///    `vdbe.c:5800` asserts `LASTROWID` implies `NCHANGE`. So a mutation
+///    that is not a counted row change never moves the rowid either.
+/// 2. **An `UPDATE` does not set it.** `insert.c:2834` reads
+///    `pik_flags |= (update_flags ? update_flags : OPFLAG_LASTROWID)` — the
+///    flag is the *else* branch, so rewriting a row leaves the last-insert
+///    rowid alone. `codegen/stmt/update.rs`'s `Insert` therefore carries
+///    `OPFLAG_NCHANGE` only.
+///
+/// The rowid recorded is the one the insert actually used, which is why the
+/// hook is here and not on `NewRowid`: for `INSERT INTO t(id, ...)` over an
+/// `INTEGER PRIMARY KEY`, the rowid comes from the bound value and
+/// `NewRowid` never executes.
+pub const OPFLAG_LASTROWID: u16 = 0x20;
+
 impl Instruction {
     /// Builds an instruction with `P4` absent and `P5` zero — the common
     /// case for control/arithmetic/compare opcodes that only use
@@ -923,6 +947,27 @@ impl Program {
         self.instructions.iter().any(|i| {
             i.p5 & OPFLAG_NCHANGE != 0 && matches!(i.opcode, Opcode::Insert | Opcode::Delete)
         })
+    }
+
+    /// The highest 1-based parameter index this program will read, or `0`
+    /// when it has no placeholders (013/Req 3).
+    ///
+    /// Derived rather than stored, for the same reason
+    /// [`Self::counts_changes`] is: a stored field can disagree with the
+    /// instructions it describes, and [`Program::new`] is public.
+    ///
+    /// It also measures the right thing. This counts what the VM will
+    /// *read* — `Opcode::Variable`'s `P1` — not what the compiler handed
+    /// out, so `?3` alone reports 3 (matching `sqlite3_bind_parameter_count`,
+    /// which returns the largest index, not the number of distinct ones)
+    /// and a placeholder the optimizer folded away is not demanded.
+    pub fn param_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|i| matches!(i.opcode, Opcode::Variable))
+            .filter_map(|i| usize::try_from(i.p1).ok())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Returns the instruction at `pc`, or `None` if `pc` is out of

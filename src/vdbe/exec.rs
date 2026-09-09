@@ -328,6 +328,11 @@ pub struct Vm {
     /// set the flag, so a table with three indexes reports the same
     /// number as the same table with none.
     changes: u64,
+    /// Rowid of the last row this program inserted (013/Req 1), or `None`
+    /// when it inserted none. Set by `Insert` only when its `P5` carries
+    /// [`OPFLAG_LASTROWID`] — see that constant for why an `UPDATE` and
+    /// an index/ephemeral write leave it alone.
+    last_insert_rowid: Option<i64>,
     /// Reused byte buffer for `MakeRecord` (#454): amortizes the record
     /// payload's allocation across every row a statement emits, instead
     /// of a fresh `Vec<u8>` per `MakeRecord` execution.
@@ -356,6 +361,7 @@ impl Default for Vm {
             params: Vec::new(),
             autocommit: true,
             changes: 0,
+            last_insert_rowid: None,
             record_scratch: Vec::new(),
             make_record_values_scratch: Vec::new(),
             encode_scratch: Vec::new(),
@@ -398,6 +404,27 @@ impl Vm {
     /// [`StepOutcome::changes`] for how the two fit together.
     pub fn changes(&self) -> u64 {
         self.changes
+    }
+
+    /// Records `rowid` as this program's last inserted rowid (013/Req 1).
+    /// Called by `Insert` only when the instruction's `P5` carries
+    /// [`OPFLAG_LASTROWID`], and only from inside the
+    /// [`OPFLAG_NCHANGE`] arm, mirroring `vdbe.c:5803`.
+    pub(crate) fn record_last_insert_rowid(&mut self, rowid: i64) {
+        self.last_insert_rowid = Some(rowid);
+    }
+
+    /// Rowid of the last row this program inserted, or `None` if it
+    /// inserted none (013/Req 1).
+    ///
+    /// Per-`Vm`, and a `Vm` lives for one statement — so `None` means
+    /// "this statement inserted nothing", not "there is no last rowid".
+    /// `sqlite3_last_insert_rowid()` is connection-scoped (`db->lastRowid`)
+    /// and a statement that inserts nothing must leave the previous value
+    /// standing; that retention is the connection's rule, exactly as it is
+    /// for [`Self::changes`]. See [`StepOutcome::last_insert_rowid`].
+    pub fn last_insert_rowid(&self) -> Option<i64> {
+        self.last_insert_rowid
     }
 
     /// Reused scratch buffer for `MakeRecord` (#454) — see
@@ -1039,7 +1066,7 @@ const MAX_STEPS: u32 = 50_000_000;
 /// Runs `program` to completion on a fresh, database-less [`Vm`] and
 /// returns the rows it emitted via `ResultRow`.
 pub fn execute(program: &Program) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::new(), program).map(|(rows, _, _)| rows)
+    run(Vm::new(), program).map(|(rows, _, _, _)| rows)
 }
 
 /// Like [`execute`], but binds `params` for `Opcode::Variable` to read
@@ -1052,7 +1079,7 @@ pub fn execute_with_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::new();
     vm.bind_params(params);
-    run(vm, program).map(|(rows, _, _)| rows)
+    run(vm, program).map(|(rows, _, _, _)| rows)
 }
 
 /// Like [`execute`], but the `Vm` can service `OpenRead` (cursor
@@ -1063,7 +1090,7 @@ pub fn execute_with_db(
     source: Rc<dyn PageSource>,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_db(source, header), program).map(|(rows, _, _)| rows)
+    run(Vm::with_db(source, header), program).map(|(rows, _, _, _)| rows)
 }
 
 /// Like [`execute_with_db`], but the `Vm` can also service the write
@@ -1074,7 +1101,7 @@ pub fn execute_with_writable_db(
     pager: crate::pager::Pager,
     header: DatabaseHeader,
 ) -> Result<Vec<Vec<Value>>, ExecError> {
-    run(Vm::with_writable_db(pager, header), program).map(|(rows, _, _)| rows)
+    run(Vm::with_writable_db(pager, header), program).map(|(rows, _, _, _)| rows)
 }
 
 /// Combines [`execute_with_db`] and [`execute_with_params`].
@@ -1086,7 +1113,7 @@ pub fn execute_with_db_and_params(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let mut vm = Vm::with_db(source, header);
     vm.bind_params(params);
-    run(vm, program).map(|(rows, _, _)| rows)
+    run(vm, program).map(|(rows, _, _, _)| rows)
 }
 
 /// Runs one statement's `program` against a `pager` shared across
@@ -1131,6 +1158,14 @@ pub struct StepOutcome {
     /// implement (spec 013/Req 1's `Connection::changes`); this type just
     /// makes it a one-liner.
     pub changes: Option<u64>,
+    /// Rowid of the last row this statement inserted, or `None` when it
+    /// inserted none (013/Req 1).
+    ///
+    /// `None` is "leave the connection's stored value alone", not "reset
+    /// it" — the same retention rule as [`Self::changes`], and the reason
+    /// this is an `Option` rather than a sentinel `0`. Rowid `0` is a legal
+    /// rowid, so a sentinel could not be distinguished from a real insert.
+    pub last_insert_rowid: Option<i64>,
 }
 
 /// [`execute_transaction_step`] plus the rows-changed count (013/Req 1,
@@ -1147,11 +1182,12 @@ pub fn execute_transaction_step_counted(
 ) -> Result<StepOutcome, ExecError> {
     let mut vm = Vm::with_shared_writable_db(pager, header);
     vm.autocommit = autocommit_in;
-    let (rows, autocommit, changed) = run(vm, program)?;
+    let (rows, autocommit, changed, last_insert_rowid) = run(vm, program)?;
     Ok(StepOutcome {
         rows,
         autocommit,
         changes: program.counts_changes().then_some(changed),
+        last_insert_rowid,
     })
 }
 
@@ -1300,15 +1336,33 @@ impl<'p> Execution<'p> {
     pub fn changes(&self) -> u64 {
         self.vm.changes()
     }
+
+    /// Rowid of the last row this execution inserted, or `None` if it has
+    /// inserted none *so far* (013/Req 1).
+    ///
+    /// Like [`Self::changes`], this is readable mid-stream and reflects
+    /// only the inserts already executed. Statements that stream rows and
+    /// insert are rare, but the honest answer for a partially-drained
+    /// execution is a partial one rather than a wrong one.
+    pub fn last_insert_rowid(&self) -> Option<i64> {
+        self.vm.last_insert_rowid()
+    }
 }
 
-fn run(vm: Vm, program: &Program) -> Result<(Vec<Vec<Value>>, bool, u64), ExecError> {
+type RunOutcome = (Vec<Vec<Value>>, bool, u64, Option<i64>);
+
+fn run(vm: Vm, program: &Program) -> Result<RunOutcome, ExecError> {
     let mut execution = Execution::new(vm, program);
     let mut rows = Vec::new();
     while let Some(row) = execution.next_row()? {
         rows.push(row);
     }
-    Ok((rows, execution.autocommit(), execution.changes()))
+    Ok((
+        rows,
+        execution.autocommit(),
+        execution.changes(),
+        execution.last_insert_rowid(),
+    ))
 }
 
 #[cfg(test)]

@@ -47,6 +47,6 @@ pub use pragma::{
 };
 pub use program::{
     AnalyzeIndexTarget, AnalyzeTarget, GroupKeyColumn, Instruction, Opcode, Program, SortKeyColumn,
-    OPFLAG_NCHANGE, P4,
+    OPFLAG_LASTROWID, OPFLAG_NCHANGE, P4,
 };
 pub use value::{and, is, is_not, not, or, sql_eq, sql_lt};

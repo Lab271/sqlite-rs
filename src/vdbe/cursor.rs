@@ -59,7 +59,7 @@ use crate::record::{
     record_column_count, TextEncoding, Value,
 };
 use crate::vdbe::exec::{to_pc, ExecError, Step, Vm};
-use crate::vdbe::program::{Instruction, OPFLAG_NCHANGE, P4};
+use crate::vdbe::program::{Instruction, OPFLAG_LASTROWID, OPFLAG_NCHANGE, P4};
 use crate::vdbe::{compare, Collation};
 
 /// One open cursor slot: a real table cursor, an in-memory ephemeral
@@ -2063,6 +2063,14 @@ pub fn insert(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> {
             // a future caller flagged it by mistake.
             if instr.p5 & OPFLAG_NCHANGE != 0 {
                 vm.record_change();
+                // Nested inside `NCHANGE`, not beside it — `vdbe.c:5803`
+                // updates `db->lastRowid` within the same arm and
+                // `vdbe.c:5800` asserts `LASTROWID` implies `NCHANGE`.
+                // `rowid` here is the key the insert actually used, which
+                // is the value `sqlite3_last_insert_rowid()` returns.
+                if instr.p5 & OPFLAG_LASTROWID != 0 {
+                    vm.record_last_insert_rowid(rowid);
+                }
             }
             Ok(Step::Next)
         }
