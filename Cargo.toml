@@ -137,6 +137,10 @@ name = "vdbe_changes"
 path = "tests/unit/vdbe_changes_test.rs"
 
 [[test]]
+name = "prepare"
+path = "tests/unit/prepare_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 

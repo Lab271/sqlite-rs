@@ -481,11 +481,14 @@ fn open_ours(path: &Path) -> OursFixture {
 }
 
 /// `WITH`/view-expansion-then-resolve-then-compile pipeline mirroring
-/// `src/bin/sqlite-rs/query.rs::compile_select_program` (the `sqlite-rs
-/// query` CLI's real dispatch) closely enough for this bench's needs —
-/// that function itself is `pub(crate)` to the binary crate and not
-/// callable from an external test/bench crate, so the CTE-expansion +
-/// resolve + single-table/joined dispatch is reproduced here rather than
+/// `codegen::compile_select_program` (the `sqlite-rs query` CLI's real
+/// dispatch) closely enough for this bench's needs. NOTE: that function
+/// was `pub(crate)` to the binary crate when this duplicate was written,
+/// which is why the duplicate exists; #695 lifted it into the library, so
+/// this bench can now call the real thing and the duplication should be
+/// removed — deliberately not done in the lift's own PR, since it changes
+/// the path this bench measures. The CTE-expansion + resolve +
+/// single-table/joined dispatch is reproduced here rather than
 /// reused. No view expansion: none of this file's SQL references a view.
 fn compile_ours_select(select: &Select, catalog: &[TableSchema]) -> Program {
     let expanded = expand_with_clause(select);

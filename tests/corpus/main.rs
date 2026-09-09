@@ -49,6 +49,7 @@ mod pager_write_test;
 mod parser_oracle_test;
 mod partial_sort_test;
 mod plan_parity_test;
+mod prepare_oracle_test;
 mod regen_test;
 mod repl_test;
 mod schema_test;
