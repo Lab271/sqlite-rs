@@ -1,59 +1,62 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-//! Opens an existing SQLite file, lists its tables, and iterates every
-//! row of one table.
+//! Open an existing database file, list its tables, and read every row of
+//! one of them.
 //!
 //! Run with: `cargo run --example read_database`
 
 use std::error::Error;
 use std::path::Path;
-use std::rc::Rc;
 
-use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{compile_select_with_catalog, resolve_from_table_schema};
-use sqlite_rs::dump;
-use sqlite_rs::format::format_query_value;
-use sqlite_rs::parser::{parse_select, ParseOutcome};
-use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::execute_with_db;
-use sqlite_rs::vfs::{PageSource, UnixVfs};
+use sqlite_rs::api::{Connection, OpenMode};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/sample.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/sample.db");
 
-    // Opening a database parses its header and returns a `Pager` over it.
-    let (header, pager) = dump::open(&UnixVfs, &path)?;
+    // `ReadWrite` rather than the default `ReadWriteCreate`, so a typo in
+    // the path is an error instead of a new empty database. `ReadOnly`
+    // would also refuse every write for the connection's whole life.
+    let conn = Connection::open_with(&fixture, OpenMode::ReadOnly)?;
+    println!("opened {} read-only\n", fixture.display());
 
-    // Schema introspection: `sqlite_schema` always lives at root page 1.
-    let mut schema_cursor = TableCursor::new(&pager, &header, 1);
-    let schemas = read_schema(&mut schema_cursor, header.text_encoding)?;
+    let tables = conn.table_names()?;
+    println!("{} table(s): {}\n", tables.len(), tables.join(", "));
 
-    println!("Tables:");
-    for schema in &schemas {
-        println!("  {} ({} columns)", schema.name, schema.columns.len());
+    for table in &tables {
+        // Table names cannot be bound as parameters — a placeholder is a
+        // *value*, not an identifier — so this interpolates a name that
+        // came from the catalog itself, not from user input.
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"))?
+            .ok_or("count() returned no row")?
+            .get(0)?;
+        println!("{table}: {count} row(s)");
     }
 
-    // Row iteration: resolve the table, compile `SELECT * FROM users`,
-    // then execute it against the same `Pager` (as a read-only `PageSource`).
-    let select = match parse_select("SELECT * FROM users") {
-        ParseOutcome::Accepted(select) => *select,
-        _ => return Err("failed to parse SELECT * FROM users".into()),
+    let Some(first) = tables.first() else {
+        println!("\nno tables to read");
+        return Ok(());
     };
-    let from = select.from.as_ref().ok_or("SELECT has no FROM clause")?;
-    let table = resolve_from_table_schema(&from.first, &schemas).map_err(|e| e.to_string())?;
-    let program =
-        compile_select_with_catalog(&select, &table, &schemas).map_err(|e| e.to_string())?;
 
-    let source: Rc<dyn PageSource> = Rc::new(pager);
-    let rows = execute_with_db(&program, source, header).map_err(|e| e.to_string())?;
-
-    println!("\nRows in users:");
-    for row in rows {
-        let rendered: Vec<String> = row
-            .iter()
-            .map(|v| String::from_utf8_lossy(&format_query_value(v)).into_owned())
+    println!("\nevery row of {first}:");
+    let mut rows = conn.query(&format!("SELECT * FROM {first}"))?;
+    println!("  columns: {:?}", rows.column_names().join(", "));
+    while let Some(row) = rows.next_row()? {
+        // `value()` hands back the raw storage class, for a reader that
+        // does not know the column types ahead of time.
+        let cells: Vec<String> = (0..row.len())
+            .map(|i| match row.value(i) {
+                Some(v) => format!("{v:?}"),
+                None => "<missing>".to_string(),
+            })
             .collect();
-        println!("  {}", rendered.join(" | "));
+        println!("  {}", cells.join(" | "));
+    }
+
+    // Read-only means read-only: this is refused rather than attempted.
+    match conn.execute(&format!("DELETE FROM {first}")) {
+        Err(e) => println!("\nattempted write -> {e}"),
+        Ok(_) => println!("\nunexpectedly wrote to a read-only connection"),
     }
 
     Ok(())

@@ -46,7 +46,11 @@ use std::time::{Duration, Instant};
 
 use crate::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
 use crate::pager::Pager;
-use crate::record::Value;
+// Re-exported rather than merely imported, so the whole embedding API is
+// reachable from this one module. A caller binding a parameter or reading a
+// column needs `Value`, and having to name `sqlite_rs::record` for it would
+// leave the facade incomplete in exactly the way Requirement 6 is about.
+pub use crate::record::Value;
 use crate::schema::{TableSchema, ViewSchema};
 use crate::vdbe::{Opcode, Program};
 use crate::vfs::{MemoryVfs, UnixVfs, Vfs};
@@ -476,6 +480,11 @@ enum Request {
         /// Where to send the stream's head, or the failure to start it.
         reply: SyncSender<Result<QueryStream, Error>>,
     },
+    /// List the table names in the catalog.
+    TableNames {
+        /// Where to send them.
+        reply: SyncSender<Result<Vec<String>, Error>>,
+    },
     /// Read the connection-scoped counters.
     Counters {
         /// Where to send them.
@@ -775,6 +784,25 @@ impl Connection {
         // worker rather than leaving it blocked on a send nobody reads.
         drop(rows);
         Ok(first)
+    }
+
+    /// The names of the tables in this database, in catalog order.
+    ///
+    /// Requirement 6 asks that the facade cover everything the engine
+    /// offers a consumer, and enumerating tables is one of those things —
+    /// `schema::read_schema` has always been able to, but only by reaching
+    /// past this module.
+    ///
+    /// This reads the decoded catalog rather than querying `sqlite_master`,
+    /// and that is not merely an optimisation: `sqlite_master` is currently
+    /// **not** queryable through `SELECT` at all
+    /// (`resolve_from_table_schema` does not resolve it, so
+    /// `SELECT name FROM sqlite_master` fails to compile). Introspection is
+    /// plan.md's V7; until then this is how a consumer lists tables.
+    pub fn table_names(&self) -> Result<Vec<String>, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::TableNames { reply: reply_tx })?;
+        self.recv(reply_rx)?
     }
 
     /// Compiles one statement and keeps it, so it can be run repeatedly
@@ -1453,6 +1481,12 @@ fn worker_main(
             }
             Request::Query { sql, params, reply } => {
                 engine.stream(&sql, params, &reply);
+            }
+            Request::TableNames { reply } => {
+                let names = engine
+                    .catalog()
+                    .map(|(schemas, _)| schemas.iter().map(|s| s.name.clone()).collect());
+                answer(&reply, names);
             }
             Request::Counters { reply } => {
                 answer(&reply, engine.counters);

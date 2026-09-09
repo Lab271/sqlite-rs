@@ -1,60 +1,59 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
-//! Runs a parameterized `SELECT` against a database, binding a `?1`
-//! placeholder before executing.
+//! Prepare a `SELECT` once, then run it with different bound parameters.
 //!
 //! Run with: `cargo run --example query`
 
 use std::error::Error;
-use std::path::Path;
-use std::rc::Rc;
 
-use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{compile_select_with_catalog, resolve_from_table_schema};
-use sqlite_rs::dump;
-use sqlite_rs::format::format_query_value;
-use sqlite_rs::parser::{parse_select, ParseOutcome};
-use sqlite_rs::record::Value;
-use sqlite_rs::schema::read_schema;
-use sqlite_rs::vdbe::execute_with_db_and_params;
-use sqlite_rs::vfs::{PageSource, UnixVfs};
+use sqlite_rs::api::{Connection, Value};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/sample.db");
-    let (header, pager) = dump::open(&UnixVfs, &path)?;
+    // No file needed: an in-memory database exercises the same pager,
+    // b-tree and journal code a file does.
+    let conn = Connection::open_in_memory()?;
 
-    let mut schema_cursor = TableCursor::new(&pager, &header, 1);
-    let schemas = read_schema(&mut schema_cursor, header.text_encoding)?;
+    conn.execute_batch(
+        "CREATE TABLE fruit(id INTEGER, name TEXT, grams INTEGER);
+         INSERT INTO fruit VALUES (1, 'apple', 150);
+         INSERT INTO fruit VALUES (2, 'banana', 120);
+         INSERT INTO fruit VALUES (3, 'cherry', 8);",
+    )?;
 
-    // Prepare: parse and compile once. `?1` is a placeholder bound at
-    // execution time via `execute_with_db_and_params`.
-    let select = match parse_select("SELECT name, age FROM users WHERE id = ?1") {
-        ParseOutcome::Accepted(select) => *select,
-        _ => return Err("failed to parse the query".into()),
-    };
-    let from = select.from.as_ref().ok_or("SELECT has no FROM clause")?;
-    let table = resolve_from_table_schema(&from.first, &schemas).map_err(|e| e.to_string())?;
-    let program =
-        compile_select_with_catalog(&select, &table, &schemas).map_err(|e| e.to_string())?;
+    // Compiled once. `param_count` is the largest `?NNN` index the
+    // statement uses, matching `sqlite3_bind_parameter_count`.
+    let by_id = conn.prepare("SELECT name, grams FROM fruit WHERE id = ?1")?;
+    println!(
+        "prepared a statement wanting {} parameter(s)",
+        by_id.param_count()
+    );
+    println!("columns: {:?}\n", by_id.column_names());
 
-    let source: Rc<dyn PageSource> = Rc::new(pager);
-
-    // Bind and run for a couple of different parameter values.
-    for id in [1_i64, 3] {
-        let rows = execute_with_db_and_params(
-            &program,
-            Rc::clone(&source),
-            header,
-            vec![Value::Integer(id)],
-        )
-        .map_err(|e| e.to_string())?;
-        for row in rows {
-            let rendered: Vec<String> = row
-                .iter()
-                .map(|v| String::from_utf8_lossy(&format_query_value(v)).into_owned())
-                .collect();
-            println!("id={id}: {}", rendered.join(" | "));
+    for id in [1i64, 2, 3, 99] {
+        match by_id.query_row(vec![Value::from(id)])? {
+            Some(row) => {
+                // Typed reads, by index or by name.
+                let name: String = row.get(0)?;
+                let grams: i64 = row.get_by_name("grams")?;
+                println!("id {id}: {name} ({grams} g)");
+            }
+            None => println!("id {id}: no such row"),
         }
+    }
+
+    // Binding the wrong number of parameters is refused rather than
+    // silently bound to NULL — which is the point of a statement handle.
+    match by_id.execute(vec![]) {
+        Err(e) => println!("\nno parameters bound -> {e}"),
+        Ok(_) => println!("\nunexpectedly accepted an unbound parameter"),
+    }
+
+    // A multi-row result streams: rows arrive in batches, so peak memory
+    // does not grow with the size of the result.
+    println!("\nheaviest first:");
+    let mut rows = conn.query("SELECT name, grams FROM fruit ORDER BY grams DESC")?;
+    while let Some(row) = rows.next_row()? {
+        println!("  {:<8} {:>4} g", row.get::<String>(0)?, row.get::<i64>(1)?);
     }
 
     Ok(())

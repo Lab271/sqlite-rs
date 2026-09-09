@@ -1,95 +1,87 @@
 // Copyright 2026 Schuberg Philis
 // SPDX-License-Identifier: Apache-2.0
 //! A full create-read-update-delete cycle, including an explicit
-//! `BEGIN`/`COMMIT` transaction.
-//!
-//! This crate has no API to create a brand-new database file from
-//! nothing (only to open an already-valid one), so this example copies
-//! a checked-in empty fixture to a scratch path first, then builds a
-//! table on top of it.
+//! transaction and the rows-affected count.
 //!
 //! Run with: `cargo run --example crud`
 
-use std::cell::RefCell;
 use std::error::Error;
-use std::path::Path;
-use std::rc::Rc;
 
-use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{
-    compile_select_with_catalog, compile_statement, resolve_from_table_schema,
-};
-use sqlite_rs::dump;
-use sqlite_rs::format::format_query_value;
-use sqlite_rs::parser::{parse_select, split_statements, ParseOutcome};
-use sqlite_rs::schema::{read_schema, read_views};
-use sqlite_rs::vdbe::{execute_transaction_step, execute_with_db};
-use sqlite_rs::vfs::{PageSource, UnixVfs};
+use sqlite_rs::api::{Connection, TransactionBehavior, Value};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/empty.db");
-    let scratch_dir =
-        std::env::temp_dir().join(format!("sqlite-rs-crud-example-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch_dir)?;
-    let scratch_db = scratch_dir.join("crud.db");
-    std::fs::copy(&fixture, &scratch_db)?;
+    // `open` creates the database if the path has no file yet, so no empty
+    // fixture needs copying into place first.
+    let dir = std::env::temp_dir().join(format!("sqlite-rs-crud-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("crud.db");
 
-    let (header, pager) = dump::open(&UnixVfs, &scratch_db)?;
-    let pager = Rc::new(RefCell::new(pager));
+    let conn = Connection::open(&path)?;
+    println!("opened {} (created it if absent)", path.display());
 
-    let script = "
-        CREATE TABLE todos(id INTEGER PRIMARY KEY, task TEXT, done INTEGER);
-        BEGIN;
-        INSERT INTO todos(id, task, done) VALUES (1, 'write examples', 0);
-        INSERT INTO todos(id, task, done) VALUES (2, 'ship it', 0);
-        UPDATE todos SET done = 1 WHERE id = 1;
-        DELETE FROM todos WHERE id = 2;
-        COMMIT;
-    ";
+    // Durability is a choice; FULL fsyncs before a commit returns.
+    conn.pragma("synchronous", "FULL")?;
 
-    let mut autocommit = true;
-    for stmt in split_statements(script) {
-        let (schemas, views) = {
-            let borrowed = pager.borrow();
-            let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
-            let schemas = read_schema(&mut schema_cursor, header.text_encoding)?;
-            let mut view_cursor = TableCursor::new(&*borrowed, &header, 1);
-            let views = read_views(&mut view_cursor, header.text_encoding)?;
-            (schemas, views)
-        };
+    conn.execute("CREATE TABLE task(id INTEGER PRIMARY KEY, title TEXT, done INTEGER)")?;
 
-        let program = compile_statement(&stmt, &schemas, &views).map_err(|e| e.to_string())?;
-        let (_, ac) = execute_transaction_step(&program, Rc::clone(&pager), header, autocommit)
-            .map_err(|e| e.to_string())?;
-        autocommit = ac;
+    // CREATE, inside a transaction so the three rows land as one unit.
+    let insert = conn.prepare("INSERT INTO task(title, done) VALUES (?1, ?2)")?;
+    let tx = conn.transaction_with(TransactionBehavior::Immediate)?;
+    for title in ["write the spec", "review the PR", "ship it"] {
+        insert.execute(vec![Value::from(title), Value::from(false)])?;
+        // Rowids are assigned by the engine; `last_insert_rowid` is how a
+        // caller learns the one it just wrote.
+        println!("inserted {title:?} as rowid {}", tx.last_insert_rowid()?);
+    }
+    tx.commit()?;
+
+    // READ.
+    println!("\nall tasks:");
+    let mut rows = conn.query("SELECT id, title, done FROM task ORDER BY id")?;
+    while let Some(row) = rows.next_row()? {
+        let done: bool = row.get_by_name("done")?;
+        println!(
+            "  [{}] {} {}",
+            if done { 'x' } else { ' ' },
+            row.get::<i64>(0)?,
+            row.get::<String>(1)?
+        );
     }
 
-    // Read back the final state through the same shared pager.
-    let schemas = {
-        let borrowed = pager.borrow();
-        let mut schema_cursor = TableCursor::new(&*borrowed, &header, 1);
-        read_schema(&mut schema_cursor, header.text_encoding)?
-    };
-    let select = match parse_select("SELECT id, task, done FROM todos") {
-        ParseOutcome::Accepted(select) => *select,
-        _ => return Err("failed to parse the readback query".into()),
-    };
-    let from = select.from.as_ref().ok_or("SELECT has no FROM clause")?;
-    let table = resolve_from_table_schema(&from.first, &schemas).map_err(|e| e.to_string())?;
-    let select_program =
-        compile_select_with_catalog(&select, &table, &schemas).map_err(|e| e.to_string())?;
-    let source: Rc<dyn PageSource> = pager;
-    let rows = execute_with_db(&select_program, source, header).map_err(|e| e.to_string())?;
+    // UPDATE. The returned count is what distinguishes a match from a
+    // miss — every optimistic-concurrency scheme is built on it.
+    let changed = conn.execute_with(
+        "UPDATE task SET done = ?1 WHERE title = ?2",
+        vec![Value::from(true), Value::from("review the PR")],
+    )?;
+    println!("\nmarked done: {changed} row(s) changed");
 
-    println!("Final todos:");
-    for row in rows {
-        let rendered: Vec<String> = row
-            .iter()
-            .map(|v| String::from_utf8_lossy(&format_query_value(v)).into_owned())
-            .collect();
-        println!("  {}", rendered.join(" | "));
+    let missed = conn.execute_with(
+        "UPDATE task SET done = ?1 WHERE title = ?2",
+        vec![Value::from(true), Value::from("no such task")],
+    )?;
+    println!("no such task: {missed} row(s) changed");
+
+    // DELETE.
+    let deleted = conn.execute("DELETE FROM task WHERE done = 1")?;
+    println!("deleted {deleted} completed task(s)");
+
+    // A transaction dropped without committing rolls back.
+    {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM task")?;
+        println!("\ninside the transaction, {} task(s) remain", count(&tx)?);
+        // No `commit()`: dropping here undoes the delete.
     }
+    println!("after the rollback, {} task(s) remain", count(&conn)?);
 
-    std::fs::remove_dir_all(&scratch_dir).ok();
+    std::fs::remove_dir_all(&dir).ok();
     Ok(())
+}
+
+fn count(conn: &Connection) -> Result<i64, Box<dyn Error>> {
+    let row = conn
+        .query_row("SELECT count(*) FROM task")?
+        .ok_or("count() returned no row")?;
+    Ok(row.get(0)?)
 }

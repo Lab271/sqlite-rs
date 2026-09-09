@@ -177,6 +177,10 @@ name = "api_statement"
 path = "tests/unit/api_statement_test.rs"
 
 [[test]]
+name = "api_surface"
+path = "tests/unit/api_surface_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 
