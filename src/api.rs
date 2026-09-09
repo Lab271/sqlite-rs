@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
 use crate::pager::Pager;
@@ -100,6 +101,39 @@ pub enum OpenMode {
     /// Open a database for reading and writing, creating a valid empty one
     /// if no file exists yet.
     ReadWriteCreate,
+}
+
+/// How a transaction acquires its locks.
+///
+/// Matches SQLite's `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE]` (#356, #395).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TransactionBehavior {
+    /// Take no write lock until the first write — SQLite's default.
+    ///
+    /// Cheapest to start and the most likely to meet
+    /// [`Error::Busy`](Error::Busy) later, because two deferred
+    /// transactions can both begin and then collide.
+    #[default]
+    Deferred,
+    /// Take the RESERVED lock at `BEGIN`, so a competing writer is refused
+    /// immediately rather than at commit.
+    ///
+    /// The right choice for a read-then-write sequence that must not lose a
+    /// race after doing its reads.
+    Immediate,
+    /// Take the EXCLUSIVE lock at `BEGIN`, excluding readers too.
+    Exclusive,
+}
+
+impl TransactionBehavior {
+    /// The `BEGIN` statement this behaviour issues.
+    fn statement(self) -> &'static str {
+        match self {
+            TransactionBehavior::Deferred => "BEGIN DEFERRED",
+            TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
+            TransactionBehavior::Exclusive => "BEGIN EXCLUSIVE",
+        }
+    }
 }
 
 /// Why an API call failed.
@@ -438,6 +472,14 @@ enum Request {
         /// Where to send them.
         reply: SyncSender<Counters>,
     },
+    /// Set how long a contended lock is waited for.
+    SetBusyTimeout {
+        /// The new timeout.
+        timeout: Duration,
+        /// Acknowledgement, so the setting is in effect before the caller
+        /// continues.
+        reply: SyncSender<()>,
+    },
 }
 
 /// How many rows the worker batches per channel send.
@@ -663,6 +705,60 @@ impl Connection {
         // worker rather than leaving it blocked on a send nobody reads.
         drop(rows);
         Ok(first)
+    }
+
+    /// Begins a deferred transaction.
+    ///
+    /// See [`Transaction`] — dropping the handle without committing rolls
+    /// back.
+    pub fn transaction(&self) -> Result<Transaction, Error> {
+        self.transaction_with(TransactionBehavior::Deferred)
+    }
+
+    /// Begins a transaction with the given locking behaviour.
+    pub fn transaction_with(&self, behavior: TransactionBehavior) -> Result<Transaction, Error> {
+        self.execute(behavior.statement())?;
+        Ok(Transaction {
+            conn: self.clone(),
+            done: false,
+        })
+    }
+
+    /// Sets `PRAGMA <name> = <value>` on this connection.
+    ///
+    /// A convenience over [`Connection::execute`] for the settings a pool
+    /// or a durability policy configures — `journal_mode`, `synchronous`.
+    /// Spec 013 scopes this to exactly that; the PRAGMA *catalogue* is
+    /// plan.md's V7, and the introspection pragmas (`table_info` and
+    /// friends) live in the CLI binary per ADR-0029, so they are not
+    /// reachable from here.
+    ///
+    /// `value` is interpolated into the statement, because that is the only
+    /// form SQLite accepts — `PRAGMA` does not take bound parameters. Pass
+    /// a literal from your own code, not something a user typed.
+    pub fn pragma(&self, name: &str, value: &str) -> Result<(), Error> {
+        self.execute(&format!("PRAGMA {name} = {value}")).map(drop)
+    }
+
+    /// Sets how long a contended lock is waited for before
+    /// [`Error::Busy`] is returned.
+    ///
+    /// Zero — the default — means fail immediately, matching stock SQLite,
+    /// where `sqlite3_busy_timeout` is unset until asked for.
+    ///
+    /// The wait applies only to statements run *outside* an explicit
+    /// transaction. Inside one, a contended lock is reported straight away:
+    /// retrying a single statement of a transaction cannot be correct,
+    /// because its mutations sit in the same pending set as every earlier
+    /// statement's. Retry the transaction instead. Stock SQLite behaves the
+    /// same way with `SQLITE_BUSY` at `COMMIT`.
+    pub fn set_busy_timeout(&self, timeout: Duration) -> Result<(), Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::SetBusyTimeout {
+            timeout,
+            reply: reply_tx,
+        })?;
+        self.recv(reply_rx)
     }
 
     /// Rows changed by the most recent counting statement, as
@@ -981,6 +1077,85 @@ fn storage_class(value: &Value) -> &'static str {
     }
 }
 
+/// An open transaction on a [`Connection`].
+///
+/// Dropping this handle without calling [`Transaction::commit`] rolls the
+/// transaction back. That is the point of the type: a `?` that returns early
+/// out of a function holding one cannot leave a half-finished transaction
+/// open, which is the failure mode a consumer storing pointers to data it
+/// cannot otherwise find must not have.
+///
+/// Derefs to its [`Connection`], so every `execute`/`query` method is
+/// available on it directly and the statements run inside the transaction.
+///
+/// # Durability
+///
+/// What [`Transaction::commit`] guarantees is set by `PRAGMA synchronous`
+/// (#645, ADR-0036), which this crate implements at all three levels:
+///
+/// * `FULL` — the journal (or WAL frame) is fsynced before the commit
+///   returns, so a committed transaction survives an OS crash or power
+///   loss. This is what a pointer store should use.
+/// * `NORMAL` — syncs are skipped at the points SQLite skips them; a
+///   commit survives a *process* crash but not necessarily a power loss.
+/// * `OFF` — no fsync. A commit survives a process crash only.
+///
+/// This crate does not weaken the mode it is set to; the sync points are
+/// `src/pager.rs`'s, and `PRAGMA synchronous` selects between them rather
+/// than being accepted and ignored.
+///
+/// Nesting is not supported (no `SAVEPOINT`): a second `BEGIN` while this
+/// handle is open is refused by the engine.
+#[derive(Debug)]
+pub struct Transaction {
+    conn: Connection,
+    done: bool,
+}
+
+impl Transaction {
+    /// Commits the transaction.
+    pub fn commit(mut self) -> Result<(), Error> {
+        self.done = true;
+        self.conn.execute("COMMIT").map(drop)
+    }
+
+    /// Rolls the transaction back.
+    ///
+    /// The same thing dropping the handle does, but with the error
+    /// reported rather than discarded.
+    pub fn rollback(mut self) -> Result<(), Error> {
+        self.done = true;
+        self.conn.execute("ROLLBACK").map(drop)
+    }
+
+    /// The connection this transaction runs on.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::Deref for Transaction {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        // Errors are unreportable from `drop`. Rolling back is the safe
+        // direction regardless: if this fails because the worker is already
+        // gone, the transaction was never committed either, so the database
+        // on disk is unchanged — which is the outcome a rollback wanted.
+        // A caller who needs to see the error calls `rollback()`.
+        self.conn.execute("ROLLBACK").ok();
+    }
+}
+
 /// What the worker should open.
 enum Target {
     /// A real file, through `UnixVfs`.
@@ -1007,6 +1182,12 @@ struct Engine {
     /// schema-changing statement is the conservative rule the CLI already
     /// uses (`src/bin/sqlite-rs/exec.rs::is_schema_changing`).
     catalog: Option<(Vec<TableSchema>, Vec<ViewSchema>)>,
+    /// How long a contended lock is waited for before giving up.
+    ///
+    /// Zero by default, matching stock SQLite — `sqlite3_busy_timeout` is
+    /// unset until a caller sets it, and a facade that silently retried for
+    /// seconds would hide contention rather than report it.
+    busy_timeout: Duration,
 }
 
 /// Sends a reply, tolerating a caller that has stopped waiting.
@@ -1060,6 +1241,10 @@ fn worker_main(
             Request::Counters { reply } => {
                 answer(&reply, engine.counters);
             }
+            Request::SetBusyTimeout { timeout, reply } => {
+                engine.busy_timeout = timeout;
+                answer(&reply, ());
+            }
         }
     }
 }
@@ -1077,6 +1262,7 @@ impl Engine {
             autocommit: true,
             counters: Counters::default(),
             catalog: None,
+            busy_timeout: Duration::ZERO,
         })
     }
 
@@ -1102,9 +1288,9 @@ impl Engine {
             // `tests/corpus/bootstrap_oracle_test.rs`.
             let file = UnixVfs
                 .create_or_open_write(path)
-                .map_err(|e| open_error(path, &e))?;
+                .map_err(|e| vfs_open_error(path, &e))?;
             file.write_at(&DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE), 0)
-                .map_err(|e| open_error(path, &e))?;
+                .map_err(|e| vfs_open_error(path, &e))?;
         }
 
         crate::dump::open(&UnixVfs, path).map_err(|e| open_error(path, &e))
@@ -1135,18 +1321,81 @@ impl Engine {
         })
     }
 
+    /// Runs one statement, waiting out a contended lock up to
+    /// [`Engine::busy_timeout`].
+    ///
+    /// Retrying is only correct while this connection is in autocommit. In
+    /// autocommit the statement *is* the transaction, so rolling the pager
+    /// back and running it again is a faithful retry of the whole unit.
+    /// Inside an explicit transaction it is not: the statement's own
+    /// mutations are already in the pager's dirty set alongside every
+    /// earlier statement's, and re-running one of them would double-apply
+    /// it. A `Busy` there is the *transaction's* to retry, which is also
+    /// what stock SQLite does with `SQLITE_BUSY` at `COMMIT`.
+    ///
+    /// The rollback before each retry is what makes this safe.
+    /// `Pager::flush` documents that a contended escalation surfaces
+    /// `VfsError::Locked` "before any byte of this transaction is journaled
+    /// or written" and leaves `dirty` intact for the caller to retry or
+    /// roll back (`src/pager.rs:524`) — so the dirty set at that point is
+    /// exactly this statement's work, and clearing it returns the engine to
+    /// the state the statement started from.
+    fn run_with_retry(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
+        let deadline = Instant::now().checked_add(self.busy_timeout);
+        let mut attempt: u32 = 0;
+        loop {
+            let was_autocommit = self.autocommit;
+            match self.run(sql, params.clone()) {
+                Err(Error::Busy { path }) if was_autocommit => {
+                    // Discard the half-applied statement before retrying.
+                    if let Ok(mut pager) = self.pager.try_borrow_mut() {
+                        pager.rollback().ok();
+                    }
+                    let Some(delay) = self.backoff(deadline, attempt) else {
+                        return Err(Error::Busy { path });
+                    };
+                    std::thread::sleep(delay);
+                    attempt = attempt.saturating_add(1);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// How long to sleep before retry `attempt`, or `None` once the
+    /// deadline has passed.
+    ///
+    /// The ladder mirrors stock SQLite's default busy handler
+    /// (`sqliteDefaultBusyCallback`): short sleeps first so an
+    /// uncontended-in-practice lock is picked up almost immediately,
+    /// lengthening so a genuinely long-held lock is not spun on.
+    fn backoff(&self, deadline: Option<Instant>, attempt: u32) -> Option<Duration> {
+        const LADDER_MS: [u64; 7] = [1, 2, 5, 10, 20, 50, 100];
+        let deadline = deadline?;
+        let now = Instant::now();
+        let remaining = deadline.checked_duration_since(now)?;
+        if remaining.is_zero() {
+            return None;
+        }
+        let step = LADDER_MS
+            .get(attempt as usize)
+            .copied()
+            .unwrap_or_else(|| LADDER_MS.last().copied().unwrap_or(100));
+        Some(Duration::from_millis(step).min(remaining))
+    }
+
     fn execute_one(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
         let statements = crate::parser::split_statements(sql);
         let count = statements.len();
         let Some(statement) = statements.into_iter().next().filter(|_| count == 1) else {
             return Err(Error::MultipleStatements { count });
         };
-        self.run(&statement, params)
+        self.run_with_retry(&statement, params)
     }
 
     fn execute_batch(&mut self, sql: &str) -> Result<(), Error> {
         for statement in crate::parser::split_statements(sql) {
-            self.run(&statement, Vec::new())?;
+            self.run_with_retry(&statement, Vec::new())?;
         }
         Ok(())
     }
@@ -1437,19 +1686,47 @@ fn starts_with_keyword(head: &str, keyword: &str) -> bool {
         .is_some_and(|h| h.eq_ignore_ascii_case(keyword))
 }
 
-fn open_error(path: &Path, e: &impl std::fmt::Display) -> Error {
-    let message = e.to_string();
-    // spec 007's `VfsError::Locked` has to arrive as the busy variant even
-    // when it surfaces during open, since that is when a competing writer's
-    // lock is most likely to be met.
-    if message.contains("locked") {
+/// Classifies a failure to open, distinguishing a contended lock from a
+/// genuinely unopenable file.
+///
+/// spec 007's `VfsError::Locked` has to arrive as the busy variant even
+/// when it surfaces during open, since that is when a competing writer's
+/// lock is most likely to be met. Matched structurally, for the reason
+/// given on [`exec_error`].
+fn open_error(path: &Path, e: &crate::dump::DumpError) -> Error {
+    use crate::dump::DumpError;
+    use crate::pager::PagerError;
+    use crate::vfs::VfsError;
+
+    let locked = matches!(
+        e,
+        DumpError::Vfs(VfsError::Locked { .. })
+            | DumpError::Pager(PagerError::Vfs(VfsError::Locked { .. }))
+    );
+    if locked {
         return Error::Busy {
             path: path.display().to_string(),
         };
     }
     Error::CannotOpen {
         path: path.display().to_string(),
-        message,
+        message: e.to_string(),
+    }
+}
+
+/// The same classification for a raw `VfsError`, used on the bootstrap
+/// path before a `Pager` exists.
+fn vfs_open_error(path: &Path, e: &crate::vfs::VfsError) -> Error {
+    use crate::vfs::VfsError;
+
+    if matches!(e, VfsError::Locked { .. }) {
+        return Error::Busy {
+            path: path.display().to_string(),
+        };
+    }
+    Error::CannotOpen {
+        path: path.display().to_string(),
+        message: e.to_string(),
     }
 }
 
@@ -1476,7 +1753,10 @@ fn named_placeholder_of(message: &str) -> Option<String> {
 }
 
 fn exec_error(e: crate::vdbe::ExecError) -> Error {
+    use crate::pager::PagerError;
     use crate::vdbe::ExecError;
+    use crate::vfs::VfsError;
+
     match e {
         // The engine's route for constraint violations: `Halt` carries the
         // extended SQLite result code codegen chose.
@@ -1484,14 +1764,15 @@ fn exec_error(e: crate::vdbe::ExecError) -> Error {
             code,
             message: message.unwrap_or_default(),
         },
-        other => {
-            let message = other.to_string();
-            if message.contains("locked") {
-                return Error::Busy {
-                    path: String::new(),
-                };
-            }
-            Error::Execution { message }
-        }
+        // Lock contention, matched structurally rather than by message
+        // text. Requirement 5 makes this a *distinct, retryable* variant,
+        // so classifying it on a substring would be exactly the wrong
+        // trade: a reworded `Display` would silently turn every busy error
+        // into a permanent one, and the caller's retry loop would vanish
+        // without a test failing.
+        ExecError::FlushFailed(PagerError::Vfs(VfsError::Locked { path })) => Error::Busy { path },
+        other => Error::Execution {
+            message: other.to_string(),
+        },
     }
 }
