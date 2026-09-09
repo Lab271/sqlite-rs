@@ -20,7 +20,9 @@ query engine that stores catalog pointers in SQLite; cited as *SQE* where its
 measured need pins a decision). Requirement 1 is the one item on this list a
 consumer cannot work around.
 
-Decisions and rejected alternatives: ADR-0041.
+Decisions and rejected alternatives: ADR-0041 (where the API lives, and why
+the `sqlx` driver stays out of tree), ADR-0043 (the failure surface: the error
+type, the result codes, busy retry and schema refresh).
 
 ## Scope and inheritance
 
