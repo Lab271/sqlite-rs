@@ -67,6 +67,8 @@ mod code {
     pub const CORRUPT: i32 = 11;
     /// `SQLITE_CANTOPEN` — unable to open the database file.
     pub const CANTOPEN: i32 = 14;
+    /// `SQLITE_MISMATCH` — data type mismatch.
+    pub const MISMATCH: i32 = 20;
     /// `SQLITE_MISUSE` — the library was used incorrectly.
     pub const MISUSE: i32 = 21;
     /// `SQLITE_RANGE` — a bind index is out of range.
@@ -207,6 +209,31 @@ pub enum Error {
     /// two ways: the connection was closed, or the worker panicked (which
     /// would be a bug in this crate).
     ConnectionClosed,
+    /// A column was read as a type its value cannot convert to.
+    TypeMismatch {
+        /// The column, named if the statement has usable names, else its
+        /// index rendered as text.
+        column: String,
+        /// The Rust type asked for.
+        expected: &'static str,
+        /// The SQLite storage class actually there.
+        found: &'static str,
+    },
+    /// A column name was read that this row does not have.
+    ///
+    /// Note that by-name access only sees real column names for a
+    /// single-table `SELECT`; see [`Rows::column_names`].
+    ColumnNotFound {
+        /// The name that was asked for.
+        name: String,
+    },
+    /// A column index was read that is past the end of the row.
+    ColumnIndexOutOfRange {
+        /// The index that was asked for.
+        index: usize,
+        /// How many columns the row has.
+        len: usize,
+    },
     /// Execution failed for a reason with no more specific variant.
     Execution {
         /// What went wrong.
@@ -237,7 +264,9 @@ impl Error {
             Error::Parse { .. } | Error::Compile { .. } | Error::NamedParameter { .. } => {
                 code::ERROR
             }
-            Error::ParamCount { .. } => code::RANGE,
+            Error::ParamCount { .. } | Error::ColumnIndexOutOfRange { .. } => code::RANGE,
+            Error::TypeMismatch { .. } => code::MISMATCH,
+            Error::ColumnNotFound { .. } => code::ERROR,
             Error::MultipleStatements { .. } | Error::ConnectionClosed => code::MISUSE,
             Error::Sqlite { code, .. } => *code,
             Error::Busy { .. } => code::BUSY,
@@ -300,6 +329,18 @@ impl std::fmt::Display for Error {
             Error::Corrupt { message } => write!(f, "database image is malformed: {message}"),
             Error::Io { message } => write!(f, "I/O error: {message}"),
             Error::ConnectionClosed => write!(f, "connection is closed"),
+            Error::TypeMismatch {
+                column,
+                expected,
+                found,
+            } => write!(
+                f,
+                "column {column} holds {found}, which cannot be read as {expected}"
+            ),
+            Error::ColumnNotFound { name } => write!(f, "no such column: {name}"),
+            Error::ColumnIndexOutOfRange { index, len } => {
+                write!(f, "column index {index} is out of range for a row of {len}")
+            }
             Error::Execution { message } => write!(f, "{message}"),
         }
     }
@@ -383,11 +424,66 @@ enum Request {
         /// Where to send the outcome.
         reply: SyncSender<Result<(), Error>>,
     },
+    /// Run one statement and stream its rows back.
+    Query {
+        /// The statement text.
+        sql: String,
+        /// Values for its `?`/`?NNN` placeholders.
+        params: Vec<Value>,
+        /// Where to send the stream's head, or the failure to start it.
+        reply: SyncSender<Result<QueryStream, Error>>,
+    },
     /// Read the connection-scoped counters.
     Counters {
         /// Where to send them.
         reply: SyncSender<Counters>,
     },
+}
+
+/// How many rows the worker batches per channel send.
+///
+/// The bound on peak memory is roughly four of these: one batch being
+/// filled on the worker, two in the channel, one held by the caller.
+/// Independent of the result size, which is the property Requirement 7
+/// actually asks for.
+const CHUNK_ROWS: usize = 64;
+
+/// Batches the result channel holds before the worker has to wait.
+///
+/// Two, not one, and the reason is a liveness one rather than throughput.
+/// The worker sends [`Chunk::Done`] after the final batch, so with a single
+/// slot a caller that ran a small query and never read it would leave the
+/// worker blocked on that `Done` — and blocked workers serve nobody, so the
+/// *next* statement on the connection would hang. With two slots, any
+/// result that fits in one batch completes and frees the worker whether the
+/// caller reads it or not, which covers the case that is easy to hit by
+/// accident:
+///
+/// ```ignore
+/// let rows = conn.query("SELECT 1")?;   // never read
+/// conn.execute("INSERT ...")?;          // must not hang
+/// ```
+///
+/// It is a mitigation, not a guarantee: a result spanning more batches than
+/// this still parks the worker until the caller reads or drops its [`Rows`].
+/// That is inherent to one worker streaming one execution — see [`Rows`].
+const CHUNK_SLOTS: usize = 2;
+
+/// The head of a streamed result: its column names, and the channel its
+/// rows arrive on.
+struct QueryStream {
+    column_names: Arc<Vec<String>>,
+    chunks: Receiver<Chunk>,
+}
+
+/// One message on a result stream.
+enum Chunk {
+    /// Up to [`CHUNK_ROWS`] rows, in emission order.
+    Rows(Vec<Vec<Value>>),
+    /// The statement finished normally.
+    Done,
+    /// The statement failed part-way through.
+    Failed(Error),
 }
 
 /// What one [`Connection::execute`] did.
@@ -510,6 +606,65 @@ impl Connection {
         self.recv(reply_rx)?
     }
 
+    /// Runs one statement and streams its rows.
+    ///
+    /// See [`Rows`] — in particular that holding an undrained `Rows` blocks
+    /// every other statement on this connection until it is read or
+    /// dropped.
+    pub fn query(&self, sql: &str) -> Result<Rows, Error> {
+        self.query_with(sql, Vec::new())
+    }
+
+    /// Runs one statement with `params` bound, and streams its rows.
+    pub fn query_with(&self, sql: &str, params: Vec<Value>) -> Result<Rows, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::Query {
+            sql: sql.to_string(),
+            params,
+            reply: reply_tx,
+        })?;
+        let stream = self.recv(reply_rx)??;
+        Ok(Rows {
+            column_names: stream.column_names,
+            chunks: stream.chunks,
+            buffered: Vec::new().into_iter(),
+            finished: false,
+        })
+    }
+
+    /// Runs one statement and collects every row.
+    ///
+    /// The convenience form for a result a caller knows is small — a
+    /// pointer store's dozen rows. Use [`Connection::query`] for anything
+    /// whose size depends on the data.
+    pub fn query_all(&self, sql: &str) -> Result<Vec<Row>, Error> {
+        self.query(sql)?.into_vec()
+    }
+
+    /// Runs one statement with `params` bound and collects every row.
+    pub fn query_all_with(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Row>, Error> {
+        self.query_with(sql, params)?.into_vec()
+    }
+
+    /// Runs one statement and returns its first row, or `None` if it
+    /// produced none.
+    ///
+    /// Remaining rows are discarded. The `LIMIT 1` existence probe a
+    /// consumer writes by hand otherwise.
+    pub fn query_row(&self, sql: &str) -> Result<Option<Row>, Error> {
+        self.query_row_with(sql, Vec::new())
+    }
+
+    /// Runs one statement with `params` bound and returns its first row.
+    pub fn query_row_with(&self, sql: &str, params: Vec<Value>) -> Result<Option<Row>, Error> {
+        let mut rows = self.query_with(sql, params)?;
+        let first = rows.next_row()?;
+        // Dropped here, which abandons the rest of the stream and frees the
+        // worker rather than leaving it blocked on a send nobody reads.
+        drop(rows);
+        Ok(first)
+    }
+
     /// Rows changed by the most recent counting statement, as
     /// `sqlite3_changes()` reports it.
     ///
@@ -555,6 +710,274 @@ impl Connection {
     /// neither blocks forever — which is what Requirement 4 asks for.
     fn recv<T>(&self, reply: Receiver<T>) -> Result<T, Error> {
         reply.recv().map_err(|_| Error::ConnectionClosed)
+    }
+}
+
+/// A result stream, read one row at a time.
+///
+/// Rows arrive from the connection's worker thread in batches, so peak
+/// memory is bounded by the batch size and the pager's page cache rather
+/// than by the size of the result (spec 013 Requirement 7). Reading the
+/// first ten rows of a million-row table costs the same as reading the
+/// first ten of a ten-row one.
+///
+/// # Holding an undrained `Rows` can block the connection
+///
+/// The engine stays inside one execution until the result is drained or
+/// this handle is dropped, so while a large result is outstanding, any
+/// other statement on the same connection — including from another thread
+/// holding a clone — waits.
+///
+/// A result that fits in one batch is safe: it completes and frees the
+/// worker whether or not it is read (see `CHUNK_SLOTS`). A larger one is
+/// not:
+///
+/// ```ignore
+/// let rows = conn.query("SELECT a FROM big")?;  // thousands of rows
+/// let more = conn.query("SELECT 1")?;           // blocks until `rows` goes
+/// ```
+///
+/// Dropping `Rows` releases the worker immediately, so this is a wait
+/// rather than a permanent deadlock — but a thread that holds a `Rows`
+/// while waiting on another thread that needs the same connection will
+/// hang. **Drain it, drop it, or bind it to a short scope.** Requirement 4
+/// accepts serialized access; this is its sharp edge.
+///
+/// Deliberately not an [`Iterator`]: [`Rows::next_row`] returns
+/// `Result<Option<Row>, Error>`, and collapsing that into
+/// `Option<Result<Row, Error>>` to fit the trait makes "the stream ended"
+/// and "the stream failed" the same shape at the call site. ADR-0040
+/// rejected an `Iterator` impl on `Execution` for this reason and the
+/// reasoning carries.
+#[derive(Debug)]
+pub struct Rows {
+    column_names: Arc<Vec<String>>,
+    chunks: Receiver<Chunk>,
+    buffered: std::vec::IntoIter<Vec<Value>>,
+    /// Set once the stream has ended, normally or otherwise, so a caller
+    /// that keeps polling gets `None` rather than a channel error.
+    finished: bool,
+}
+
+impl Rows {
+    /// The result's column names.
+    ///
+    /// Available before the first row is read, and empty for a statement
+    /// that returns no columns.
+    ///
+    /// **Real names only for a single-table `SELECT`.** A join or a
+    /// compound (`UNION`) reports `column1`, `column2`, … because that is
+    /// what `codegen::result_column_names` can currently derive
+    /// (`src/codegen/prepare.rs:181`). By-index access is unaffected;
+    /// by-name access on a join will not find the name a caller expects.
+    /// Stated rather than hidden — the fix belongs in the name resolver,
+    /// not here.
+    pub fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    /// Reads the next row, or `None` once the result is exhausted.
+    ///
+    /// Blocks until the worker produces a row.
+    pub fn next_row(&mut self) -> Result<Option<Row>, Error> {
+        loop {
+            if let Some(values) = self.buffered.next() {
+                return Ok(Some(Row {
+                    values,
+                    column_names: Arc::clone(&self.column_names),
+                }));
+            }
+            if self.finished {
+                return Ok(None);
+            }
+            match self.chunks.recv() {
+                Ok(Chunk::Rows(batch)) => self.buffered = batch.into_iter(),
+                Ok(Chunk::Done) => {
+                    self.finished = true;
+                    return Ok(None);
+                }
+                Ok(Chunk::Failed(e)) => {
+                    self.finished = true;
+                    return Err(e);
+                }
+                // The worker vanished mid-stream without saying why, which
+                // means it panicked — a bug here, not a caller error.
+                Err(_) => {
+                    self.finished = true;
+                    return Err(Error::ConnectionClosed);
+                }
+            }
+        }
+    }
+
+    /// Reads every remaining row into a `Vec`.
+    ///
+    /// For results a caller knows are small. Defeats the streaming
+    /// property by construction, which is fine when a dozen rows is the
+    /// whole answer and is the wrong choice otherwise.
+    pub fn into_vec(mut self) -> Result<Vec<Row>, Error> {
+        let mut out = Vec::new();
+        while let Some(row) = self.next_row()? {
+            out.push(row);
+        }
+        Ok(out)
+    }
+}
+
+/// One result row.
+#[derive(Debug, Clone)]
+pub struct Row {
+    values: Vec<Value>,
+    column_names: Arc<Vec<String>>,
+}
+
+impl Row {
+    /// How many columns this row has.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether this row has no columns.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// This row's column names — see [`Rows::column_names`] for when they
+    /// are real names.
+    pub fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    /// The raw [`Value`] at `index`, or `None` if the row is shorter.
+    ///
+    /// The escape hatch from [`Row::get`]'s conversions, for a caller that
+    /// wants to switch on the storage class itself.
+    pub fn value(&self, index: usize) -> Option<&Value> {
+        self.values.get(index)
+    }
+
+    /// Reads column `index` (0-based) as `T`.
+    pub fn get<T: FromValue>(&self, index: usize) -> Result<T, Error> {
+        let value = self.values.get(index).ok_or(Error::ColumnIndexOutOfRange {
+            index,
+            len: self.values.len(),
+        })?;
+        T::from_value(value).map_err(|expected| Error::TypeMismatch {
+            column: self
+                .column_names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| index.to_string()),
+            expected,
+            found: storage_class(value),
+        })
+    }
+
+    /// Reads the column called `name` as `T`.
+    ///
+    /// Case-insensitive, matching SQLite's column-name comparison. See
+    /// [`Rows::column_names`]: on a join or a compound the names are
+    /// positional placeholders, so this will not find a base-table name.
+    pub fn get_by_name<T: FromValue>(&self, name: &str) -> Result<T, Error> {
+        let index = self
+            .column_names
+            .iter()
+            .position(|candidate| candidate.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::ColumnNotFound {
+                name: name.to_string(),
+            })?;
+        self.get(index)
+    }
+}
+
+/// A type a [`Value`] can be read as.
+///
+/// Conversions are the ones SQLite's own `sqlite3_column_*` family
+/// performs without reinterpreting storage: an `INTEGER` reads as `i64`,
+/// and as `f64` because that is lossless for the range in practice; a
+/// `REAL` does not read as `i64`, because truncating silently is how a
+/// rowid becomes wrong. `Option<T>` is how a nullable column is read —
+/// `NULL` into a non-`Option` type is a [`Error::TypeMismatch`] rather
+/// than a default value.
+pub trait FromValue: Sized {
+    /// Converts `value`, or returns the name of the type that was wanted
+    /// so the caller can build the error with the column's identity.
+    fn from_value(value: &Value) -> Result<Self, &'static str>;
+}
+
+impl FromValue for i64 {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            Value::Integer(v) => Ok(*v),
+            _ => Err("i64"),
+        }
+    }
+}
+
+impl FromValue for f64 {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            Value::Real(v) => Ok(*v),
+            // Widening an integer is lossless and is what
+            // `sqlite3_column_double` does.
+            Value::Integer(v) => Ok(*v as f64),
+            _ => Err("f64"),
+        }
+    }
+}
+
+impl FromValue for bool {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            // SQLite has no boolean storage class; 0 is false and every
+            // other integer is true, as its own `CASE`/`WHERE` do.
+            Value::Integer(v) => Ok(*v != 0),
+            _ => Err("bool"),
+        }
+    }
+}
+
+impl FromValue for String {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            Value::Text(v) => Ok(v.to_string()),
+            _ => Err("String"),
+        }
+    }
+}
+
+impl FromValue for Vec<u8> {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            Value::Blob(v) => Ok(v.to_vec()),
+            _ => Err("Vec<u8>"),
+        }
+    }
+}
+
+impl FromValue for Value {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        Ok(value.clone())
+    }
+}
+
+impl<T: FromValue> FromValue for Option<T> {
+    fn from_value(value: &Value) -> Result<Self, &'static str> {
+        match value {
+            Value::Null => Ok(None),
+            other => T::from_value(other).map(Some),
+        }
+    }
+}
+
+/// The SQLite storage-class name for `value`, for error messages.
+fn storage_class(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NULL",
+        Value::Integer(_) => "INTEGER",
+        Value::Real(_) => "REAL",
+        Value::Text(_) => "TEXT",
+        Value::Blob(_) => "BLOB",
     }
 }
 
@@ -630,6 +1053,9 @@ fn worker_main(
             }
             Request::ExecuteBatch { sql, reply } => {
                 answer(&reply, engine.execute_batch(&sql));
+            }
+            Request::Query { sql, params, reply } => {
+                engine.stream(&sql, params, &reply);
             }
             Request::Counters { reply } => {
                 answer(&reply, engine.counters);
@@ -776,6 +1202,148 @@ impl Engine {
             self.counters.last_insert_rowid = rowid;
         }
         Ok(Applied { changes })
+    }
+
+    /// Runs `sql` and streams its rows to `reply`'s receiver.
+    ///
+    /// The whole execution lives in this one stack frame, which is what
+    /// makes it expressible at all: `Execution` borrows its `Program`, and
+    /// no type in this module may carry a lifetime (see the module docs).
+    /// So the worker stays inside this call until the result is drained or
+    /// the caller drops its [`Rows`] — and while it does, this connection
+    /// serves nothing else.
+    ///
+    /// That is a real constraint on callers, not an implementation detail:
+    /// holding an undrained `Rows` blocks every other statement on the same
+    /// connection until it is read or dropped. It is a wait rather than a
+    /// deadlock — dropping `Rows` closes the channel, the next send fails,
+    /// and the worker returns here — but a thread that holds a `Rows` while
+    /// waiting on another thread that needs the same connection will hang.
+    /// Requirement 4 accepts serialized access; this is its sharp edge, and
+    /// `Rows`'s own documentation repeats it.
+    fn stream(
+        &mut self,
+        sql: &str,
+        params: Vec<Value>,
+        reply: &SyncSender<Result<QueryStream, Error>>,
+    ) {
+        let started = self.start_stream(sql, params.len());
+        let (program, column_names) = match started {
+            Ok(pair) => pair,
+            Err(e) => {
+                answer(reply, Err(e));
+                return;
+            }
+        };
+
+        // Bounded, so a slow reader applies backpressure to the engine
+        // rather than letting rows pile up. See `CHUNK_SLOTS` for why the
+        // bound is two and not one.
+        let (chunk_tx, chunk_rx) = sync_channel::<Chunk>(CHUNK_SLOTS);
+        let head = QueryStream {
+            column_names,
+            chunks: chunk_rx,
+        };
+        if reply.send(Ok(head)).is_err() {
+            // The caller gave up before reading anything; nothing ran, so
+            // there is nothing to unwind.
+            return;
+        }
+
+        self.drain(&program, params, &chunk_tx);
+    }
+
+    /// Compiles `sql`, checks it against this connection's mode and its
+    /// parameter arity, and works out its column names.
+    fn start_stream(
+        &mut self,
+        sql: &str,
+        param_count: usize,
+    ) -> Result<(Program, Arc<Vec<String>>), Error> {
+        let program = self.compile(sql)?;
+        if self.mode == OpenMode::ReadOnly && writes(&program) {
+            return Err(Error::ReadOnly {
+                statement: sql.to_string(),
+            });
+        }
+        let wanted = program.param_count();
+        if wanted != param_count {
+            return Err(Error::ParamCount {
+                expected: wanted,
+                found: param_count,
+            });
+        }
+        let names = self.column_names_of(sql)?;
+        Ok((program, Arc::new(names)))
+    }
+
+    /// The result column names for `sql`, empty for a statement that is not
+    /// a `SELECT`.
+    fn column_names_of(&mut self, sql: &str) -> Result<Vec<String>, Error> {
+        use crate::parser::error::ParseOutcome;
+
+        if !is_select(sql) {
+            return Ok(Vec::new());
+        }
+        let ParseOutcome::Accepted(select) = crate::parser::parse_select(sql) else {
+            // Unreachable: `compile` already parsed this successfully.
+            return Ok(Vec::new());
+        };
+        let (schemas, _) = self.catalog()?;
+        Ok(crate::codegen::result_column_names(&select, schemas))
+    }
+
+    /// Drives `program` to completion, sending rows in batches.
+    fn drain(&mut self, program: &Program, params: Vec<Value>, chunks: &SyncSender<Chunk>) {
+        let mut vm =
+            crate::vdbe::Vm::with_shared_writable_db(std::rc::Rc::clone(&self.pager), self.header);
+        vm.autocommit = self.autocommit;
+        vm.bind_params(params);
+        let mut execution = crate::vdbe::Execution::new(vm, program);
+
+        let mut batch: Vec<Vec<Value>> = Vec::new();
+        loop {
+            match execution.next_row() {
+                Ok(Some(row)) => {
+                    batch.push(row);
+                    if batch.len() >= CHUNK_ROWS
+                        && chunks
+                            .send(Chunk::Rows(std::mem::take(&mut batch)))
+                            .is_err()
+                    {
+                        // The caller dropped its `Rows`. Abandon the
+                        // execution here: dropping it releases its cursors,
+                        // which is Requirement 7's "abandoning a statement
+                        // releases it".
+                        return;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    // A mid-stream failure. Send it rather than the rows
+                    // already batched: a partial result the caller cannot
+                    // tell is partial would be worse than no result.
+                    answer(chunks, Chunk::Failed(exec_error(e)));
+                    return;
+                }
+            }
+        }
+
+        if !batch.is_empty() && chunks.send(Chunk::Rows(batch)).is_err() {
+            return;
+        }
+
+        // Only a stream that ran to completion updates the connection's
+        // state. An abandoned one returns above, leaving the counters and
+        // the autocommit flag as they were.
+        self.autocommit = execution.autocommit();
+        if program.counts_changes() {
+            self.counters.changes = execution.changes();
+        }
+        if let Some(rowid) = execution.last_insert_rowid() {
+            self.counters.last_insert_rowid = rowid;
+        }
+        answer(chunks, Chunk::Done);
     }
 
     fn compile(&mut self, sql: &str) -> Result<Program, Error> {

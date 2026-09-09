@@ -161,6 +161,10 @@ name = "api_threading"
 path = "tests/unit/api_threading_test.rs"
 
 [[test]]
+name = "api_streaming"
+path = "tests/unit/api_streaming_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 

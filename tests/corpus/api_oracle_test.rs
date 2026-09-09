@@ -270,3 +270,95 @@ fn parameterised_writes_match_the_oracle() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The read path against the oracle: every row of every query, in order,
+/// rendered the way `sqlite3` renders it.
+///
+/// Streaming is the mechanism (`tests/unit/api_streaming_test.rs` pins
+/// that); this pins the *answers*. A `Rows` that streamed the wrong values,
+/// or dropped or reordered a batch boundary, would pass every unit test
+/// that only checks counts and shapes.
+#[test]
+fn queried_rows_match_the_oracle() {
+    let Some(bin) = pinned_oracle() else {
+        skip_no_oracle("queried_rows_match_the_oracle");
+        return;
+    };
+    let dir = scratch_dir("reads");
+    let ours = dir.join("ours.db");
+    let theirs = dir.join("theirs.db");
+
+    // More rows than one channel batch (64), so a result that spans batch
+    // boundaries is compared rather than only a short one.
+    let mut setup = String::from("CREATE TABLE t(a INTEGER, b TEXT, r REAL);");
+    for i in 0..200 {
+        let r = f64::from(i) / 4.0;
+        setup.push_str(&format!("INSERT INTO t VALUES ({i}, 'row-{i}', {r});"));
+    }
+    setup.push_str("CREATE INDEX t_a ON t(a);");
+
+    let conn = Connection::open(&ours).unwrap();
+    conn.execute_batch(&setup).unwrap();
+    drop(conn);
+    oracle_says(&bin, &theirs, &setup);
+
+    let queries = [
+        "SELECT a, b, r FROM t",
+        "SELECT a FROM t WHERE a > 150",
+        "SELECT a, b FROM t WHERE a < 3",
+        "SELECT count(*) FROM t",
+        "SELECT a FROM t ORDER BY a DESC",
+        "SELECT b FROM t WHERE a = 42",
+        "SELECT a FROM t LIMIT 5",
+        "SELECT sum(a), min(a), max(a) FROM t",
+    ];
+
+    // Reopen for reading; each `Rows` is scoped so the worker is never held
+    // by one result while the next query is issued.
+    let conn = Connection::open(&ours).unwrap();
+    for sql in queries {
+        let mine = {
+            let mut rows = conn
+                .query(sql)
+                .unwrap_or_else(|e| panic!("{sql} failed through the API: {e}"));
+            let mut rendered = Vec::new();
+            while let Some(row) = rows.next_row().unwrap() {
+                let cells: Vec<String> = (0..row.len())
+                    .map(|i| render(row.value(i).expect("in range")))
+                    .collect();
+                rendered.push(cells.join("|"));
+            }
+            rendered
+        };
+
+        let theirs_rows = oracle_says(&bin, &theirs, &format!("{sql};"));
+        let expected: Vec<String> = if theirs_rows.is_empty() {
+            Vec::new()
+        } else {
+            theirs_rows.lines().map(|l| l.to_string()).collect()
+        };
+
+        assert_eq!(mine, expected, "rows diverge for {sql:?}");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Renders a value the way the `sqlite3` shell's default list mode does, so
+/// the two sides are comparable as text.
+fn render(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Integer(v) => v.to_string(),
+        Value::Real(v) => {
+            // The shell prints a float with no fractional part as `N.0`.
+            if v.fract() == 0.0 && v.is_finite() {
+                format!("{v:.1}")
+            } else {
+                v.to_string()
+            }
+        }
+        Value::Text(v) => v.to_string(),
+        Value::Blob(v) => String::from_utf8_lossy(v).into_owned(),
+    }
+}
