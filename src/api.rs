@@ -268,6 +268,12 @@ pub enum Error {
         /// How many columns the row has.
         len: usize,
     },
+    /// A [`Statement`] was used after its worker discarded it.
+    ///
+    /// Not reachable while the handle is alive — `Statement` owns its
+    /// registration and finalizes it on drop — so this is a guard against
+    /// an internal inconsistency rather than a caller error.
+    StatementFinalized,
     /// Execution failed for a reason with no more specific variant.
     Execution {
         /// What went wrong.
@@ -301,7 +307,9 @@ impl Error {
             Error::ParamCount { .. } | Error::ColumnIndexOutOfRange { .. } => code::RANGE,
             Error::TypeMismatch { .. } => code::MISMATCH,
             Error::ColumnNotFound { .. } => code::ERROR,
-            Error::MultipleStatements { .. } | Error::ConnectionClosed => code::MISUSE,
+            Error::MultipleStatements { .. }
+            | Error::ConnectionClosed
+            | Error::StatementFinalized => code::MISUSE,
             Error::Sqlite { code, .. } => *code,
             Error::Busy { .. } => code::BUSY,
             Error::CannotOpen { .. } => code::CANTOPEN,
@@ -363,6 +371,7 @@ impl std::fmt::Display for Error {
             Error::Corrupt { message } => write!(f, "database image is malformed: {message}"),
             Error::Io { message } => write!(f, "I/O error: {message}"),
             Error::ConnectionClosed => write!(f, "connection is closed"),
+            Error::StatementFinalized => write!(f, "statement has been finalized"),
             Error::TypeMismatch {
                 column,
                 expected,
@@ -472,6 +481,46 @@ enum Request {
         /// Where to send them.
         reply: SyncSender<Counters>,
     },
+    /// Compile one statement and keep it.
+    Prepare {
+        /// The statement text.
+        sql: String,
+        /// Where to send the handle, or the failure to compile.
+        reply: SyncSender<Result<PreparedHandle, Error>>,
+    },
+    /// Run a kept statement, discarding rows.
+    StatementExecute {
+        /// Which statement.
+        id: u64,
+        /// Values for its placeholders.
+        params: Vec<Value>,
+        /// Where to send the outcome.
+        reply: SyncSender<Result<Applied, Error>>,
+    },
+    /// Run a kept statement and stream its rows.
+    StatementQuery {
+        /// Which statement.
+        id: u64,
+        /// Values for its placeholders.
+        params: Vec<Value>,
+        /// Where to send the stream's head.
+        reply: SyncSender<Result<QueryStream, Error>>,
+    },
+    /// How many times a kept statement has been recompiled.
+    StatementRepreparations {
+        /// Which statement.
+        id: u64,
+        /// Where to send the count.
+        reply: SyncSender<Result<u64, Error>>,
+    },
+    /// Discard a kept statement.
+    ///
+    /// No reply: `Statement::drop` cannot wait on one usefully, and there
+    /// is nothing a caller could do with the answer.
+    Finalize {
+        /// Which statement.
+        id: u64,
+    },
     /// Set how long a contended lock is waited for.
     SetBusyTimeout {
         /// The new timeout.
@@ -510,6 +559,27 @@ const CHUNK_ROWS: usize = 64;
 /// this still parks the worker until the caller reads or drops its [`Rows`].
 /// That is inherent to one worker streaming one execution — see [`Rows`].
 const CHUNK_SLOTS: usize = 2;
+
+/// What the worker returns when it has compiled and kept a statement.
+struct PreparedHandle {
+    id: u64,
+    param_count: usize,
+    column_names: Arc<Vec<String>>,
+}
+
+/// One compiled statement the worker is holding for a [`Statement`].
+struct KeptStatement {
+    /// Kept so the statement can be recompiled after a schema change, and
+    /// so `is_schema_changing` can be re-evaluated on each run.
+    sql: String,
+    program: Program,
+    column_names: Arc<Vec<String>>,
+    /// The schema generation this was compiled against.
+    generation: u64,
+    /// How many times it has been recompiled — SQLite's
+    /// `SQLITE_STMTSTATUS_REPREPARE`.
+    repreparations: u64,
+}
 
 /// The head of a streamed result: its column names, and the channel its
 /// rows arrive on.
@@ -705,6 +775,29 @@ impl Connection {
         // worker rather than leaving it blocked on a send nobody reads.
         drop(rows);
         Ok(first)
+    }
+
+    /// Compiles one statement and keeps it, so it can be run repeatedly
+    /// with different parameters.
+    ///
+    /// The value is not speed: for a dozen statements at commit frequency,
+    /// compiling once saves nothing measurable. It is that a handle owning
+    /// its parameter slots reports a wrong argument count instead of
+    /// writing a valid row that points at the wrong thing (spec 013
+    /// Requirement 3).
+    pub fn prepare(&self, sql: &str) -> Result<Statement, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::Prepare {
+            sql: sql.to_string(),
+            reply: reply_tx,
+        })?;
+        let handle = self.recv(reply_rx)??;
+        Ok(Statement {
+            conn: self.clone(),
+            id: handle.id,
+            param_count: handle.param_count,
+            column_names: handle.column_names,
+        })
     }
 
     /// Begins a deferred transaction.
@@ -1156,6 +1249,122 @@ impl Drop for Transaction {
     }
 }
 
+/// A compiled statement, ready to run with parameters.
+///
+/// Owns its registration on the connection's worker and finalizes it on
+/// drop. Holds a clone of the [`Connection`], so the worker stays alive for
+/// as long as any statement does.
+///
+/// # Schema changes
+///
+/// A statement recompiles itself if the schema changed since it was
+/// prepared, which is what `sqlite3_prepare_v2` does on `SQLITE_SCHEMA`.
+/// That is not a convenience: a program addresses tables by root page, and
+/// a `DROP` can return that page to the freelist for a later `CREATE` to
+/// reuse — so running a stale program could read a page belonging to a
+/// different table. [`Statement::reprepare_count`] reports how often it has
+/// happened, mirroring `SQLITE_STMTSTATUS_REPREPARE`.
+#[derive(Debug)]
+pub struct Statement {
+    conn: Connection,
+    id: u64,
+    param_count: usize,
+    column_names: Arc<Vec<String>>,
+}
+
+impl Statement {
+    /// How many parameters this statement reads.
+    ///
+    /// The largest `?NNN` index it uses, matching
+    /// `sqlite3_bind_parameter_count` — so `?3` alone reports 3.
+    pub fn param_count(&self) -> usize {
+        self.param_count
+    }
+
+    /// This statement's result column names.
+    ///
+    /// Subject to the same limit as [`Rows::column_names`]: real names only
+    /// for a single-table `SELECT`.
+    pub fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    /// Runs the statement with `params` bound, returning rows changed.
+    pub fn execute(&self, params: Vec<Value>) -> Result<u64, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.conn.send(Request::StatementExecute {
+            id: self.id,
+            params,
+            reply: reply_tx,
+        })?;
+        let applied = self.conn.recv(reply_rx)??;
+        Ok(applied.changes.unwrap_or(0))
+    }
+
+    /// Runs the statement with `params` bound and streams its rows.
+    ///
+    /// The same caveat as [`Connection::query`]: see [`Rows`].
+    pub fn query(&self, params: Vec<Value>) -> Result<Rows, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.conn.send(Request::StatementQuery {
+            id: self.id,
+            params,
+            reply: reply_tx,
+        })?;
+        let stream = self.conn.recv(reply_rx)??;
+        Ok(Rows {
+            column_names: stream.column_names,
+            chunks: stream.chunks,
+            buffered: Vec::new().into_iter(),
+            finished: false,
+        })
+    }
+
+    /// Runs the statement and collects every row.
+    pub fn query_all(&self, params: Vec<Value>) -> Result<Vec<Row>, Error> {
+        self.query(params)?.into_vec()
+    }
+
+    /// Runs the statement and returns its first row, if any.
+    pub fn query_row(&self, params: Vec<Value>) -> Result<Option<Row>, Error> {
+        let mut rows = self.query(params)?;
+        let first = rows.next_row()?;
+        drop(rows);
+        Ok(first)
+    }
+
+    /// How many times this statement has been recompiled because the
+    /// schema changed under it.
+    ///
+    /// SQLite's `SQLITE_STMTSTATUS_REPREPARE`: "the number of times that
+    /// the prepared statement has been automatically regenerated due to
+    /// schema changes". Zero for a statement whose schema has held still,
+    /// which is what makes "compiled once" an observable claim rather than
+    /// an assertion about internals.
+    pub fn reprepare_count(&self) -> Result<u64, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.conn.send(Request::StatementRepreparations {
+            id: self.id,
+            reply: reply_tx,
+        })?;
+        self.conn.recv(reply_rx)?
+    }
+
+    /// The connection this statement belongs to.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Drop for Statement {
+    fn drop(&mut self) {
+        // Fire and forget: there is no reply to wait for and nothing a
+        // caller could do with a failure. If the worker is already gone it
+        // has dropped every kept statement with it.
+        self.conn.send(Request::Finalize { id: self.id }).ok();
+    }
+}
+
 /// What the worker should open.
 enum Target {
     /// A real file, through `UnixVfs`.
@@ -1182,6 +1391,13 @@ struct Engine {
     /// schema-changing statement is the conservative rule the CLI already
     /// uses (`src/bin/sqlite-rs/exec.rs::is_schema_changing`).
     catalog: Option<(Vec<TableSchema>, Vec<ViewSchema>)>,
+    /// Statements compiled and kept for a [`Statement`] handle.
+    statements: std::collections::HashMap<u64, KeptStatement>,
+    /// Source of [`KeptStatement`] keys.
+    next_statement_id: u64,
+    /// Bumped whenever the catalog is invalidated, so a kept statement can
+    /// tell it was compiled against an older schema (013/Req 8).
+    schema_generation: u64,
     /// How long a contended lock is waited for before giving up.
     ///
     /// Zero by default, matching stock SQLite — `sqlite3_busy_timeout` is
@@ -1241,6 +1457,21 @@ fn worker_main(
             Request::Counters { reply } => {
                 answer(&reply, engine.counters);
             }
+            Request::Prepare { sql, reply } => {
+                answer(&reply, engine.prepare(&sql));
+            }
+            Request::StatementExecute { id, params, reply } => {
+                answer(&reply, engine.statement_execute(id, params));
+            }
+            Request::StatementQuery { id, params, reply } => {
+                engine.statement_stream(id, params, &reply);
+            }
+            Request::StatementRepreparations { id, reply } => {
+                answer(&reply, engine.repreparations(id));
+            }
+            Request::Finalize { id } => {
+                engine.statements.remove(&id);
+            }
             Request::SetBusyTimeout { timeout, reply } => {
                 engine.busy_timeout = timeout;
                 answer(&reply, ());
@@ -1262,6 +1493,9 @@ impl Engine {
             autocommit: true,
             counters: Counters::default(),
             catalog: None,
+            statements: std::collections::HashMap::new(),
+            next_statement_id: 0,
+            schema_generation: 0,
             busy_timeout: Duration::ZERO,
         })
     }
@@ -1385,11 +1619,7 @@ impl Engine {
     }
 
     fn execute_one(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
-        let statements = crate::parser::split_statements(sql);
-        let count = statements.len();
-        let Some(statement) = statements.into_iter().next().filter(|_| count == 1) else {
-            return Err(Error::MultipleStatements { count });
-        };
+        let statement = self.single_statement(sql)?;
         self.run_with_retry(&statement, params)
     }
 
@@ -1404,8 +1634,24 @@ impl Engine {
     /// counters and invalidating the catalog if it could have changed.
     fn run(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
         let program = self.compile(sql)?;
+        self.run_compiled(sql, &program, params)
+    }
 
-        if self.mode == OpenMode::ReadOnly && writes(&program) {
+    /// Checks an already-compiled `program` against this connection's mode
+    /// and the supplied parameters, runs it, and invalidates the catalog if
+    /// it could have changed the schema.
+    ///
+    /// Split out from [`Engine::run`] so a kept statement takes exactly the
+    /// same path as an ad-hoc one — a second copy of these checks is how a
+    /// prepared statement ends up honouring a different contract from
+    /// `execute`.
+    fn run_compiled(
+        &mut self,
+        sql: &str,
+        program: &Program,
+        params: Vec<Value>,
+    ) -> Result<Applied, Error> {
+        if self.mode == OpenMode::ReadOnly && writes(program) {
             return Err(Error::ReadOnly {
                 statement: sql.to_string(),
             });
@@ -1419,12 +1665,167 @@ impl Engine {
             });
         }
 
-        let outcome = self.step(&program, params)?;
+        let outcome = self.step(program, params)?;
 
         if is_schema_changing(sql) {
-            self.catalog = None;
+            self.invalidate_catalog();
         }
         Ok(outcome)
+    }
+
+    /// Drops the decoded catalog and moves the schema generation on.
+    ///
+    /// The generation is what lets a kept statement notice it was compiled
+    /// against an older schema. Correctness, not caching: a program
+    /// addresses tables by root page, and a `DROP` can hand that page back
+    /// to the freelist for a later `CREATE` to reuse — so running a stale
+    /// program could read a page that now belongs to a different table
+    /// (013/Req 8).
+    fn invalidate_catalog(&mut self) {
+        self.catalog = None;
+        self.schema_generation = self.schema_generation.saturating_add(1);
+    }
+
+    /// Compiles `sql` and keeps it, returning the handle's fields.
+    fn prepare(&mut self, sql: &str) -> Result<PreparedHandle, Error> {
+        let statement = self.single_statement(sql)?;
+        let program = self.compile(&statement)?;
+        let column_names = Arc::new(self.column_names_of(&statement)?);
+        let param_count = program.param_count();
+
+        let id = self.next_statement_id;
+        self.next_statement_id = self.next_statement_id.saturating_add(1);
+        self.statements.insert(
+            id,
+            KeptStatement {
+                sql: statement,
+                program,
+                column_names: Arc::clone(&column_names),
+                generation: self.schema_generation,
+                repreparations: 0,
+            },
+        );
+        Ok(PreparedHandle {
+            id,
+            param_count,
+            column_names,
+        })
+    }
+
+    /// Takes a kept statement out of the table, recompiling it first if the
+    /// schema has moved under it.
+    ///
+    /// Taken rather than borrowed because running it needs `&mut self`. The
+    /// caller must put it back — see [`Engine::statement_execute`].
+    fn take_refreshed(&mut self, id: u64) -> Result<KeptStatement, Error> {
+        let mut kept = self
+            .statements
+            .remove(&id)
+            .ok_or(Error::StatementFinalized)?;
+        if kept.generation != self.schema_generation {
+            // Recompile rather than fail, which is what
+            // `sqlite3_prepare_v2` does on `SQLITE_SCHEMA`. A failure would
+            // be safe too, but it would push a retry loop onto every
+            // caller for something the connection can do itself.
+            match self.compile(&kept.sql) {
+                Ok(program) => {
+                    let names = self.column_names_of(&kept.sql)?;
+                    kept.program = program;
+                    kept.column_names = Arc::new(names);
+                    kept.generation = self.schema_generation;
+                    kept.repreparations = kept.repreparations.saturating_add(1);
+                }
+                Err(e) => {
+                    // The statement no longer compiles — its table was
+                    // dropped, say. Keep it (so the id stays valid and the
+                    // error is repeatable) and report why.
+                    self.statements.insert(id, kept);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(kept)
+    }
+
+    fn statement_execute(&mut self, id: u64, params: Vec<Value>) -> Result<Applied, Error> {
+        let kept = self.take_refreshed(id)?;
+        let result = self.run_compiled(&kept.sql, &kept.program, params);
+        self.statements.insert(id, kept);
+        result
+    }
+
+    fn repreparations(&mut self, id: u64) -> Result<u64, Error> {
+        self.statements
+            .get(&id)
+            .map(|kept| kept.repreparations)
+            .ok_or(Error::StatementFinalized)
+    }
+
+    /// [`Engine::stream`] for a kept statement.
+    fn statement_stream(
+        &mut self,
+        id: u64,
+        params: Vec<Value>,
+        reply: &SyncSender<Result<QueryStream, Error>>,
+    ) {
+        let kept = match self.take_refreshed(id) {
+            Ok(kept) => kept,
+            Err(e) => {
+                answer(reply, Err(e));
+                return;
+            }
+        };
+
+        if let Err(e) = self.check_runnable(&kept.sql, &kept.program, params.len()) {
+            self.statements.insert(id, kept);
+            answer(reply, Err(e));
+            return;
+        }
+
+        let (chunk_tx, chunk_rx) = sync_channel::<Chunk>(CHUNK_SLOTS);
+        let head = QueryStream {
+            column_names: Arc::clone(&kept.column_names),
+            chunks: chunk_rx,
+        };
+        if reply.send(Ok(head)).is_err() {
+            self.statements.insert(id, kept);
+            return;
+        }
+        self.drain(&kept.program, params, &chunk_tx);
+        self.statements.insert(id, kept);
+    }
+
+    /// The mode and arity checks, shared by the ad-hoc and kept paths.
+    fn check_runnable(
+        &self,
+        sql: &str,
+        program: &Program,
+        param_count: usize,
+    ) -> Result<(), Error> {
+        if self.mode == OpenMode::ReadOnly && writes(program) {
+            return Err(Error::ReadOnly {
+                statement: sql.to_string(),
+            });
+        }
+        let wanted = program.param_count();
+        if wanted != param_count {
+            return Err(Error::ParamCount {
+                expected: wanted,
+                found: param_count,
+            });
+        }
+        Ok(())
+    }
+
+    /// Splits `sql` and insists on exactly one statement.
+    fn single_statement(&self, sql: &str) -> Result<String, Error> {
+        let statements = crate::parser::split_statements(sql);
+        let count = statements.len();
+        statements
+            .into_iter()
+            .next()
+            .filter(|_| count == 1)
+            .ok_or(Error::MultipleStatements { count })
     }
 
     /// Runs `program`, threading the transaction state and folding the
@@ -1510,18 +1911,7 @@ impl Engine {
         param_count: usize,
     ) -> Result<(Program, Arc<Vec<String>>), Error> {
         let program = self.compile(sql)?;
-        if self.mode == OpenMode::ReadOnly && writes(&program) {
-            return Err(Error::ReadOnly {
-                statement: sql.to_string(),
-            });
-        }
-        let wanted = program.param_count();
-        if wanted != param_count {
-            return Err(Error::ParamCount {
-                expected: wanted,
-                found: param_count,
-            });
-        }
+        self.check_runnable(sql, &program, param_count)?;
         let names = self.column_names_of(sql)?;
         Ok((program, Arc::new(names)))
     }

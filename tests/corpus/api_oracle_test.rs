@@ -362,3 +362,80 @@ fn render(value: &Value) -> String {
         Value::Blob(v) => String::from_utf8_lossy(v).into_owned(),
     }
 }
+
+/// A statement prepared *before* an index existed must maintain that index
+/// once it does (spec 013 Requirement 8).
+///
+/// This is the claim a unit test cannot make. A stale program inserts the
+/// table row and skips the index entirely, leaving a row present in the
+/// table with no matching index entry — and neither our own reads nor our
+/// own integrity checker necessarily notice, because a read may table-scan
+/// and find it anyway. `PRAGMA integrity_check` in stock sqlite3 does
+/// notice: a missing index entry is exactly what it reports. #685 is the
+/// precedent — that whole class of bug was invisible until the oracle was
+/// asked.
+#[test]
+fn a_prepared_write_after_create_index_keeps_the_file_valid() {
+    let Some(bin) = pinned_oracle() else {
+        skip_no_oracle("a_prepared_write_after_create_index_keeps_the_file_valid");
+        return;
+    };
+    let dir = scratch_dir("reprepare");
+    let db = dir.join("idx.db");
+
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t(id INTEGER, name TEXT);
+             INSERT INTO t VALUES (1, 'one');",
+        )
+        .unwrap();
+
+        // Prepared while no index exists.
+        let insert = conn.prepare("INSERT INTO t VALUES (?1, ?2)").unwrap();
+        insert
+            .execute(vec![Value::from(2), Value::from("two")])
+            .unwrap();
+
+        // Now two indexes appear, including a UNIQUE one — whose entries
+        // stock sqlite3 checks against the table both ways.
+        conn.execute("CREATE INDEX t_id ON t(id)").unwrap();
+        conn.execute("CREATE UNIQUE INDEX t_name ON t(name)")
+            .unwrap();
+
+        // The same handle, run again. It must recompile and maintain both.
+        insert
+            .execute(vec![Value::from(3), Value::from("three")])
+            .unwrap();
+        insert
+            .execute(vec![Value::from(4), Value::from("four")])
+            .unwrap();
+
+        assert!(
+            insert.reprepare_count().unwrap() >= 1,
+            "the prepared insert should have recompiled once the indexes appeared"
+        );
+    }
+
+    assert_eq!(
+        oracle_says(&bin, &db, "PRAGMA integrity_check;"),
+        "ok",
+        "rows inserted through a statement prepared before the index left the \
+         file malformed — the index is missing entries the table has"
+    );
+
+    // And the index really is usable, checked through the oracle so our own
+    // planner cannot paper over a missing entry with a table scan.
+    assert_eq!(
+        oracle_says(
+            &bin,
+            &db,
+            "SELECT name FROM t INDEXED BY t_id WHERE id = 4;"
+        ),
+        "four",
+        "the index has no entry for a row inserted through the stale statement"
+    );
+    assert_eq!(oracle_says(&bin, &db, "SELECT count(*) FROM t;"), "4");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
