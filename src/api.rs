@@ -1,0 +1,929 @@
+// Copyright 2026 Schuberg Philis
+// SPDX-License-Identifier: Apache-2.0
+//! The embedding API: a `Connection` an application links against.
+//!
+//! This is the supported surface (spec 013). Everything else this crate
+//! exports — `btree`, `codegen`, `pager`, `parser`, `planner`, `vdbe`,
+//! `vfs` — is the engine, and a consumer should not have to name any of it.
+//!
+//! ## Why a worker thread
+//!
+//! The engine's page-source graph is `Rc`/`RefCell` by decision
+//! (ADR-0013, ADR-0017: a read path that pays no atomic refcount cost), and
+//! `Rc` is not `Send`. A handle a connection pool, an async task, or a
+//! trait with `Send + Sync` bounds can hold therefore cannot own the engine
+//! directly, and *no* wrapper fixes that: `Mutex<T>` is `Send` only when
+//! `T: Send`, so wrapping the pager graph in a lock changes nothing at the
+//! type level. The two achievable designs are an `Arc`/lock refactor of
+//! `Pager` and `PageSource`, which ADR-0013/ADR-0017 rejected on read-path
+//! cost, or a thread that owns the engine and is spoken to over a channel.
+//! ADR-0041 chose the second; `sqlx`'s own SQLite driver does the same for
+//! a C `sqlite3*`.
+//!
+//! One constraint makes it the only *expressible* design rather than merely
+//! the preferred one. `make check-mvl-limit` forbids named lifetime
+//! parameters in `src/`, so no type here may hold an
+//! [`Execution`](crate::vdbe::Execution) — it borrows its `Program`, and a
+//! field of that type would need a lifetime. The execution has to live
+//! inside a single worker stack frame, which is exactly what this design
+//! gives it.
+//!
+//! Rows cross the channel without copying: ADR-0039 made [`Value`]'s
+//! payloads `Arc`, so a `Value` is `Send + Sync` already.
+//!
+//! ## What is here so far
+//!
+//! `Connection` with [`Connection::open`], [`Connection::execute`] and the
+//! statement-level counters spec 013 Requirement 1 asks for. Streaming
+//! reads, prepared statements and explicit transactions are separate
+//! phases; the protocol below is shaped to take them.
+
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+use crate::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
+use crate::pager::Pager;
+use crate::record::Value;
+use crate::schema::{TableSchema, ViewSchema};
+use crate::vdbe::{Opcode, Program};
+use crate::vfs::{MemoryVfs, UnixVfs, Vfs};
+
+/// SQLite primary result codes, from `sqlite3.h` at the pinned 3.53.4.
+///
+/// Only the ones this module can actually produce are defined; the full
+/// list is not this crate's to publish.
+mod code {
+    /// `SQLITE_ERROR` — generic error.
+    pub const ERROR: i32 = 1;
+    /// `SQLITE_BUSY` — the database file is locked.
+    pub const BUSY: i32 = 5;
+    /// `SQLITE_READONLY` — attempt to write a read-only database.
+    pub const READONLY: i32 = 8;
+    /// `SQLITE_IOERR` — a disk I/O error.
+    pub const IOERR: i32 = 10;
+    /// `SQLITE_CORRUPT` — the database disk image is malformed.
+    pub const CORRUPT: i32 = 11;
+    /// `SQLITE_CANTOPEN` — unable to open the database file.
+    pub const CANTOPEN: i32 = 14;
+    /// `SQLITE_MISUSE` — the library was used incorrectly.
+    pub const MISUSE: i32 = 21;
+    /// `SQLITE_RANGE` — a bind index is out of range.
+    pub const RANGE: i32 = 25;
+}
+
+/// How to open a database file.
+///
+/// Mirrors the three modes a `sqlite://` URL can ask for, which is what a
+/// consumer configures (spec 013 Requirement 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenMode {
+    /// Open an existing database and refuse every statement that would
+    /// write to it.
+    ///
+    /// Enforced per statement rather than by the pager, and that is a
+    /// deliberate divergence from stock SQLite recorded under ADR-0004.
+    /// [`Pager::open`] calls `Vfs::open_write` unconditionally and there is
+    /// no read-only pager; the read-only page source that does exist
+    /// (`VfsPageSource`) bypasses `Pager` entirely and so merges no WAL
+    /// frames, which would silently serve stale data for a WAL database.
+    /// Refusing writes above the pager is the honest option until spec 007
+    /// grows a read-only pager: the file is opened for writing, but nothing
+    /// this connection accepts will write to it.
+    ReadOnly,
+    /// Open an existing database for reading and writing. Fails if the file
+    /// does not exist, and creates nothing.
+    ReadWrite,
+    /// Open a database for reading and writing, creating a valid empty one
+    /// if no file exists yet.
+    ReadWriteCreate,
+}
+
+/// Why an API call failed.
+///
+/// Deliberately flat: every payload is a `String`, an `i32` or a `Copy`
+/// enum, and layer errors arrive as already-formatted text rather than as
+/// wrapped values. Two things fall out that matter more than a
+/// [`source`](std::error::Error::source) chain would.
+///
+/// It is unconditionally `Send + Sync + 'static`, which it *must* be —
+/// every error travels back from the worker thread over a channel, so an
+/// error type that borrowed from engine state could not be returned at all.
+/// And it derives [`PartialEq`], so a test can assert the exact error
+/// instead of substring-matching a message.
+///
+/// The price is that the originating layer error is not recoverable from
+/// here. That is a real loss, and a small one: the sixteen engine error
+/// enums barely implement `source()` themselves, and the message they
+/// format is the diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// The SQL could not be parsed.
+    Parse {
+        /// What the parser objected to.
+        message: String,
+        /// 1-based line of the offending token.
+        line: u32,
+        /// 1-based column of the offending token.
+        column: u32,
+    },
+    /// The statement parsed but could not be compiled.
+    Compile {
+        /// What the compiler objected to.
+        message: String,
+    },
+    /// A named parameter form (`:name`, `@name`, `$name`) was used.
+    ///
+    /// Separate from [`Error::Compile`] because it is the one compile
+    /// failure a consumer is likely to hit by habit rather than by mistake:
+    /// binding by name is what most drivers do. Positional `?`/`?NNN` is
+    /// what this crate supports.
+    NamedParameter {
+        /// The placeholder as written, sigil included.
+        placeholder: String,
+    },
+    /// The number of bound parameters did not match what the statement
+    /// wants.
+    ///
+    /// Stricter than stock SQLite, which leaves an unbound parameter NULL.
+    /// A deliberate divergence under ADR-0004: refusing to run is the safe
+    /// direction, and catching a transposed or short argument list is the
+    /// stated value of spec 013 Requirement 3.
+    ParamCount {
+        /// How many the statement reads.
+        expected: usize,
+        /// How many the caller supplied.
+        found: usize,
+    },
+    /// More than one statement was given where exactly one was required.
+    MultipleStatements {
+        /// How many statements the text contained.
+        count: usize,
+    },
+    /// The engine halted with a SQLite result code — a constraint
+    /// violation, typically.
+    ///
+    /// `code` is the *extended* code (e.g. 2067 for a UNIQUE violation);
+    /// [`Error::sqlite_code`] narrows it to the primary one.
+    Sqlite {
+        /// The extended SQLite result code.
+        code: i32,
+        /// The engine's message, if it supplied one.
+        message: String,
+    },
+    /// The database is locked by another connection or process (spec 007's
+    /// `VfsError::Locked`). Retryable — see [`Error::is_retryable`].
+    Busy {
+        /// The path that was locked.
+        path: String,
+    },
+    /// The database file could not be opened.
+    CannotOpen {
+        /// The path that could not be opened.
+        path: String,
+        /// Why.
+        message: String,
+    },
+    /// A write was attempted on a connection opened [`OpenMode::ReadOnly`].
+    ReadOnly {
+        /// The statement that was refused.
+        statement: String,
+    },
+    /// The database image is malformed.
+    Corrupt {
+        /// What was malformed.
+        message: String,
+    },
+    /// An I/O error.
+    Io {
+        /// What failed.
+        message: String,
+    },
+    /// The connection's worker thread is no longer running.
+    ///
+    /// Returned rather than blocking, per spec 013 Requirement 4. Reachable
+    /// two ways: the connection was closed, or the worker panicked (which
+    /// would be a bug in this crate).
+    ConnectionClosed,
+    /// Execution failed for a reason with no more specific variant.
+    Execution {
+        /// What went wrong.
+        message: String,
+    },
+}
+
+impl Error {
+    /// The primary SQLite result code for this error, as
+    /// `sqlite3_errcode()` reports it.
+    ///
+    /// Primary, not extended: `sqlite3_errcode()` returns the low byte and
+    /// `sqlite3_extended_errcode()` the whole word, so both are offered
+    /// here under the names that match. A caller switching on "is this a
+    /// constraint violation" wants 19; one distinguishing UNIQUE from
+    /// NOT NULL wants 2067 and should call
+    /// [`Error::extended_sqlite_code`].
+    pub fn sqlite_code(&self) -> i32 {
+        // The extended-to-primary rule is the low byte (`sqlite3.h`: every
+        // extended code is `primary | (n<<8)`).
+        self.extended_sqlite_code() & 0xff
+    }
+
+    /// The extended SQLite result code for this error, as
+    /// `sqlite3_extended_errcode()` reports it.
+    pub fn extended_sqlite_code(&self) -> i32 {
+        match self {
+            Error::Parse { .. } | Error::Compile { .. } | Error::NamedParameter { .. } => {
+                code::ERROR
+            }
+            Error::ParamCount { .. } => code::RANGE,
+            Error::MultipleStatements { .. } | Error::ConnectionClosed => code::MISUSE,
+            Error::Sqlite { code, .. } => *code,
+            Error::Busy { .. } => code::BUSY,
+            Error::CannotOpen { .. } => code::CANTOPEN,
+            Error::ReadOnly { .. } => code::READONLY,
+            Error::Corrupt { .. } => code::CORRUPT,
+            Error::Io { .. } => code::IOERR,
+            Error::Execution { .. } => code::ERROR,
+        }
+    }
+
+    /// Whether retrying the same call could succeed without any change on
+    /// the caller's part.
+    ///
+    /// True only for [`Error::Busy`]: the lock it names is held by someone
+    /// else and may be released. Every other variant describes something
+    /// that will fail identically on a retry.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::Busy { .. })
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Parse {
+                message,
+                line,
+                column,
+            } => {
+                write!(f, "syntax error (line {line}, column {column}): {message}")
+            }
+            Error::Compile { message } => write!(f, "cannot compile statement: {message}"),
+            Error::NamedParameter { placeholder } => write!(
+                f,
+                "named parameter {placeholder} is not supported — bind by position with ? or ?NNN"
+            ),
+            Error::ParamCount { expected, found } => write!(
+                f,
+                "statement wants {expected} parameter(s) but {found} were bound"
+            ),
+            Error::MultipleStatements { count } => write!(
+                f,
+                "expected a single statement but found {count} — use execute_batch"
+            ),
+            Error::Sqlite { code, message } => {
+                if message.is_empty() {
+                    write!(f, "SQLite error {code}")
+                } else {
+                    write!(f, "{message} (SQLite error {code})")
+                }
+            }
+            Error::Busy { path } => write!(f, "database is locked: {path}"),
+            Error::CannotOpen { path, message } => {
+                write!(f, "cannot open {path}: {message}")
+            }
+            Error::ReadOnly { statement } => {
+                write!(f, "connection is read-only; refused: {statement}")
+            }
+            Error::Corrupt { message } => write!(f, "database image is malformed: {message}"),
+            Error::Io { message } => write!(f, "I/O error: {message}"),
+            Error::ConnectionClosed => write!(f, "connection is closed"),
+            Error::Execution { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// A connection to one database.
+///
+/// `Send + Sync` and cheap to clone: every clone talks to the same worker
+/// thread, and the thread is joined when the last clone drops. Statements
+/// are serialized, which is what spec 013 Requirement 4 specifies — a
+/// pointer store's throughput is irrelevant, and reachability is the point.
+#[derive(Debug, Clone)]
+pub struct Connection {
+    inner: Arc<Shared>,
+}
+
+/// The shared half of a [`Connection`], so clones address one worker.
+#[derive(Debug)]
+struct Shared {
+    /// `SyncSender` rather than `Sender` deliberately: `Sender<T>` is
+    /// `Send` but not `Sync`, and a handle several threads hold at once
+    /// needs both.
+    ///
+    /// `Option` so [`Shared::drop`] can *close* the channel before joining.
+    /// This is load-bearing rather than tidy: the worker's loop ends when
+    /// `recv` fails, which only happens once every sender is gone, so
+    /// joining while still holding this one deadlocks — the drop waits for
+    /// a thread that is waiting for the drop.
+    requests: Option<SyncSender<Request>>,
+    /// Taken by [`Shared::drop`] to join the worker. `Mutex` because a
+    /// `JoinHandle` has to be owned to be joined, and because `Shared` is
+    /// reachable from several threads until the last clone goes.
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // Order matters. Dropping the sender closes the channel, so the
+        // worker's `recv` returns `Err` and its loop ends; only then is
+        // there anything to join. Field-drop order would run this *after*
+        // `drop`, hence the explicit `take`.
+        self.requests = None;
+
+        // Then wait for it, so a caller that drops a connection and
+        // immediately reopens the same path cannot race its predecessor's
+        // file locks — the `Pager` releases those when the worker's stack
+        // unwinds, which has not happened yet when the channel closes.
+        //
+        // `Mutex::get_mut` rather than `lock`: this is `&mut self`, so
+        // there is no contention to wait on and a poisoned mutex cannot
+        // block the join.
+        if let Ok(slot) = self.worker.get_mut() {
+            if let Some(handle) = slot.take() {
+                handle.join().ok();
+            }
+        }
+    }
+}
+
+/// What the API asks the worker to do.
+///
+/// Every variant carries its own reply channel, so several threads holding
+/// clones of one [`Connection`] each wait on their own answer while the
+/// worker serves them in arrival order.
+enum Request {
+    /// Run exactly one statement.
+    Execute {
+        /// The statement text.
+        sql: String,
+        /// Values for its `?`/`?NNN` placeholders.
+        params: Vec<Value>,
+        /// Where to send the outcome.
+        reply: SyncSender<Result<Applied, Error>>,
+    },
+    /// Run every statement in a script, stopping at the first failure.
+    ExecuteBatch {
+        /// The script.
+        sql: String,
+        /// Where to send the outcome.
+        reply: SyncSender<Result<(), Error>>,
+    },
+    /// Read the connection-scoped counters.
+    Counters {
+        /// Where to send them.
+        reply: SyncSender<Counters>,
+    },
+}
+
+/// What one [`Connection::execute`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Applied {
+    /// Rows this statement changed, or `None` if it was not a counting
+    /// statement.
+    changes: Option<u64>,
+}
+
+/// The connection-scoped counters, retained across statements exactly as
+/// `sqlite3_changes()`/`sqlite3_last_insert_rowid()` are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Counters {
+    changes: u64,
+    last_insert_rowid: i64,
+}
+
+impl Connection {
+    /// Opens `path`, creating a valid empty database if no file exists.
+    ///
+    /// The default mode, matching what a `sqlite://<path>?mode=rwc` URL
+    /// asks for.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::open_with(path, OpenMode::ReadWriteCreate)
+    }
+
+    /// Opens `path` in `mode`.
+    pub fn open_with(path: impl AsRef<Path>, mode: OpenMode) -> Result<Self, Error> {
+        Self::spawn(Target::File(path.as_ref().to_path_buf()), mode)
+    }
+
+    /// Opens a private in-memory database, discarded when the last clone of
+    /// this connection drops.
+    ///
+    /// Backed by `MemoryVfs`, so it exercises the same pager, journal and
+    /// b-tree code a file does rather than a separate code path.
+    pub fn open_in_memory() -> Result<Self, Error> {
+        Self::spawn(Target::Memory, OpenMode::ReadWriteCreate)
+    }
+
+    /// Spawns the worker and waits for it to report whether it opened.
+    ///
+    /// Opening happens *on the worker thread* because the engine state it
+    /// produces is not `Send` — the `Pager` cannot be built here and moved
+    /// there. So the outcome comes back over a channel like everything
+    /// else, and a failure to open leaves no thread behind.
+    fn spawn(target: Target, mode: OpenMode) -> Result<Self, Error> {
+        let (request_tx, request_rx) = sync_channel::<Request>(0);
+        let (open_tx, open_rx) = sync_channel::<Result<(), Error>>(0);
+
+        let handle = std::thread::Builder::new()
+            .name("sqlite-rs-connection".to_string())
+            .spawn(move || worker_main(target, mode, request_rx, open_tx))
+            .map_err(|e| Error::Io {
+                message: format!("could not spawn the connection's worker thread: {e}"),
+            })?;
+
+        match open_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                inner: Arc::new(Shared {
+                    requests: Some(request_tx),
+                    worker: Mutex::new(Some(handle)),
+                }),
+            }),
+            Ok(Err(e)) => {
+                // The worker returns straight after reporting a failure;
+                // join it so no thread outlives the failed open. Safe to
+                // join here without closing `request_tx` first: the worker
+                // has already left its serve loop.
+                handle.join().ok();
+                Err(e)
+            }
+            // The worker vanished without reporting — only reachable if it
+            // panicked, which is a bug here rather than a caller error.
+            Err(_) => {
+                handle.join().ok();
+                Err(Error::ConnectionClosed)
+            }
+        }
+    }
+
+    /// Runs one statement with no parameters, returning how many rows it
+    /// changed.
+    ///
+    /// Zero for a statement that is not an `INSERT`/`UPDATE`/`DELETE`; see
+    /// [`Connection::changes`] for the retained count, which a
+    /// non-counting statement deliberately leaves alone.
+    pub fn execute(&self, sql: &str) -> Result<u64, Error> {
+        self.execute_with(sql, Vec::new())
+    }
+
+    /// Runs one statement with `params` bound to its `?`/`?NNN`
+    /// placeholders, 1-based, returning how many rows it changed.
+    ///
+    /// The count must match the statement's placeholder count exactly, or
+    /// this fails with [`Error::ParamCount`] rather than binding NULLs.
+    pub fn execute_with(&self, sql: &str, params: Vec<Value>) -> Result<u64, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::Execute {
+            sql: sql.to_string(),
+            params,
+            reply: reply_tx,
+        })?;
+        let applied = self.recv(reply_rx)??;
+        Ok(applied.changes.unwrap_or(0))
+    }
+
+    /// Runs every statement in `sql`, stopping at the first failure.
+    ///
+    /// For schema setup, where a caller has a script rather than a
+    /// statement. Not a transaction: statements that already ran stay
+    /// applied, exactly as `sqlite3_exec` leaves them.
+    pub fn execute_batch(&self, sql: &str) -> Result<(), Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::ExecuteBatch {
+            sql: sql.to_string(),
+            reply: reply_tx,
+        })?;
+        self.recv(reply_rx)?
+    }
+
+    /// Rows changed by the most recent counting statement, as
+    /// `sqlite3_changes()` reports it.
+    ///
+    /// A statement that is not an `INSERT`/`UPDATE`/`DELETE` does not reset
+    /// this — so a `SELECT` after a `DELETE` of two rows still reports two.
+    /// That retention rule is the whole reason this is not just
+    /// [`Connection::execute`]'s return value.
+    pub fn changes(&self) -> Result<u64, Error> {
+        Ok(self.counters()?.changes)
+    }
+
+    /// Rowid of the most recent successful `INSERT` into a rowid table, as
+    /// `sqlite3_last_insert_rowid()` reports it.
+    ///
+    /// Zero if this connection has inserted nothing yet. Like
+    /// [`Connection::changes`], a statement that inserts nothing leaves the
+    /// value standing.
+    pub fn last_insert_rowid(&self) -> Result<i64, Error> {
+        Ok(self.counters()?.last_insert_rowid)
+    }
+
+    fn counters(&self) -> Result<Counters, Error> {
+        let (reply_tx, reply_rx) = sync_channel(0);
+        self.send(Request::Counters { reply: reply_tx })?;
+        self.recv(reply_rx)
+    }
+
+    /// Hands `request` to the worker, or reports the worker is gone.
+    fn send(&self, request: Request) -> Result<(), Error> {
+        self.inner
+            .requests
+            .as_ref()
+            .ok_or(Error::ConnectionClosed)?
+            .send(request)
+            .map_err(|_| Error::ConnectionClosed)
+    }
+
+    /// Waits for the worker's answer, or reports the worker is gone.
+    ///
+    /// The two halves are separate because either can be the one to notice:
+    /// `send` fails if the worker died before the request, `recv` fails if
+    /// it died while serving it. Both mean the same thing to a caller, and
+    /// neither blocks forever — which is what Requirement 4 asks for.
+    fn recv<T>(&self, reply: Receiver<T>) -> Result<T, Error> {
+        reply.recv().map_err(|_| Error::ConnectionClosed)
+    }
+}
+
+/// What the worker should open.
+enum Target {
+    /// A real file, through `UnixVfs`.
+    File(PathBuf),
+    /// A private in-memory database, through `MemoryVfs`.
+    Memory,
+}
+
+/// The engine state one connection owns, and the only place it is touched.
+struct Engine {
+    pager: std::rc::Rc<std::cell::RefCell<Pager>>,
+    header: DatabaseHeader,
+    mode: OpenMode,
+    /// Threaded from each statement into the next, so a multi-statement
+    /// transaction is one unit (`execute_transaction_step`'s contract).
+    autocommit: bool,
+    counters: Counters,
+    /// The decoded catalog, reused across statements and dropped after any
+    /// statement that can change the schema.
+    ///
+    /// Correctness, not only speed: a prepared program addresses tables by
+    /// root page, so compiling against a stale catalog after a `DROP`/
+    /// `CREATE` could read a recycled page. Invalidating on every possibly
+    /// schema-changing statement is the conservative rule the CLI already
+    /// uses (`src/bin/sqlite-rs/exec.rs::is_schema_changing`).
+    catalog: Option<(Vec<TableSchema>, Vec<ViewSchema>)>,
+}
+
+/// Sends a reply, tolerating a caller that has stopped waiting.
+///
+/// A dropped receiver is not an error worth reporting: the caller gave up
+/// — its thread unwound, or it was interrupted between sending the request
+/// and reading the answer — so there is nobody to tell, and no reason for
+/// the worker to stop serving this connection's other handles.
+fn answer<T>(reply: &SyncSender<T>, value: T) {
+    reply.send(value).ok();
+}
+
+/// The worker thread's body: open, report, then serve requests until the
+/// last [`Connection`] clone drops.
+fn worker_main(
+    target: Target,
+    mode: OpenMode,
+    requests: Receiver<Request>,
+    open_reply: SyncSender<Result<(), Error>>,
+) {
+    let mut engine = match Engine::open(target, mode) {
+        Ok(engine) => {
+            if open_reply.send(Ok(())).is_err() {
+                // The caller gave up between spawning us and hearing back,
+                // so there is nobody to serve. Drop the engine, releasing
+                // its file locks.
+                return;
+            }
+            engine
+        }
+        Err(e) => {
+            answer(&open_reply, Err(e));
+            return;
+        }
+    };
+    // Dropped before the first request is served: `Connection::spawn` has
+    // its answer, and holding it would keep a channel alive for nothing.
+    drop(open_reply);
+
+    while let Ok(request) = requests.recv() {
+        match request {
+            Request::Execute { sql, params, reply } => {
+                answer(&reply, engine.execute_one(&sql, params));
+            }
+            Request::ExecuteBatch { sql, reply } => {
+                answer(&reply, engine.execute_batch(&sql));
+            }
+            Request::Counters { reply } => {
+                answer(&reply, engine.counters);
+            }
+        }
+    }
+}
+
+impl Engine {
+    fn open(target: Target, mode: OpenMode) -> Result<Self, Error> {
+        let (header, pager) = match target {
+            Target::File(path) => Self::open_file(&path, mode)?,
+            Target::Memory => Self::open_memory()?,
+        };
+        Ok(Self {
+            pager: std::rc::Rc::new(std::cell::RefCell::new(pager)),
+            header,
+            mode,
+            autocommit: true,
+            counters: Counters::default(),
+            catalog: None,
+        })
+    }
+
+    fn open_file(path: &Path, mode: OpenMode) -> Result<(DatabaseHeader, Pager), Error> {
+        let exists = UnixVfs.exists(path).map_err(|e| Error::CannotOpen {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+
+        if !exists {
+            if mode != OpenMode::ReadWriteCreate {
+                // Requirement 2 is explicit that this creates nothing, so
+                // the check is here rather than letting `open_write` bring
+                // the file into existence as a side effect.
+                return Err(Error::CannotOpen {
+                    path: path.display().to_string(),
+                    message: "no such database, and this mode does not create one".to_string(),
+                });
+            }
+            // Give the file a valid empty page 1 before anything tries to
+            // parse a header out of it — the same bootstrap the CLI's
+            // `exec` does, and proven against the oracle in
+            // `tests/corpus/bootstrap_oracle_test.rs`.
+            let file = UnixVfs
+                .create_or_open_write(path)
+                .map_err(|e| open_error(path, &e))?;
+            file.write_at(&DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE), 0)
+                .map_err(|e| open_error(path, &e))?;
+        }
+
+        crate::dump::open(&UnixVfs, path).map_err(|e| open_error(path, &e))
+    }
+
+    fn open_memory() -> Result<(DatabaseHeader, Pager), Error> {
+        const PATH: &str = "/sqlite-rs-memory.db";
+        let mut vfs = MemoryVfs::new();
+        vfs.insert(PATH, DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE));
+        crate::dump::open(&vfs, Path::new(PATH)).map_err(|e| open_error(Path::new(PATH), &e))
+    }
+
+    /// Reads the catalog, or reuses the cached decode.
+    fn catalog(&mut self) -> Result<&(Vec<TableSchema>, Vec<ViewSchema>), Error> {
+        if self.catalog.is_none() {
+            let borrowed = self.pager.borrow();
+            let mut cursor = crate::btree::TableCursor::new(&*borrowed, &self.header, 1);
+            let decoded =
+                crate::schema::read_schema_and_views(&mut cursor, self.header.text_encoding)
+                    .map_err(|e| Error::Corrupt {
+                        message: format!("cannot read the schema: {e}"),
+                    })?;
+            drop(borrowed);
+            self.catalog = Some(decoded);
+        }
+        self.catalog.as_ref().ok_or(Error::Execution {
+            message: "catalog cache was empty immediately after filling it".to_string(),
+        })
+    }
+
+    fn execute_one(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
+        let statements = crate::parser::split_statements(sql);
+        let count = statements.len();
+        let Some(statement) = statements.into_iter().next().filter(|_| count == 1) else {
+            return Err(Error::MultipleStatements { count });
+        };
+        self.run(&statement, params)
+    }
+
+    fn execute_batch(&mut self, sql: &str) -> Result<(), Error> {
+        for statement in crate::parser::split_statements(sql) {
+            self.run(&statement, Vec::new())?;
+        }
+        Ok(())
+    }
+
+    /// Compiles and runs one statement, updating the connection-scoped
+    /// counters and invalidating the catalog if it could have changed.
+    fn run(&mut self, sql: &str, params: Vec<Value>) -> Result<Applied, Error> {
+        let program = self.compile(sql)?;
+
+        if self.mode == OpenMode::ReadOnly && writes(&program) {
+            return Err(Error::ReadOnly {
+                statement: sql.to_string(),
+            });
+        }
+
+        let wanted = program.param_count();
+        if wanted != params.len() {
+            return Err(Error::ParamCount {
+                expected: wanted,
+                found: params.len(),
+            });
+        }
+
+        let outcome = self.step(&program, params)?;
+
+        if is_schema_changing(sql) {
+            self.catalog = None;
+        }
+        Ok(outcome)
+    }
+
+    /// Runs `program`, threading the transaction state and folding the
+    /// counters.
+    fn step(&mut self, program: &Program, params: Vec<Value>) -> Result<Applied, Error> {
+        let mut vm =
+            crate::vdbe::Vm::with_shared_writable_db(std::rc::Rc::clone(&self.pager), self.header);
+        vm.autocommit = self.autocommit;
+        vm.bind_params(params);
+
+        let mut execution = crate::vdbe::Execution::new(vm, program);
+        // Rows are discarded here; `execute` reports a count, not results.
+        // Draining through `next_row` rather than a collecting entry point
+        // keeps this on the one loop ADR-0040 specifies, so the eventual
+        // streaming path cannot diverge from this one.
+        while execution.next_row().map_err(exec_error)?.is_some() {}
+
+        self.autocommit = execution.autocommit();
+        let changes = program.counts_changes().then(|| execution.changes());
+        if let Some(changed) = changes {
+            self.counters.changes = changed;
+        }
+        if let Some(rowid) = execution.last_insert_rowid() {
+            self.counters.last_insert_rowid = rowid;
+        }
+        Ok(Applied { changes })
+    }
+
+    fn compile(&mut self, sql: &str) -> Result<Program, Error> {
+        // One entry point for every statement kind, which is what
+        // `sqlite3_prepare_v2` presents and what #695's lift made possible:
+        // `compile_statement` answers `Unrecognized("SELECT")` for a read,
+        // and the SELECT pipeline needs its FROM tables resolved and its
+        // views and CTEs expanded first.
+        if is_select(sql) {
+            return self.compile_select(sql);
+        }
+        let (schemas, views) = self.catalog()?;
+        crate::codegen::compile_statement(sql, schemas, views).map_err(|e| Error::Compile {
+            message: e.to_string(),
+        })
+    }
+
+    fn compile_select(&mut self, sql: &str) -> Result<Program, Error> {
+        use crate::parser::error::ParseOutcome;
+
+        let select = match crate::parser::parse_select(sql) {
+            ParseOutcome::Accepted(select) => *select,
+            ParseOutcome::Unsupported { message, span }
+            | ParseOutcome::Invalid { message, span } => {
+                return Err(Error::Parse {
+                    message,
+                    line: span.line,
+                    column: span.column,
+                })
+            }
+        };
+        let stats = std::collections::HashMap::new();
+        let (schemas, views) = self.catalog()?;
+        match crate::codegen::compile_select_program(&select, false, schemas, views, &stats) {
+            Ok(crate::codegen::SelectOutcome::Program(program)) => Ok(program),
+            Ok(crate::codegen::SelectOutcome::Eqp(_)) => Err(Error::Compile {
+                message: "EXPLAIN QUERY PLAN has no rows to execute".to_string(),
+            }),
+            Err(e) => Err(prepare_error(&e)),
+        }
+    }
+}
+
+/// Whether `program` can modify the database.
+///
+/// Keyed on `OpenWrite` and the DDL opcodes, not on `Insert`/`Delete`.
+/// Those two also target *ephemeral* cursors: a materialized FROM-subquery
+/// emits an `Insert` (`src/codegen/subquery/from_clause.rs:296`) in a plain
+/// `SELECT`, so keying on them would refuse read queries in
+/// [`OpenMode::ReadOnly`]. `OpenWrite` is the only way to obtain a writable
+/// table cursor, and every DML path emits one.
+fn writes(program: &Program) -> bool {
+    program.instructions.iter().any(|i| {
+        matches!(
+            i.opcode,
+            Opcode::OpenWrite
+                | Opcode::CreateTable
+                | Opcode::DropTable
+                | Opcode::CreateIndex
+                | Opcode::DropIndex
+                | Opcode::CreateView
+                | Opcode::Analyze
+                | Opcode::SetJournalMode
+        )
+    })
+}
+
+/// Whether `sql` should go through the `SELECT` compile pipeline.
+fn is_select(sql: &str) -> bool {
+    let head = sql.trim_start();
+    ["SELECT", "VALUES", "WITH"]
+        .iter()
+        .any(|kw| starts_with_keyword(head, kw))
+}
+
+/// Whether `sql` can change the `sqlite_master` catalog.
+///
+/// Conservative by design: any statement starting with `CREATE`, `DROP` or
+/// `ALTER` invalidates the cached catalog, even one that fails or turns out
+/// to be a no-op. The cost of an unnecessary re-read is one b-tree walk;
+/// the cost of a missed one is compiling against a stale root page.
+fn is_schema_changing(sql: &str) -> bool {
+    let head = sql.trim_start();
+    ["CREATE", "DROP", "ALTER"]
+        .iter()
+        .any(|kw| starts_with_keyword(head, kw))
+}
+
+fn starts_with_keyword(head: &str, keyword: &str) -> bool {
+    head.get(..keyword.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(keyword))
+}
+
+fn open_error(path: &Path, e: &impl std::fmt::Display) -> Error {
+    let message = e.to_string();
+    // spec 007's `VfsError::Locked` has to arrive as the busy variant even
+    // when it surfaces during open, since that is when a competing writer's
+    // lock is most likely to be met.
+    if message.contains("locked") {
+        return Error::Busy {
+            path: path.display().to_string(),
+        };
+    }
+    Error::CannotOpen {
+        path: path.display().to_string(),
+        message,
+    }
+}
+
+fn prepare_error(e: &crate::codegen::PrepareError) -> Error {
+    let message = e.to_string();
+    if let Some(placeholder) = named_placeholder_of(&message) {
+        return Error::NamedParameter { placeholder };
+    }
+    Error::Compile { message }
+}
+
+/// Recovers the placeholder from codegen's named-parameter refusal so the
+/// API can report [`Error::NamedParameter`] rather than a generic compile
+/// failure.
+///
+/// Reading it back out of the message is not elegant. The alternative is a
+/// dedicated `CodegenError` variant, which is a change to a shared engine
+/// error enum with sixteen match sites — worth doing, and worth doing on
+/// its own rather than inside the facade. Recorded so the seam is visible.
+fn named_placeholder_of(message: &str) -> Option<String> {
+    let rest = message.strip_prefix("unsupported: named parameter ")?;
+    let placeholder = rest.split_whitespace().next()?;
+    Some(placeholder.to_string())
+}
+
+fn exec_error(e: crate::vdbe::ExecError) -> Error {
+    use crate::vdbe::ExecError;
+    match e {
+        // The engine's route for constraint violations: `Halt` carries the
+        // extended SQLite result code codegen chose.
+        ExecError::Halted { code, message } => Error::Sqlite {
+            code,
+            message: message.unwrap_or_default(),
+        },
+        other => {
+            let message = other.to_string();
+            if message.contains("locked") {
+                return Error::Busy {
+                    path: String::new(),
+                };
+            }
+            Error::Execution { message }
+        }
+    }
+}

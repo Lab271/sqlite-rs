@@ -18,6 +18,7 @@ mod harness;
 mod oracle;
 
 mod analyze_test;
+mod api_oracle_test;
 mod autoindex_maintenance_test;
 mod begin_immediate_lock_interop_test;
 mod bootstrap_oracle_test;

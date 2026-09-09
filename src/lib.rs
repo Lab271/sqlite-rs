@@ -26,6 +26,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod api;
 pub mod btree;
 pub mod codegen;
 pub mod dump;
