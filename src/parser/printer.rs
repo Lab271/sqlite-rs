@@ -704,7 +704,7 @@ impl fmt::Display for Rollback {
 impl fmt::Display for ParamKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParamKind::Anonymous => write!(f, "?"),
+            ParamKind::Anonymous(_) => write!(f, "?"),
             ParamKind::Numbered(n) => write!(f, "?{n}"),
             ParamKind::Colon(s) => write!(f, ":{s}"),
             ParamKind::At(s) => write!(f, "@{s}"),

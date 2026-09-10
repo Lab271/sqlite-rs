@@ -444,7 +444,7 @@ mod tests {
             Vec::<usize>::new()
         );
         let param = Expr {
-            kind: ExprKind::Param(ParamKind::Anonymous),
+            kind: ExprKind::Param(ParamKind::Anonymous(1)),
             span: span(),
         };
         assert_eq!(

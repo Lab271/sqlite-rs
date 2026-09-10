@@ -120,7 +120,7 @@ fn is_supported_seek_operand(expr: &Expr) -> bool {
     matches!(
         &expr.kind,
         ExprKind::Literal(Literal::Integer(_))
-            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+            | ExprKind::Param(ParamKind::Anonymous(_) | ParamKind::Numbered(_))
     )
 }
 

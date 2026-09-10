@@ -222,8 +222,7 @@ pub(crate) fn compile_value(
         ExprKind::Param(kind) => {
             let r = reg.alloc();
             let index = match kind {
-                ParamKind::Anonymous => Some(reg.anonymous_param()),
-                ParamKind::Numbered(n) => Some(reg.numbered_param(*n)),
+                ParamKind::Anonymous(n) | ParamKind::Numbered(n) => Some(*n),
                 ParamKind::Colon(_) | ParamKind::At(_) | ParamKind::Dollar(_) => None,
             };
             if let Some(index) = index {

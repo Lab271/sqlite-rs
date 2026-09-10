@@ -35,6 +35,11 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    /// Highest parameter index handed out so far, so a bare `?` can take
+    /// the next one in text order. Per-statement, which it is by
+    /// construction: every parse entry point builds its own `Parser` for
+    /// one statement's tokens.
+    next_param: u32,
 }
 
 /// Recursion-depth cap for `expr`/`not_expr`/`unary_expr`, so pathological
@@ -59,6 +64,7 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            next_param: 0,
         }
     }
 
@@ -2212,8 +2218,14 @@ impl Parser {
             TokenKind::Param(p) => {
                 self.advance();
                 let kind = match *p {
-                    Param::Anonymous => ParamKind::Anonymous,
-                    Param::Numbered(n) => ParamKind::Numbered(n),
+                    Param::Anonymous => {
+                        self.next_param = self.next_param.saturating_add(1);
+                        ParamKind::Anonymous(self.next_param)
+                    }
+                    Param::Numbered(n) => {
+                        self.next_param = self.next_param.max(n);
+                        ParamKind::Numbered(n)
+                    }
                     Param::Colon(s) => ParamKind::Colon(s),
                     Param::At(s) => ParamKind::At(s),
                     Param::Dollar(s) => ParamKind::Dollar(s),

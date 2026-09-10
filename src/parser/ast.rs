@@ -506,8 +506,17 @@ pub enum Literal {
 /// A bind parameter's form.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamKind {
-    /// Bare `?`.
-    Anonymous,
+    /// Bare `?`, carrying the 1-based index assigned at parse time.
+    ///
+    /// SQLite assigns this during parsing (`sqlite3ExprAssignVarNumber`),
+    /// in the order the placeholders appear in the SQL text: a bare `?`
+    /// takes one more than the highest index used so far, and a `?NNN`
+    /// raises that high-water mark. Carrying the index here rather than
+    /// deriving it in codegen is load-bearing — codegen visits
+    /// expressions in *plan* order, not text order, and uses more than
+    /// one register allocator per statement, so a codegen-time counter
+    /// numbers the same SQL differently depending on the plan chosen.
+    Anonymous(u32),
     /// `?NNN`.
     Numbered(u32),
     /// `:name`.
