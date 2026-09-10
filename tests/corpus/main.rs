@@ -13,6 +13,7 @@
     clippy::arithmetic_side_effects
 )]
 
+mod consumer_sqe_test;
 mod harness;
 mod oracle;
 
