@@ -16,8 +16,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use sqlite_rs::api::{Connection, Error};
-use sqlite_rs::record::Value;
+use sqlite_rs::api::{Connection, Error, Value};
 
 fn seeded() -> Connection {
     let conn = Connection::open_in_memory().unwrap();

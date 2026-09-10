@@ -18,8 +18,7 @@
 
 use std::time::Instant;
 
-use sqlite_rs::api::{Connection, Error};
-use sqlite_rs::record::Value;
+use sqlite_rs::api::{Connection, Error, Value};
 
 fn seeded(rows: i64) -> Connection {
     let conn = Connection::open_in_memory().unwrap();

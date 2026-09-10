@@ -439,3 +439,87 @@ fn a_prepared_write_after_create_index_keeps_the_file_valid() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Requirement 4's contention scenario, judged by the oracle.
+///
+/// Eight threads sharing one handle, a hundred inserts each. The unit
+/// suite (`tests/unit/api_threading_test.rs::eight_threads_sharing_one_handle_produce_a_valid_file`)
+/// checks that all 800 rows are there and that each thread's hundred
+/// survived; what it cannot check is whether the *file* is well-formed.
+///
+/// That distinction is not academic. #685 was a whole class of write bug
+/// that our own reads could not see: a row present in the table with no
+/// matching index entry reads back fine and fails `integrity_check`. A
+/// concurrent write path that corrupted the free list or an interior page
+/// could pass every assertion in the unit test and still produce a file
+/// stock sqlite3 refuses.
+#[test]
+fn concurrent_writes_leave_a_file_the_oracle_accepts() {
+    let Some(bin) = pinned_oracle() else {
+        skip_no_oracle("concurrent_writes_leave_a_file_the_oracle_accepts");
+        return;
+    };
+    let db = scratch_dir("contention").join("threads.db");
+    std::fs::remove_file(&db).ok();
+
+    const THREADS: i64 = 8;
+    const PER_THREAD: i64 = 100;
+
+    {
+        let conn = std::sync::Arc::new(Connection::open(&db).unwrap());
+        // An index, so index maintenance runs on every insert and the
+        // oracle's integrity_check has an index to validate against the
+        // table. Without one, integrity_check cannot see the failure mode
+        // this test exists for.
+        conn.execute_batch(
+            "CREATE TABLE t(thread INTEGER, seq INTEGER, payload TEXT);
+             CREATE INDEX t_thread_seq ON t(thread, seq);",
+        )
+        .unwrap();
+
+        let mut handles = Vec::new();
+        for thread in 0..THREADS {
+            let conn = std::sync::Arc::clone(&conn);
+            handles.push(std::thread::spawn(move || {
+                for seq in 0..PER_THREAD {
+                    conn.execute_with(
+                        "INSERT INTO t VALUES (?1, ?2, ?3)",
+                        vec![
+                            Value::from(thread),
+                            Value::from(seq),
+                            Value::from(format!("t{thread}-s{seq}")),
+                        ],
+                    )
+                    .expect("every insert should succeed");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("a worker thread panicked");
+        }
+    }
+
+    assert_eq!(
+        oracle_says(&bin, &db, "PRAGMA integrity_check;"),
+        "ok",
+        "800 concurrent inserts through one handle left a malformed file"
+    );
+    assert_eq!(
+        oracle_says(&bin, &db, "SELECT count(*) FROM t;"),
+        (THREADS * PER_THREAD).to_string(),
+        "the oracle counts a different number of rows than we wrote"
+    );
+    // Every (thread, seq) pair exactly once, read through the index the
+    // writes had to maintain.
+    assert_eq!(
+        oracle_says(
+            &bin,
+            &db,
+            "SELECT count(*) FROM (SELECT DISTINCT thread, seq FROM t);"
+        ),
+        (THREADS * PER_THREAD).to_string(),
+        "a (thread, seq) pair was written twice or lost"
+    );
+
+    std::fs::remove_file(&db).ok();
+}

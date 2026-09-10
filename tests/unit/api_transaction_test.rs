@@ -12,8 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sqlite_rs::api::{Connection, Error, TransactionBehavior};
-use sqlite_rs::record::Value;
+use sqlite_rs::api::{Connection, Error, TransactionBehavior, Value};
 
 fn scratch(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sqlite-rs-api-tx-{}-{label}", std::process::id()));

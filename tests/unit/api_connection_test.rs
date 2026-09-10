@@ -210,3 +210,79 @@ fn a_batch_stops_at_the_first_failure() {
     conn.execute("DELETE FROM t WHERE a = 3").unwrap();
     assert_eq!(conn.changes().unwrap(), 0);
 }
+
+/// Opening something that is not a database must fail, and — the half that
+/// matters — must leave the file exactly as it was.
+///
+/// `Pager::open` calls `Vfs::open_write` unconditionally
+/// (`src/pager.rs:419`), so the file is opened for writing before its
+/// header is ever parsed. Nothing in the type system stops a future change
+/// from truncating or initialising it on the way to discovering it is not
+/// a database, and a consumer pointed at the wrong path would lose the
+/// file. So the byte comparison here is the point, not the error variant.
+#[test]
+fn a_foreign_file_is_refused_without_being_touched() {
+    let path = scratch("foreign");
+    let original: &[u8] = b"hello world";
+    std::fs::write(&path, original).unwrap();
+
+    let err = Connection::open(&path).expect_err("not a database");
+    assert!(
+        matches!(err, Error::CannotOpen { .. }),
+        "expected CannotOpen, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("magic"),
+        "the message should say what was wrong with it: {err}"
+    );
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "refusing a foreign file must not modify it"
+    );
+    clean(&path);
+}
+
+/// `ReadOnly` on a path with no file is an error, not an empty database,
+/// and it creates nothing.
+#[test]
+fn readonly_on_a_missing_file_fails_and_creates_nothing() {
+    let path = scratch("readonly-missing");
+    clean(&path);
+    let dir = path.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let err = Connection::open_with(&path, OpenMode::ReadOnly)
+        .expect_err("read-only cannot open what does not exist");
+    assert!(
+        matches!(err, Error::CannotOpen { .. }),
+        "expected CannotOpen, got {err:?}"
+    );
+    assert!(!path.exists(), "read-only must not create the file");
+    clean(&path);
+}
+
+/// #695's open acceptance criterion: a `PRAGMA` that this API does not
+/// support should say where the rest of them live, rather than handing back
+/// a bare parser message about a pragma name.
+#[test]
+fn an_unsupported_pragma_points_at_v7() {
+    let conn = Connection::open_in_memory().unwrap();
+    let err = conn
+        .prepare("PRAGMA table_info(t)")
+        .expect_err("introspection pragmas are not on this API");
+    let text = err.to_string();
+    assert!(
+        text.contains("V7"),
+        "the refusal should name the plan block that owns the catalogue: {text}"
+    );
+    assert!(
+        text.contains("Connection::pragma"),
+        "and should point at what this API does support: {text}"
+    );
+
+    // The setting form still works, which is the whole reason the message
+    // has to be specific rather than "PRAGMA is unsupported".
+    conn.pragma("journal_mode", "delete").unwrap();
+}

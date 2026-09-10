@@ -246,6 +246,16 @@ An in-memory database (`open_in_memory`) is also provided, backed by
 `MemoryVfs`, so it exercises the same pager, journal and b-tree code a file
 does rather than a separate path.
 
+**Journal mode is set after opening, not at open.** A consumer's proposal for
+this requirement asked for `journal_mode: Delete | Wal` among the open
+options, alongside read-only and create. It is not there: `Connection::pragma`
+sets it, as `PRAGMA journal_mode = wal` does through any SQLite driver, and
+the mode a database is in is persistent state in its header rather than a
+property of one handle's session. Putting it in the open options would imply
+a per-handle setting that does not exist, and would have to answer what
+happens when two handles ask for different modes on one file. Deliberate, and
+recorded here rather than left as an omission.
+
 **Implementation:** `src/api.rs::Connection::open`, plus `::open_with`,
 `::open_in_memory` and `::OpenMode`
 
@@ -277,6 +287,33 @@ does rather than a separate path.
   empty, and the oracle can then grow the file
 
 **Tests:** `tests/corpus/bootstrap_oracle_test.rs::an_empty_database_we_build_is_valid_at_every_page_size`
+
+#### Scenario: A file that is not a database is refused, unchanged
+
+- GIVEN a file whose contents are not a SQLite database
+- WHEN it is opened
+- THEN the open fails naming what was wrong with the header, and the file's
+  bytes are byte-for-byte what they were
+
+**Tests:** `tests/unit/api_connection_test.rs::a_foreign_file_is_refused_without_being_touched`
+
+#### Scenario: Read-only on a missing file fails and creates nothing
+
+- GIVEN a path with no file at it
+- WHEN opened `ReadOnly`
+- THEN it fails and no file exists afterwards
+
+**Tests:** `tests/unit/api_connection_test.rs::readonly_on_a_missing_file_fails_and_creates_nothing`
+
+#### Scenario: Journal mode is reachable, and an unsupported pragma says where the rest live
+
+- GIVEN a connection
+- WHEN `pragma("journal_mode", ...)` is set, and separately an introspection
+  pragma is prepared
+- THEN the setting form is honoured, and the introspection form is refused
+  with a message naming plan.md V7 and `Connection::pragma`
+
+**Tests:** `tests/unit/api_connection_test.rs::an_unsupported_pragma_points_at_v7`, `tests/unit/api_transaction_test.rs::pragma_sets_a_value_the_engine_honours`
 
 #### Scenario: Read-only refuses every write and permits every read
 
@@ -415,7 +452,7 @@ as a ratchet
 
 **Implementation:** `src/api.rs::Connection`
 
-**Tests:** `tests/unit/api_threading_test.rs`
+**Tests:** `tests/unit/api_threading_test.rs`, `tests/corpus/api_oracle_test.rs`
 
 #### Scenario: The handle is shared across threads
 
@@ -432,6 +469,18 @@ as a ratchet
   above.
 
 **Tests:** `tests/unit/api_threading_test.rs::handle_is_send_sync`, `tests/unit/api_threading_test.rs::a_shared_reference_works_across_threads`
+
+#### Scenario: Eight threads contending on one handle produce a valid file
+
+- GIVEN eight threads sharing one `Arc<Connection>` on a file, each running a
+  hundred parameterised inserts against an indexed table
+- WHEN every thread has joined
+- THEN all eight hundred rows are present, each thread's hundred are
+  individually accounted for, the rows survive reopening the file, and the
+  pinned oracle reports `integrity_check` = `ok` with the same row count and
+  no duplicated key pair
+
+**Tests:** `tests/unit/api_threading_test.rs::eight_threads_sharing_one_handle_produce_a_valid_file`, `tests/corpus/api_oracle_test.rs::concurrent_writes_leave_a_file_the_oracle_accepts`
 
 #### Scenario: The thread is released, and a dead engine errors
 

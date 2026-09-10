@@ -18,8 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sqlite_rs::api::Connection;
-use sqlite_rs::record::Value;
+use sqlite_rs::api::{Connection, Value};
 
 /// Compile-time proof, not a runtime check. If `Connection` ever stops
 /// being `Send + Sync` this fails to build, which is the point —
@@ -98,6 +97,97 @@ fn a_shared_reference_works_across_threads() {
         handle.join().expect("a worker thread panicked");
     }
     assert_eq!(conn.execute("DELETE FROM t").unwrap(), 4);
+}
+
+/// Requirement 4's contention scenario, on a real file: eight threads
+/// sharing one handle, a hundred inserts each, and the oracle asked whether
+/// the result is a well-formed database.
+///
+/// The count matters. Four threads doing one insert apiece — which is what
+/// this test used to be — proves the handle compiles and does not crash; it
+/// barely queues two requests against each other. Eight hundred inserts
+/// through one worker is what actually exercises the channel under
+/// contention, and the row count is an exact figure that any lost or
+/// double-applied request breaks.
+///
+/// On a file rather than in memory, so the pager, journal and b-tree are
+/// the real ones rather than the memory VFS's.
+#[test]
+fn eight_threads_sharing_one_handle_produce_a_valid_file() {
+    // No `clean` first: it removes the parent directory, and `scratch`
+    // has just created it.
+    let path = scratch("contention");
+
+    const THREADS: i64 = 8;
+    const PER_THREAD: i64 = 100;
+
+    {
+        let conn = Arc::new(Connection::open(&path).unwrap());
+        conn.execute("CREATE TABLE t(thread INTEGER, seq INTEGER)")
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for thread in 0..THREADS {
+            let conn = Arc::clone(&conn);
+            handles.push(std::thread::spawn(move || {
+                for seq in 0..PER_THREAD {
+                    conn.execute_with(
+                        "INSERT INTO t VALUES (?1, ?2)",
+                        vec![Value::from(thread), Value::from(seq)],
+                    )
+                    .expect("every insert should succeed");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("a worker thread panicked");
+        }
+
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM t")
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(
+            total,
+            THREADS * PER_THREAD,
+            "every insert must be applied exactly once"
+        );
+
+        // And no thread's rows were lost or duplicated individually, which a
+        // bare total would hide if one thread lost rows and another gained
+        // them.
+        for thread in 0..THREADS {
+            let n: i64 = conn
+                .query_row_with(
+                    "SELECT count(*) FROM t WHERE thread = ?1",
+                    vec![Value::from(thread)],
+                )
+                .unwrap()
+                .unwrap()
+                .get(0)
+                .unwrap();
+            assert_eq!(n, PER_THREAD, "thread {thread} lost or gained rows");
+        }
+    }
+
+    // Reopening proves the rows are on disk rather than only in a page
+    // cache the writing handle happened to hold.
+    let reopened = Connection::open(&path).unwrap();
+    let total: i64 = reopened
+        .query_row("SELECT count(*) FROM t")
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(total, THREADS * PER_THREAD, "rows did not survive reopen");
+    drop(reopened);
+
+    // Whether stock sqlite3 also calls the resulting file well-formed is
+    // asserted where the oracle lives:
+    // `tests/corpus/api_oracle_test.rs::concurrent_writes_leave_a_file_the_oracle_accepts`.
+    clean(&path);
 }
 
 /// The thread is released on drop, and this test would *hang* rather than

@@ -2029,8 +2029,26 @@ impl Engine {
             return self.compile_select(sql);
         }
         let (schemas, views) = self.catalog()?;
-        crate::codegen::compile_statement(sql, schemas, views).map_err(|e| Error::Compile {
-            message: e.to_string(),
+        crate::codegen::compile_statement(sql, schemas, views).map_err(|e| {
+            // `PRAGMA <name> = <value>` compiles; the introspection
+            // pragmas do not, and a consumer meeting one deserves to be
+            // told where they live rather than reading a parser message
+            // about an unsupported pragma name. The catalogue and its
+            // tiers are plan.md's V7 (ADR-0029 put the nine introspection
+            // pragmas in the CLI); spec 013's non-goals say this API
+            // covers only what a pool sets and what durability requires.
+            if is_pragma(sql) {
+                return Error::Compile {
+                    message: format!(
+                        "{e} — this API supports only `PRAGMA <name> = <value>` \
+                         (see Connection::pragma); the introspection pragmas are \
+                         plan.md V7 and are available through the sqlite-rs CLI"
+                    ),
+                };
+            }
+            Error::Compile {
+                message: e.to_string(),
+            }
         })
     }
 
@@ -2090,6 +2108,11 @@ fn is_select(sql: &str) -> bool {
     ["SELECT", "VALUES", "WITH"]
         .iter()
         .any(|kw| starts_with_keyword(head, kw))
+}
+
+/// Whether `sql` is a `PRAGMA` statement.
+fn is_pragma(sql: &str) -> bool {
+    starts_with_keyword(sql.trim_start(), "PRAGMA")
 }
 
 /// Whether `sql` can change the `sqlite_master` catalog.
