@@ -14,149 +14,16 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
-use sqlite_rs::codegen::{
-    compile_select_compound, compile_select_joined, compile_select_with_catalog,
-    compile_select_with_catalog_and_stats, expand_with_clause, explain_query_plan,
-    flatten_from_subqueries, push_down_where_predicates, resolve_from_table_schema, resolve_views,
-    CodegenError, EqpRow, ExpandViews,
-};
+use sqlite_rs::codegen::{compile_select_program, SelectOutcome};
 use sqlite_rs::dump;
 use sqlite_rs::format::{write_csv_value, write_query_value};
-use sqlite_rs::parser::ast::Select;
 use sqlite_rs::parser::{parse_explain, parse_select, ParseOutcome};
 use sqlite_rs::schema::{read_schema, read_views, TableSchema, ViewSchema};
-use sqlite_rs::vdbe::{execute_with_db, explain, Program};
+use sqlite_rs::vdbe::{execute_with_db, explain};
 use sqlite_rs::vfs::{PageSource, UnixVfs};
 
 use crate::common::{fatal, CSV_ROW_TERMINATOR};
 use crate::pragma_query::{execute_pragma_query, parse_pragma_query};
-
-/// What [`compile_select_program`] produced: either `EXPLAIN QUERY
-/// PLAN`'s rows (nothing further to compile — there's no bytecode to
-/// run or `-explain`) or an ordinary compiled `Program`.
-pub(crate) enum SelectOutcome {
-    Eqp(Vec<EqpRow>),
-    Program(Program),
-}
-
-/// Parses (already done by the caller — `select`/`eqp_mode` come from
-/// `parse_select`/`parse_explain`), resolves every table `select`
-/// touches against `schemas`, and compiles it: FROM-less (#260),
-/// single-table, joined (#237), or `UNION ALL` compound (#240),
-/// whichever `select`'s shape calls for. Shared by `run_query` (a
-/// fresh read-only `Pager` per invocation) and the REPL (#365, one
-/// shared read/write `Pager` per session) — both need exactly this
-/// parse-resolve-compile pipeline, just against a different
-/// `PageSource`.
-pub(crate) fn compile_select_program(
-    select: &Select,
-    eqp_mode: bool,
-    schemas: &[TableSchema],
-    views: &[ViewSchema],
-    stats_by_table: &std::collections::HashMap<String, sqlite_rs::planner::Stats>,
-) -> Result<SelectOutcome, String> {
-    // #376: a `WITH` clause is rewritten away before any table
-    // resolution happens — every CTE reference in `FROM`/`JOIN` becomes
-    // a `TableRefKind::Subquery` wrapping that CTE's own query, so the
-    // rest of this pipeline (and #257's subquery-in-FROM codegen) needs
-    // no CTE-specific handling at all.
-    let cte_expanded = expand_with_clause(select);
-    // #380: every catalog-view reference in `FROM`/`JOIN` is rewritten
-    // away next, the same shape as the CTE rewrite above — into a
-    // `TableRefKind::Subquery` wrapping the view's own stored query,
-    // reusing #257's subquery-in-FROM codegen unchanged. Runs *after*
-    // the CTE rewrite (rather than before) so it also reaches into any
-    // `TableRefKind::Subquery` the CTE rewrite just produced — a CTE
-    // whose own body references a view is resolved this way, without
-    // `expand_views` needing any CTE-specific handling of its own; a
-    // CTE also shadows a same-named view for the scope of its declaring
-    // `SELECT`, matching how it already shadows a same-named real table.
-    let resolved_views = resolve_views(views);
-    let expanded = cte_expanded
-        .expand_views(&resolved_views)
-        .map_err(|e| e.to_string())?;
-    // `flatten_from_subqueries`/`push_down_where_predicates` below always
-    // need `&mut Select`, so this is where the deferred clone (if any —
-    // Cow was `Borrowed` for the common no-CTE/no-view case) finally
-    // happens, at most once total rather than once per expansion pass.
-    let mut expanded = expanded.into_owned();
-    // #566: flatten a simple FROM-subquery/view/CTE directly into the
-    // enclosing query first — eliminating it outright makes any base-
-    // table index it hides visible to the planner, which a mere
-    // predicate push-down (below) can't do.
-    flatten_from_subqueries(&mut expanded);
-    // #532: push safely-movable outer WHERE conjuncts into whatever
-    // views/derived-tables flattening didn't eliminate, so their own
-    // materialization scan (below) can filter before scanning.
-    push_down_where_predicates(&mut expanded);
-    let select = &expanded;
-
-    let resolve_table = |table_ref: &sqlite_rs::parser::ast::TableRef| {
-        resolve_from_table_schema(table_ref, schemas)
-    };
-
-    let Some(from) = &select.from else {
-        if eqp_mode {
-            return Err("EXPLAIN QUERY PLAN requires a FROM clause".to_string());
-        }
-        let no_table = TableSchema {
-            unresolved_autoindex: false,
-            name: String::new(),
-            root_page: 0,
-            columns: vec![],
-            column_types: vec![],
-            column_collations: vec![],
-            without_rowid: false,
-            strict: false,
-            is_virtual: false,
-            sql: String::new(),
-            indexes: vec![],
-            rowid_alias: None,
-        };
-        let program =
-            compile_select_with_catalog(select, &no_table, &[]).map_err(|e| e.to_string())?;
-        return Ok(SelectOutcome::Program(program));
-    };
-
-    let schema = resolve_table(&from.first).map_err(|e| e.to_string())?;
-
-    if eqp_mode {
-        let mut joined_schemas = vec![schema];
-        for join in &from.joins {
-            joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
-        }
-        let rows = explain_query_plan(select, &joined_schemas, stats_by_table, schemas)
-            .map_err(|e| e.to_string())?;
-        return Ok(SelectOutcome::Eqp(rows));
-    }
-
-    let program = if !select.compound.is_empty() {
-        let mut arm_schemas = Vec::with_capacity(select.compound.len());
-        for arm in &select.compound {
-            let Some(arm_from) = &arm.from else {
-                return Err(CodegenError::NoFromClause.to_string());
-            };
-            arm_schemas.push(resolve_table(&arm_from.first).map_err(|e| e.to_string())?);
-        }
-        compile_select_compound(select, &schema, &arm_schemas, schemas)
-            .map_err(|e| e.to_string())?
-    } else if from.joins.is_empty() {
-        let stats = stats_by_table
-            .get(&schema.name)
-            .cloned()
-            .unwrap_or_default();
-        compile_select_with_catalog_and_stats(select, &schema, schemas, &stats)
-            .map_err(|e| e.to_string())?
-    } else {
-        let mut joined_schemas = vec![schema];
-        for join in &from.joins {
-            joined_schemas.push(resolve_table(&join.table).map_err(|e| e.to_string())?);
-        }
-        compile_select_joined(select, &joined_schemas, schemas, stats_by_table)
-            .map_err(|e| e.to_string())?
-    };
-    Ok(SelectOutcome::Program(program))
-}
 
 pub fn run_query(raw_args: Vec<String>) -> ExitCode {
     let mut csv = false;
