@@ -4,6 +4,24 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+### Fixed
+
+- Bare `?` bind parameters were numbered during code generation rather than
+  at parse time, so their indices depended on the plan the optimizer chose
+  instead of on the order they appear in the SQL. Two consequences, both
+  silent: `UPDATE t SET v = ? WHERE k = ?` numbered its `WHERE` placeholder
+  before its `SET` one and bound the two values in the wrong order, matching
+  no row and reporting `Ok(0)` — which is also the value an
+  optimistic-concurrency check reads as a lost race; and a projection of
+  index columns only, on a table with a usable index, compiled its seek keys
+  through a second register allocator whose counter restarted, collapsing
+  two placeholders onto index 1 and reporting one parameter where there were
+  two. Indices are now assigned in the parser in text order, as SQLite does
+  it, so they no longer depend on the plan (ADR-0044). Explicit `?NNN` was
+  never affected.
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed
