@@ -13,6 +13,7 @@ use crate::parser::error::{
     parse_create_view, parse_delete, parse_drop_index, parse_drop_table, parse_insert,
     parse_pragma, parse_rollback, parse_update,
 };
+use crate::parser::skip_leading_trivia;
 use crate::schema::{TableSchema, ViewSchema};
 use crate::vdbe::Program;
 
@@ -83,7 +84,8 @@ impl From<CodegenError> for DispatchError {
 /// there. `compile_statement` below instead does its own borrowed,
 /// non-allocating scan for the hot dispatch path.
 pub fn leading_keywords(sql: &str) -> Vec<String> {
-    sql.split_whitespace()
+    skip_leading_trivia(sql)
+        .split_whitespace()
         .take(3)
         .map(|w| w.to_ascii_uppercase())
         .collect()
@@ -142,7 +144,7 @@ pub fn compile_statement(
             .ok_or_else(|| DispatchError::NoSuchIndex(name.to_string()))
     };
 
-    let mut words = sql.split_whitespace();
+    let mut words = skip_leading_trivia(sql).split_whitespace();
     let first_word = words.next().unwrap_or("");
     let head = canonical(first_word);
     let second = canonical(words.next().unwrap_or(""));

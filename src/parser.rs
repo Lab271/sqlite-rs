@@ -16,4 +16,4 @@ pub use error::{
     parse_delete, parse_drop_index, parse_drop_table, parse_drop_view, parse_explain, parse_insert,
     parse_pragma, parse_rollback, parse_select, parse_update, ParseOutcome,
 };
-pub use tokenizer::{ends_with_semicolon, split_statements};
+pub use tokenizer::{ends_with_semicolon, skip_leading_trivia, split_statements};
