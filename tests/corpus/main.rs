@@ -53,6 +53,7 @@ mod repl_test;
 mod schema_test;
 mod skip_scan_test;
 mod sql_corpus_test;
+mod sqlite_master_test;
 mod subquery_test;
 mod transaction_oracle_test;
 mod union_test;

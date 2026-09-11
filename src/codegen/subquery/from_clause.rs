@@ -149,6 +149,49 @@ fn subquery_result_schema(
     }
 }
 
+/// #707: `sqlite_master`/`sqlite_schema` (the modern alias, same
+/// table) is a real b-tree rooted at page 1 — `read_schema` decodes
+/// it, but never places an entry for *itself* into the catalog it
+/// builds, since it isn't one of the objects it describes. So an
+/// ordinary catalog lookup never finds it; this hands back a
+/// hardcoded schema for it instead, matching the on-disk row shape
+/// (`type`, `name`, `tbl_name`, `rootpage`, `sql`) exactly, so the rest
+/// of codegen treats it as a completely ordinary table scan — no
+/// synthesized rows, no special-cased read path. Root page 1 carries
+/// every object's row, autoindexes included, whether or not
+/// `read_schema` itself was able to fully parse that row's DDL.
+fn sqlite_master_schema(name: &str) -> Option<TableSchema> {
+    if !name.eq_ignore_ascii_case("sqlite_master") && !name.eq_ignore_ascii_case("sqlite_schema") {
+        return None;
+    }
+    Some(TableSchema {
+        unresolved_autoindex: false,
+        name: "sqlite_master".to_string(),
+        root_page: 1,
+        columns: vec![
+            "type".to_string(),
+            "name".to_string(),
+            "tbl_name".to_string(),
+            "rootpage".to_string(),
+            "sql".to_string(),
+        ],
+        column_types: vec![
+            "TEXT".to_string(),
+            "TEXT".to_string(),
+            "TEXT".to_string(),
+            "INTEGER".to_string(),
+            "TEXT".to_string(),
+        ],
+        column_collations: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: String::new(),
+        indexes: vec![],
+        rowid_alias: None,
+    })
+}
+
 /// Resolves `table_ref` to the [`TableSchema`] the rest of codegen
 /// should treat it as: a real catalog lookup by name, or (#257) the
 /// synthetic schema describing a `FROM`-subquery's own projected
@@ -163,13 +206,18 @@ pub fn resolve_from_table_schema(
     catalog: &[TableSchema],
 ) -> Result<TableSchema, CodegenError> {
     match &table_ref.kind {
-        crate::parser::ast::TableRefKind::Name(name) => catalog
-            .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
-            .cloned()
-            .ok_or_else(|| CodegenError::Unsupported {
-                reason: format!("no such table: {name}"),
-            }),
+        crate::parser::ast::TableRefKind::Name(name) => {
+            if let Some(schema) = sqlite_master_schema(name) {
+                return Ok(schema);
+            }
+            catalog
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .ok_or_else(|| CodegenError::Unsupported {
+                    reason: format!("no such table: {name}"),
+                })
+        }
         crate::parser::ast::TableRefKind::Subquery(subquery) => {
             let table_refs = subquery_own_table_refs(subquery)?;
             let schemas = resolve_subquery_schemas(&table_refs, catalog)?;

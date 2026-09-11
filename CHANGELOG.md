@@ -19,6 +19,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   in one statement, where the post-sort pseudo cursor previously tried
   to re-issue `Rowid` against itself (#708).
 
+- `SELECT ... FROM sqlite_master` (and its modern alias
+  `sqlite_schema`) didn't compile at all — the decoded catalog was
+  never reachable as a queryable table. `sqlite_master` is a real
+  b-tree at page 1 with a fixed five-column shape, so it's now a
+  resolvable table like any other: `WHERE type = 'index'`,
+  `ORDER BY`, and an empty database all work exactly as the oracle
+  gives them, with no new opcode or synthesized rows (ADR-0046,
+  supersedes ADR-0029's problem statement for this one table) (#707).
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed

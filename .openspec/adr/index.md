@@ -45,3 +45,4 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0039](0039-value-payloads-are-arc-not-rc.md) | `Value`'s text and blob payloads are `Arc`, not `Rc` | 2026-09-04 |
 | [0040](0040-streaming-execution-with-batch-as-wrapper.md) | One streaming execution primitive, with the batch path as its wrapper | 2026-09-01 |
 | [0041](0041-embedding-api-owns-the-connection-driver-out-of-tree.md) | The embedding API owns the connection; the `sqlx` driver stays out of tree | 2026-08-28 |
+| [0046](0046-sqlite-master-is-a-resolvable-table.md) | `sqlite_master`/`sqlite_schema` is a resolvable table, not a synthetic CLI result set | 2026-09-11 |
