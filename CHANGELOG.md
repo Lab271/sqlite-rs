@@ -40,7 +40,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   (`Init -> Halt`, no page allocated, no schema-cookie bump); an
   unguarded duplicate create still fails, matching the oracle's
   wording (`table t already exists`, `index i already exists`, `view v
-  already exists`) (#697).
+  already exists`) (#697). Follow-up: the error named the kind of the
+  *statement* rather than the kind of the *existing* object, so a
+  cross-kind clash (tables and views share a namespace) reported the
+  wrong noun in both directions. It now names the existing object's
+  kind, and the same check covers the index namespace: `CREATE
+  TABLE`/`CREATE VIEW` against an existing index reports "there is
+  already an index named X" (guard does not suppress it — different
+  namespace), and `CREATE INDEX` against an existing table or view
+  reports "there is already a table named X" (also not suppressed),
+  matching the oracle verbatim in all four directions.
 
 ## [0.18.10] - 2026-08-31
 

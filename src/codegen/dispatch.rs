@@ -36,17 +36,32 @@ pub enum DispatchError {
     /// The statement referenced an index not present in the schema catalog.
     NoSuchIndex(String),
 
-    /// `CREATE TABLE` (without `IF NOT EXISTS`) named a table that already
-    /// exists (#697).
+    /// `CREATE TABLE`/`CREATE VIEW` (without `IF NOT EXISTS`) named an
+    /// object that already exists as a table (#697). Tables and views
+    /// share one namespace, so this also covers `CREATE VIEW` clashing
+    /// with an existing table.
     TableAlreadyExists(String),
 
     /// `CREATE INDEX` (without `IF NOT EXISTS`) named an index that already
     /// exists (#697).
     IndexAlreadyExists(String),
 
-    /// `CREATE VIEW` (without `IF NOT EXISTS`) named a view that already
-    /// exists (#697).
+    /// `CREATE TABLE`/`CREATE VIEW` (without `IF NOT EXISTS`) named an
+    /// object that already exists as a view (#697). Tables and views
+    /// share one namespace, so this also covers `CREATE TABLE` clashing
+    /// with an existing view.
     ViewAlreadyExists(String),
+
+    /// `CREATE TABLE`/`CREATE VIEW` named an object that already exists as
+    /// an index — a different namespace, so `IF NOT EXISTS` does not
+    /// suppress this one (oracle-measured followup to #697).
+    NameTakenByIndex(String),
+
+    /// `CREATE INDEX` named an object that already exists as a table or a
+    /// view — a different namespace, so `IF NOT EXISTS` does not suppress
+    /// this one (oracle-measured followup to #697). Matches the oracle's
+    /// own wording, which says "table" even when the clash is with a view.
+    NameTakenByTable(String),
 
     /// The leading keyword(s) didn't match any statement kind this
     /// dispatcher knows how to parse/compile.
@@ -70,6 +85,12 @@ impl std::fmt::Display for DispatchError {
             DispatchError::TableAlreadyExists(name) => write!(f, "table {name} already exists"),
             DispatchError::IndexAlreadyExists(name) => write!(f, "index {name} already exists"),
             DispatchError::ViewAlreadyExists(name) => write!(f, "view {name} already exists"),
+            DispatchError::NameTakenByIndex(name) => {
+                write!(f, "there is already an index named {name}")
+            }
+            DispatchError::NameTakenByTable(name) => {
+                write!(f, "there is already a table named {name}")
+            }
             DispatchError::Unrecognized(kw) => {
                 write!(f, "unsupported or unrecognized statement: {kw:?} ...")
             }
@@ -292,18 +313,28 @@ pub fn compile_statement(
         },
         "CREATE" if second == "TABLE" => match parse_create_table(sql) {
             ParseOutcome::Accepted(create) => {
-                let exists = schemas
+                let existing_view = views
                     .iter()
-                    .any(|s| s.name.eq_ignore_ascii_case(&create.name))
-                    || views
-                        .iter()
-                        .any(|v| v.name.eq_ignore_ascii_case(&create.name));
-                if exists {
+                    .any(|v| v.name.eq_ignore_ascii_case(&create.name));
+                let existing_table = schemas
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&create.name));
+                if existing_table || existing_view {
                     if create.if_not_exists {
                         Ok(compile_noop())
+                    } else if existing_view {
+                        Err(DispatchError::ViewAlreadyExists(create.name))
                     } else {
                         Err(DispatchError::TableAlreadyExists(create.name))
                     }
+                } else if schemas
+                    .iter()
+                    .flat_map(|s| &s.indexes)
+                    .any(|idx| idx.name.eq_ignore_ascii_case(&create.name))
+                {
+                    // Different namespace than table/view, so `IF NOT
+                    // EXISTS` does not suppress this one (oracle-measured).
+                    Err(DispatchError::NameTakenByIndex(create.name))
                 } else {
                     Ok(compile_create_table(&create, sql)?)
                 }
@@ -312,18 +343,28 @@ pub fn compile_statement(
         },
         "CREATE" if second == "VIEW" => match parse_create_view(sql) {
             ParseOutcome::Accepted(create) => {
-                let exists = schemas
+                let existing_view = views
                     .iter()
-                    .any(|s| s.name.eq_ignore_ascii_case(&create.name))
-                    || views
-                        .iter()
-                        .any(|v| v.name.eq_ignore_ascii_case(&create.name));
-                if exists {
+                    .any(|v| v.name.eq_ignore_ascii_case(&create.name));
+                let existing_table = schemas
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&create.name));
+                if existing_table || existing_view {
                     if create.if_not_exists {
                         Ok(compile_noop())
-                    } else {
+                    } else if existing_view {
                         Err(DispatchError::ViewAlreadyExists(create.name))
+                    } else {
+                        Err(DispatchError::TableAlreadyExists(create.name))
                     }
+                } else if schemas
+                    .iter()
+                    .flat_map(|s| &s.indexes)
+                    .any(|idx| idx.name.eq_ignore_ascii_case(&create.name))
+                {
+                    // Different namespace than table/view, so `IF NOT
+                    // EXISTS` does not suppress this one (oracle-measured).
+                    Err(DispatchError::NameTakenByIndex(create.name))
                 } else {
                     Ok(compile_create_view(&create, sql)?)
                 }
@@ -333,16 +374,26 @@ pub fn compile_statement(
         "CREATE" if second == "INDEX" || second == "UNIQUE" => match parse_create_index(sql) {
             ParseOutcome::Accepted(ci) => {
                 let schema = find_schema(&ci.table)?;
-                let exists = schema
+                let index_exists = schema
                     .indexes
                     .iter()
                     .any(|idx| idx.name.eq_ignore_ascii_case(&ci.name));
-                if exists {
+                if index_exists {
                     if ci.if_not_exists {
                         Ok(compile_noop())
                     } else {
                         Err(DispatchError::IndexAlreadyExists(ci.name))
                     }
+                } else if schemas
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&ci.name))
+                    || views.iter().any(|v| v.name.eq_ignore_ascii_case(&ci.name))
+                {
+                    // Different namespace than index, so `IF NOT EXISTS`
+                    // does not suppress this one (oracle-measured). The
+                    // oracle says "table" even when the clash is with a
+                    // view — matched verbatim, not guessed.
+                    Err(DispatchError::NameTakenByTable(ci.name))
                 } else {
                     Ok(compile_create_index(&ci, schema, sql)?)
                 }
