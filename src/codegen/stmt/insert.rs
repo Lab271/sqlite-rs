@@ -47,11 +47,12 @@
 //! seek+branch primitive (`src/vdbe/cursor.rs`, built on
 //! `IndexCursor::seek`) and dispatches `ON CONFLICT` the same way
 //! `emit_pk_conflict` does for the rowid-PK case. A composite
-//! `PRIMARY KEY(...)`/`UNIQUE(...)` *table* constraint with no backing
-//! `CREATE INDEX`/on-disk index (this codebase doesn't auto-create
-//! `sqlite_autoindex_*` entries yet) has no real index to seek against,
-//! so it still isn't enforced — that's a `CREATE TABLE`-side gap, not
-//! an INSERT-codegen one.
+//! `PRIMARY KEY(...)`/`UNIQUE(...)` *table* constraint goes through this
+//! same path: `CREATE TABLE` now backs it with a `sqlite_autoindex_*`
+//! b-tree and `sqlite_master` row (#687), so by the time INSERT compiles
+//! there is a real on-disk index in `schema.indexes` for
+//! `emit_unique_check` to seek against — no `CREATE TABLE`-side gap is
+//! left for this codegen to work around.
 //!
 //! Known simplifications (deferred to follow-up tickets, not chased
 //! here):
