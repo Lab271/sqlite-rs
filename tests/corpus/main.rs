@@ -50,6 +50,7 @@ mod partial_sort_test;
 mod plan_parity_test;
 mod regen_test;
 mod repl_test;
+mod rowid_alias_test;
 mod schema_test;
 mod skip_scan_test;
 mod sql_corpus_test;
