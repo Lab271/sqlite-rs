@@ -1094,19 +1094,22 @@ pub fn rowid_alias_from_sql(sql: &str, without_rowid: bool) -> Option<usize> {
             return Some(idx);
         }
     }
-    // The table-level `PRIMARY KEY(col)` form: SQLite only treats this
-    // as a rowid alias when it names the table's one and only column,
-    // and that column is INTEGER-typed (a composite key, or a second
-    // column, rules it out).
-    if let [only] = columns.as_slice() {
-        if is_integer_column(only) {
-            let col_name = column_name(only);
-            let is_alias = constraints
-                .iter()
-                .filter_map(|c| primary_key_single_column(c))
-                .any(|pk_col| pk_col.eq_ignore_ascii_case(&col_name));
-            if is_alias {
-                return Some(0);
+    // The table-level `PRIMARY KEY(col)` form: SQLite treats this as a
+    // rowid alias when the constraint names exactly one column and that
+    // column is INTEGER-typed — regardless of how many other columns
+    // the table has. Only a composite key (naming more than one
+    // column) rules it out.
+    if let Some(pk_col) = constraints
+        .iter()
+        .find_map(|c| primary_key_single_column(c))
+    {
+        if let Some((idx, def)) = columns
+            .iter()
+            .enumerate()
+            .find(|(_, def)| column_name(def).eq_ignore_ascii_case(&pk_col))
+        {
+            if is_integer_column(def) {
+                return Some(idx);
             }
         }
     }

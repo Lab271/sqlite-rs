@@ -415,6 +415,14 @@ sqlite-rs MUST be able to extract every stored row from any well-formed SQLite d
 
 **Tests:** `src/header.rs::tests::encoding_utf16le`, `src/header.rs::tests::encoding_utf16be`, `src/record/decode.rs::tests::text_utf16le_and_utf16be`
 
+#### Scenario: Table-level PRIMARY KEY(col) rowid alias round-trips regardless of other columns
+
+- GIVEN a table declaring a single-column, INTEGER-typed table-level `PRIMARY KEY (col)` constraint, whether or not the table has other columns
+- WHEN sqlite-rs reads that column back
+- THEN it MUST return the stored value (substituted from the rowid), not `NULL` — only a composite table-level key, or a non-INTEGER type, rules out the rowid-alias optimization
+
+**Tests:** `tests/corpus/rowid_alias_test.rs::table_level_pk_with_other_columns_is_still_rowid_alias`, `tests/corpus/rowid_alias_test.rs::table_level_pk_single_column_is_rowid_alias`, `tests/corpus/rowid_alias_test.rs::table_level_pk_non_integer_is_not_rowid_alias`, `tests/corpus/rowid_alias_test.rs::composite_table_level_pk_is_not_rowid_alias`
+
 #### Scenario: Unknown schema entry degrades gracefully
 
 - GIVEN a database containing a virtual table (e.g. FTS5) whose module is unimplemented

@@ -4,6 +4,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+### Fixed
+
+- A table-level `PRIMARY KEY (col)` rowid alias read back `NULL` once
+  the table had more than one column: `rowid_alias_from_sql` only
+  recognized the form when the primary-key column was the table's sole
+  column. It now matches the constraint's named column against the
+  column list directly, so a second (or later) column no longer defeats
+  the rowid-alias optimization — only a composite key or a non-INTEGER
+  type does (#686).
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed
