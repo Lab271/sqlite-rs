@@ -273,3 +273,183 @@ fn without_rowid_table_rejects_rowid_reference() {
         "expected an unknown-column error, got: {err}"
     );
 }
+
+/// #708 follow-up: `GROUP BY rowid` regressed relative to main (a
+/// runtime "pseudo cursor" internals error) because `compile_grouped_scan`
+/// never got the materialize-then-read-back-with-`Column` treatment
+/// `compile_sorted_scan` (#718) established for `ORDER BY rowid`. Covers
+/// the base case, gaps left by a delete, and every spelling.
+#[test]
+fn group_by_rowid_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned 3.53.4 sqlite3 oracle on this machine");
+        return;
+    };
+    let db = scratch_db(
+        "group_by_rowid",
+        &oracle,
+        "CREATE TABLE t(a INTEGER, v TEXT); \
+         INSERT INTO t VALUES (1, 'aa'), (2, 'bb'), (3, 'cc'), (4, 'dd'); \
+         DELETE FROM t WHERE a = 2;",
+    );
+    let schema = rowid_table_schema();
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT rowid, count(*) FROM t GROUP BY rowid",
+    );
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT _rowid_, count(*) FROM t GROUP BY _rowid_",
+    );
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT oid, count(*) FROM t GROUP BY oid",
+    );
+}
+
+/// #708 follow-up: `GROUP BY rowid` combined with `HAVING` on the same
+/// pseudo-column — both the group key comparison and the `HAVING`
+/// re-projection go through the same pass-2 pseudo cursor, so both need
+/// the fix.
+#[test]
+fn group_by_rowid_with_having_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned 3.53.4 sqlite3 oracle on this machine");
+        return;
+    };
+    let db = scratch_db(
+        "group_by_rowid_having",
+        &oracle,
+        "CREATE TABLE t(a INTEGER, v TEXT); \
+         INSERT INTO t VALUES (1, 'aa'), (2, 'bb'), (3, 'cc'), (4, 'dd'); \
+         DELETE FROM t WHERE a = 2;",
+    );
+    let schema = rowid_table_schema();
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT rowid, count(*) FROM t GROUP BY rowid HAVING rowid > 1",
+    );
+    // A mix of spellings between the `GROUP BY` key and `HAVING` is
+    // legal in SQLite (all three are the same pseudo-column).
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT rowid, count(*) FROM t GROUP BY rowid HAVING _rowid_ > 1",
+    );
+}
+
+/// #708 follow-up: `GROUP BY` combined with `ORDER BY` is rejected
+/// outright regardless of what's being grouped by (see
+/// `compile_select_scan`'s check, predating this ticket) — `rowid`
+/// must hit that same clean compile-time rejection, not the "pseudo
+/// cursor" runtime error this ticket fixes elsewhere, and not a panic.
+#[test]
+fn group_by_rowid_with_order_by_is_cleanly_unsupported() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned 3.53.4 sqlite3 oracle on this machine");
+        return;
+    };
+    let schema = rowid_table_schema();
+    let db = scratch_db(
+        "group_by_rowid_order_by",
+        &oracle,
+        "CREATE TABLE t(a INTEGER, v TEXT); INSERT INTO t VALUES (1, 'aa'), (2, 'bb');",
+    );
+    let err = our_rows(
+        &db,
+        &schema,
+        "SELECT rowid, count(*) FROM t GROUP BY rowid ORDER BY rowid",
+    )
+    .expect_err("GROUP BY combined with ORDER BY is not yet supported, rowid or not");
+    assert!(
+        err.contains("Unsupported"),
+        "expected a clean Unsupported rejection, not a runtime error, got: {err}"
+    );
+    assert!(
+        !err.contains("pseudo cursor") && !err.contains("CursorTypeMismatch"),
+        "must not surface the internals error this ticket fixes, got: {err}"
+    );
+}
+
+/// Control: `GROUP BY` on an ordinary declared column, with no rowid
+/// involved at all, must not regress from this ticket's changes to
+/// `compile_grouped_scan`'s pass 1/pass 2.
+#[test]
+fn group_by_real_column_still_matches_oracle() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned 3.53.4 sqlite3 oracle on this machine");
+        return;
+    };
+    let db = scratch_db(
+        "group_by_real_column",
+        &oracle,
+        "CREATE TABLE t(a INTEGER, v TEXT); \
+         INSERT INTO t VALUES (1, 'aa'), (2, 'aa'), (3, 'bb');",
+    );
+    let schema = rowid_table_schema();
+    assert_matches_oracle(
+        &oracle,
+        &db,
+        &schema,
+        "SELECT v, count(*) FROM t GROUP BY v",
+    );
+}
+
+/// `WITHOUT ROWID` tables have no rowid to `GROUP BY` at all — must be
+/// rejected the same way a bare `SELECT rowid` already is (#708), not
+/// silently produce a number and not hit the pseudo-cursor internals
+/// error.
+#[test]
+fn group_by_rowid_on_without_rowid_table_rejects_cleanly() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned 3.53.4 sqlite3 oracle on this machine");
+        return;
+    };
+    let db = scratch_db(
+        "group_by_without_rowid",
+        &oracle,
+        "CREATE TABLE t(a INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID; \
+         INSERT INTO t VALUES (1, 'aa'), (2, 'bb');",
+    );
+    let oracle_out = Command::new(&oracle)
+        .arg("-readonly")
+        .arg(&db)
+        .arg("SELECT rowid, count(*) FROM t GROUP BY rowid")
+        .output()
+        .expect("invoking sqlite3 oracle");
+    assert!(
+        !oracle_out.status.success(),
+        "expected the oracle itself to reject rowid on a WITHOUT ROWID table"
+    );
+
+    let schema = TableSchema {
+        unresolved_autoindex: false,
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["a".to_string(), "v".to_string()],
+        column_types: vec!["INTEGER".to_string(), "TEXT".to_string()],
+        column_collations: vec![],
+        without_rowid: true,
+        strict: false,
+        is_virtual: false,
+        sql: "CREATE TABLE t(a INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID".to_string(),
+        indexes: vec![],
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
+    let err = our_rows(&db, &schema, "SELECT rowid, count(*) FROM t GROUP BY rowid")
+        .expect_err("GROUP BY rowid on a WITHOUT ROWID table must be rejected");
+    assert!(
+        err.contains("UnknownColumn"),
+        "expected an unknown-column error, got: {err}"
+    );
+}

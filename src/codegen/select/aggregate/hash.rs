@@ -257,6 +257,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        None,
         &agg_slots,
         limit.as_ref(),
         end_label,

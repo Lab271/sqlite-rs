@@ -17,7 +17,12 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   tables reject it with the same unknown-column error the oracle gives.
   Also fixes the same reference combined with `ORDER BY` and an alias
   in one statement, where the post-sort pseudo cursor previously tried
-  to re-issue `Rowid` against itself (#708).
+  to re-issue `Rowid` against itself. `GROUP BY rowid` (and `_rowid_`/
+  `oid`) had the identical pseudo-cursor problem in
+  `compile_grouped_scan`'s sort-then-group pass 2 — both the group-key
+  comparison and a bare `rowid` in the result list or `HAVING` now read
+  back a materialized field instead of re-issuing `Rowid` against a
+  cursor that can't answer it (#708).
 
 ## [0.18.10] - 2026-08-31
 
