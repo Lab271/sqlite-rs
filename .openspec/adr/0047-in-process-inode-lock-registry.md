@@ -108,13 +108,35 @@ at-most-one-in-process-holder set keyed by `-shm` path), reusing
   otherwise, narrowing the critical section is a follow-up, not a
   redesign.
 - `WalReadLock`'s per-slot claim (`src/vfs/shm.rs::claim_wal_read_lock`)
-  is **not** routed through an in-process arbiter in this change: two
-  in-process readers can still both win the same reader-mark slot. This
-  is deliberately out of scope here — the harm class #706 is about is a
-  writer's success being silently discarded, which this residual does
-  not cause (worst case: a checkpoint bounds itself more conservatively
-  than necessary against a slot two readers happen to share). Follow-up
-  ticket if it needs closing properly.
+  is **not** routed through an in-process arbiter in this change, and
+  the residual is the *unsafe* direction, not merely a wasteful one.
+  `active_reader_marks` (`src/vfs/shm.rs`) probes slot occupancy with a
+  non-blocking `F_WRLCK`; POSIX record locks never conflict within one
+  process, so a reader mark held by *this* process is invisible to its
+  own probe — the exact bug class #706 exists to fix, left unfixed for
+  this one lock. With a single in-process `WalReadLock` held,
+  `active_reader_marks` returns an empty list, and
+  `src/pager/checkpoint.rs`'s `marks.into_iter().filter(|&mark| mark >
+  0).min().unwrap_or(total_frames)` folds that emptiness into "no
+  constraint" — the checkpoint's safe bound becomes the *whole* WAL
+  rather than a conservative floor, so a checkpoint can backfill past a
+  live same-process reader's snapshot. (Two in-process readers racing
+  `claim_wal_read_lock` can also land on the same slot, the second
+  clobbering the first's published mark.) This is deliberately out of
+  scope here, not because it is harmless, but because actual harm is
+  not reachable yet. The checkpoint path itself
+  (`Pager::switch_wal_to_journal` -> `checkpoint::checkpoint_passive`,
+  wired to the public `Pager::set_journal_mode` / `PRAGMA
+  journal_mode`) is already reachable today with a single in-process
+  `Pager` — `PRAGMA journal_mode=WAL` followed by `PRAGMA
+  journal_mode=DELETE` checkpoints and removes `-wal`/`-shm` today —
+  but causing harm needs a *second* in-process reader racing it, and
+  nothing shipped can open two in-process `Pager`s (or `Connection`s)
+  at once yet: the CLI is one `Pager` per process, and the embedding
+  API that would let a consumer do this (`src/api.rs`, #705) is still
+  unmerged. Follow-up ticket to route
+  `claim_wal_read_lock`/`active_reader_marks` through the same
+  in-process arbiter once that surface lands.
 - `tests/corpus/in_process_lock_registry_test.rs` proves the issue's
   exact scenario, a cross-process regression guard, a handle-close/
   reopen lifecycle check, and a pool-of-N-handles progress check, all
