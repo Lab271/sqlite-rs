@@ -15,6 +15,18 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   column list directly, so a second (or later) column no longer defeats
   the rowid-alias optimization — only a composite key or a non-INTEGER
   type does (#686).
+- `CREATE TABLE` with a declared composite `PRIMARY KEY`/`UNIQUE`
+  constraint created no `sqlite_autoindex_*` b-tree or `sqlite_master`
+  row, so stock `sqlite3` answered any write or `integrity_check`
+  against a table this crate created with "database disk image is
+  malformed (11)". `Opcode::CreateTable` now allocates a root page and
+  a `sql IS NULL` `sqlite_master` row for every constraint
+  `schema::autoindex_key_lists` says stock SQLite would autoindex,
+  numbered by the same declaration-order rule #685's reader already
+  consumes; rowid-alias and `WITHOUT ROWID` primary keys still consume
+  no number. `btree::MasterEntry::sql` is now `Option<String>` so a
+  `NULL` `sql` column can be represented at all, rather than an empty
+  string (#687).
 
 ## [0.18.10] - 2026-08-31
 

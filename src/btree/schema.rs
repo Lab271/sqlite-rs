@@ -131,7 +131,7 @@ mod tests {
             name: "t".to_string(),
             tbl_name: "t".to_string(),
             rootpage: table_root,
-            sql: "CREATE TABLE t(name)".to_string(),
+            sql: Some("CREATE TABLE t(name)".to_string()),
         };
 
         let index_root = create_empty_index_root(&mut pager).unwrap();

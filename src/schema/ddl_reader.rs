@@ -544,7 +544,7 @@ fn same_key_list(a: &[IndexedColumn], b: &[IndexedColumn]) -> bool {
 ///
 /// `None` means some constraint could not be understood. The caller must
 /// treat that as unresolvable and refuse writes, never as "no index".
-fn autoindex_key_lists(sql: &str, without_rowid: bool) -> Option<Vec<Vec<IndexedColumn>>> {
+pub fn autoindex_key_lists(sql: &str, without_rowid: bool) -> Option<Vec<Vec<IndexedColumn>>> {
     let (start, end) = column_list_span(sql)?;
     let inner = sql.get(start..end)?;
     let alias = rowid_alias_column_name(sql, without_rowid);
@@ -754,6 +754,20 @@ struct ParsedCreateTable {
     column_collations: Vec<Collation>,
     without_rowid: bool,
     strict: bool,
+}
+
+/// Returns a fresh `CREATE TABLE`'s column names (declared order) and
+/// whether it is `WITHOUT ROWID` — the two pieces `Opcode::CreateTable`
+/// needs to resolve [`autoindex_key_lists`]' `IndexedColumn` names into
+/// column positions for [`crate::btree::populate_index_from_table`]
+/// (#687). Empty columns and `without_rowid: false` for anything this
+/// naive reader can't parse, same degradation as the rest of this
+/// module.
+pub fn column_names_and_without_rowid(sql: &str) -> (Vec<String>, bool) {
+    match parse_create_table(sql) {
+        Some(parsed) => (parsed.columns, parsed.without_rowid),
+        None => (Vec::new(), false),
+    }
 }
 
 /// Parses `CREATE TABLE ... (col-defs) [table-options]`. Returns `None`

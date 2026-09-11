@@ -381,13 +381,16 @@ Two ways to satisfy this, and either is acceptable:
   read-only until it can. Narrower, and it converts silent corruption into an
   error a caller can act on.
 
-Creating `sqlite_autoindex_*` for a declared constraint is a separate `CREATE
+Creating `sqlite_autoindex_*` for a declared constraint was a separate `CREATE
 TABLE`-side gap (`src/codegen/stmt/insert.rs` records it, V3/V7 owns it), and it
-has its own file-level consequence: a table this crate creates with a declared
-composite `PRIMARY KEY` has no autoindex, and stock `sqlite3` then answers any
+had its own file-level consequence: a table this crate created with a declared
+composite `PRIMARY KEY` had no autoindex, and stock `sqlite3` then answered any
 write or `integrity_check` on it with "database disk image is malformed (11)".
-Closing this requirement without closing that one leaves creation broken; closing
-that one without this leaves adoption of a foreign file broken.
+Closing this requirement without closing that one left creation broken; closing
+that one without this left adoption of a foreign file broken. Closed by #687:
+`Opcode::CreateTable` now allocates a root page and a `sql IS NULL`
+`sqlite_master` row per constraint `schema::autoindex_key_lists` says stock
+SQLite would autoindex, numbered by the same rule #685's reader consumes.
 
 **Implementation:** `src/schema/ddl_reader.rs::index_schema` (planned), consumed
 by `src/codegen/stmt/insert.rs::emit_unique_check`
@@ -421,6 +424,26 @@ by `src/codegen/stmt/insert.rs::emit_unique_check`
   `integrity_check` reports ok
 
 **Tests:** `tests/corpus/autoindex_maintenance_test.rs::named_index_round_trips` (planned)
+
+#### Scenario: CREATE TABLE with a declared composite key emits its own autoindex
+
+- GIVEN `CREATE TABLE t (a INTEGER, b TEXT, PRIMARY KEY (a, b))` run through this
+  crate
+- WHEN the oracle opens the resulting file
+- THEN `PRAGMA integrity_check` reports ok, a `sqlite_autoindex_t_1` row exists
+  with `sql IS NULL`, and the oracle can insert and then rejects a duplicate key
+
+**Tests:** `tests/corpus/create_table_autoindex_test.rs::composite_primary_key_passes_oracle_integrity_check_and_accepts_oracle_writes`, `tests/corpus/create_table_autoindex_test.rs::autoindex_master_row_shape_matches_oracle_convention`
+
+#### Scenario: Rowid-alias and WITHOUT ROWID primary keys emit no autoindex on creation
+
+- GIVEN `CREATE TABLE t (a INTEGER, b TEXT, PRIMARY KEY (a))` (a rowid alias,
+  #686) and separately the same DDL with `WITHOUT ROWID` appended
+- WHEN this crate creates the table
+- THEN no `sqlite_autoindex_*` row is registered for either — the constraint
+  consumes no autoindex number
+
+**Tests:** `tests/corpus/create_table_autoindex_test.rs::rowid_alias_primary_key_gains_no_autoindex`, `tests/corpus/create_table_autoindex_test.rs::without_rowid_primary_key_gains_no_autoindex`
 
 ## Related regimes
 
