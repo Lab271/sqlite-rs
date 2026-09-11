@@ -14,13 +14,14 @@ use crate::parser::error::{
     parse_pragma, parse_rollback, parse_update,
 };
 use crate::schema::{TableSchema, ViewSchema};
-use crate::vdbe::Program;
+use crate::vdbe::{Instruction, Opcode, Program};
 
 use super::{
     compile_analyze, compile_begin, compile_commit, compile_create_index, compile_create_table,
     compile_create_view, compile_delete_with_catalog, compile_drop_index, compile_drop_table,
     compile_insert, compile_pragma, compile_rollback, compile_update_with_catalog,
-    expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError, ExpandViews,
+    expand_with_clause, resolve_from_table_schema, resolve_views, CodegenError, Emitter,
+    ExpandViews,
 };
 
 /// Failure compiling one dispatched statement — everything
@@ -34,6 +35,18 @@ pub enum DispatchError {
 
     /// The statement referenced an index not present in the schema catalog.
     NoSuchIndex(String),
+
+    /// `CREATE TABLE` (without `IF NOT EXISTS`) named a table that already
+    /// exists (#697).
+    TableAlreadyExists(String),
+
+    /// `CREATE INDEX` (without `IF NOT EXISTS`) named an index that already
+    /// exists (#697).
+    IndexAlreadyExists(String),
+
+    /// `CREATE VIEW` (without `IF NOT EXISTS`) named a view that already
+    /// exists (#697).
+    ViewAlreadyExists(String),
 
     /// The leading keyword(s) didn't match any statement kind this
     /// dispatcher knows how to parse/compile.
@@ -54,6 +67,9 @@ impl std::fmt::Display for DispatchError {
         match self {
             DispatchError::NoSuchTable(name) => write!(f, "no such table: {name}"),
             DispatchError::NoSuchIndex(name) => write!(f, "no such index: {name}"),
+            DispatchError::TableAlreadyExists(name) => write!(f, "table {name} already exists"),
+            DispatchError::IndexAlreadyExists(name) => write!(f, "index {name} already exists"),
+            DispatchError::ViewAlreadyExists(name) => write!(f, "view {name} already exists"),
             DispatchError::Unrecognized(kw) => {
                 write!(f, "unsupported or unrecognized statement: {kw:?} ...")
             }
@@ -116,6 +132,22 @@ fn parse_error<T: std::fmt::Debug>(other: ParseOutcome<T>) -> DispatchError {
     DispatchError::ParseFailed(format!("{other:?}"))
 }
 
+/// A statement that does nothing: `Init -> Halt`, no other opcode. What a
+/// guarded `CREATE ... IF NOT EXISTS`/`DROP ... IF EXISTS` compiles to when
+/// its guard condition is already satisfied — the oracle reports success
+/// (rc 0) and touches neither the schema nor any b-tree page, so this must
+/// not allocate a page, write a `sqlite_master` row, or bump the schema
+/// cookie either (#697).
+fn compile_noop() -> Program {
+    let mut em = Emitter::new();
+    let init_addr = em.emit(Instruction::new(Opcode::Init, 0, 0, 0));
+    let body_start = em.new_label();
+    em.place(body_start);
+    em.patch_p2(init_addr, body_start);
+    em.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+    em.finish()
+}
+
 /// Parses `sql`, picks the compiler for its leading keyword(s), and
 /// compiles it against `schemas` — the `exec <file> "<SQL>"` CLI
 /// subcommand's core (#215's write-path CLI surface), shared by any
@@ -133,15 +165,6 @@ pub fn compile_statement(
             .find(|s| s.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| DispatchError::NoSuchTable(name.to_string()))
     };
-    let find_index_root = |name: &str| -> Result<u32, DispatchError> {
-        schemas
-            .iter()
-            .flat_map(|s| &s.indexes)
-            .find(|idx| idx.name.eq_ignore_ascii_case(name))
-            .map(|idx| idx.root_page)
-            .ok_or_else(|| DispatchError::NoSuchIndex(name.to_string()))
-    };
-
     let mut words = sql.split_whitespace();
     let first_word = words.next().unwrap_or("");
     let head = canonical(first_word);
@@ -268,31 +291,89 @@ pub fn compile_statement(
             other => Err(parse_error(other)),
         },
         "CREATE" if second == "TABLE" => match parse_create_table(sql) {
-            ParseOutcome::Accepted(create) => Ok(compile_create_table(&create, sql)?),
+            ParseOutcome::Accepted(create) => {
+                let exists = schemas
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&create.name))
+                    || views
+                        .iter()
+                        .any(|v| v.name.eq_ignore_ascii_case(&create.name));
+                if exists {
+                    if create.if_not_exists {
+                        Ok(compile_noop())
+                    } else {
+                        Err(DispatchError::TableAlreadyExists(create.name))
+                    }
+                } else {
+                    Ok(compile_create_table(&create, sql)?)
+                }
+            }
             other => Err(parse_error(other)),
         },
         "CREATE" if second == "VIEW" => match parse_create_view(sql) {
-            ParseOutcome::Accepted(create) => Ok(compile_create_view(&create, sql)?),
+            ParseOutcome::Accepted(create) => {
+                let exists = schemas
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&create.name))
+                    || views
+                        .iter()
+                        .any(|v| v.name.eq_ignore_ascii_case(&create.name));
+                if exists {
+                    if create.if_not_exists {
+                        Ok(compile_noop())
+                    } else {
+                        Err(DispatchError::ViewAlreadyExists(create.name))
+                    }
+                } else {
+                    Ok(compile_create_view(&create, sql)?)
+                }
+            }
             other => Err(parse_error(other)),
         },
         "CREATE" if second == "INDEX" || second == "UNIQUE" => match parse_create_index(sql) {
             ParseOutcome::Accepted(ci) => {
                 let schema = find_schema(&ci.table)?;
-                Ok(compile_create_index(&ci, schema, sql)?)
+                let exists = schema
+                    .indexes
+                    .iter()
+                    .any(|idx| idx.name.eq_ignore_ascii_case(&ci.name));
+                if exists {
+                    if ci.if_not_exists {
+                        Ok(compile_noop())
+                    } else {
+                        Err(DispatchError::IndexAlreadyExists(ci.name))
+                    }
+                } else {
+                    Ok(compile_create_index(&ci, schema, sql)?)
+                }
             }
             other => Err(parse_error(other)),
         },
         "DROP" if second == "TABLE" => match parse_drop_table(sql) {
             ParseOutcome::Accepted(drop) => {
-                let schema = find_schema(&drop.name)?;
-                Ok(compile_drop_table(&drop, schema)?)
+                match schemas
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(&drop.name))
+                {
+                    Some(schema) => Ok(compile_drop_table(&drop, schema)?),
+                    None if drop.if_exists => Ok(compile_noop()),
+                    None => Err(DispatchError::NoSuchTable(drop.name)),
+                }
             }
             other => Err(parse_error(other)),
         },
         "DROP" if second == "INDEX" => match parse_drop_index(sql) {
             ParseOutcome::Accepted(di) => {
-                let root_page = find_index_root(&di.name)?;
-                Ok(compile_drop_index(&di, root_page)?)
+                let existing_root = schemas
+                    .iter()
+                    .flat_map(|s| &s.indexes)
+                    .find(|idx| idx.name.eq_ignore_ascii_case(&di.name))
+                    .map(|idx| idx.root_page);
+                match existing_root {
+                    Some(root_page) => Ok(compile_drop_index(&di, root_page)?),
+                    None if di.if_exists => Ok(compile_noop()),
+                    None => Err(DispatchError::NoSuchIndex(di.name)),
+                }
             }
             other => Err(parse_error(other)),
         },

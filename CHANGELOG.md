@@ -27,6 +27,20 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   no number. `btree::MasterEntry::sql` is now `Option<String>` so a
   `NULL` `sql` column can be represented at all, rather than an empty
   string (#687).
+- `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS`/`CREATE VIEW
+  IF NOT EXISTS` and `DROP TABLE IF EXISTS`/`DROP INDEX IF EXISTS`
+  parsed their guard but never consulted it before emitting: a second
+  `CREATE TABLE IF NOT EXISTS` against an existing table appended a
+  second `sqlite_master` row and leaked its root page, which stock
+  `sqlite3` then reported as `Page N: never used` (plus a stale
+  autoindex entry-count mismatch for a composite key) — corrupting a
+  database this crate itself created on its second run, the exact
+  startup idiom `IF NOT EXISTS` exists for. `compile_statement` now
+  checks the catalog first: a satisfied guard compiles to a no-op
+  (`Init -> Halt`, no page allocated, no schema-cookie bump); an
+  unguarded duplicate create still fails, matching the oracle's
+  wording (`table t already exists`, `index i already exists`, `view v
+  already exists`) (#697).
 
 ## [0.18.10] - 2026-08-31
 

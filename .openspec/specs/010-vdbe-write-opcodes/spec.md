@@ -445,6 +445,21 @@ by `src/codegen/stmt/insert.rs::emit_unique_check`
 
 **Tests:** `tests/corpus/create_table_autoindex_test.rs::rowid_alias_primary_key_gains_no_autoindex`, `tests/corpus/create_table_autoindex_test.rs::without_rowid_primary_key_gains_no_autoindex`
 
+#### Scenario: A guarded CREATE/DROP is a clean no-op when its guard condition already holds
+
+- GIVEN a table (or index, or view) already registered in `sqlite_master`
+- WHEN `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS`/`CREATE VIEW
+  IF NOT EXISTS` names it again, or `DROP TABLE IF EXISTS`/`DROP INDEX IF
+  EXISTS` names an object that does not exist
+- THEN the statement succeeds (rc 0) without allocating a page, writing a
+  second `sqlite_master` row, or bumping the schema cookie — the oracle's
+  `PRAGMA integrity_check` and page count are unchanged, and without the
+  guard the same duplicate create still fails with the oracle's own wording
+  (`table t already exists`, `index i already exists`, `view v already
+  exists`)
+
+**Tests:** `tests/corpus/ddl_guard_test.rs::create_table_if_not_exists_twice_is_a_clean_no_op`, `tests/corpus/ddl_guard_test.rs::create_table_if_not_exists_twice_without_a_constraint_is_a_clean_no_op`, `tests/corpus/ddl_guard_test.rs::create_table_without_guard_still_fails_on_a_duplicate`, `tests/corpus/ddl_guard_test.rs::create_index_if_not_exists_twice_is_a_clean_no_op`, `tests/corpus/ddl_guard_test.rs::create_view_if_not_exists_twice_is_a_clean_no_op`, `tests/corpus/ddl_guard_test.rs::drop_table_if_exists_on_a_missing_table_is_a_clean_no_op`, `tests/corpus/ddl_guard_test.rs::drop_index_if_exists_on_a_missing_index_is_a_clean_no_op`
+
 ## Related regimes
 
 - Tier suite: `tests/tiers/tier2.rs::t2_crud_round_trips_on_rowid_tables`
