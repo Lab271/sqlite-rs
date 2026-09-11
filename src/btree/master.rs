@@ -77,8 +77,10 @@ pub struct MasterEntry {
     pub tbl_name: String,
     /// Root page number of the object's b-tree, or 0 when it has none.
     pub rootpage: u32,
-    /// The `CREATE ...` SQL text that defines the object.
-    pub sql: String,
+    /// The `CREATE ...` SQL text that defines the object, or `None` for
+    /// an implicitly created `sqlite_autoindex_*` — stock SQLite stores
+    /// `NULL` there, not an empty string (#687).
+    pub sql: Option<String>,
 }
 
 /// Scans the table b-tree rooted at `root_page` and returns the highest
@@ -145,7 +147,10 @@ pub fn insert_master_row(
         Value::Text(entry.name.as_str().into()),
         Value::Text(entry.tbl_name.as_str().into()),
         Value::Integer(entry.rootpage as i64),
-        Value::Text(entry.sql.as_str().into()),
+        match &entry.sql {
+            Some(sql) => Value::Text(sql.as_str().into()),
+            None => Value::Null,
+        },
     ];
     let payload = encode_record(&values, header.text_encoding);
     super::insert_row(pager, header, SQLITE_MASTER_ROOT_PAGE, next_rowid, &payload)
@@ -203,7 +208,7 @@ pub fn ensure_sqlite_sequence_table(
             name: "sqlite_sequence".to_string(),
             tbl_name: "sqlite_sequence".to_string(),
             rootpage: root_page,
-            sql: SQLITE_SEQUENCE_SQL.to_string(),
+            sql: Some(SQLITE_SEQUENCE_SQL.to_string()),
         },
     )?;
     bump_schema_cookie(pager)?;
@@ -323,7 +328,7 @@ pub fn ensure_sqlite_stat1_table(
             name: "sqlite_stat1".to_string(),
             tbl_name: "sqlite_stat1".to_string(),
             rootpage: root_page,
-            sql: SQLITE_STAT1_SQL.to_string(),
+            sql: Some(SQLITE_STAT1_SQL.to_string()),
         },
     )?;
     bump_schema_cookie(pager)?;
@@ -445,7 +450,7 @@ mod tests {
                 name: "t".to_string(),
                 tbl_name: "t".to_string(),
                 rootpage: 2,
-                sql: "CREATE TABLE t(a INTEGER, b TEXT)".to_string(),
+                sql: Some("CREATE TABLE t(a INTEGER, b TEXT)".to_string()),
             },
         )
         .unwrap();

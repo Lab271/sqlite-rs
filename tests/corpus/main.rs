@@ -26,6 +26,7 @@ mod btree_test;
 mod cli_e2e_test;
 mod cli_write_test;
 mod crash_torture_test;
+mod create_table_autoindex_test;
 mod cte_test;
 mod declared_collate_test;
 mod dump_oracle_test;

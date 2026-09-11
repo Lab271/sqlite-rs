@@ -2178,20 +2178,85 @@ pub fn create_table(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError>
         &btree::MasterEntry {
             kind: "table".to_string(),
             name: name.clone(),
-            tbl_name: name,
+            tbl_name: name.clone(),
             rootpage: root_page,
-            sql,
+            sql: Some(sql.clone()),
         },
     )
     .map_err(|e| ExecError::MalformedInstruction {
         opcode: "CreateTable",
         reason: e.to_string(),
     })?;
+    create_declared_autoindexes(&mut pager, &header, &name, &sql, root_page)?;
     btree::bump_schema_cookie(&mut pager).map_err(|e| ExecError::MalformedInstruction {
         opcode: "CreateTable",
         reason: e.to_string(),
     })?;
     Ok(Step::Next)
+}
+
+/// Emits a `sqlite_autoindex_<table>_<n>` entry for each constraint
+/// SQLite would autoindex, per the numbering rule #685 derived from the
+/// oracle and implements in `schema::autoindex_key_lists` — declaration
+/// order, column-level constraints included, rowid-alias/`WITHOUT
+/// ROWID` primary keys skipped and consuming no number, redundant
+/// constraints collapsed (#687). Runs inside `create_table`'s own write,
+/// so a failed `CreateTable` never leaves a partial autoindex behind.
+fn create_declared_autoindexes(
+    pager: &mut crate::pager::Pager,
+    header: &crate::header::DatabaseHeader,
+    table_name: &str,
+    sql: &str,
+    table_root_page: u32,
+) -> Result<(), ExecError> {
+    let (columns, without_rowid) = crate::schema::column_names_and_without_rowid(sql);
+    let Some(key_lists) = crate::schema::autoindex_key_lists(sql, without_rowid) else {
+        return Ok(());
+    };
+    for (i, key_cols) in key_lists.into_iter().enumerate() {
+        let ordinal = i.saturating_add(1);
+        let index_name = format!("sqlite_autoindex_{table_name}_{ordinal}");
+        let column_indices: Vec<usize> = key_cols
+            .iter()
+            .filter_map(|c| {
+                columns
+                    .iter()
+                    .position(|col| col.eq_ignore_ascii_case(&c.name))
+            })
+            .collect();
+        let index_root =
+            btree::create_empty_index_root(pager).map_err(|e| ExecError::MalformedInstruction {
+                opcode: "CreateTable",
+                reason: e.to_string(),
+            })?;
+        btree::populate_index_from_table(
+            pager,
+            header,
+            table_root_page,
+            index_root,
+            &column_indices,
+        )
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "CreateTable",
+            reason: e.to_string(),
+        })?;
+        btree::insert_master_row(
+            pager,
+            header,
+            &btree::MasterEntry {
+                kind: "index".to_string(),
+                name: index_name,
+                tbl_name: table_name.to_string(),
+                rootpage: index_root,
+                sql: None,
+            },
+        )
+        .map_err(|e| ExecError::MalformedInstruction {
+            opcode: "CreateTable",
+            reason: e.to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 /// `CreateView` (#380): registers a `sqlite_master` row with
@@ -2219,7 +2284,7 @@ pub fn create_view(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError> 
             name: name.clone(),
             tbl_name: name,
             rootpage: 0,
-            sql,
+            sql: Some(sql),
         },
     )
     .map_err(|e| ExecError::MalformedInstruction {
@@ -2343,7 +2408,7 @@ pub fn create_index(vm: &mut Vm, instr: &Instruction) -> Result<Step, ExecError>
             name: name.clone(),
             tbl_name: table_name,
             rootpage: index_root,
-            sql,
+            sql: Some(sql),
         },
     )
     .map_err(|e| ExecError::MalformedInstruction {
