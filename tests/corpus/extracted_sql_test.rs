@@ -278,7 +278,7 @@ fn deeply_nested_expressions_hit_the_depth_guard_instead_of_the_stack() {
 /// never raise it without a documented cause like the #240/#257/#403 bumps
 /// above. A raise means a regression that reclassified valid SQL as
 /// malformed.
-const SELECT_INVALID_BASELINE: usize = 2;
+const SELECT_INVALID_BASELINE: usize = 1;
 
 /// Invariant 2: the parser must not call real, SQLite-accepted SELECT invalid.
 /// `Unsupported` is expected and fine — the V2 grammar is a deliberate slice.

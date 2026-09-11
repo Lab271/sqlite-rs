@@ -27,7 +27,7 @@
 
 use super::ast::*;
 use super::error::{PResult, ParseFail};
-use super::tokenizer::{Keyword, Param, Span, Token, TokenKind};
+use super::tokenizer::{is_fallback_keyword, keyword_text, Keyword, Param, Span, Token, TokenKind};
 
 /// Recursive-descent parser state: the token stream, a cursor into it, and
 /// the current expression-nesting depth (see [`MAX_EXPR_DEPTH`]).
@@ -210,6 +210,13 @@ impl Parser {
             TokenKind::Identifier(name) => {
                 let span = self.advance_span();
                 Ok((name, span))
+            }
+            // `parse.y:272`'s `%fallback ID` list (#696): 89 keywords are
+            // non-reserved in real SQLite and double as ordinary
+            // identifiers wherever a keyword isn't expected.
+            TokenKind::Keyword(kw) if is_fallback_keyword(kw) => {
+                let span = self.advance_span();
+                Ok((keyword_text(kw).to_string(), span))
             }
             _ => {
                 let tok = self.peek().clone();
@@ -1381,6 +1388,13 @@ impl Parser {
             self.advance();
             return Ok(Some(name));
         }
+        // Deliberately not extended to bare (no `AS`) fallback keywords:
+        // real SQLite's LALR table resolves e.g. `a NATURAL JOIN b`'s
+        // `NATURAL` as the join operator, not a bare alias for `a`, via
+        // shift/reduce precedence this recursive-descent parser has no
+        // equivalent for. Accepting it here regressed exactly that case
+        // (#696) — `AS <fallback-keyword>` (`identifier()`, above) is
+        // the safe, unambiguous form and is what the ticket requires.
         Ok(None)
     }
 
@@ -2235,7 +2249,33 @@ impl Parser {
                 self.advance();
                 self.exists_tail(start, false)
             }
-            TokenKind::Identifier(name) => {
+            // SQLite treats most keywords as usable function names when
+            // followed by `(` (e.g. `replace(...)`, `glob(...)`) — only
+            // the handful matched above (CASE/CAST/EXISTS/CURRENT_*)
+            // are true reserved words in expression position. Checked
+            // before the #696 fallback-identifier arm below so that a
+            // fallback keyword followed by `(` (e.g. `key(x)`) is still
+            // a function call, not a column reference.
+            TokenKind::Keyword(kw) if matches!(self.peek_at(1).kind, TokenKind::LParen) => {
+                self.advance();
+                self.function_call(format!("{kw:?}"), tok.span)
+            }
+            // `parse.y:272`'s `%fallback ID` list (#696): a non-reserved
+            // keyword not followed by `(` is an ordinary column
+            // reference, same as `TokenKind::Identifier` below.
+            TokenKind::Identifier(_) | TokenKind::Keyword(_) => {
+                let name = match tok.kind {
+                    TokenKind::Identifier(name) => name,
+                    TokenKind::Keyword(kw) if is_fallback_keyword(kw) => {
+                        keyword_text(kw).to_string()
+                    }
+                    other => {
+                        return Err(ParseFail::Invalid {
+                            message: format!("expected column or expression, found {other:?}"),
+                            span: tok.span,
+                        })
+                    }
+                };
                 self.advance();
                 if matches!(self.peek().kind, TokenKind::LParen) {
                     return self.function_call(name, tok.span);
@@ -2270,14 +2310,6 @@ impl Parser {
                     },
                 };
                 Ok(Expr { kind, span })
-            }
-            // SQLite treats most keywords as usable function names when
-            // followed by `(` (e.g. `replace(...)`, `glob(...)`) — only
-            // the handful matched above (CASE/CAST/EXISTS/CURRENT_*)
-            // are true reserved words in expression position.
-            TokenKind::Keyword(kw) if matches!(self.peek_at(1).kind, TokenKind::LParen) => {
-                self.advance();
-                self.function_call(format!("{kw:?}"), tok.span)
             }
             TokenKind::LParen => {
                 self.advance();

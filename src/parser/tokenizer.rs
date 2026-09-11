@@ -589,6 +589,123 @@ const KEYWORDS: &[(&str, Keyword)] = &[
     ("WITHOUT", Keyword::WITHOUT),
 ];
 
+/// `parse.y:272`'s `%fallback ID` list (3.53.4, pinned oracle): these 89
+/// keywords are non-reserved in real SQLite — Lemon retries them as a
+/// plain `ID` wherever the grammar can't shift them as the keyword
+/// itself, so they double as ordinary identifiers (column/table/alias
+/// names) everywhere a keyword isn't expected. The other 57 keywords in
+/// `KEYWORDS` above stay fully reserved. See #696.
+const FALLBACK_KEYWORDS: &[Keyword] = &[
+    Keyword::ABORT,
+    Keyword::ACTION,
+    Keyword::AFTER,
+    Keyword::ALWAYS,
+    Keyword::ANALYZE,
+    Keyword::ASC,
+    Keyword::ATTACH,
+    Keyword::BEFORE,
+    Keyword::BEGIN,
+    Keyword::BY,
+    Keyword::CASCADE,
+    Keyword::CAST,
+    Keyword::COLUMN,
+    Keyword::CONFLICT,
+    Keyword::CROSS,
+    Keyword::CURRENT,
+    Keyword::CURRENT_DATE,
+    Keyword::CURRENT_TIME,
+    Keyword::CURRENT_TIMESTAMP,
+    Keyword::DATABASE,
+    Keyword::DEFERRED,
+    Keyword::DESC,
+    Keyword::DETACH,
+    Keyword::DO,
+    Keyword::EACH,
+    Keyword::END,
+    Keyword::EXCLUDE,
+    Keyword::EXCLUSIVE,
+    Keyword::EXPLAIN,
+    Keyword::FAIL,
+    Keyword::FILTER,
+    Keyword::FIRST,
+    Keyword::FOLLOWING,
+    Keyword::FOR,
+    Keyword::FULL,
+    Keyword::GENERATED,
+    Keyword::GLOB,
+    Keyword::GROUPS,
+    Keyword::IF,
+    Keyword::IGNORE,
+    Keyword::IMMEDIATE,
+    Keyword::INDEXED,
+    Keyword::INITIALLY,
+    Keyword::INNER,
+    Keyword::INSTEAD,
+    Keyword::KEY,
+    Keyword::LAST,
+    Keyword::LEFT,
+    Keyword::LIKE,
+    Keyword::MATCH,
+    Keyword::MATERIALIZED,
+    Keyword::NATURAL,
+    Keyword::NO,
+    Keyword::NULLS,
+    Keyword::OF,
+    Keyword::OFFSET,
+    Keyword::OTHERS,
+    Keyword::OUTER,
+    Keyword::OVER,
+    Keyword::PARTITION,
+    Keyword::PLAN,
+    Keyword::PRAGMA,
+    Keyword::PRECEDING,
+    Keyword::QUERY,
+    Keyword::RAISE,
+    Keyword::RANGE,
+    Keyword::RECURSIVE,
+    Keyword::REGEXP,
+    Keyword::REINDEX,
+    Keyword::RELEASE,
+    Keyword::RENAME,
+    Keyword::REPLACE,
+    Keyword::RESTRICT,
+    Keyword::RIGHT,
+    Keyword::ROLLBACK,
+    Keyword::ROW,
+    Keyword::ROWS,
+    Keyword::SAVEPOINT,
+    Keyword::TEMP,
+    Keyword::TEMPORARY,
+    Keyword::TIES,
+    Keyword::TRIGGER,
+    Keyword::UNBOUNDED,
+    Keyword::VACUUM,
+    Keyword::VIEW,
+    Keyword::VIRTUAL,
+    Keyword::WINDOW,
+    Keyword::WITH,
+    Keyword::WITHOUT,
+];
+
+/// True for the 89 keywords `parse.y:272`'s `%fallback ID` declares
+/// non-reserved (see [`FALLBACK_KEYWORDS`]) — these double as ordinary
+/// identifiers outside keyword position. The other 57 keywords in
+/// `KEYWORDS` stay fully reserved, matching the oracle.
+pub fn is_fallback_keyword(kw: Keyword) -> bool {
+    FALLBACK_KEYWORDS.contains(&kw)
+}
+
+/// The literal source text a keyword token was recognized from
+/// (uppercase, per [`KEYWORDS`]) — used to recover an identifier's text
+/// when a [`is_fallback_keyword`] keyword is accepted in an identifier
+/// position (#696).
+pub fn keyword_text(kw: Keyword) -> &'static str {
+    KEYWORDS
+        .iter()
+        .find(|(_, k)| *k == kw)
+        .map_or("", |(text, _)| text)
+}
+
 /// Case-insensitive ASCII ordering of `a` against `b`, without
 /// allocating an uppercased copy of either — used by [`lookup_word`]'s
 /// binary search so per-identifier lookup costs no heap allocation.

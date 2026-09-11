@@ -31,6 +31,7 @@ mod cte_test;
 mod declared_collate_test;
 mod dump_oracle_test;
 mod expr_vectors_test;
+mod fallback_keyword_test;
 mod families_test;
 mod group_by_projection_test;
 mod harness_test;
