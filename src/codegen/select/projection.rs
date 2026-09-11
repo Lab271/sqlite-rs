@@ -134,11 +134,23 @@ pub(super) fn compile_row_values(
                     catalog: None,
                 } = &expr.kind
                 {
+                    let declared_idx = column_index(schema, name);
                     let pseudo_rowid_idx = pseudo
-                        .then(|| column_index(schema, name))
+                        .then_some(declared_idx)
                         .flatten()
                         .filter(|idx| schema.rowid_alias == Some(*idx))
                         .or_else(|| {
+                            // SQLite's shadowing rule: a *declared*
+                            // column named `rowid`/`_rowid_`/`oid` wins
+                            // over the pseudo-column, so the sentinel is
+                            // only reachable when no such column exists.
+                            // Without this guard a declared, non-alias
+                            // `rowid` column read back through the
+                            // post-`ORDER BY` pseudo cursor projected the
+                            // hidden rowid instead of its own value.
+                            if declared_idx.is_some() {
+                                return None;
+                            }
                             pseudo
                                 .then(|| {
                                     crate::codegen::expr::rowid_pseudo_column_index(schema, name)

@@ -22,7 +22,16 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   `compile_grouped_scan`'s sort-then-group pass 2 — both the group-key
   comparison and a bare `rowid` in the result list or `HAVING` now read
   back a materialized field instead of re-issuing `Rowid` against a
-  cursor that can't answer it (#708).
+  cursor that can't answer it (#708). Two silent wrong answers in the
+  same family are fixed alongside it: an aggregate with no `GROUP BY`
+  (`SELECT rowid, count(*) FROM t`) took a fast path whose synthetic
+  per-group record has no slot for the pseudo-column and so projected an
+  empty value instead of the rowid — that path now defers to
+  `compile_grouped_scan`; and a table with a *declared* column named
+  `rowid` projected the hidden rowid instead of the column's own value
+  once an `ORDER BY` put the read behind a pseudo cursor, because the
+  projection fell through to the pseudo-column sentinel even though a
+  declared column of that name shadows it (#708).
 
 ## [0.18.10] - 2026-08-31
 

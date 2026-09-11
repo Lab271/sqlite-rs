@@ -453,3 +453,85 @@ fn group_by_rowid_on_without_rowid_table_rejects_cleanly() {
         "expected an unknown-column error, got: {err}"
     );
 }
+
+/// #708 follow-up: the implicit whole-table group (an aggregate with no
+/// `GROUP BY`) took `try_compile_direct_agg_scan`'s fast path, whose
+/// synthetic per-group record has one field per declared column and no
+/// slot for the rowid pseudo-column — so `SELECT rowid, count(*)` read
+/// off the end of the record and projected an empty value where the
+/// oracle returns the rowid. Silent wrong answer, not an error.
+#[test]
+fn bare_rowid_alongside_an_aggregate_with_no_group_by() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned sqlite3 oracle found");
+        return;
+    };
+    let db = scratch_db(
+        "implicit_group_rowid",
+        &oracle,
+        "CREATE TABLE t(a INTEGER, v TEXT); \
+         INSERT INTO t VALUES (10, 'aa'), (20, 'bb'), (30, 'cc');",
+    );
+    let schema = rowid_table_schema();
+    for sql in [
+        "SELECT rowid, count(*) FROM t",
+        "SELECT _rowid_, count(*) FROM t",
+        "SELECT oid, count(*) FROM t",
+        "SELECT rowid, count(*) FROM t WHERE v > 'aa'",
+        "SELECT rowid, count(*) FROM t HAVING count(*) > 0",
+        "SELECT max(rowid) FROM t",
+        // Control: the fast path must still serve an aggregate that
+        // never mentions the pseudo-column.
+        "SELECT count(*) FROM t",
+        "SELECT count(*), max(a) FROM t",
+    ] {
+        assert_matches_oracle(&oracle, &db, &schema, sql);
+    }
+}
+
+/// #708 follow-up: SQLite's shadowing rule says a *declared* column
+/// named `rowid` wins over the pseudo-column. That held on a plain scan
+/// but broke once the row was read back through the post-`ORDER BY`
+/// pseudo cursor, which projected the hidden rowid instead of the
+/// declared column's own value — correct on `origin/main`, so a
+/// regression this stack introduced.
+#[test]
+fn a_declared_rowid_column_still_wins_after_order_by() {
+    let Some(oracle) = pinned_oracle() else {
+        eprintln!("skipping: no pinned sqlite3 oracle found");
+        return;
+    };
+    let db = scratch_db(
+        "declared_rowid_order_by",
+        &oracle,
+        "CREATE TABLE t(rowid TEXT, v TEXT); \
+         INSERT INTO t VALUES ('r1', 'bb'), ('r2', 'aa');",
+    );
+    let schema = TableSchema {
+        unresolved_autoindex: false,
+        name: "t".to_string(),
+        root_page: 2,
+        columns: vec!["rowid".to_string(), "v".to_string()],
+        column_types: vec!["TEXT".to_string(), "TEXT".to_string()],
+        column_collations: vec![],
+        without_rowid: false,
+        strict: false,
+        is_virtual: false,
+        sql: "CREATE TABLE t(rowid TEXT, v TEXT)".to_string(),
+        indexes: vec![],
+        rowid_alias: None,
+    }
+    .with_computed_rowid_alias();
+    for sql in [
+        // The regression: a sort puts the read behind a pseudo cursor.
+        "SELECT rowid, v FROM t ORDER BY v",
+        "SELECT rowid, v FROM t ORDER BY v DESC",
+        "SELECT rowid FROM t ORDER BY rowid",
+        "SELECT t.rowid FROM t ORDER BY v",
+        // Controls: these were already correct and must stay so.
+        "SELECT rowid, v FROM t",
+        "SELECT rowid, v FROM t WHERE rowid = 'r1'",
+    ] {
+        assert_matches_oracle(&oracle, &db, &schema, sql);
+    }
+}

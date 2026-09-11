@@ -321,6 +321,18 @@ where
     if aggs.iter().any(|(_, _, _, distinct)| *distinct) {
         return Ok(false);
     }
+    // #708 follow-up: this fast path's synthetic per-group record holds
+    // one field per *declared* schema column and nothing else, so it has
+    // no slot for the bare `rowid`/`_rowid_`/`oid` pseudo-column — yet
+    // the projection still asks for `rowid_pseudo_column_index`'s
+    // sentinel (one past the last column), which reads off the end of
+    // the record and projects an empty value instead of the rowid.
+    // Decline and let `compile_grouped_scan`'s implicit-whole-table-group
+    // path handle it: it materializes the field (see
+    // `grouped_scan_needs_rowid_field`) and reads it back with `Column`.
+    if grouped_scan_needs_rowid_field(select, schema) {
+        return Ok(false);
+    }
 
     let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     // #322: hoist any uncorrelated WHERE-clause subquery once, up
