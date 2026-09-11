@@ -14,6 +14,7 @@
 //! access here goes through safe `nix`/`std` APIs, and the crate is
 //! `#![forbid(unsafe_code)]` with no local override anywhere.
 
+pub(crate) mod inode_registry;
 pub(crate) mod lock;
 mod memory;
 mod page_source;

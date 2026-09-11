@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::sys::fcntl::{off_t, EACCES, EAGAIN, F_RDLCK, F_UNLCK, F_WRLCK, O_NOFOLLOW};
 
+use super::inode_registry::ExclusiveGate;
 use super::lock::fcntl_lock;
 use super::{SharedLockGuard, VfsError};
 
@@ -96,6 +97,29 @@ const WAL_WRITE_LOCK_BYTE: off_t = UNIX_SHM_BASE;
 /// read(0..4)).
 const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
 
+/// In-process arbitration for `WAL_WRITE_LOCK` (#491/#706): `open_shm_shared`
+/// already shares one fd per `-shm` path, so the real `fcntl` byte lock
+/// below no longer risks the "closing any fd drops every lock" hazard —
+/// but a second in-process holder would still win the same non-blocking
+/// `fcntl` call, since POSIX locks never conflict with the calling
+/// process's own locks. Keyed by `-shm` path, same identity
+/// `open_shm_shared` already uses.
+static WAL_WRITE_HOLDERS: OnceLock<ExclusiveGate<PathBuf>> = OnceLock::new();
+/// Same idea as [`WAL_WRITE_HOLDERS`], for `WAL_CKPT_LOCK`.
+static WAL_CKPT_HOLDERS: OnceLock<ExclusiveGate<PathBuf>> = OnceLock::new();
+
+fn wal_write_holders() -> &'static ExclusiveGate<PathBuf> {
+    WAL_WRITE_HOLDERS.get_or_init(ExclusiveGate::new)
+}
+
+fn wal_ckpt_holders() -> &'static ExclusiveGate<PathBuf> {
+    WAL_CKPT_HOLDERS.get_or_init(ExclusiveGate::new)
+}
+
+fn would_block_error() -> io::Error {
+    io::Error::from_raw_os_error(EAGAIN)
+}
+
 /// A held `WAL_WRITE_LOCK`, releasing on drop — taken by a writer (#389)
 /// before appending frames/advancing `mxFrame`, so a second concurrent
 /// writer is refused rather than interleaving frames or racing the
@@ -103,6 +127,7 @@ const WAL_CKPT_LOCK_BYTE: off_t = UNIX_SHM_BASE.saturating_add(1);
 #[derive(Debug)]
 pub struct WalWriteLock {
     file: Arc<File>,
+    path: PathBuf,
 }
 
 impl SharedLockGuard for WalWriteLock {}
@@ -110,14 +135,36 @@ impl SharedLockGuard for WalWriteLock {}
 impl Drop for WalWriteLock {
     fn drop(&mut self) {
         fcntl_lock(&self.file, F_UNLCK, WAL_WRITE_LOCK_BYTE, 1).ok();
+        wal_write_holders().release(&self.path);
     }
 }
 
 pub(crate) fn claim_wal_write_lock(shm_path: &Path) -> io::Result<WalWriteLock> {
-    let file = open_shm_shared(shm_path)?;
-    validate_shm_len(&file)?;
-    fcntl_lock(&file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
-    Ok(WalWriteLock { file })
+    // #491/#706: `open_shm_shared` already gives every in-process caller
+    // the same fd for this path, so the real `fcntl` call below can't be
+    // relied on to refuse a second in-process holder — POSIX locks never
+    // conflict with the calling process's own locks, regardless of fd.
+    // `wal_write_holders` is the in-process arbitration layer that
+    // catches what the real lock can't.
+    if !wal_write_holders().acquire(shm_path.to_path_buf()) {
+        return Err(would_block_error());
+    }
+    let result = (|| -> io::Result<Arc<File>> {
+        let file = open_shm_shared(shm_path)?;
+        validate_shm_len(&file)?;
+        fcntl_lock(&file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)?;
+        Ok(file)
+    })();
+    match result {
+        Ok(file) => Ok(WalWriteLock {
+            file,
+            path: shm_path.to_path_buf(),
+        }),
+        Err(e) => {
+            wal_write_holders().release(&shm_path.to_path_buf());
+            Err(e)
+        }
+    }
 }
 
 /// A persistent `-shm` fd for [`super::Vfs::open_wal_shm`] (#437): opened
@@ -157,13 +204,28 @@ fn to_shm_lock_error(path: &Path, source: io::Error) -> VfsError {
 
 impl super::WalShm for UnixWalShm {
     fn claim_write_lock(&self) -> super::Result<()> {
-        fcntl_lock(&self.file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)
-            .map_err(|source| to_shm_lock_error(&self.path, source))
+        // Same `wal_write_holders` gate `claim_wal_write_lock` uses (#491/
+        // #706) — this is the persistent-handle (#437) path to the same
+        // `WAL_WRITE_LOCK_BYTE`, so both routes have to arbitrate against
+        // each other through the one gate, not just against themselves.
+        if !wal_write_holders().acquire(self.path.clone()) {
+            return Err(VfsError::Locked {
+                path: self.path.display().to_string(),
+            });
+        }
+        let result = fcntl_lock(&self.file, F_WRLCK, WAL_WRITE_LOCK_BYTE, 1)
+            .map_err(|source| to_shm_lock_error(&self.path, source));
+        if result.is_err() {
+            wal_write_holders().release(&self.path);
+        }
+        result
     }
 
     fn release_write_lock(&self) -> super::Result<()> {
-        fcntl_lock(&self.file, F_UNLCK, WAL_WRITE_LOCK_BYTE, 1)
-            .map_err(|source| to_shm_vfs_error(&self.path, source))
+        let result = fcntl_lock(&self.file, F_UNLCK, WAL_WRITE_LOCK_BYTE, 1)
+            .map_err(|source| to_shm_vfs_error(&self.path, source));
+        wal_write_holders().release(&self.path);
+        result
     }
 
     fn publish_mx_frame(&self, mx_frame: u32) -> super::Result<()> {
@@ -277,6 +339,7 @@ const N_BACKFILL_OFFSET: u64 = 96;
 #[derive(Debug)]
 pub struct WalCheckpointLock {
     file: Arc<File>,
+    path: PathBuf,
 }
 
 impl SharedLockGuard for WalCheckpointLock {}
@@ -284,14 +347,32 @@ impl SharedLockGuard for WalCheckpointLock {}
 impl Drop for WalCheckpointLock {
     fn drop(&mut self) {
         fcntl_lock(&self.file, F_UNLCK, WAL_CKPT_LOCK_BYTE, 1).ok();
+        wal_ckpt_holders().release(&self.path);
     }
 }
 
 pub(crate) fn claim_wal_checkpoint_lock(shm_path: &Path) -> io::Result<WalCheckpointLock> {
-    let file = open_shm_shared(shm_path)?;
-    validate_shm_len(&file)?;
-    fcntl_lock(&file, F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
-    Ok(WalCheckpointLock { file })
+    // See `claim_wal_write_lock`'s doc comment: same in-process
+    // arbitration gap, same fix.
+    if !wal_ckpt_holders().acquire(shm_path.to_path_buf()) {
+        return Err(would_block_error());
+    }
+    let result = (|| -> io::Result<Arc<File>> {
+        let file = open_shm_shared(shm_path)?;
+        validate_shm_len(&file)?;
+        fcntl_lock(&file, F_WRLCK, WAL_CKPT_LOCK_BYTE, 1)?;
+        Ok(file)
+    })();
+    match result {
+        Ok(file) => Ok(WalCheckpointLock {
+            file,
+            path: shm_path.to_path_buf(),
+        }),
+        Err(e) => {
+            wal_ckpt_holders().release(&shm_path.to_path_buf());
+            Err(e)
+        }
+    }
 }
 
 /// The frame marks of readers currently pinned to this WAL generation —
