@@ -109,6 +109,60 @@ pub fn output_column_names(select: &Select, schema: &TableSchema) -> Vec<String>
         .collect()
 }
 
+/// #709: like [`output_column_names`], but for a `FROM` clause with
+/// joins, where a `*`/`table.*` expansion must draw columns from the
+/// right per-table schema instead of a single one. `tables` is
+/// `(alias, schema)` pairs in the same order the joined tables appear
+/// in the `FROM` clause (leftmost first); `table.*`/`table.col`
+/// qualifier matching uses alias-or-name, mirroring
+/// `TableBinding::matches_qualifier`.
+///
+/// A bare column reference's name doesn't depend on which table it
+/// came from (`ExprKind::Column`'s `name` is already
+/// qualifier-independent — `SELECT a.x` carries `name: "x"` same as an
+/// unqualified `x`), so an ordinary `ResultColumn::Expr` needs no
+/// per-table lookup at all; only `Star`/`TableStar` expansion does.
+/// Same "alias, else bare column name, else `columnN`" fallback order
+/// as the single-table rule, and the same known gap: an unaliased
+/// *computed* expression (`a + 1`) falls back to positional `columnN`
+/// here rather than the oracle's own expression-text rendering — no
+/// expression-to-SQL-text printer exists in this crate yet, so that
+/// part of SQLite's rule is unimplemented for both the single-table
+/// and joined paths alike, not a regression introduced here.
+pub fn output_column_names_joined(
+    select: &Select,
+    tables: &[(Option<String>, TableSchema)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for col in &select.columns {
+        match col {
+            ResultColumn::Star => {
+                for (_, schema) in tables {
+                    out.extend(schema.columns.iter().cloned());
+                }
+            }
+            ResultColumn::TableStar { table } => {
+                if let Some((_, schema)) = tables.iter().find(|(alias, schema)| {
+                    alias
+                        .as_deref()
+                        .map(|a| a.eq_ignore_ascii_case(table))
+                        .unwrap_or_else(|| schema.name.eq_ignore_ascii_case(table))
+                }) {
+                    out.extend(schema.columns.iter().cloned());
+                }
+            }
+            ResultColumn::Expr { expr, alias } => {
+                let name = alias.clone().unwrap_or_else(|| match &expr.kind {
+                    ExprKind::Column { name, .. } => name.clone(),
+                    _ => format!("column{}", out.len().saturating_add(1)),
+                });
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 pub(super) fn order_by_entries(select: &Select, schema: &TableSchema) -> Vec<OrderByEntry> {
     let mut out = Vec::new();
     for col in &select.columns {

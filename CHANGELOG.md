@@ -28,6 +28,15 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
   gives them, with no new opcode or synthesized rows (ADR-0046,
   supersedes ADR-0029's problem statement for this one table) (#707).
 
+- `.headers on`'s column labels for a join or a compound `SELECT`
+  fell back to positional `column1`/`column2` placeholders instead of
+  deriving real names. A joined `FROM` now expands `*`/`table.*`
+  against each source table in order (`output_column_names_joined`),
+  and a compound takes its names from the leftmost arm — matching
+  what `.headers on` prints in stock `sqlite3` for a two/three-table
+  join, `UNION`/`UNION ALL`, a subquery in `FROM`, an aliased or
+  table-qualified reference, and duplicate names across a join (#709).
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed
