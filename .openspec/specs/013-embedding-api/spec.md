@@ -470,6 +470,46 @@ as a ratchet
 
 **Tests:** `tests/unit/api_threading_test.rs::handle_is_send_sync`, `tests/unit/api_threading_test.rs::a_shared_reference_works_across_threads`
 
+A `Transaction` holds the connection for its lifetime, and other holders
+wait. Requirement 4's serialization is per *statement* — the worker runs one
+request at a time — and a transaction is several. Without exclusion, three
+interleavings are reachable through the `Clone` this requirement exists to
+allow: another task's `BEGIN` landing inside an open transaction (refused,
+loud); another task's statements being committed with a transaction they know
+nothing about; and an autocommit write from a third task being **rolled back**
+with someone else's transaction, having already returned success. The last is
+a lost write that reported success, so this is enforced rather than
+documented (ADR-0045).
+
+The thread that opened the transaction may keep using the original handle —
+that is what a single-threaded caller has always done, and it is what SQLite
+does. Re-entry from that same thread asking for a *second* transaction is
+`Error::TransactionActive` rather than a wait, because it is a nesting bug and
+waiting would hide it as a hang. A raw `execute("BEGIN")` is not guarded:
+nothing would release a slot it claimed.
+
+#### Scenario: A transaction excludes other threads for its lifetime
+
+- GIVEN one connection shared by two threads, one of which has opened a
+  transaction and written a row
+- WHEN the other thread issues an autocommit write, and the transaction is
+  then rolled back
+- THEN the other thread's write waits rather than joining the transaction,
+  succeeds once the transaction ends, and survives the rollback — which
+  discards only the transaction's own row
+
+**Tests:** `tests/unit/api_transaction_test.rs::another_threads_write_is_not_swallowed_by_a_rollback`, `tests/unit/api_transaction_test.rs::another_thread_waits_and_then_proceeds_after_a_commit`
+
+#### Scenario: Exclusion does not deadlock the thread that owns it
+
+- GIVEN a thread holding a `Transaction`
+- WHEN it uses the original connection handle directly, and separately asks
+  for a second transaction
+- THEN the statement runs inside the open transaction, and the second
+  transaction request is `Error::TransactionActive` rather than a wait
+
+**Tests:** `tests/unit/api_transaction_test.rs::the_same_thread_may_still_use_the_connection_directly`, `tests/unit/api_transaction_test.rs::a_second_transaction_on_the_same_thread_reports_rather_than_hangs`, `tests/unit/api_transaction_test.rs::the_slot_is_released_even_if_teardown_fails`
+
 #### Scenario: Eight threads contending on one handle produce a valid file
 
 - GIVEN eight threads sharing one `Arc<Connection>` on a file, each running a

@@ -12,6 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+
 use sqlite_rs::api::{Connection, Error, TransactionBehavior, Value};
 
 fn scratch(label: &str) -> PathBuf {
@@ -224,4 +226,162 @@ fn a_rolled_back_statement_still_reported_its_count() {
     assert_eq!(count(&conn), 1);
     // ...but the count is not retroactively revised, matching SQLite.
     assert_eq!(conn.changes().unwrap(), 1);
+}
+
+/// A `Transaction` is a unit, not a sequence other holders of the same
+/// connection can interleave with (spec 013 Requirement 4).
+///
+/// Requirement 4's serialization is per *statement* — the worker runs one
+/// request at a time. That is not enough for a transaction, which is
+/// several. A consumer running two concurrent catalog commits hit the
+/// visible half of this: the second task's `BEGIN` landed inside the
+/// first's open transaction and was refused.
+///
+/// This test pins the invisible half, which is worse. Without exclusion an
+/// autocommit write from another task runs inside whichever transaction
+/// happens to be open, and is committed or rolled back with it — so a write
+/// that returned `Ok(1)` disappears when an unrelated task rolls back. That
+/// is a lost write that reported success.
+#[test]
+fn another_threads_write_is_not_swallowed_by_a_rollback() {
+    let conn = Arc::new(Connection::open_in_memory().unwrap());
+    conn.execute("CREATE TABLE t(who TEXT)").unwrap();
+
+    let tx = conn.transaction().unwrap();
+    tx.execute_with("INSERT INTO t VALUES (?1)", vec![Value::from("in-txn")])
+        .unwrap();
+
+    // Another thread's autocommit write. It must not join this
+    // transaction, so it has to wait for it — the thread parks inside
+    // `execute_with` until the rollback below releases the slot.
+    let other = {
+        let conn = Arc::clone(&conn);
+        std::thread::spawn(move || {
+            conn.execute_with("INSERT INTO t VALUES (?1)", vec![Value::from("other")])
+                .expect("the other thread's insert should succeed")
+        })
+    };
+
+    // Give the other thread a chance to be blocked rather than merely slow,
+    // so this test is about exclusion and not about scheduling luck.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        !other.is_finished(),
+        "the other thread's write should be waiting for the open transaction"
+    );
+
+    tx.rollback().unwrap();
+
+    let applied = other.join().expect("the other thread panicked");
+    assert_eq!(applied, 1);
+
+    // The rollback discarded its own row and nothing else. Without the
+    // slot, `other`'s insert would have been inside the transaction and
+    // would have gone with it, leaving zero rows.
+    let rows = conn.query_all("SELECT who FROM t").unwrap();
+    let names: Vec<String> = rows.iter().map(|r| r.get::<String>(0).unwrap()).collect();
+    assert_eq!(
+        names,
+        vec!["other".to_string()],
+        "the rollback should discard only its own write"
+    );
+}
+
+/// The other side of the same rule: a committed transaction and a waiting
+/// thread both end up applied, in that order.
+#[test]
+fn another_thread_waits_and_then_proceeds_after_a_commit() {
+    let conn = Arc::new(Connection::open_in_memory().unwrap());
+    conn.execute("CREATE TABLE t(who TEXT)").unwrap();
+
+    let tx = conn.transaction().unwrap();
+    tx.execute_with("INSERT INTO t VALUES (?1)", vec![Value::from("in-txn")])
+        .unwrap();
+
+    let other = {
+        let conn = Arc::clone(&conn);
+        std::thread::spawn(move || {
+            conn.execute_with("INSERT INTO t VALUES (?1)", vec![Value::from("other")])
+                .unwrap()
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(!other.is_finished(), "should be waiting");
+
+    tx.commit().unwrap();
+    other.join().expect("the other thread panicked");
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM t")
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(count, 2, "both writes should be present after the commit");
+}
+
+/// Exclusion must not become a deadlock against oneself. Holding a
+/// `Transaction` and continuing to use the original handle on the same
+/// thread is what a single-threaded caller has always been able to do, and
+/// what SQLite does: the statement runs inside the open transaction.
+///
+/// Without the same-thread arm in the gate this test hangs rather than
+/// fails, which is worth saying out loud.
+#[test]
+fn the_same_thread_may_still_use_the_connection_directly() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE t(a INTEGER)").unwrap();
+
+    let tx = conn.transaction().unwrap();
+    tx.execute("INSERT INTO t VALUES (1)").unwrap();
+    // Same thread, original handle, transaction still open.
+    conn.execute("INSERT INTO t VALUES (2)").unwrap();
+    tx.rollback().unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM t")
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "both inserts were inside the transaction, so the rollback took both"
+    );
+}
+
+/// Re-entry on the thread that already holds the transaction is a nesting
+/// bug and is reported, not waited on.
+#[test]
+fn a_second_transaction_on_the_same_thread_reports_rather_than_hangs() {
+    let conn = Connection::open_in_memory().unwrap();
+    let _outer = conn.transaction().unwrap();
+    assert_eq!(
+        conn.transaction().expect_err("nesting is refused"),
+        Error::TransactionActive
+    );
+}
+
+/// Dropping the guard releases the slot even when the rollback itself
+/// fails, so a failed teardown cannot wedge the connection for everyone
+/// else.
+#[test]
+fn the_slot_is_released_even_if_teardown_fails() {
+    let conn = Arc::new(Connection::open_in_memory().unwrap());
+    conn.execute("CREATE TABLE t(a INTEGER)").unwrap();
+
+    {
+        let tx = conn.transaction().unwrap();
+        tx.execute("INSERT INTO t VALUES (1)").unwrap();
+        // Roll back underneath the guard, so the guard's own ROLLBACK on
+        // drop has nothing to roll back and errors.
+        conn.execute("ROLLBACK").unwrap();
+    }
+
+    // If the slot leaked, this would hang rather than fail.
+    let other = {
+        let conn = Arc::clone(&conn);
+        std::thread::spawn(move || conn.execute("INSERT INTO t VALUES (2)").unwrap())
+    };
+    assert_eq!(other.join().expect("the other thread panicked"), 1);
 }
