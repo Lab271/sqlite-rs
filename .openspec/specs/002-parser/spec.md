@@ -410,6 +410,14 @@ The tokenizer MUST convert SQL text into a stream of tokens. Each token MUST car
 
 **Tests:** `src/parser/tokenizer.rs::test_tokenize_parameters`
 
+#### Scenario: A leading or trailing comment is trivia, not syntax
+
+- GIVEN `-- c\nCREATE TABLE t(a);`, `/* c */ CREATE TABLE t(a);`, `CREATE TABLE t(a); -- c`, or a comment-only input
+- WHEN parsed
+- THEN the comment is skipped and the statement parses (a comment-only input succeeds as a no-op), matching what the pinned oracle accepts
+
+**Tests:** `tests/corpus/comment_trivia_test.rs::leading_line_comment_before_statement_is_accepted`, `tests/corpus/comment_trivia_test.rs::leading_block_comment_before_statement_is_accepted`, `tests/corpus/comment_trivia_test.rs::trailing_line_comment_after_statement_is_accepted`, `tests/corpus/comment_trivia_test.rs::comment_only_input_is_a_successful_no_op`, `src/parser/tokenizer.rs::skip_leading_trivia_skips_whitespace_and_both_comment_styles`
+
 ### Requirement 2: Grammar Compatibility [MUST]
 
 The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLite rejects.

@@ -192,8 +192,7 @@ pub fn run_query(raw_args: Vec<String>) -> ExitCode {
     // point (`parse_explain`, grammar V4) rather than `parse_select` —
     // only checked when the statement actually starts with `EXPLAIN`,
     // so an ordinary `SELECT` never pays for the extra parse attempt.
-    let starts_with_explain = sql
-        .trim_start()
+    let starts_with_explain = sqlite_rs::parser::skip_leading_trivia(&sql)
         .get(..7)
         .is_some_and(|head| head.eq_ignore_ascii_case("explain"));
     let (select, eqp_mode) = if starts_with_explain {

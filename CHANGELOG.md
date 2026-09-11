@@ -8,6 +8,14 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Fixed
 
+- A SQL comment before or after a statement (`-- c\nCREATE TABLE t(a);`,
+  `CREATE TABLE t(a); -- c`, or comment-only input) was a parse error,
+  even though `split_statements` already grouped a leading comment with
+  its statement — the statement dispatchers keyword-sniffed the raw
+  text and expected the first token to be a keyword. `codegen::dispatch`
+  and the `exec`/`query` CLI entry points now skip leading trivia via
+  `parser::skip_leading_trivia` before sniffing; comment-only input is a
+  successful no-op, matching the oracle (#698, spec 002 Req 1).
 - `hash_agg_find` allocated a fresh `Vec<u8>` key buffer and `Vec<Value>`
   key-values buffer per row. It now reuses `HashAggState`-held scratch
   buffers via take/give-back, cloning into `GroupSlot`/the index

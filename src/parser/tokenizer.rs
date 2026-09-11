@@ -1179,8 +1179,8 @@ pub fn ends_with_semicolon(sql: &str) -> bool {
     matches!(last_real, Some(tok) if tok.kind == TokenKind::Semicolon)
 }
 
-/// Empty statements (a bare `;`, leading/trailing whitespace-only) are
-/// dropped, matching `sqlite3`'s own script handling.
+/// Empty statements (a bare `;`, leading/trailing whitespace-only, or
+/// comment-only) are dropped, matching `sqlite3`'s own script handling.
 pub fn split_statements(sql: &str) -> Vec<String> {
     let tokens = Tokenizer::tokenize(sql);
     let mut statements = Vec::new();
@@ -1201,11 +1201,26 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     statements
 }
 
+/// Skips leading whitespace and comments in `sql`, returning the rest of
+/// the source starting at the first real token (or the empty string if
+/// `sql` is nothing but trivia). Comments are trivia, not syntax — code
+/// that keyword-sniffs a raw statement string (e.g. `codegen::dispatch`)
+/// needs to look past a leading comment the same way the tokenizer does,
+/// rather than treating the comment's own text as the "first word".
+pub fn skip_leading_trivia(sql: &str) -> &str {
+    let offset = Tokenizer::tokenize(sql)
+        .first()
+        .map(|tok| tok.span.offset as usize)
+        .unwrap_or(0);
+    sql.get(offset..).unwrap_or("")
+}
+
 fn push_trimmed(statements: &mut Vec<String>, slice: &str) {
     let trimmed = slice.trim();
-    if !trimmed.is_empty() {
-        statements.push(trimmed.to_string());
+    if trimmed.is_empty() || skip_leading_trivia(trimmed).is_empty() {
+        return;
     }
+    statements.push(trimmed.to_string());
 }
 
 /// The remaining unconsumed source, from the given byte cursor.
@@ -1254,6 +1269,45 @@ mod tests {
     fn split_statements_drops_empty_and_whitespace_only_statements() {
         let stmts = split_statements("  ; BEGIN ;  ; ROLLBACK ; ");
         assert_eq!(stmts, vec!["BEGIN", "ROLLBACK"]);
+    }
+
+    #[test]
+    fn split_statements_keeps_a_leading_comment_attached_to_its_statement() {
+        // #698: `split_statements` already groups a leading comment with
+        // the statement that follows it (matching `sqlite3`'s own script
+        // handling) — the bug was downstream, in code that keyword-sniffs
+        // that returned text. This test pins the grouping behavior this
+        // ticket must not disturb.
+        let stmts = split_statements("-- c\nCREATE TABLE t(a);");
+        assert_eq!(stmts, vec!["-- c\nCREATE TABLE t(a)"]);
+    }
+
+    #[test]
+    fn split_statements_drops_a_comment_only_statement() {
+        // #698: a comment-only statement must not survive as a
+        // "statement" for the dispatcher to choke on — it's a no-op.
+        let stmts = split_statements("-- just a comment");
+        assert!(stmts.is_empty());
+
+        let stmts = split_statements("BEGIN; /* comment only */; COMMIT");
+        assert_eq!(stmts, vec!["BEGIN", "COMMIT"]);
+    }
+
+    #[test]
+    fn skip_leading_trivia_skips_whitespace_and_both_comment_styles() {
+        assert_eq!(
+            skip_leading_trivia("-- c\nCREATE TABLE t(a)"),
+            "CREATE TABLE t(a)"
+        );
+        assert_eq!(
+            skip_leading_trivia("/* c */ CREATE TABLE t(a)"),
+            "CREATE TABLE t(a)"
+        );
+        assert_eq!(
+            skip_leading_trivia("  CREATE TABLE t(a)"),
+            "CREATE TABLE t(a)"
+        );
+        assert_eq!(skip_leading_trivia("-- only a comment"), "");
     }
 
     #[test]

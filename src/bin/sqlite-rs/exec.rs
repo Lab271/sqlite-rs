@@ -103,7 +103,7 @@ pub fn run_exec(path: &Path, sql: &str) -> ExitCode {
 /// any statement starting with `CREATE`/`DROP`/`ALTER` invalidates,
 /// even one that ends up failing or being a no-op.
 fn is_schema_changing(stmt: &str) -> bool {
-    let head = stmt.trim_start();
+    let head = sqlite_rs::parser::skip_leading_trivia(stmt);
     ["CREATE", "DROP", "ALTER"].iter().any(|kw| {
         head.get(..kw.len())
             .is_some_and(|h| h.eq_ignore_ascii_case(kw))
