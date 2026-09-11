@@ -4,6 +4,35 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+### Fixed
+
+- `rowid`/`_rowid_`/`oid` resolved in a `WHERE` clause but not in a
+  result-list projection (`Scope::resolve` had no pseudo-column
+  awareness, unlike the `UPDATE`/`DELETE` seek path's
+  `is_rowid_reference`). Now resolves as a pseudo-column on rowid
+  tables — a declared column of that name still shadows it, `INTEGER
+  PRIMARY KEY` remains the existing alias case, and `WITHOUT ROWID`
+  tables reject it with the same unknown-column error the oracle gives.
+  Also fixes the same reference combined with `ORDER BY` and an alias
+  in one statement, where the post-sort pseudo cursor previously tried
+  to re-issue `Rowid` against itself. `GROUP BY rowid` (and `_rowid_`/
+  `oid`) had the identical pseudo-cursor problem in
+  `compile_grouped_scan`'s sort-then-group pass 2 — both the group-key
+  comparison and a bare `rowid` in the result list or `HAVING` now read
+  back a materialized field instead of re-issuing `Rowid` against a
+  cursor that can't answer it (#708). Two silent wrong answers in the
+  same family are fixed alongside it: an aggregate with no `GROUP BY`
+  (`SELECT rowid, count(*) FROM t`) took a fast path whose synthetic
+  per-group record has no slot for the pseudo-column and so projected an
+  empty value instead of the rowid — that path now defers to
+  `compile_grouped_scan`; and a table with a *declared* column named
+  `rowid` projected the hidden rowid instead of the column's own value
+  once an `ORDER BY` put the read behind a pseudo cursor, because the
+  projection fell through to the pseudo-column sentinel even though a
+  declared column of that name shadows it (#708).
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed

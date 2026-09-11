@@ -321,6 +321,18 @@ where
     if aggs.iter().any(|(_, _, _, distinct)| *distinct) {
         return Ok(false);
     }
+    // #708 follow-up: this fast path's synthetic per-group record holds
+    // one field per *declared* schema column and nothing else, so it has
+    // no slot for the bare `rowid`/`_rowid_`/`oid` pseudo-column — yet
+    // the projection still asks for `rowid_pseudo_column_index`'s
+    // sentinel (one past the last column), which reads off the end of
+    // the record and projects an empty value instead of the rowid.
+    // Decline and let `compile_grouped_scan`'s implicit-whole-table-group
+    // path handle it: it materializes the field (see
+    // `grouped_scan_needs_rowid_field`) and reads it back with `Column`.
+    if grouped_scan_needs_rowid_field(select, schema) {
+        return Ok(false);
+    }
 
     let table_scope = Scope::single(schema, cursors.table).with_catalog(catalog.to_vec());
     // #322: hoist any uncorrelated WHERE-clause subquery once, up
@@ -431,6 +443,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        None,
         &agg_slots,
         limit.as_ref(),
         end_label,
@@ -682,6 +695,72 @@ fn walk_expr_for_column_refs(
     }
 }
 
+/// #708 follow-up: is `expr` exactly a bare, unshadowed
+/// `rowid`/`_rowid_`/`oid` reference — the narrow shape
+/// [`order_by_target_for_expr`] already routes to `OrderByTarget::Expr`
+/// since it has no real schema column index of its own. `schema` is the
+/// original table schema (not [`compact_schema`]'s narrowed one), so a
+/// declared column named `rowid` correctly wins (shadowing) via
+/// `column_index` before `rowid_pseudo_column_index` is even consulted.
+fn is_bare_rowid_pseudo_column(expr: &Expr, schema: &TableSchema) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Column {
+            name,
+            table: None,
+            catalog: None,
+        } if crate::codegen::expr::column_index(schema, name).is_none()
+            && crate::codegen::expr::rowid_pseudo_column_index(schema, name).is_some()
+    )
+}
+
+/// Same bare-reference check as [`is_bare_rowid_pseudo_column`], but
+/// walking through `Paren`/`Collate`/`Unary`/`Binary` wrappers (matching
+/// `accum::substitute_rowid_pseudo_column`'s own traversal) to answer
+/// whether `expr` references the pseudo-column *anywhere*, e.g. `HAVING
+/// rowid > 1`'s `rowid` is nested one level inside a `Binary`.
+fn expr_references_rowid_pseudo_column(expr: &Expr, schema: &TableSchema) -> bool {
+    if is_bare_rowid_pseudo_column(expr, schema) {
+        return true;
+    }
+    match &expr.kind {
+        ExprKind::Paren(inner)
+        | ExprKind::Collate { expr: inner, .. }
+        | ExprKind::Unary { expr: inner, .. } => expr_references_rowid_pseudo_column(inner, schema),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            expr_references_rowid_pseudo_column(lhs, schema)
+                || expr_references_rowid_pseudo_column(rhs, schema)
+        }
+        _ => false,
+    }
+}
+
+/// #708 follow-up: does [`compile_grouped_scan`]'s pass 1 need to
+/// materialize the bare rowid pseudo-column into the sort record? Needed
+/// whenever `GROUP BY`, a result column, or `HAVING` references it —
+/// otherwise there is no field for it anywhere in the compacted record
+/// (unlike a real `schema` column, `needed_order` never contains it).
+/// `WITHOUT ROWID` never needs it: there is no rowid to materialize, and
+/// [`crate::codegen::expr::rowid_pseudo_column_index`] already reports
+/// unknown-column for it, same as main.
+fn grouped_scan_needs_rowid_field(select: &Select, schema: &TableSchema) -> bool {
+    if schema.without_rowid {
+        return false;
+    }
+    select
+        .group_by
+        .iter()
+        .any(|e| expr_references_rowid_pseudo_column(e, schema))
+        || select.columns.iter().any(|col| match col {
+            ResultColumn::Expr { expr, .. } => expr_references_rowid_pseudo_column(expr, schema),
+            ResultColumn::Star | ResultColumn::TableStar { .. } => false,
+        })
+        || select
+            .having
+            .as_ref()
+            .is_some_and(|h| expr_references_rowid_pseudo_column(h, schema))
+}
+
 /// #239: `GROUP BY` / `HAVING`. Strategy mirrors real SQLite's
 /// sort-then-group `select.c` shape rather than a hash table, since the
 /// `Sorter*` opcode family this compiler already has for `ORDER BY`
@@ -778,6 +857,11 @@ where
     if let Some(outer) = outer_scope {
         pseudo_scope = pseudo_scope.with_outer(outer.clone());
     }
+    // #708 follow-up: whether a bare rowid/`_rowid_`/`oid` pseudo-column
+    // reference anywhere in `GROUP BY`/`select.columns`/`HAVING` needs a
+    // materialized field in the sort record — see
+    // `grouped_scan_needs_rowid_field`'s doc for why.
+    let needs_rowid_field = grouped_scan_needs_rowid_field(select, schema);
 
     // Pass 1: buffer every WHERE-matching row's needed column values
     // (#665: only the columns `needed_order` names, not the full row),
@@ -810,6 +894,21 @@ where
     }
     let first = compile_row_values_compact(em, reg, schema, &needed_order, cursors.table)?;
 
+    // #708 follow-up: materialize the bare rowid pseudo-column right
+    // after the compacted schema-column block — `cursors.table` is a
+    // real table cursor here, so `Opcode::Rowid` is valid (unlike pass
+    // 2's `cursors.pseudo`, which can't answer it at all). Its field
+    // position (`needed_order.len()`, i.e. right after `first`) is
+    // reused below by both a rowid `GROUP BY` key and, in pass 2, by the
+    // group's snapshot/key re-reads — the same materialize-once,
+    // read-back-with-`Column` shape `compile_sorted_scan` established
+    // for `ORDER BY rowid` (#718).
+    let rowid_field_index = needs_rowid_field.then(|| {
+        let r = reg.alloc();
+        em.emit(Instruction::new(Opcode::Rowid, cursors.table, r, 0));
+        usize::try_from(r.saturating_sub(first)).unwrap_or(0)
+    });
+
     let mut sort_keys = Vec::with_capacity(group_targets.len());
     for (expr, target) in select.group_by.iter().zip(&group_targets) {
         let index = match target {
@@ -817,6 +916,12 @@ where
             // `select.group_by` references (`columns_needed_for_projection`),
             // so `idx` always has a compacted position.
             OrderByTarget::Column(idx) => compact_of.get(*idx).copied().flatten().unwrap_or(0),
+            OrderByTarget::Expr(e) if is_bare_rowid_pseudo_column(e, schema) => {
+                // Already materialized above — reuse it rather than
+                // recompiling (which would emit a second, redundant
+                // `Rowid` read against the same real cursor).
+                rowid_field_index.unwrap_or(0)
+            }
             OrderByTarget::Expr(e) => {
                 let r = compile_value(em, reg, &table_scope, e)?;
                 usize::try_from(r.saturating_sub(first)).unwrap_or(0)
@@ -892,6 +997,15 @@ where
     for &r in &snapshot_regs {
         em.emit(Instruction::new(Opcode::Null, 0, r, 0));
     }
+    // #708 follow-up: the bare rowid pseudo-column's own persistent
+    // "arbitrary row" snapshot register, alongside `snapshot_regs` —
+    // kept separate rather than folded into that array since it has no
+    // corresponding `schema.columns`/`compact_of` entry to zip against.
+    let rowid_snapshot_reg = rowid_field_index.map(|_| {
+        let r = reg.alloc();
+        em.emit(Instruction::new(Opcode::Null, 0, r, 0));
+        r
+    });
     // Aggregate-context slots (`Vm::agg_contexts`) are a disjoint table
     // from the register file, addressed by their own small integer
     // space — a bare 0-based counter here, not `reg.alloc()`.
@@ -945,6 +1059,26 @@ where
                 read_pseudo_column(em, &pseudo_schema, cursors.pseudo, compact_idx, r)?;
                 Ok(r)
             }
+            OrderByTarget::Expr(_) if is_bare_rowid_pseudo_column(expr, schema) => {
+                // #708 follow-up: `compile_value(&pseudo_scope, ...)`
+                // would resolve this against the pass-2 pseudo cursor,
+                // which can't answer `Opcode::Rowid` at all (that's the
+                // regression this ticket fixes) — read the field pass 1
+                // already materialized instead, same as
+                // `read_pseudo_column` does for `OrderByTarget::Column`
+                // just above.
+                let r = reg.alloc();
+                let idx = rowid_field_index.unwrap_or(0);
+                em.emit(Instruction::new(
+                    Opcode::Column,
+                    cursors.pseudo,
+                    i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                        reason: format!("column index {idx} does not fit in a P2 operand"),
+                    })?,
+                    r,
+                ));
+                Ok(r)
+            }
             OrderByTarget::Expr(_) => compile_value(em, reg, &pseudo_scope, expr),
         })
         .collect::<Result<_, CodegenError>>()?;
@@ -995,6 +1129,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        rowid_snapshot_reg,
         &agg_slots,
         limit.as_ref(),
         end_label,
@@ -1034,6 +1169,20 @@ where
             read_pseudo_column(em, &pseudo_schema, cursors.pseudo, compact_idx, dest)?;
         }
     }
+    // #708 follow-up: the bare rowid pseudo-column's own "arbitrary row"
+    // snapshot, same shape as `snapshot_regs`'s loop just above — read
+    // straight off pass 1's materialized field (`rowid_field_index`),
+    // never recomputed via `Opcode::Rowid` against `cursors.pseudo`.
+    if let (Some(idx), Some(dest)) = (rowid_field_index, rowid_snapshot_reg) {
+        em.emit(Instruction::new(
+            Opcode::Column,
+            cursors.pseudo,
+            i32::try_from(idx).map_err(|_| CodegenError::Unsupported {
+                reason: format!("column index {idx} does not fit in a P2 operand"),
+            })?,
+            dest,
+        ));
+    }
     let after_accumulate = em.new_label();
     let goto_after_accumulate = em.emit(Instruction::new(Opcode::Goto, 0, 0, 0));
     em.patch_p2(goto_after_accumulate, after_accumulate);
@@ -1070,6 +1219,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        rowid_snapshot_reg,
         &agg_slots,
         limit.as_ref(),
         end_label,
@@ -1331,6 +1481,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        None,
         &agg_slots,
         limit.as_ref(),
         end_label,
@@ -1374,6 +1525,7 @@ where
         schema,
         catalog,
         &snapshot_regs,
+        None,
         &agg_slots,
         limit.as_ref(),
         end_label,

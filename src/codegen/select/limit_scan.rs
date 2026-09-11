@@ -948,6 +948,32 @@ where
     Ok(())
 }
 
+/// #708: does `select` project a bare `rowid`/`_rowid_`/`oid`
+/// pseudo-column reference (not a declared column, and not buried in a
+/// compound expression — same narrow scope as the existing
+/// `rowid_alias` special case in `projection.rs`)? If so,
+/// `compile_sorted_scan`'s pass 1 must materialize it into the sorted
+/// record — it has no field there otherwise, since pass 1's
+/// schema-column block only ever iterates `schema.columns`.
+fn select_projects_rowid_pseudo_column(select: &Select, schema: &TableSchema) -> bool {
+    select.columns.iter().any(|col| match col {
+        ResultColumn::Expr {
+            expr:
+                Expr {
+                    kind:
+                        ExprKind::Column {
+                            name,
+                            table: None,
+                            catalog: None,
+                        },
+                    ..
+                },
+            ..
+        } => crate::codegen::expr::rowid_pseudo_column_index(schema, name).is_some(),
+        _ => false,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_sorted_scan<F>(
     em: &mut Emitter,
@@ -1074,6 +1100,18 @@ where
         false,
         catalog,
     )?;
+
+    // #708: materialize the bare rowid pseudo-column, if projected,
+    // immediately after the schema-column block — landing at record
+    // field index `schema.columns.len()`, the same sentinel
+    // `expr::rowid_pseudo_column_index` hands out, so pass 2's
+    // `projection.rs` special case can read it back with a plain
+    // `Column` op against the post-sort pseudo cursor instead of
+    // re-issuing `Rowid` (which only a real table cursor supports).
+    if !schema.without_rowid && select_projects_rowid_pseudo_column(select, schema) {
+        let r = reg.alloc();
+        em.emit(Instruction::new(Opcode::Rowid, cursors.table, r, 0));
+    }
 
     // Compute every genuine-expression sort key into its own register,
     // appended after the schema-column block. A key's final register

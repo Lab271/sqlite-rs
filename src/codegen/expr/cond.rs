@@ -23,6 +23,28 @@ pub(crate) fn column_index(schema: &TableSchema, name: &str) -> Option<usize> {
         .position(|c| c.eq_ignore_ascii_case(name))
 }
 
+/// #708: `rowid`/`_rowid_`/`oid` as a pseudo-column on a rowid table —
+/// resolves to a sentinel index one past `schema.columns`'s end, which
+/// [`super::value::emit_column_read`] recognizes and reads via
+/// `Opcode::Rowid` off the live cursor, same as a genuine
+/// `rowid_alias` hit. Only consulted when [`column_index`] has already
+/// failed, so a declared column of that name always wins (shadowing).
+/// `WITHOUT ROWID` tables have no rowid at all, so this always misses
+/// for them, and callers fall through to the ordinary "unknown column"
+/// error — matching the oracle.
+pub(crate) fn rowid_pseudo_column_index(schema: &TableSchema, name: &str) -> Option<usize> {
+    if schema.without_rowid {
+        return None;
+    }
+    if name.eq_ignore_ascii_case("rowid")
+        || name.eq_ignore_ascii_case("_rowid_")
+        || name.eq_ignore_ascii_case("oid")
+    {
+        return Some(schema.columns.len());
+    }
+    None
+}
+
 /// #581: a rough, static (no `ANALYZE` data needed) cost class for an
 /// expression, used only to order `AND`/`OR` operands cheapest-first so
 /// short-circuit evaluation skips the pricier side more often — never

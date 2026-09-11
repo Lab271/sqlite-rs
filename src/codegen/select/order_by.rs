@@ -146,6 +146,17 @@ pub(super) fn order_by_target_for_expr(
     schema: &TableSchema,
 ) -> Result<OrderByTarget, CodegenError> {
     match &expr.kind {
+        // #708: `rowid`/`_rowid_`/`oid` has no schema column index to
+        // give `OrderByTarget::Column` (its "index" is the sentinel
+        // `emit_column_read` recognizes against a *live* cursor, which
+        // this target's consumers don't all have) — routing it through
+        // `Expr` instead reuses ordinary expression compilation
+        // (`Scope::resolve` already knows the pseudo-column).
+        ExprKind::Column {
+            table: None, name, ..
+        } if rowid_pseudo_column_index(schema, name).is_some() => {
+            Ok(OrderByTarget::Expr(expr.clone()))
+        }
         ExprKind::Column {
             table: None, name, ..
         } => column_index(schema, name)
@@ -188,6 +199,9 @@ pub(super) fn resolve_order_by_target(
                 .find(|e| e.alias.as_deref() == Some(name.as_str()))
             {
                 return order_by_target_for_expr(&entry.expr, schema);
+            }
+            if rowid_pseudo_column_index(schema, name).is_some() {
+                return Ok(OrderByTarget::Expr(expr.clone()));
             }
             column_index(schema, name)
                 .map(OrderByTarget::Column)

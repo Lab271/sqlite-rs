@@ -202,6 +202,65 @@ pub(in crate::codegen::select) fn substitute_aggregates(
     }
 }
 
+/// #708 follow-up (GROUP BY rowid): rewrites a bare, unshadowed
+/// `rowid`/`_rowid_`/`oid` reference into a `Column` reference to
+/// [`flush_group`]'s synthetic `__rowid` field — the same idea as
+/// [`substitute_aggregates`]'s aggregate-call rewrite, just for the
+/// pseudo-column [`compile_grouped_scan`] materialized into the sort
+/// record instead. `schema` is the *original* table schema (not the
+/// synthetic one), so `column_index` sees any real declared `rowid`
+/// column and correctly leaves it alone (shadowing).
+pub(in crate::codegen::select) fn substitute_rowid_pseudo_column(
+    expr: &Expr,
+    schema: &TableSchema,
+) -> Expr {
+    if let ExprKind::Column {
+        name,
+        table: None,
+        catalog: None,
+    } = &expr.kind
+    {
+        if crate::codegen::expr::column_index(schema, name).is_none()
+            && crate::codegen::expr::rowid_pseudo_column_index(schema, name).is_some()
+        {
+            return Expr {
+                kind: ExprKind::Column {
+                    table: None,
+                    catalog: None,
+                    name: "__rowid".to_string(),
+                },
+                span: expr.span,
+            };
+        }
+    }
+    let kind = match &expr.kind {
+        ExprKind::Paren(inner) => {
+            ExprKind::Paren(Box::new(substitute_rowid_pseudo_column(inner, schema)))
+        }
+        ExprKind::Collate {
+            expr: inner,
+            collation,
+        } => ExprKind::Collate {
+            expr: Box::new(substitute_rowid_pseudo_column(inner, schema)),
+            collation: collation.clone(),
+        },
+        ExprKind::Unary { op, expr: inner } => ExprKind::Unary {
+            op: *op,
+            expr: Box::new(substitute_rowid_pseudo_column(inner, schema)),
+        },
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+            op: *op,
+            lhs: Box::new(substitute_rowid_pseudo_column(lhs, schema)),
+            rhs: Box::new(substitute_rowid_pseudo_column(rhs, schema)),
+        },
+        other => other.clone(),
+    };
+    Expr {
+        kind,
+        span: expr.span,
+    }
+}
+
 /// Pseudo-cursor-safe single-column read: like `emit_column_read`, but
 /// aware that `cursor` re-reads an already-materialized record (so the
 /// rowid-alias column is an ordinary field within it, not something
@@ -339,10 +398,13 @@ pub(in crate::codegen::select) fn emit_agg_step(
 /// Finalizes and emits one grouped output row via `sink`, applying
 /// `HAVING`/`LIMIT`/`OFFSET` exactly as the ungrouped scans do. Builds a
 /// synthetic record — the group's snapshot column values (from the last
-/// row seen) followed by each aggregate's finalized value — and opens a
-/// fresh pseudo cursor over it, so `select.columns`/`having` (with
-/// aggregate calls rewritten to reference the synthetic record's
-/// trailing fields via [`substitute_aggregates`]) compile through the
+/// row seen), the group's bare rowid pseudo-column value (#708 follow-up,
+/// when `rowid_reg` is given), then each aggregate's finalized value —
+/// and opens a fresh pseudo cursor over it, so `select.columns`/`having`
+/// (with aggregate calls rewritten to reference the synthetic record's
+/// trailing fields via [`substitute_aggregates`], and a bare
+/// `rowid`/`_rowid_`/`oid` reference rewritten to the synthetic `__rowid`
+/// field via [`substitute_rowid_pseudo_column`]) compile through the
 /// ordinary `compile_row_values`/`compile_cond` machinery unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::codegen::select) fn flush_group<F>(
@@ -352,6 +414,7 @@ pub(in crate::codegen::select) fn flush_group<F>(
     schema: &TableSchema,
     catalog: &[TableSchema],
     snapshot_regs: &[i32],
+    rowid_reg: Option<i32>,
     agg_slots: &[AggSlot],
     limit: Option<&LimitState>,
     end_label: Label,
@@ -363,8 +426,14 @@ where
     let synthetic_names: Vec<String> = (0..agg_slots.len()).map(|i| format!("__agg{i}")).collect();
 
     let mut synthetic_columns = schema.columns.clone();
+    if rowid_reg.is_some() {
+        synthetic_columns.push("__rowid".to_string());
+    }
     synthetic_columns.extend(synthetic_names.iter().cloned());
     let mut synthetic_types = schema.column_types.clone();
+    if rowid_reg.is_some() {
+        synthetic_types.push(String::new());
+    }
     synthetic_types.extend(synthetic_names.iter().map(|_| String::new()));
     let synthetic_schema = TableSchema {
         unresolved_autoindex: false,
@@ -381,17 +450,28 @@ where
         rowid_alias: None,
     };
 
-    // Allocate one fresh, contiguous register per snapshot/aggregate
+    // Allocate one fresh, contiguous register per snapshot/rowid/aggregate
     // field up front — `reg.alloc()` bump-allocates sequentially, so as
     // long as nothing else allocates in between, `dests` is guaranteed
     // contiguous for `MakeRecord`.
-    let synthetic_count = snapshot_regs.len().saturating_add(agg_slots.len());
+    let rowid_width = usize::from(rowid_reg.is_some());
+    let synthetic_count = snapshot_regs
+        .len()
+        .saturating_add(rowid_width)
+        .saturating_add(agg_slots.len());
     let dests: Vec<i32> = (0..synthetic_count).map(|_| reg.alloc()).collect();
     let synthetic_first = dests.first().copied().unwrap_or_else(|| reg.alloc());
     for (&snap, &dest) in snapshot_regs.iter().zip(&dests) {
         em.emit(Instruction::new(Opcode::Copy, snap, dest, 0));
     }
-    let agg_dests = dests.get(snapshot_regs.len()..).unwrap_or(&[]);
+    if let Some(rreg) = rowid_reg {
+        if let Some(&dest) = dests.get(snapshot_regs.len()) {
+            em.emit(Instruction::new(Opcode::Copy, rreg, dest, 0));
+        }
+    }
+    let agg_dests = dests
+        .get(snapshot_regs.len().saturating_add(rowid_width)..)
+        .unwrap_or(&[]);
     for (agg, &dest) in agg_slots.iter().zip(agg_dests) {
         // `avg()`'s sum/count division now happens inside
         // `crate::vdbe::aggregate::finalize` — `AggFinal` just reads
@@ -423,7 +503,12 @@ where
     let flush_scope = Scope::single(&synthetic_schema, flush_cursor).with_catalog(catalog.to_vec());
     let skip_label = em.new_label();
     if let Some(having) = &select.having {
-        let rewritten = substitute_aggregates(having, agg_slots, &synthetic_names);
+        let having = if rowid_reg.is_some() {
+            substitute_rowid_pseudo_column(having, schema)
+        } else {
+            having.clone()
+        };
+        let rewritten = substitute_aggregates(&having, agg_slots, &synthetic_names);
         compile_cond(
             em,
             reg,
@@ -443,10 +528,17 @@ where
         .columns
         .iter()
         .map(|col| match col {
-            ResultColumn::Expr { expr, alias } => ResultColumn::Expr {
-                expr: substitute_aggregates(expr, agg_slots, &synthetic_names),
-                alias: alias.clone(),
-            },
+            ResultColumn::Expr { expr, alias } => {
+                let expr = if rowid_reg.is_some() {
+                    substitute_rowid_pseudo_column(expr, schema)
+                } else {
+                    expr.clone()
+                };
+                ResultColumn::Expr {
+                    expr: substitute_aggregates(&expr, agg_slots, &synthetic_names),
+                    alias: alias.clone(),
+                }
+            }
             other => other.clone(),
         })
         .collect();
