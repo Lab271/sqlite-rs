@@ -338,6 +338,14 @@ pub struct Pager {
     /// [`Pager::open`], same as stock SQLite; never read from or
     /// written to the database file. See [`SynchronousMode`].
     synchronous: SynchronousMode,
+    /// #710: whether [`Pager::bump_change_counter`] has already run for
+    /// the transaction currently buffered in `dirty`. A retried `flush`
+    /// after a lock-contention failure (the dirty set survives a failed
+    /// attempt — see `flush`'s doc comment) must not bump the counter a
+    /// second time for what is still, on disk, a single committed
+    /// transaction. Reset to `false` everywhere `dirty` is cleared
+    /// (successful commit in either journal mode, and `rollback`).
+    change_counter_bumped: bool,
 }
 
 /// Byte offsets of the three header fields ([`crate::header::DatabaseHeader`])
@@ -348,6 +356,17 @@ pub struct Pager {
 const PAGE_COUNT_OFFSET: usize = 28;
 const FREELIST_TRUNK_PAGE_OFFSET: usize = 32;
 const FREELIST_PAGE_COUNT_OFFSET: usize = 36;
+
+/// Bytes 24-27: the file change counter (#710). Stock `sqlite3` bumps this
+/// once per committed write transaction so a reader with a cached page 1
+/// (page-1 change-counter check on acquiring SHARED) knows to invalidate its
+/// cache. Wrapping past `u32::MAX` is expected, not an error.
+const CHANGE_COUNTER_OFFSET: usize = 24;
+
+/// Bytes 92-95: "version-valid-for" — the change-counter value for which the
+/// page-count field at [`PAGE_COUNT_OFFSET`] is valid. Kept equal to
+/// [`CHANGE_COUNTER_OFFSET`] on every bump, mirroring stock `sqlite3`.
+const VERSION_VALID_FOR_OFFSET: usize = 92;
 
 fn read_be_u32(buf: &[u8], offset: usize) -> Result<u32, freelist::FreelistError> {
     let end = offset.saturating_add(4);
@@ -456,6 +475,7 @@ impl Pager {
             journal_path,
             journal_mode,
             synchronous: SynchronousMode::default(),
+            change_counter_bumped: false,
         })
     }
 
@@ -497,6 +517,19 @@ impl Pager {
             // ending either way.
             self.release_tx_lock()?;
             return Ok(());
+        }
+
+        // #710: bump the change counter (and version-valid-for) exactly
+        // once per committed transaction, before either commit path writes
+        // page 1 — this marks page 1 dirty if it wasn't already, so both
+        // the rollback-journal and WAL paths pick it up as just another
+        // dirty page. Guarded by `change_counter_bumped` so a retried
+        // `flush` (a prior attempt failed on lock contention and left
+        // `dirty` — including this already-bumped page 1 — intact) does
+        // not bump it a second time for one committed transaction.
+        if !self.change_counter_bumped {
+            self.bump_change_counter()?;
+            self.change_counter_bumped = true;
         }
 
         // WAL mode (#389) never touches the rollback journal or the main
@@ -580,6 +613,19 @@ impl Pager {
         Ok(())
     }
 
+    /// Increments the change counter at [`CHANGE_COUNTER_OFFSET`] and sets
+    /// version-valid-for ([`VERSION_VALID_FOR_OFFSET`]) to the same value,
+    /// wrapping on overflow (not an error — stock `sqlite3` wraps too).
+    /// Marks page 1 dirty via [`Pager::get_page_mut`] so the caller's commit
+    /// path journals/writes it like any other dirty page.
+    fn bump_change_counter(&mut self) -> Result<(), PagerError> {
+        let page1 = self.get_page_mut(1)?;
+        let counter = read_be_u32(page1, CHANGE_COUNTER_OFFSET)?.wrapping_add(1);
+        write_be_u32(page1, CHANGE_COUNTER_OFFSET, counter)?;
+        write_be_u32(page1, VERSION_VALID_FOR_OFFSET, counter)?;
+        Ok(())
+    }
+
     fn flush_locked(&mut self) -> Result<(), PagerError> {
         let mut page_nums: Vec<u32> = self.dirty.keys().copied().collect();
         page_nums.sort_unstable();
@@ -633,6 +679,7 @@ impl Pager {
             self.vfs.delete(&self.journal_path)?;
         }
         self.dirty.clear();
+        self.change_counter_bumped = false;
         Ok(())
     }
 
@@ -762,6 +809,7 @@ impl Pager {
             }
         }
         self.dirty.clear();
+        self.change_counter_bumped = false;
         Ok(())
     }
 
@@ -777,6 +825,7 @@ impl Pager {
     /// transaction is ending here rather than at a later `flush`.
     pub fn rollback(&mut self) -> Result<(), PagerError> {
         self.dirty.clear();
+        self.change_counter_bumped = false;
         self.release_tx_lock()
     }
 
@@ -1601,11 +1650,20 @@ mod tests {
 
         pager.flush().unwrap();
 
+        // #710: `flush` bumps the change counter (offset 24-27) and
+        // version-valid-for (offset 92-95) even though nothing else in
+        // this transaction touched page 1.
+        let mut expected_page1 = vec![1u8; 512];
+        expected_page1[CHANGE_COUNTER_OFFSET..CHANGE_COUNTER_OFFSET + 4]
+            .copy_from_slice(&[1, 1, 1, 2]);
+        expected_page1[VERSION_VALID_FOR_OFFSET..VERSION_VALID_FOR_OFFSET + 4]
+            .copy_from_slice(&[1, 1, 1, 2]);
+
         assert_eq!(pager.read_page(2).unwrap(), vec![9u8; 512].into());
 
         let reopened = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
         assert_eq!(reopened.read_page(2).unwrap(), vec![9u8; 512].into());
-        assert_eq!(reopened.read_page(1).unwrap(), vec![1u8; 512].into());
+        assert_eq!(reopened.read_page(1).unwrap(), expected_page1.into());
     }
 
     /// #320: a page cached by an earlier `read_page` must not survive a
@@ -1624,7 +1682,75 @@ mod tests {
         pager.get_page_mut(1).unwrap().fill(9u8);
         pager.flush().unwrap();
 
-        assert_eq!(pager.read_page(1).unwrap(), vec![9u8; 512].into());
+        // #710: the change counter/version-valid-for bump lands on top of
+        // this transaction's own fill(9) of page 1.
+        let mut expected = vec![9u8; 512];
+        expected[CHANGE_COUNTER_OFFSET..CHANGE_COUNTER_OFFSET + 4].copy_from_slice(&[9, 9, 9, 10]);
+        expected[VERSION_VALID_FOR_OFFSET..VERSION_VALID_FOR_OFFSET + 4]
+            .copy_from_slice(&[9, 9, 9, 10]);
+        assert_eq!(pager.read_page(1).unwrap(), expected.into());
+    }
+
+    /// #710: the change counter bumps exactly once per committed
+    /// transaction, not once per dirty page — two pages written in the
+    /// same `flush` must not double-bump it.
+    #[test]
+    fn change_counter_bumps_once_per_transaction_not_per_page() {
+        let mut vfs = MemoryVfs::new();
+        let mut contents = vec![0u8; 512];
+        contents.extend(vec![2u8; 512]);
+        vfs.insert("/test.db", contents);
+
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.get_page_mut(1).unwrap();
+        pager.get_page_mut(2).unwrap().fill(5u8);
+        pager.flush().unwrap();
+
+        let page1 = pager.read_page(1).unwrap();
+        assert_eq!(
+            &page1[CHANGE_COUNTER_OFFSET..CHANGE_COUNTER_OFFSET + 4],
+            &[0, 0, 0, 1],
+            "one transaction touching two pages bumps the counter exactly once"
+        );
+    }
+
+    /// #710 acceptance criterion: a rolled-back transaction must leave
+    /// the change counter and version-valid-for untouched — `rollback`
+    /// only clears the in-memory dirty set and never calls `flush`, so
+    /// the bump (which lives inside `flush`) never happens.
+    #[test]
+    fn rollback_leaves_change_counter_unchanged() {
+        let mut vfs = MemoryVfs::new();
+        vfs.insert("/test.db", vec![7u8; 512]);
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+
+        pager.get_page_mut(1).unwrap().fill(9u8);
+        pager.rollback().unwrap();
+
+        let reopened = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        assert_eq!(reopened.read_page(1).unwrap(), vec![7u8; 512].into());
+    }
+
+    /// #710 acceptance criterion: the counter wraps past `u32::MAX`
+    /// rather than erroring.
+    #[test]
+    fn change_counter_wraps_past_u32_max() {
+        let mut vfs = MemoryVfs::new();
+        let mut page1 = vec![0u8; 512];
+        write_be_u32(&mut page1, CHANGE_COUNTER_OFFSET, u32::MAX).unwrap();
+        page1.extend(vec![1u8; 512]);
+        vfs.insert("/test.db", page1);
+
+        let mut pager = Pager::open(&vfs, Path::new("/test.db"), 512).unwrap();
+        pager.get_page_mut(2).unwrap().fill(3u8);
+        pager.flush().unwrap();
+
+        let page1 = pager.read_page(1).unwrap();
+        assert_eq!(
+            &page1[CHANGE_COUNTER_OFFSET..CHANGE_COUNTER_OFFSET + 4],
+            &0u32.to_be_bytes(),
+            "wrapping past u32::MAX must not error and must wrap to 0"
+        );
     }
 
     /// #469: `Pager::read_page`'s cache-hit branch (`PageSource for

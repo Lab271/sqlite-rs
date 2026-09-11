@@ -13,8 +13,9 @@
 //! when no oracle is present. See `.openspec/specs/004-corpus/spec.md`
 //! Requirement 1.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 /// Must equal Cargo.toml's `[package.metadata.oracle] version` — a
 /// `const` cannot read it at run time, so `make version-pin` enforces
@@ -194,4 +195,97 @@ pub fn oracle_csv_with_header_output(
         .join(",");
     let sql = format!("select {select_list} from \"{table}\"");
     run_oracle(oracle, db, &["-csv", "-header"], &sql)
+}
+
+/// A long-lived `sqlite3 <db>` session (stdin/stdout piped), for proving
+/// behaviour that a fresh-process-per-assertion oracle invocation cannot
+/// see: [`run_oracle`] re-opens `sqlite3` for every call, so it re-reads
+/// the header and never consults a page cache. #710 (the file change
+/// counter) is invisible without a session that reads once, observes
+/// someone else's write, and reads again to check whether it kept serving
+/// its first read's cached pages. #706 (in-process locking) reuses this
+/// same session type as the cross-process side of its lock interop check.
+///
+/// Not `-readonly`: a session may itself be the writer in a locking test.
+pub struct OracleSession {
+    child: Child,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl OracleSession {
+    /// Spawns `sqlite3 <db>` in `-list` mode with the same separator/null
+    /// rendering [`run_oracle`]'s callers already expect, so assertions
+    /// can share format expectations between the two.
+    pub fn spawn(oracle: &Path, db: &Path) -> Self {
+        let mut child = Command::new(oracle)
+            .arg("-list")
+            .arg("-separator")
+            .arg("|")
+            .arg("-nullvalue")
+            .arg("NULL")
+            .arg(db)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "spawning persistent sqlite3 oracle session on {}: {e}",
+                    db.display()
+                )
+            });
+        let stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .expect("oracle session stdout was piped"),
+        );
+        OracleSession { child, stdout }
+    }
+
+    /// Runs `sql` in this session and returns everything it printed for
+    /// it. A sentinel marker query is appended after `sql` so the reader
+    /// knows where this call's share of the continuous stdout stream
+    /// ends — the session's stdout is not framed per command.
+    pub fn exec(&mut self, sql: &str) -> String {
+        const MARKER: &str = "__ORACLE_SESSION_DONE__";
+        {
+            let stdin = self
+                .child
+                .stdin
+                .as_mut()
+                .expect("oracle session stdin was piped");
+            writeln!(stdin, "{sql}").expect("writing to oracle session stdin");
+            writeln!(stdin, "SELECT '{MARKER}';").expect("writing marker to oracle session stdin");
+            stdin.flush().expect("flushing oracle session stdin");
+        }
+
+        let mut output = String::new();
+        loop {
+            let mut line = String::new();
+            let n = self
+                .stdout
+                .read_line(&mut line)
+                .unwrap_or_else(|e| panic!("reading oracle session stdout: {e}"));
+            assert!(
+                n > 0,
+                "oracle session stdout closed before the marker was seen \
+                 (the session process likely exited — check its SQL for errors)"
+            );
+            if line.trim_end_matches(['\r', '\n']) == MARKER {
+                break;
+            }
+            output.push_str(&line);
+        }
+        output
+    }
+}
+
+impl Drop for OracleSession {
+    fn drop(&mut self) {
+        if let Some(mut stdin) = self.child.stdin.take() {
+            writeln!(stdin, ".quit").ok();
+        }
+        self.child.wait().ok();
+    }
 }

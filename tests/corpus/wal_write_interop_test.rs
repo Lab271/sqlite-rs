@@ -240,10 +240,14 @@ fn concurrent_writer_is_refused_the_wal_write_lock() {
     // Once the contending process releases the lock, the same writer
     // (its dirty page untouched by the failed attempt) commits cleanly.
     pager.flush().unwrap();
-    assert_eq!(
-        pager.read_page(1).unwrap(),
-        vec![0xABu8; page_size as usize].into()
-    );
+    // #710: `flush` bumps the change counter (offset 24-27) and
+    // version-valid-for (offset 92-95) exactly once for this one
+    // committed transaction — even though `flush` was called twice, the
+    // first (failed) attempt must not have double-bumped it.
+    let mut expected = vec![0xABu8; page_size as usize];
+    expected[24..28].copy_from_slice(&[0xAB, 0xAB, 0xAB, 0xAC]);
+    expected[92..96].copy_from_slice(&[0xAB, 0xAB, 0xAB, 0xAC]);
+    assert_eq!(pager.read_page(1).unwrap(), expected.into());
 }
 
 /// A `-wal` frame written by our own [`WalWriter`] must be readable by a
