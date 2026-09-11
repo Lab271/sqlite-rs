@@ -47,7 +47,8 @@ use std::rc::Rc;
 
 use sqlite_rs::btree::TableCursor;
 use sqlite_rs::codegen::{
-    compile_statement, leading_keywords, output_column_names, resolve_from_table_schema,
+    compile_statement, leading_keywords, output_column_names, output_column_names_joined,
+    resolve_from_table_schema,
 };
 use sqlite_rs::dump;
 use sqlite_rs::parser::{ends_with_semicolon, parse_select, split_statements, ParseOutcome};
@@ -398,30 +399,55 @@ fn run_one_statement(
     }
 }
 
-/// `.headers on`'s column labels for `select`'s result set: for a
-/// single-table, non-compound `SELECT` this is
+/// `.headers on`'s column labels for `select`'s result set:
 /// [`output_column_names`]'s "alias, else bare column name, else
-/// `columnN`" rule against the resolved `FROM` table; anything the
-/// codegen pipeline resolves less directly (no `FROM`, a join, or a
-/// compound) falls back to positional `column1..columnN` labels — a
-/// scope-cut noted in the issue's write-up rather than plumbing this
-/// REPL's header derivation through the full join/compound resolver.
+/// `columnN`" rule, applied against whichever table(s) `select`'s own
+/// `FROM` clause resolves to — a single table, or (#709)
+/// [`output_column_names_joined`] against every joined table in order
+/// for `*`/`table.*` expansion. A compound `SELECT` takes its names
+/// from the leftmost arm (`select` itself, never `select.compound`),
+/// matching the oracle and the same rule `compile_select_compound`
+/// already uses internally to resolve a compound's own trailing
+/// `ORDER BY`. A `FROM`-less `select` (or one whose `FROM` doesn't
+/// resolve — dead code today, `run_query`/the REPL would already have
+/// rejected an unresolvable table before headers are ever derived)
+/// falls back to positional `column1..columnN` labels.
 fn derive_headers(
     select: &sqlite_rs::parser::ast::Select,
     schemas: &[sqlite_rs::schema::TableSchema],
 ) -> Vec<String> {
-    let single_table = select.compound.is_empty()
-        && select
-            .from
-            .as_ref()
-            .is_some_and(|from| from.joins.is_empty());
-    if single_table {
-        if let Some(from) = &select.from {
+    if let Some(from) = &select.from {
+        if from.joins.is_empty() {
             if let Ok(schema) = resolve_from_table_schema(&from.first, schemas) {
                 return output_column_names(select, &schema);
             }
+        } else if let Ok(tables) = joined_tables(from, schemas) {
+            return output_column_names_joined(select, &tables);
         }
     }
     let count = select.columns.len().max(1);
     (1..=count).map(|i| format!("column{i}")).collect()
+}
+
+/// Resolves every table in `from` (leftmost plus each `JOIN`) to its
+/// `(alias, schema)` pair, in `FROM`-clause order — the shape
+/// [`output_column_names_joined`] needs for `table.*` qualifier
+/// matching.
+fn joined_tables(
+    from: &sqlite_rs::parser::ast::FromClause,
+    schemas: &[sqlite_rs::schema::TableSchema],
+) -> Result<Vec<(Option<String>, sqlite_rs::schema::TableSchema)>, sqlite_rs::codegen::CodegenError>
+{
+    let mut out = Vec::with_capacity(from.joins.len().saturating_add(1));
+    out.push((
+        from.first.alias.clone(),
+        resolve_from_table_schema(&from.first, schemas)?,
+    ));
+    for join in &from.joins {
+        out.push((
+            join.table.alias.clone(),
+            resolve_from_table_schema(&join.table, schemas)?,
+        ));
+    }
+    Ok(out)
 }

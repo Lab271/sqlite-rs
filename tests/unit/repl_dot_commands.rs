@@ -348,8 +348,14 @@ fn crlf_line_endings_are_trimmed_like_bare_newlines() {
     assert!(out.contains('1'), "{out}");
 }
 
+/// #709: a join used to fall back to positional `column1|column2`
+/// headers — `derive_headers` had no join-aware naming at all.
+/// `output_column_names_joined` now derives real names the same way a
+/// single-table `SELECT` always could: a bare column reference names
+/// itself regardless of which joined table it came from (`t.a` names
+/// `a`, matching the oracle).
 #[test]
-fn select_with_join_falls_back_to_positional_headers() {
+fn select_with_join_reports_real_column_names() {
     let db = scratch_db("join-headers");
     seed(&db, "CREATE TABLE t(a)");
     seed(&db, "CREATE TABLE u(b)");
@@ -360,5 +366,6 @@ fn select_with_join_falls_back_to_positional_headers() {
         &db,
         ".headers on\nSELECT t.a, u.b FROM t JOIN u ON 1;\n.quit\n",
     );
-    assert!(out.contains("column1|column2"), "{out}");
+    assert!(out.contains("a|b"), "{out}");
+    assert!(!out.contains("column1|column2"), "{out}");
 }
