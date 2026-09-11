@@ -85,6 +85,10 @@ name = "unit_introspection_pragmas"
 path = "tests/unit/introspection_pragmas.rs"
 
 [[test]]
+name = "unit_param_numbering"
+path = "tests/unit/param_numbering_test.rs"
+
+[[test]]
 name = "unit_codegen"
 path = "tests/unit/codegen.rs"
 

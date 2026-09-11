@@ -94,7 +94,7 @@ where
             let is_supported_operand = matches!(
                 &operand.kind,
                 ExprKind::Literal(Literal::Integer(_))
-                    | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+                    | ExprKind::Param(ParamKind::Anonymous(_) | ParamKind::Numbered(_))
             );
             if !is_supported_operand {
                 return Ok(false);

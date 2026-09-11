@@ -86,7 +86,7 @@ pub(super) fn is_supported_operand(expr: &Expr) -> bool {
     matches!(
         &expr.kind,
         ExprKind::Literal(Literal::Integer(_) | Literal::Float(_) | Literal::Str(_))
-            | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+            | ExprKind::Param(ParamKind::Anonymous(_) | ParamKind::Numbered(_))
     )
 }
 

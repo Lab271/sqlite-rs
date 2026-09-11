@@ -106,7 +106,7 @@ pub fn compile_delete_with_catalog(
             matches!(
                 &operand.kind,
                 ExprKind::Literal(Literal::Integer(_))
-                    | ExprKind::Param(ParamKind::Anonymous | ParamKind::Numbered(_))
+                    | ExprKind::Param(ParamKind::Anonymous(_) | ParamKind::Numbered(_))
             )
         });
 
