@@ -141,6 +141,10 @@ name = "codegen_select"
 path = "tests/unit/codegen_select_test.rs"
 
 [[test]]
+name = "rowid_projection"
+path = "tests/unit/rowid_projection_test.rs"
+
+[[test]]
 name = "codegen_insert"
 path = "tests/unit/codegen_insert_test.rs"
 

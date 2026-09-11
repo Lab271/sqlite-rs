@@ -27,7 +27,11 @@ pub(crate) fn emit_column_read(
     idx: usize,
     dest: i32,
 ) -> Result<(), CodegenError> {
-    if schema.rowid_alias == Some(idx) {
+    if schema.rowid_alias == Some(idx) || idx == schema.columns.len() {
+        // `idx == schema.columns.len()` is #708's `rowid`/`_rowid_`/`oid`
+        // pseudo-column sentinel (see `expr::rowid_pseudo_column_index`)
+        // — one past the last declared column, so it never collides
+        // with a real index.
         em.emit(Instruction::new(Opcode::Rowid, cursor, dest, 0));
         return Ok(());
     }

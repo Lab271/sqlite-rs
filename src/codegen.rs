@@ -561,7 +561,9 @@ impl Scope {
                 .ok_or_else(|| select::CodegenError::UnknownColumn {
                     name: name.to_string(),
                 })?;
-        let idx = expr::column_index(&binding.schema, name).unwrap_or(0);
+        let idx = expr::column_index(&binding.schema, name)
+            .or_else(|| expr::rowid_pseudo_column_index(&binding.schema, name))
+            .unwrap_or(0);
         Ok((binding.cursor, idx, &binding.schema, binding.forced_null))
     }
 
@@ -593,16 +595,18 @@ impl Scope {
                     .ok_or_else(|| select::CodegenError::UnknownColumn {
                         name: format!("{table}.{name}"),
                     })?;
-            expr::column_index(&binding.schema, name).ok_or_else(|| {
-                select::CodegenError::UnknownColumn {
+            expr::column_index(&binding.schema, name)
+                .or_else(|| expr::rowid_pseudo_column_index(&binding.schema, name))
+                .ok_or_else(|| select::CodegenError::UnknownColumn {
                     name: format!("{table}.{name}"),
-                }
-            })?;
+                })?;
             return Ok(idx);
         }
         let mut found: Option<usize> = None;
         for (i, binding) in self.tables.iter().enumerate() {
-            if expr::column_index(&binding.schema, name).is_some() {
+            if expr::column_index(&binding.schema, name).is_some()
+                || expr::rowid_pseudo_column_index(&binding.schema, name).is_some()
+            {
                 if found.is_some() {
                     return Err(select::CodegenError::AmbiguousColumn {
                         name: name.to_string(),

@@ -17,7 +17,7 @@
 
 use crate::codegen::expr::{
     collation_of, column_index, compile_cond, compile_value, emit_column_read, expr_affinity,
-    expr_collation, is_aggregate_call,
+    expr_collation, is_aggregate_call, rowid_pseudo_column_index,
 };
 use crate::codegen::{
     p4_coll_seq, CondTargets, Emitter, Label, RegAlloc, Scope, TableBinding, Target,

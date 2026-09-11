@@ -119,6 +119,15 @@ pub(super) fn compile_row_values(
                 // through to `compile_value`, matching this crate's
                 // existing register-reuse limitations for compound
                 // result-column expressions.
+                //
+                // #708's bare `rowid`/`_rowid_`/`oid` pseudo-column
+                // (not a declared column at all) needs the identical
+                // treatment: `compile_sorted_scan`'s pass 1 materializes
+                // it into the sorted record right after the schema
+                // columns block, at position `schema.columns.len()` —
+                // matching `rowid_pseudo_column_index`'s sentinel — so
+                // pass 2 reads it back with a plain `Column` op instead
+                // of re-issuing `Rowid` against the pseudo cursor.
                 if let ExprKind::Column {
                     name,
                     table: None,
@@ -128,7 +137,14 @@ pub(super) fn compile_row_values(
                     let pseudo_rowid_idx = pseudo
                         .then(|| column_index(schema, name))
                         .flatten()
-                        .filter(|idx| schema.rowid_alias == Some(*idx));
+                        .filter(|idx| schema.rowid_alias == Some(*idx))
+                        .or_else(|| {
+                            pseudo
+                                .then(|| {
+                                    crate::codegen::expr::rowid_pseudo_column_index(schema, name)
+                                })
+                                .flatten()
+                        });
                     if let Some(idx) = pseudo_rowid_idx {
                         let r = reg.alloc();
                         em.emit(Instruction::new(

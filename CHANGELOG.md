@@ -4,6 +4,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [Unreleased]
+
+### Fixed
+
+- `rowid`/`_rowid_`/`oid` resolved in a `WHERE` clause but not in a
+  result-list projection (`Scope::resolve` had no pseudo-column
+  awareness, unlike the `UPDATE`/`DELETE` seek path's
+  `is_rowid_reference`). Now resolves as a pseudo-column on rowid
+  tables — a declared column of that name still shadows it, `INTEGER
+  PRIMARY KEY` remains the existing alias case, and `WITHOUT ROWID`
+  tables reject it with the same unknown-column error the oracle gives.
+  Also fixes the same reference combined with `ORDER BY` and an alias
+  in one statement, where the post-sort pseudo cursor previously tried
+  to re-issue `Rowid` against itself (#708).
+
 ## [0.18.10] - 2026-08-31
 
 ### Fixed
