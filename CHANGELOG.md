@@ -2,7 +2,38 @@
 
 All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/). Pre-1.0: minor bumps may break the public API.
 
+**API stability policy:** `sqlite_rs::api` is the supported surface for
+embedding — `Connection`, `Statement`, `Rows`, `Row`, `Transaction`,
+`Error`, `OpenMode`, `TransactionBehavior`, `FromValue`, `Value`. Breaking
+changes to it are called out in this file under **Changed**, and after 1.0
+will require a major bump.
+
+Every other public module (`btree`, `codegen`, `dump`, `format`, `header`,
+`integrity`, `pager`, `parser`, `planner`, `record`, `schema`, `sys`,
+`vdbe`, `vfs`) is the **engine**. It is public because the CLI in
+`src/bin/` links this crate like any other consumer, and because it is
+useful for inspecting a database file — not as a promise. Engine
+signatures change whenever the implementation needs them to, at any
+version, without appearing under **Changed**. Code built on them can break
+on a patch release.
+
+If a consumer needs something only the engine offers, that is a gap in
+`api`; please report it as one rather than depending on the engine
+(spec 013 Requirement 6).
+
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
+
+## [Unreleased]
+
+### Added
+
+- **Embedding API: the `Connection` facade (spec 013).** `sqlite_rs::api`
+  is now the supported surface for linking this crate into a host program:
+  `Connection` (`Send + Sync`, `Clone`, over an owned worker thread),
+  `Statement`, streaming `Rows`/`Row` with typed access, `Transaction`,
+  `OpenMode`, and a flat `Error` carrying both `sqlite_code()` and
+  `extended_sqlite_code()`. See the API stability policy above: `api` is the
+  promise, every other module is the engine.
 
 ## [0.18.10] - 2026-08-31
 

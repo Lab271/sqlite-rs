@@ -835,6 +835,43 @@ pub struct Instruction {
     pub p5: u16,
 }
 
+/// `P5` bit marking an `Insert`/`Delete` as *the* row change a statement
+/// should report through the rows-changed counter (013/Req 1, #692).
+///
+/// Same value and same job as stock SQLite's `OPFLAG_NCHANGE`. The flag
+/// exists because the opcode alone cannot tell you: one `UPDATE`ed row
+/// emits a `Delete` *and* an `Insert` (`codegen/stmt/update.rs`), and the
+/// two-pass range-seek plan additionally emits an `Insert` against an
+/// ephemeral cursor to stash matched rowids, so counting every
+/// `Insert`/`Delete` as it executes reports 3 for a plan that changed 1
+/// row and 2 for the other plan of the same statement. Codegen knows
+/// which mutation is the row change; the handler does not.
+pub const OPFLAG_NCHANGE: u16 = 0x01;
+
+/// `P5` bit marking the `Insert` whose rowid `Connection::last_insert_rowid`
+/// should report (013/Req 1).
+///
+/// Same value (`0x20`) and same job as stock SQLite's `OPFLAG_LASTROWID`
+/// (`sqliteInt.h:4068`, pinned 3.53.4). Two properties of the upstream
+/// handler are worth stating because they are not guessable from the name,
+/// and both are reproduced in `cursor::insert`:
+///
+/// 1. **It nests inside [`OPFLAG_NCHANGE`].** `vdbe.c:5803` updates
+///    `db->lastRowid` *within* the `if( p5 & OPFLAG_NCHANGE )` arm, and
+///    `vdbe.c:5800` asserts `LASTROWID` implies `NCHANGE`. So a mutation
+///    that is not a counted row change never moves the rowid either.
+/// 2. **An `UPDATE` does not set it.** `insert.c:2834` reads
+///    `pik_flags |= (update_flags ? update_flags : OPFLAG_LASTROWID)` — the
+///    flag is the *else* branch, so rewriting a row leaves the last-insert
+///    rowid alone. `codegen/stmt/update.rs`'s `Insert` therefore carries
+///    `OPFLAG_NCHANGE` only.
+///
+/// The rowid recorded is the one the insert actually used, which is why the
+/// hook is here and not on `NewRowid`: for `INSERT INTO t(id, ...)` over an
+/// `INTEGER PRIMARY KEY`, the rowid comes from the bound value and
+/// `NewRowid` never executes.
+pub const OPFLAG_LASTROWID: u16 = 0x20;
+
 impl Instruction {
     /// Builds an instruction with `P4` absent and `P5` zero — the common
     /// case for control/arithmetic/compare opcodes that only use
@@ -861,6 +898,20 @@ impl Instruction {
             p5: 0,
         }
     }
+
+    /// Builds an instruction with an explicit `P5` flags operand — the
+    /// `with_p4` constructor's counterpart for the flags word. Used for
+    /// [`OPFLAG_NCHANGE`]; `new`/`with_p4` both leave `p5` zero.
+    pub fn with_p5(opcode: Opcode, p1: i32, p2: i32, p3: i32, p5: u16) -> Self {
+        Self {
+            opcode,
+            p1,
+            p2,
+            p3,
+            p4: P4::None,
+            p5,
+        }
+    }
 }
 
 /// A linear, zero-indexed sequence of instructions. Execution starts at
@@ -876,6 +927,47 @@ impl Program {
     /// Builds a program from its instruction sequence.
     pub fn new(instructions: Vec<Instruction>) -> Self {
         Self { instructions }
+    }
+
+    /// Whether this program is a statement whose rows-changed count is
+    /// meaningful (013/Req 1, #692) — i.e. whether codegen flagged any
+    /// mutation with [`OPFLAG_NCHANGE`].
+    ///
+    /// Deliberately *static*: it asks what the program contains, not what
+    /// it executed. An `UPDATE` whose `WHERE` matches no row never runs
+    /// its flagged `Insert`, but must still report a count of zero rather
+    /// than "not a counting statement" — which is the distinction
+    /// `sqlite3_changes()` needs in order to leave the previous count
+    /// alone after a `SELECT`.
+    ///
+    /// Derived rather than stored so it cannot disagree with the
+    /// instructions it describes; `Program` is a `Vec<Instruction>` and
+    /// programs are a handful of instructions per statement.
+    pub fn counts_changes(&self) -> bool {
+        self.instructions.iter().any(|i| {
+            i.p5 & OPFLAG_NCHANGE != 0 && matches!(i.opcode, Opcode::Insert | Opcode::Delete)
+        })
+    }
+
+    /// The highest 1-based parameter index this program will read, or `0`
+    /// when it has no placeholders (013/Req 3).
+    ///
+    /// Derived rather than stored, for the same reason
+    /// [`Self::counts_changes`] is: a stored field can disagree with the
+    /// instructions it describes, and [`Program::new`] is public.
+    ///
+    /// It also measures the right thing. This counts what the VM will
+    /// *read* — `Opcode::Variable`'s `P1` — not what the compiler handed
+    /// out, so `?3` alone reports 3 (matching `sqlite3_bind_parameter_count`,
+    /// which returns the largest index, not the number of distinct ones)
+    /// and a placeholder the optimizer folded away is not demanded.
+    pub fn param_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|i| matches!(i.opcode, Opcode::Variable))
+            .filter_map(|i| usize::try_from(i.p1).ok())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Returns the instruction at `pc`, or `None` if `pc` is out of

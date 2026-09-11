@@ -29,6 +29,80 @@ pub enum Value {
 const fn assert_value_send_sync<T: Send + Sync>() {}
 const _: () = assert_value_send_sync::<Value>();
 
+/// Conversions into [`Value`], so binding a parameter does not require a
+/// caller to name `Arc`.
+///
+/// Spec 013 Requirement 6 asks that a consumer using only the embedding API
+/// never has to reach into the engine. `Value::Text` and `Value::Blob` hold
+/// `Arc` payloads (ADR-0039, so a row can cross a thread), which is an
+/// implementation detail of the *storage*, not something a caller binding
+/// the string `"x"` should have to construct.
+///
+/// `bool` maps to `Integer(0)`/`Integer(1)` because that is what SQLite
+/// stores — it has no boolean storage class. `Option<T>` maps `None` to
+/// `Null`, which is what makes a nullable column bindable without a match.
+mod conversions {
+    use super::Value;
+    use std::sync::Arc;
+
+    impl From<i64> for Value {
+        fn from(v: i64) -> Self {
+            Value::Integer(v)
+        }
+    }
+
+    impl From<i32> for Value {
+        fn from(v: i32) -> Self {
+            Value::Integer(i64::from(v))
+        }
+    }
+
+    impl From<bool> for Value {
+        fn from(v: bool) -> Self {
+            Value::Integer(i64::from(v))
+        }
+    }
+
+    impl From<f64> for Value {
+        fn from(v: f64) -> Self {
+            Value::Real(v)
+        }
+    }
+
+    impl From<&str> for Value {
+        fn from(v: &str) -> Self {
+            Value::Text(Arc::from(v))
+        }
+    }
+
+    impl From<String> for Value {
+        fn from(v: String) -> Self {
+            Value::Text(Arc::from(v.as_str()))
+        }
+    }
+
+    impl From<&[u8]> for Value {
+        fn from(v: &[u8]) -> Self {
+            Value::Blob(Arc::from(v))
+        }
+    }
+
+    impl From<Vec<u8>> for Value {
+        fn from(v: Vec<u8>) -> Self {
+            Value::Blob(Arc::from(v.as_slice()))
+        }
+    }
+
+    impl<T: Into<Value>> From<Option<T>> for Value {
+        fn from(v: Option<T>) -> Self {
+            match v {
+                Some(inner) => inner.into(),
+                None => Value::Null,
+            }
+        }
+    }
+}
+
 /// The database's text encoding, from database header byte 56.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextEncoding {

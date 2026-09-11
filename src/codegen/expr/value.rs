@@ -215,23 +215,39 @@ pub(crate) fn compile_value(
 
         // `?` and `?NNN` compile to `Variable`, reading whatever the
         // caller bound via `Vm::bind_params`/`execute_with_params`
-        // (#137). Named forms (`:name`/`@name`/`$name`) aren't wired to
-        // an index yet — out of #137's bounded scope — so they still
-        // compile to an always-NULL register (known simplification,
-        // same as before).
+        // (#137).
+        //
+        // Named forms (`:name`/`@name`/`$name`) are rejected rather than
+        // compiled (013/Req 3). They are still not wired to an index — that
+        // was out of #137's bounded scope and remains out of scope here —
+        // but the previous behaviour was to emit nothing and hand back a
+        // fresh (NULL-reading) register. That turns `WHERE x = :name` into
+        // `WHERE x = NULL`, which matches no row and raises no error: a
+        // silent wrong answer, and the worst possible failure mode for a
+        // consumer binding parameters by name. Refusing to compile is the
+        // honest answer until the indices exist.
         ExprKind::Param(kind) => {
-            let r = reg.alloc();
             let index = match kind {
-                ParamKind::Anonymous => Some(reg.anonymous_param()),
-                ParamKind::Numbered(n) => Some(reg.numbered_param(*n)),
-                ParamKind::Colon(_) | ParamKind::At(_) | ParamKind::Dollar(_) => None,
+                ParamKind::Anonymous => reg.anonymous_param(),
+                ParamKind::Numbered(n) => reg.numbered_param(*n),
+                ParamKind::Colon(name) | ParamKind::At(name) | ParamKind::Dollar(name) => {
+                    let sigil = match kind {
+                        ParamKind::At(_) => '@',
+                        ParamKind::Dollar(_) => '$',
+                        _ => ':',
+                    };
+                    return Err(CodegenError::Unsupported {
+                        reason: format!(
+                            "named parameter {sigil}{name} is not supported — bind by position                              with ? or ?NNN"
+                        ),
+                    });
+                }
             };
-            if let Some(index) = index {
-                let p1 = i32::try_from(index).map_err(|_| CodegenError::Unsupported {
-                    reason: format!("parameter index {index} is out of range"),
-                })?;
-                em.emit(Instruction::new(Opcode::Variable, p1, r, 0));
-            }
+            let r = reg.alloc();
+            let p1 = i32::try_from(index).map_err(|_| CodegenError::Unsupported {
+                reason: format!("parameter index {index} is out of range"),
+            })?;
+            em.emit(Instruction::new(Opcode::Variable, p1, r, 0));
             Ok(r)
         }
 

@@ -133,6 +133,54 @@ name = "vdbe_streaming_execution"
 path = "tests/unit/vdbe_streaming_execution_test.rs"
 
 [[test]]
+name = "vdbe_changes"
+path = "tests/unit/vdbe_changes_test.rs"
+
+[[test]]
+name = "vdbe_last_insert_rowid"
+path = "tests/unit/vdbe_last_insert_rowid_test.rs"
+
+[[test]]
+name = "prepare"
+path = "tests/unit/prepare_test.rs"
+
+[[test]]
+name = "param_binding"
+path = "tests/unit/param_binding_test.rs"
+
+[[test]]
+name = "api_connection"
+path = "tests/unit/api_connection_test.rs"
+
+[[test]]
+name = "api_changes"
+path = "tests/unit/api_changes_test.rs"
+
+[[test]]
+name = "api_threading"
+path = "tests/unit/api_threading_test.rs"
+
+[[test]]
+name = "api_streaming"
+path = "tests/unit/api_streaming_test.rs"
+
+[[test]]
+name = "api_transaction"
+path = "tests/unit/api_transaction_test.rs"
+
+[[test]]
+name = "api_durability"
+path = "tests/unit/api_durability_test.rs"
+
+[[test]]
+name = "api_statement"
+path = "tests/unit/api_statement_test.rs"
+
+[[test]]
+name = "api_surface"
+path = "tests/unit/api_surface_test.rs"
+
+[[test]]
 name = "codegen_expr"
 path = "tests/unit/codegen_expr_test.rs"
 

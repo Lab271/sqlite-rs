@@ -45,3 +45,6 @@ Specs record what the system must do; ADRs record **why it is shaped this way** 
 | [0039](0039-value-payloads-are-arc-not-rc.md) | `Value`'s text and blob payloads are `Arc`, not `Rc` | 2026-09-04 |
 | [0040](0040-streaming-execution-with-batch-as-wrapper.md) | One streaming execution primitive, with the batch path as its wrapper | 2026-09-01 |
 | [0041](0041-embedding-api-owns-the-connection-driver-out-of-tree.md) | The embedding API owns the connection; the `sqlx` driver stays out of tree | 2026-08-28 |
+| [0042](0042-rows-changed-counted-by-codegen-flag.md) | Codegen flags the one mutation that is a row change; `None` is not `Some(0)` | 2026-09-04 |
+| [0043](0043-embedding-api-failure-surface.md) | The embedding API's failure surface: a flat error, both result codes, and autocommit-only busy retry | 2026-09-09 |
+| [0045](0045-a-transaction-holds-the-connection.md) | A transaction holds the connection; other threads wait | 2026-09-10 |

@@ -26,6 +26,28 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+// ## The supported surface
+//
+// [`api`] is the API this crate supports for embedding: `Connection`,
+// `Statement`, `Rows`, `Transaction`, `Error`, and `Value`. An application
+// should need nothing else, and spec 013 Requirement 6 makes that a
+// testable claim rather than an aspiration —
+// `tests/unit/api_surface_test.rs` runs the whole workload through
+// `sqlite_rs::api` alone.
+//
+// Every other module below is the **engine**: the parser, code generator,
+// virtual machine, b-tree, pager and VFS that `api` is built on. They are
+// public because the CLI in `src/bin/` is a separate binary that links this
+// crate like any other consumer, and because they are genuinely useful for
+// inspecting a database file. They are *not* a stability promise. Their
+// signatures change whenever the implementation needs them to, without a
+// major version bump, and a consumer wiring `dump::open` to
+// `execute_transaction_step` is building on items that carry no such
+// promise.
+//
+// If something a consumer needs is only reachable through the engine, that
+// is a gap in `api` and worth reporting as one.
+pub mod api;
 pub mod btree;
 pub mod codegen;
 pub mod dump;

@@ -55,7 +55,7 @@ use crate::parser::ast::{
     ConflictAction, Expr, ExprKind, Literal, ParamKind, TableConstraint, Update,
 };
 use crate::schema::TableSchema;
-use crate::vdbe::{affinity_of, Instruction, Opcode, Program, P4};
+use crate::vdbe::{affinity_of, Instruction, Opcode, Program, OPFLAG_NCHANGE, P4};
 
 const TABLE_CURSOR: i32 = 0;
 const CHECK_CURSOR: i32 = 1;
@@ -615,12 +615,24 @@ fn emit_update_row_body(
         FIRST_INDEX_CURSOR,
         Opcode::IdxDelete,
     )?;
+    // One changed row, counted once (013/Req 1, #692): an UPDATE rewrites
+    // a row as `Delete` + `Insert`, so only the `Insert` carries
+    // `OPFLAG_NCHANGE`. Flagging both would report 2 per row; flagging the
+    // `Delete` instead would work equally well but reads as a deletion.
+    // Stock SQLite flags the insert side too.
+    //
+    // Deliberately *not* `OPFLAG_LASTROWID`, even though this is an
+    // `Insert`: `insert.c:2834` sets that flag only on the `else` branch of
+    // `pik_flags |= (update_flags ? update_flags : OPFLAG_LASTROWID)`, and
+    // an UPDATE supplies `update_flags`. So rewriting a row must leave
+    // `last_insert_rowid` reporting whatever the last real INSERT set.
     em.emit(Instruction::new(Opcode::Delete, TABLE_CURSOR, 0, 0));
-    em.emit(Instruction::new(
+    em.emit(Instruction::with_p5(
         Opcode::Insert,
         TABLE_CURSOR,
         rowid_reg,
         record_reg,
+        OPFLAG_NCHANGE,
     ));
 
     if !schema.indexes.is_empty() {

@@ -13,12 +13,16 @@
     clippy::arithmetic_side_effects
 )]
 
+mod changes_oracle_test;
 mod harness;
 mod oracle;
 
 mod analyze_test;
+mod api_durability_oracle_test;
+mod api_oracle_test;
 mod autoindex_maintenance_test;
 mod begin_immediate_lock_interop_test;
+mod bootstrap_oracle_test;
 mod btree_delete_test;
 mod btree_index_insert_delete_test;
 mod btree_insert_test;
@@ -39,6 +43,7 @@ mod index_ordered_group_by_test;
 mod index_ordered_scan_test;
 mod join_test;
 mod journal_interop_test;
+mod last_insert_rowid_oracle_test;
 mod lock_state_interop_test;
 mod no_stats_optimizations_test;
 mod or_to_in_test;
@@ -48,6 +53,7 @@ mod pager_write_test;
 mod parser_oracle_test;
 mod partial_sort_test;
 mod plan_parity_test;
+mod prepare_oracle_test;
 mod regen_test;
 mod repl_test;
 mod schema_test;
