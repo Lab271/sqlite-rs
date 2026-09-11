@@ -4,6 +4,25 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 **Versioning policy:** one minor version per completed plan phase — the version number tells the plan's story, sub-steps stay inside a phase. V1 (READ CORE) = 0.1.0 through 0.4.0. *(History note: internal iterations briefly numbered 0.4.0–0.6.0 were renumbered into the phase scheme on 14 Aug 2026, before any tag or publication of those versions existed.)*
 
+## [0.18.12] - 2026-09-11
+
+### Fixed
+
+- Two `Connection`s (currently: two independent `Pager`s) opened on the
+  same file in one process did not lock against each other — a `BEGIN
+  IMMEDIATE` write on one handle could be silently discarded by another
+  handle's commit, with no error and `PRAGMA integrity_check` still
+  reporting `ok`. POSIX `fcntl` locks are scoped to `(process, inode)`,
+  not to a file descriptor, so two independently-opened fds on the same
+  inode never conflicted with each other. `src/vfs/inode_registry.rs`
+  adds the process-wide `(device, inode)` registry stock `sqlite3`'s
+  `unixInodeInfo` provides: one real fcntl-backed lock ladder per inode,
+  shared by every `Connection` on it, arbitrating in-process requests
+  before any `fcntl` call. `src/vfs/shm.rs`'s `WAL_WRITE_LOCK`/
+  `WAL_CKPT_LOCK` guards gain the same in-process arbitration, answering
+  #491 for real rather than by assertion. See ADR-0047 (#706, #491,
+  #412).
+
 ## [0.18.11] - 2026-09-11
 
 ### Fixed

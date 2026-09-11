@@ -35,6 +35,7 @@ mod families_test;
 mod group_by_projection_test;
 mod harness_test;
 mod hash_group_by_test;
+mod in_process_lock_registry_test;
 mod index_maintenance_test;
 mod index_ordered_group_by_test;
 mod index_ordered_scan_test;
