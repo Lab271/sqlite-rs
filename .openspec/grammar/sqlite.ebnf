@@ -411,7 +411,38 @@ rollback-stmt   ::= "ROLLBACK" [ "TRANSACTION" ] ;
 
 table-name      ::= identifier ;                                          (* V2 *)
 column-name     ::= identifier ;                                          (* V2 *)
-identifier      ::= ID ;   (* bare, "double-quoted", [bracketed], `backticked` -- V2 tokenizer (#60) *)
+identifier      ::= ID | fallback-keyword ;
+                                                           (* V2 tokenizer (#60): ID is bare,
+                                                              "double-quoted", [bracketed], `backticked`.
+                                                              fallback-keyword added by #696. *)
+
+fallback-keyword ::= "ABORT" | "ACTION" | "AFTER" | "ALWAYS" | "ANALYZE"
+                  | "ASC" | "ATTACH" | "BEFORE" | "BEGIN" | "BY" | "CASCADE"
+                  | "CAST" | "COLUMN" | "CONFLICT" | "CROSS" | "CURRENT"
+                  | "CURRENT_DATE" | "CURRENT_TIME" | "CURRENT_TIMESTAMP"
+                  | "DATABASE" | "DEFERRED" | "DESC" | "DETACH" | "DO"
+                  | "EACH" | "END" | "EXCLUDE" | "EXCLUSIVE" | "EXPLAIN"
+                  | "FAIL" | "FILTER" | "FIRST" | "FOLLOWING" | "FOR"
+                  | "FULL" | "GENERATED" | "GLOB" | "GROUPS" | "IF"
+                  | "IGNORE" | "IMMEDIATE" | "INDEXED" | "INITIALLY"
+                  | "INNER" | "INSTEAD" | "KEY" | "LAST" | "LEFT" | "LIKE"
+                  | "MATCH" | "MATERIALIZED" | "NATURAL" | "NO" | "NULLS"
+                  | "OF" | "OFFSET" | "OTHERS" | "OUTER" | "OVER"
+                  | "PARTITION" | "PLAN" | "PRAGMA" | "PRECEDING" | "QUERY"
+                  | "RAISE" | "RANGE" | "RECURSIVE" | "REGEXP" | "REINDEX"
+                  | "RELEASE" | "RENAME" | "REPLACE" | "RESTRICT" | "RIGHT"
+                  | "ROLLBACK" | "ROW" | "ROWS" | "SAVEPOINT" | "TEMP"
+                  | "TEMPORARY" | "TIES" | "TRIGGER" | "UNBOUNDED"
+                  | "VACUUM" | "VIEW" | "VIRTUAL" | "WINDOW" | "WITH"
+                  | "WITHOUT" ;
+                                                           (* V2 [parse.y:272 fallback] -- the 89
+                                                              non-reserved keywords Lemon's
+                                                              `%fallback ID` retries as a plain ID
+                                                              wherever the grammar can't shift them
+                                                              as the keyword itself (#696). The other
+                                                              57 keywords in the tokenizer's table
+                                                              stay fully reserved, matching the
+                                                              oracle. *)
 
 (* ===================== Future blocks (stubs -- the denominator) =====================
  * V4:  subqueries in FROM (table-valued)

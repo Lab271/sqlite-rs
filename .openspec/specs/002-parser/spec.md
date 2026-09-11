@@ -464,6 +464,14 @@ The parser MUST accept all SQL that SQLite accepts, and reject all SQL that SQLi
 
 **Tests:** `tests/unit/parser.rs::test_error_on_missing_columns`, `tests/corpus/parser_oracle_test.rs::parser_matches_oracle_three_way_outcome`
 
+#### Scenario: Non-reserved (fallback) keywords work as identifiers
+
+- GIVEN the 89 keywords `parse.y:272`'s `%fallback ID` declares non-reserved (e.g. `KEY`, `VALUE`-adjacent words, `MATCH`, `FIRST`, `ROW`) used as a column/table name or `AS`-alias, such as `CREATE TABLE p(namespace TEXT, key TEXT, value TEXT, PRIMARY KEY(namespace, key))` followed by `SELECT key, value FROM p`
+- WHEN parsed
+- THEN parse succeeds, with the word still working as its keyword in keyword position in the same statement (`PRIMARY KEY(key)`, `ORDER BY key`); the other 57 keywords stay reserved and are rejected as bare identifiers, matching the oracle
+
+**Tests:** `tests/corpus/fallback_keyword_test.rs::every_fallback_word_is_accepted_as_a_column_name_matching_the_oracle`, `tests/corpus/fallback_keyword_test.rs::every_reserved_word_is_rejected_as_a_bare_column_name_matching_the_oracle`, `tests/corpus/fallback_keyword_test.rs::sqe_namespace_properties_table_matches_the_oracle`, `tests/corpus/fallback_keyword_test.rs::a_fallback_word_works_as_both_keyword_and_identifier_in_one_statement`, `tests/corpus/fallback_keyword_test.rs::as_alias_using_a_fallback_word_parses`
+
 #### Scenario: SQL text corpus labels match real SQLite
 
 - GIVEN the three-way labeled corpus at `tests/corpus/sql/{valid_in_subset,valid_out_of_subset,invalid}/*.sql` (#2), covering the V2 SELECT-core subset plus representative V3/V4+ statements and malformed SQL

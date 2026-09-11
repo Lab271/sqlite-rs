@@ -8,6 +8,21 @@ All notable changes to sqlite-rs. Format follows [Keep a Changelog](https://keep
 
 ### Fixed
 
+- 89 of our 146 keywords were reserved unconditionally, unlike real
+  SQLite, which treats them as ordinary identifiers outside keyword
+  position (`parse.y:272`'s `%fallback ID`) — this blocked schemas as
+  ordinary as `CREATE TABLE p(namespace TEXT, key TEXT, value TEXT,
+  PRIMARY KEY(namespace, key))`. `parser::grammar`'s `identifier()` (the
+  single choke point nearly every identifier-accepting production already
+  funneled through) and `primary_expr`'s column-reference arm now accept
+  the 89-word fallback set; `KEY`/`FIRST`/`MATCH`/etc. still work as
+  keywords in keyword position in the same statement. The other 57
+  keywords stay fully reserved. Deliberately not extended to a bare
+  (no-`AS`) alias, since that regressed `a NATURAL JOIN b`/`t LEFT JOIN
+  (...)` — those keywords are the join operator there, a shift/reduce
+  call this recursive-descent parser can't make the way SQLite's LALR
+  table does; `AS <fallback-keyword>` is the safe form (#696, spec 002
+  Req 2).
 - A SQL comment before or after a statement (`-- c\nCREATE TABLE t(a);`,
   `CREATE TABLE t(a); -- c`, or comment-only input) was a parse error,
   even though `split_statements` already grouped a leading comment with
